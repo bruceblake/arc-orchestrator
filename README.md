@@ -269,6 +269,8 @@ the service evolves. Only `config.py`, `work.py`, and `.env` ever need touching.
 | `dashboard.py` + `static/` | read-only live dashboard (desktop, phone, usage pages) |
 | `main.py` | CLI: run / once / build / serve / status / graph |
 
+---
+
 ## Multi-harness code orchestration
 
 A third workload (`code_tasks.py`) drives coding agents as first-class
