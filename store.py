@@ -79,6 +79,34 @@ CREATE INDEX IF NOT EXISTS idx_items_round ON items(round_id);
 CREATE INDEX IF NOT EXISTS idx_answers_item ON answers(item_id);
 CREATE INDEX IF NOT EXISTS idx_seeds_used ON seeds(used);
 CREATE INDEX IF NOT EXISTS idx_build_modules_build ON build_modules(build_id);
+CREATE TABLE IF NOT EXISTS code_tasks(
+  id TEXT NOT NULL,
+  taskfile TEXT NOT NULL,
+  title TEXT,
+  model TEXT NOT NULL,
+  reviewer TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  branch TEXT,
+  worktree TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL,
+  finished_at TEXT,
+  PRIMARY KEY (taskfile, id)
+);
+CREATE TABLE IF NOT EXISTS harness_runs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id TEXT NOT NULL,
+  harness TEXT NOT NULL,
+  model TEXT NOT NULL,
+  role TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  exit_code INTEGER,
+  transcript TEXT,
+  seconds REAL,
+  verdict TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_harness_runs_task ON harness_runs(task_id);
 """
 
 
@@ -247,6 +275,54 @@ class Store:
                 ).fetchall()
             ]
         return {"builds": builds, "by_family": by_family, "recent": recent}
+
+    def save_harness_run(self, task_id, harness, model, role, attempt,
+                         exit_code, transcript, seconds, verdict=None):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO harness_runs(task_id, harness, model, role, attempt, "
+                "exit_code, transcript, seconds, verdict, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (task_id, harness, model, role, attempt, exit_code,
+                 transcript, seconds, verdict, _now()),
+            )
+            self.conn.commit()
+
+    def upsert_code_task(self, taskfile, tid, title, model, reviewer, status,
+                         branch=None, worktree=None, error=None, finished=False):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO code_tasks(id, taskfile, title, model, reviewer, status, "
+                "branch, worktree, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(taskfile, id) DO UPDATE SET status=excluded.status, "
+                "branch=excluded.branch, worktree=excluded.worktree, error=NULL",
+                (tid, taskfile, title, model, reviewer, status, branch, worktree, _now()),
+            )
+            if finished:
+                self.conn.execute(
+                    "UPDATE code_tasks SET status=?, error=?, finished_at=? "
+                    "WHERE taskfile=? AND id=?",
+                    (status, error, _now(), taskfile, tid),
+                )
+            self.conn.commit()
+
+    def code_status(self):
+        with self.lock:
+            tasks = [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT id, taskfile, title, model, reviewer, status, branch, "
+                    "error, created_at, finished_at FROM code_tasks ORDER BY created_at DESC LIMIT 50"
+                ).fetchall()
+            ]
+            runs = [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT task_id, harness, model, role, attempt, exit_code, "
+                    "seconds, verdict FROM harness_runs ORDER BY id DESC LIMIT 50"
+                ).fetchall()
+            ]
+        return {"tasks": tasks, "runs": runs}
 
     def stats(self):
         with self.lock:

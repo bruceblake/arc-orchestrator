@@ -170,6 +170,47 @@ def cmd_build(args):
         pass
 
 
+def cmd_code(args):
+    import json
+    import events
+    from store import Store
+    from code_tasks import build_code_graph, describe, load_taskfile, plan_tasks
+
+    if args.code_cmd == "status":
+        out = Store(args.db or config.DB_PATH).code_status()
+        print(json.dumps(out, indent=2, default=str))
+        return
+
+    async def run():
+        if args.code_cmd == "plan":
+            path = await plan_tasks(args.goal, Path(args.repo).resolve())
+            print(f"task file written: {path}")
+            print(describe(load_taskfile(path)))
+            return
+        taskset = load_taskfile(args.taskfile)
+        if args.dry_run:
+            print(describe(taskset))
+            print(f"\ndry-run ok — {len(taskset['tasks'])} task(s), roles validated, "
+                  "no models called, no git mutations")
+            return
+        if not Path(args.repo or taskset["repo"]).exists():
+            sys.exit(f"repo not found: {taskset['repo']}")
+        store = Store(db_path(args, False))
+        events.set_context(workload="code-tasks")
+        graph = build_code_graph(store, taskset, taskfile=str(Path(args.taskfile).resolve()))
+        final = await graph.run({})
+        results = final.get("results", {})
+        merged = sorted(k for k, v in results.items()
+                        if k.startswith("publish_") and isinstance(v, dict) and v.get("merged"))
+        log = logging.getLogger("code-cmd")
+        log.info("done — merged: %s", ", ".join(merged) or "none")
+
+    try:
+        asyncio.run(run())
+    except KeyboardInterrupt:
+        pass
+
+
 def cmd_serve(args):
     from dashboard import serve
 
@@ -195,6 +236,20 @@ def main():
     serve_p.add_argument("--port", type=int, default=None, help=f"port (default {8787})")
     serve_p.add_argument("--db", default=None, help="sqlite database path")
     serve_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    code_p = sub.add_parser("code", help="multi-harness code workload (worktrees + reviews)")
+    code_sub = code_p.add_subparsers(dest="code_cmd", required=True)
+    cr_p = code_sub.add_parser("run", help="run a task file")
+    cr_p.add_argument("taskfile", help="path to task JSON")
+    cr_p.add_argument("--repo", default=None, help="override repo path from task file")
+    cr_p.add_argument("--dry-run", action="store_true", help="print the resolved DAG, no models, no git")
+    cr_p.add_argument("--db", default=None, help="sqlite database path")
+    cr_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    cp_p = code_sub.add_parser("plan", help="ask Kimi-K3 to draft a task file for a goal")
+    cp_p.add_argument("goal", help="project goal in one sentence")
+    cp_p.add_argument("repo", help="target repo path")
+    cp_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    cs_p = code_sub.add_parser("status", help="show code-task and harness-run stats")
+    cs_p.add_argument("--db", default=None, help="sqlite database path")
 
     args = ap.parse_args()
     setup_logging(getattr(args, "verbose", False))
@@ -209,6 +264,8 @@ def main():
         cmd_run(args, once=True)
     elif args.cmd == "build":
         cmd_build(args)
+    elif args.cmd == "code":
+        cmd_code(args)
     elif args.cmd == "serve":
         cmd_serve(args)
 

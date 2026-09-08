@@ -99,6 +99,36 @@ def family_limit(name):
             pass
     return FAMILIES[name].limit
 
+# --- multi-harness code workload -------------------------------------------
+# Kimi-K3 (kimi CLI) and GLM-5.3 (opencode) plan and review; gpt-oss-120b and
+# DeepSeek-V4-Flash (opencode) implement. ARC rejects over-limit requests per
+# model, so driver caps reserve headroom for interactive use of the account.
+WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
+TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
+DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "900"))
+GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
+MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
+
+IMPLEMENTER_MODELS = {"gpt-oss-120b", "DeepSeek-V4-Flash"}
+MODEL_FAMILY = {
+    "gpt-oss-120b": "gpt-oss",
+    "DeepSeek-V4-Flash": "deepseek",
+    "GLM-5.3": "glm",
+    "Kimi-K3": "kimi",
+}
+_MODEL_DRIVER_CAP = {"Kimi-K3": 2, "GLM-5.3": 3, "gpt-oss-120b": 8, "DeepSeek-V4-Flash": 8}
+
+
+def driver_limit(model):
+    """Max concurrent harness instances for a model (ARC cap minus headroom)."""
+    override = os.getenv(f"ARC_DRIVER_LIMIT_{MODEL_FAMILY[model].upper().replace('-', '_')}")
+    if override:
+        try:
+            return int(override)
+        except ValueError:
+            pass
+    return _MODEL_DRIVER_CAP[model]
+
 DEFAULT_SEEDS = [
     "Scaling laws and efficiency trade-offs in mixture-of-experts LLM architectures",
     "Post-quantum cryptography migration paths for TLS infrastructure",
