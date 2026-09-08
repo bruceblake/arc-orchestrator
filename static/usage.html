@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARC Usage Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
+  --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
+  --err: #f85149; --run: #e3b341; --purple: #bc8cff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 13px/1.45 "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+header {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--bg); z-index: 10;
+}
+header h1 { font-size: 15px; margin: 0; color: var(--accent); }
+.pill {
+  padding: 2px 10px; border: 1px solid var(--border); border-radius: 12px;
+  color: var(--dim); white-space: nowrap;
+}
+.pill b { color: var(--text); }
+header a.pill { text-decoration: none; }
+header a.pill:hover { border-color: var(--accent); color: var(--accent); }
+main { padding: 14px 16px; display: grid; gap: 14px; grid-template-columns: 1fr 1fr; }
+.panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px; overflow: auto;
+}
+.panel h2 {
+  font-size: 12px; margin: 0 0 8px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.col { display: grid; gap: 14px; align-content: start; }
+svg text { font-family: inherit; }
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 3px 8px; border-bottom: 1px solid var(--border); text-align: left; }
+th { color: var(--dim); font-weight: normal; font-size: 11px; }
+td.num, th.num { text-align: right; }
+.good { color: var(--ok); } .bad { color: var(--err); } .warn { color: var(--warn); }
+.tag { padding: 0 6px; border-radius: 8px; background: #21262d; color: var(--dim); }
+.hint { color: var(--dim); font-size: 11px; }
+.empty { color: var(--dim); font-size: 12px; padding: 6px 0; }
+footer { padding: 8px 16px; color: var(--dim); font-size: 11px; border-top: 1px solid var(--border); }
+.famrow { display: grid; grid-template-columns: 90px 1fr 64px; gap: 8px; align-items: center; margin: 7px 0; font-size: 11px; }
+.barwrap { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; height: 14px; overflow: hidden; }
+.bar { height: 100%; transition: width .4s; }
+.legend { display: flex; gap: 12px; font-size: 11px; color: var(--dim); flex-wrap: wrap; margin-bottom: 4px; }
+.legend .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+#ch-req, #ch-tok { width: 100%; height: auto; display: block; }
+@media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ARC Usage</h1>
+  <a class="pill" href="/">&larr; flows</a>
+  <span class="pill">requests <b id="h-requests">–</b></span>
+  <span class="pill">tokens <b id="h-tokens">–</b></span>
+  <span class="pill">in flight <b id="h-inflight">0</b></span>
+  <span class="pill">api <b id="h-api" class="good">live</b></span>
+  <span class="pill" id="h-clock">–</span>
+</header>
+
+<main>
+  <div class="col">
+    <div class="panel">
+      <h2>Per-model totals <span class="hint">(all time, from event log; failed attempts include retried)</span></h2>
+      <table>
+        <thead><tr>
+          <th>model</th><th>family</th>
+          <th class="num">requests</th><th class="num">ok</th>
+          <th class="num">errors</th><th class="num">failed attempts</th>
+          <th class="num">tokens</th><th class="num">prompt</th><th class="num">completion</th>
+          <th class="num">avg ms</th><th>last</th>
+        </tr></thead>
+        <tbody id="modelbody"></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>In flight now <span class="hint">(requests on the wire, from request_start events)</span></h2>
+      <table>
+        <thead><tr>
+          <th>model</th><th>purpose</th><th></th><th class="num">elapsed</th><th>req id</th>
+        </tr></thead>
+        <tbody id="livebody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="col">
+    <div class="panel">
+      <h2>Concurrency vs session limits</h2>
+      <div id="famlist"></div>
+      <div class="hint">bar turns red at the family limit</div>
+    </div>
+    <div class="panel">
+      <h2>Requests per minute <span class="hint">(last hour)</span></h2>
+      <div class="legend" id="leg-req"></div>
+      <svg id="ch-req" viewBox="0 0 560 180"></svg>
+    </div>
+    <div class="panel">
+      <h2>Tokens per minute <span class="hint">(last hour)</span></h2>
+      <div class="legend" id="leg-tok"></div>
+      <svg id="ch-tok" viewBox="0 0 560 180"></svg>
+    </div>
+  </div>
+</main>
+
+<footer>source: event log via /api/usage · refreshes every 3s</footer>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+const fmtInt = (n) => (n ?? 0).toLocaleString("en-US");
+const FAMCOLORS = {"gpt-oss": "#58a6ff", "glm": "#bc8cff", "kimi": "#3fb950", "deepseek": "#d29922", "kimi-code": "#cba6f7"};
+const famColor = (f) => FAMCOLORS[f] || "#8b949e";
+
+let last = null;
+let clockOffset = 0;
+const serverNow = () => Date.now() / 1000 + clockOffset;
+
+function fmtDur(s) {
+  if (s < 60) return s.toFixed(1) + "s";
+  if (s < 3600) return (s / 60).toFixed(1) + "m";
+  return (s / 3600).toFixed(1) + "h";
+}
+function fmtAgo(ts) {
+  if (!ts) return "–";
+  const d = serverNow() - ts;
+  if (d < 5) return "now";
+  if (d < 60) return Math.floor(d) + "s ago";
+  if (d < 3600) return Math.floor(d / 60) + "m ago";
+  return (d / 3600).toFixed(1) + "h ago";
+}
+
+function renderFamilies(fams) {
+  const el = $("#famlist");
+  if (!fams.length) { el.innerHTML = '<div class="empty">no data</div>'; return; }
+  el.innerHTML = fams.map((f) => {
+    const lim = f.limit ?? 0;
+    const pct = lim > 0 ? Math.min(100, (100 * f.inflight) / lim) : (f.inflight > 0 ? 100 : 0);
+    const hot = lim > 0 && f.inflight >= lim;
+    return `<div class="famrow">
+      <span style="color:${famColor(f.family)}">${esc(f.family)}</span>
+      <div class="barwrap"><div class="bar" style="width:${pct}%;background:${hot ? "var(--err)" : famColor(f.family)}"></div></div>
+      <span class="num ${hot ? "bad" : ""}" style="text-align:right">${f.inflight}/${lim || "–"}</span>
+    </div>`;
+  }).join("");
+}
+
+function renderModels(models) {
+  const tb = $("#modelbody");
+  if (!models.length) {
+    tb.innerHTML = '<tr><td colspan="11" class="empty">no requests yet — run a round or a build</td></tr>';
+    return;
+  }
+  tb.innerHTML = models.map((m) => `<tr>
+    <td style="color:${famColor(m.family)};white-space:nowrap">${esc(m.model)}</td>
+    <td>${esc(m.family)}</td>
+    <td class="num">${fmtInt(m.requests)}</td>
+    <td class="num good">${fmtInt(m.ok)}</td>
+    <td class="num ${m.errors ? "bad" : ""}">${fmtInt(m.errors)}</td>
+    <td class="num ${m.failed_attempts ? "warn" : ""}">${fmtInt(m.failed_attempts)}</td>
+    <td class="num">${fmtInt(m.tokens)}</td>
+    <td class="num">${fmtInt(m.prompt_tokens)}</td>
+    <td class="num">${fmtInt(m.completion_tokens)}</td>
+    <td class="num">${m.avg_latency_ms == null ? "–" : fmtDur(m.avg_latency_ms / 1000)}</td>
+    <td class="hint">${fmtAgo(m.last_ts)}</td>
+  </tr>`).join("");
+}
+
+function renderInflight(list) {
+  const tb = $("#livebody");
+  if (!list.length) {
+    tb.innerHTML = '<tr><td colspan="5" class="empty">nothing in flight</td></tr>';
+    return;
+  }
+  tb.innerHTML = list.map((r) => `<tr>
+    <td style="color:${famColor(r.family)}">${esc(r.model)}</td>
+    <td>${esc(r.purpose || "")}</td>
+    <td>${r.websearch ? '<span class="tag">web</span>' : ""}</td>
+    <td class="num">${fmtDur(Math.max(0, serverNow() - r.started))}</td>
+    <td class="hint">${esc(r.req_id)}</td>
+  </tr>`).join("");
+}
+
+const fmtT = (t) => {
+  const d = new Date(t * 1000);
+  return String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+};
+
+function chart(el, series, key) {
+  const W = 560, H = 180, PL = 52, PR = 8, PT = 8, PB = 18;
+  const fams = Object.keys(series);
+  el.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  if (!fams.length) {
+    el.innerHTML = `<text x="${W / 2}" y="${H / 2}" fill="#8b949e" font-size="11" text-anchor="middle">no data</text>`;
+    return;
+  }
+  let n = 0, max = 0;
+  for (const f of fams) {
+    n = Math.max(n, series[f].length);
+    for (const p of series[f]) max = Math.max(max, p[key] || 0);
+  }
+  if (!n) { el.innerHTML = ""; return; }
+  const maxV = max || 1;
+  const x = (i) => PL + (i * (W - PL - PR)) / Math.max(1, n - 1);
+  const y = (v) => PT + (1 - v / maxV) * (H - PT - PB);
+  let s = "";
+  s += `<line x1="${PL}" y1="${PT}" x2="${PL}" y2="${y(0)}" stroke="#30363d"/>`;
+  s += `<line x1="${PL}" y1="${y(0)}" x2="${W - PR}" y2="${y(0)}" stroke="#30363d"/>`;
+  s += `<line x1="${PL}" y1="${y(maxV / 2)}" x2="${W - PR}" y2="${y(maxV / 2)}" stroke="#21262d" stroke-dasharray="3 3"/>`;
+  s += `<text x="${PL - 5}" y="${y(maxV) + 3}" fill="#8b949e" font-size="9" text-anchor="end">${fmtInt(maxV)}</text>`;
+  s += `<text x="${PL - 5}" y="${y(0) + 3}" fill="#8b949e" font-size="9" text-anchor="end">0</text>`;
+  if (series[fams[0]].length) {
+    const t0 = series[fams[0]][0].t, t1 = series[fams[0]][series[fams[0]].length - 1].t;
+    s += `<text x="${PL}" y="${H - 4}" fill="#8b949e" font-size="9">${fmtT(t0)}</text>`;
+    s += `<text x="${W - PR}" y="${H - 4}" fill="#8b949e" font-size="9" text-anchor="end">${fmtT(t1)}</text>`;
+  }
+  for (const f of fams) {
+    const pts = series[f].map((p, i) => `${x(i).toFixed(1)},${y(p[key] || 0).toFixed(1)}`).join(" ");
+    s += `<polyline fill="none" stroke="${famColor(f)}" stroke-width="1.5" points="${pts}"/>`;
+  }
+  el.innerHTML = s;
+}
+
+function legend(el, fams) {
+  el.innerHTML = fams.map((f) =>
+    `<span><span class="sw" style="background:${famColor(f)}"></span>${esc(f)}</span>`).join("");
+}
+
+function render(data) {
+  $("#h-requests").textContent = fmtInt(data.totals.requests);
+  $("#h-tokens").textContent = fmtInt(data.totals.tokens);
+  $("#h-inflight").textContent = data.inflight.length;
+  renderFamilies(data.families || []);
+  renderModels(data.models || []);
+  renderInflight(data.inflight || []);
+  const fams = Object.keys(data.series || {});
+  legend($("#leg-req"), fams);
+  legend($("#leg-tok"), fams);
+  chart($("#ch-req"), data.series || {}, "requests");
+  chart($("#ch-tok"), data.series || {}, "tokens");
+}
+
+async function refresh() {
+  try {
+    const r = await fetch("/api/usage", {cache: "no-store"});
+    if (!r.ok) throw new Error("http " + r.status);
+    const data = await r.json();
+    clockOffset = (data.now || Date.now() / 1000) - Date.now() / 1000;
+    last = data;
+    render(data);
+    $("#h-api").textContent = "live";
+    $("#h-api").className = "good";
+  } catch (e) {
+    $("#h-api").textContent = "down";
+    $("#h-api").className = "bad";
+  }
+}
+
+function tick() {
+  $("#h-clock").textContent = new Date(serverNow() * 1000).toLocaleTimeString("en-GB");
+  if (last) renderInflight(last.inflight || []);
+}
+
+refresh();
+setInterval(refresh, 3000);
+setInterval(tick, 1000);
+tick();
+</script>
+</body>
+</html>

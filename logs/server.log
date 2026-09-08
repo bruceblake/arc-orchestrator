@@ -1,0 +1,115 @@
+11:37:42 INFO    dashboard: dashboard on http://0.0.0.0:8787 (db=/home/proxyie/arc-orchestrator/orchestrator.db, events=/home/proxyie/arc-orchestrator/logs/events.jsonl)
+13:59:32 INFO    dashboard: dashboard on http://0.0.0.0:8787 (db=/home/proxyie/arc-orchestrator/orchestrator.db, events=/home/proxyie/arc-orchestrator/logs/events.jsonl)
+Traceback (most recent call last):
+  File "/home/proxyie/arc-orchestrator/main.py", line 209, in <module>
+    main()
+    ~~~~^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 205, in main
+    cmd_serve(args)
+    ~~~~~~~~~^^^^^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 168, in cmd_serve
+    serve(port=args.port, db_path=args.db or config.DB_PATH)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxyie/arc-orchestrator/dashboard.py", line 260, in serve
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+  File "/usr/lib/python3.14/socketserver.py", line 457, in __init__
+    self.server_bind()
+    ~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/server.py", line 148, in server_bind
+    socketserver.TCPServer.server_bind(self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.14/socketserver.py", line 478, in server_bind
+    self.socket.bind(self.server_address)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 98] Address already in use
+15:18:16 INFO    dashboard: dashboard on http://0.0.0.0:8787 (db=/home/proxyie/arc-orchestrator/orchestrator.db, events=/home/proxyie/arc-orchestrator/logs/events.jsonl)
+Traceback (most recent call last):
+  File "/home/proxyie/arc-orchestrator/main.py", line 217, in <module>
+    main()
+    ~~~~^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 213, in main
+    cmd_serve(args)
+    ~~~~~~~~~^^^^^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 176, in cmd_serve
+    serve(port=args.port, db_path=args.db or config.DB_PATH)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxyie/arc-orchestrator/dashboard.py", line 260, in serve
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+  File "/usr/lib/python3.14/socketserver.py", line 457, in __init__
+    self.server_bind()
+    ~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/server.py", line 148, in server_bind
+    socketserver.TCPServer.server_bind(self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.14/socketserver.py", line 478, in server_bind
+    self.socket.bind(self.server_address)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 98] Address already in use
+15:19:45 INFO    dashboard: dashboard on http://0.0.0.0:8787 (db=/home/proxyie/arc-orchestrator/orchestrator.db, events=/home/proxyie/arc-orchestrator/logs/events.jsonl)
+Traceback (most recent call last):
+  File "/home/proxyie/arc-orchestrator/main.py", line 217, in <module>
+    main()
+    ~~~~^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 213, in main
+    cmd_serve(args)
+    ~~~~~~~~~^^^^^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 176, in cmd_serve
+    serve(port=args.port, db_path=args.db or config.DB_PATH)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxyie/arc-orchestrator/dashboard.py", line 260, in serve
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+  File "/usr/lib/python3.14/socketserver.py", line 457, in __init__
+    self.server_bind()
+    ~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/server.py", line 148, in server_bind
+    socketserver.TCPServer.server_bind(self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.14/socketserver.py", line 478, in server_bind
+    self.socket.bind(self.server_address)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 98] Address already in use
+Traceback (most recent call last):
+  File "/home/proxyie/arc-orchestrator/main.py", line 217, in <module>
+    main()
+    ~~~~^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 213, in main
+    cmd_serve(args)
+    ~~~~~~~~~^^^^^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 176, in cmd_serve
+    serve(port=args.port, db_path=args.db or config.DB_PATH)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxyie/arc-orchestrator/dashboard.py", line 409, in serve
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+  File "/usr/lib/python3.14/socketserver.py", line 457, in __init__
+    self.server_bind()
+    ~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/server.py", line 148, in server_bind
+    socketserver.TCPServer.server_bind(self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.14/socketserver.py", line 478, in server_bind
+    self.socket.bind(self.server_address)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 98] Address already in use
+Traceback (most recent call last):
+  File "/home/proxyie/arc-orchestrator/main.py", line 217, in <module>
+    main()
+    ~~~~^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 213, in main
+    cmd_serve(args)
+    ~~~~~~~~~^^^^^^
+  File "/home/proxyie/arc-orchestrator/main.py", line 176, in cmd_serve
+    serve(port=args.port, db_path=args.db or config.DB_PATH)
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/proxyie/arc-orchestrator/dashboard.py", line 411, in serve
+    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+  File "/usr/lib/python3.14/socketserver.py", line 457, in __init__
+    self.server_bind()
+    ~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3.14/http/server.py", line 148, in server_bind
+    socketserver.TCPServer.server_bind(self)
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^
+  File "/usr/lib/python3.14/socketserver.py", line 478, in server_bind
+    self.socket.bind(self.server_address)
+    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 98] Address already in use
+15:50:45 INFO    dashboard: dashboard on http://0.0.0.0:8787 (db=/home/proxyie/arc-orchestrator/orchestrator.db, events=/home/proxyie/arc-orchestrator/logs/events.jsonl)

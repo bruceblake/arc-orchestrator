@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>ARC Phone</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+:root {
+  --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
+  --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
+  --err: #f85149; --purple: #bc8cff;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 "SF Mono", "Cascadia Code", Consolas, monospace;
+}
+header {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 12px 14px; border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; background: var(--bg); z-index: 10;
+}
+header h1 { font-size: 16px; margin: 0; color: var(--accent); flex: 1; }
+#h-api { font-size: 12px; color: var(--ok); }
+#h-api.bad { color: var(--err); }
+main { padding: 12px; display: grid; gap: 12px; max-width: 640px; margin: 0 auto; }
+.panel {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; overflow: auto;
+}
+.panel h2 {
+  font-size: 11px; margin: 0 0 10px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .08em;
+}
+.big { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center; }
+.big .v { font-size: 22px; font-weight: 700; }
+.big .k { font-size: 11px; color: var(--dim); }
+.good { color: var(--ok); } .bad { color: var(--err); } .warn { color: var(--warn); }
+table { border-collapse: collapse; width: 100%; }
+th, td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; font-size: 12.5px; }
+th { color: var(--dim); font-weight: normal; font-size: 11px; }
+td.num, th.num { text-align: right; }
+.tag { padding: 1px 7px; border-radius: 8px; background: #21262d; color: var(--dim); font-size: 11px; }
+.empty { color: var(--dim); font-size: 12px; padding: 6px 0; }
+.famrow { display: grid; grid-template-columns: 84px 1fr 56px; gap: 8px; align-items: center; margin: 8px 0; font-size: 12px; }
+.barwrap { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; height: 16px; overflow: hidden; }
+.bar { height: 100%; transition: width .4s; }
+a.btn {
+  display: block; text-align: center; text-decoration: none;
+  background: var(--accent); color: #0d1117; font-weight: 700; font-size: 16px;
+  padding: 14px; border-radius: 10px;
+}
+a.ghost {
+  display: block; text-align: center; text-decoration: none; color: var(--accent);
+  border: 1px solid var(--border); padding: 10px; border-radius: 10px; font-size: 13px;
+}
+.hint { color: var(--dim); font-size: 11px; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ARC Phone</h1>
+  <span id="h-api">live</span>
+  <span id="h-clock" class="hint"></span>
+</header>
+<main>
+  <a class="btn" id="btn-term" href="#">&#9000;&#xfe0e; Open Terminal</a>
+
+  <div class="panel">
+    <div class="big">
+      <div><div class="v" id="t-req">–</div><div class="k">requests</div></div>
+      <div><div class="v" id="t-tok">–</div><div class="k">tokens</div></div>
+      <div><div class="v" id="t-err">–</div><div class="k">errors</div></div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>In flight now</h2>
+    <div id="inflight"><div class="empty">nothing running</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>Concurrency by family</h2>
+    <div id="fams"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Per-model (all time)</h2>
+    <table>
+      <thead><tr>
+        <th>model</th><th>family</th><th class="num">req</th>
+        <th class="num">err</th><th class="num">tokens</th>
+      </tr></thead>
+      <tbody id="models"></tbody>
+    </table>
+  </div>
+
+  <a class="ghost" href="/usage.html">Full dashboard &rarr;</a>
+  <a class="ghost" href="/">Flows &rarr;</a>
+  <div class="hint">refresh every 2s</div>
+</main>
+
+<script>
+const TERM_URL = (location.hostname.endsWith('.ts.net'))
+  ? location.protocol + '//' + location.hostname + ':8443/'
+  : 'https://bruce-pc.taila54b46.ts.net:8443/';
+document.getElementById('btn-term').href = TERM_URL;
+
+const fmt = n => n == null ? '–' : n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
+const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const COLORS = { 'gpt-oss':'var(--accent)', glm:'var(--purple)', kimi:'var(--ok)', deepseek:'var(--warn)', 'kimi-code':'#cba6f7' };
+
+async function poll() {
+  try {
+    const r = await fetch('/api/usage', { cache: 'no-store' });
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    document.getElementById('h-api').textContent = 'live';
+    document.getElementById('h-api').className = 'good';
+
+    const ms = d.models || [];
+    let req = 0, tok = 0, err = 0;
+    for (const m of ms) { req += m.requests|0; tok += m.tokens|0; err += m.errors|0; }
+    document.getElementById('t-req').textContent = fmt(req);
+    document.getElementById('t-tok').textContent = fmt(tok);
+    const te = document.getElementById('t-err');
+    te.textContent = fmt(err);
+    te.className = 'v ' + (err ? 'bad' : 'good');
+
+    const inf = d.inflight || [];
+    document.getElementById('inflight').innerHTML = inf.length
+      ? '<table><tbody>' + inf.map(i =>
+          `<tr><td>${esc(i.model)}</td><td><span class="tag">${esc(i.family)}</span></td>` +
+          `<td>${esc(i.purpose)}</td><td class="num warn">${(i.elapsed ?? 0).toFixed(1)}s</td></tr>`).join('') +
+        '</tbody></table>'
+      : '<div class="empty">nothing running</div>';
+
+    document.getElementById('fams').innerHTML = (d.families || []).map(f => {
+      const pct = f.limit ? Math.min(100, (f.inflight / f.limit) * 100) : 0;
+      const col = COLORS[f.family] || 'var(--accent)';
+      return `<div class="famrow"><span>${esc(f.family)}</span>` +
+        `<span class="barwrap"><span class="bar" style="width:${pct}%;background:${col}"></span></span>` +
+        `<span class="num">${f.inflight}/${f.limit ?? '–'}</span></div>`;
+    }).join('');
+
+    document.getElementById('models').innerHTML = ms.map(m =>
+      `<tr><td>${esc(m.model)}</td><td><span class="tag">${esc(m.family)}</span></td>` +
+      `<td class="num">${fmt(m.requests)}</td>` +
+      `<td class="num ${m.errors ? 'bad' : ''}">${fmt(m.errors)}</td>` +
+      `<td class="num">${fmt(m.tokens)}</td></tr>`).join('');
+  } catch (e) {
+    document.getElementById('h-api').textContent = 'offline';
+    document.getElementById('h-api').className = 'bad';
+  }
+  document.getElementById('h-clock').textContent = new Date().toLocaleTimeString();
+}
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>

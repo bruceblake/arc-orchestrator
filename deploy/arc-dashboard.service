@@ -1,0 +1,15 @@
+[Unit]
+Description=ARC LLM orchestrator dashboard
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/proxyie/arc-orchestrator
+ExecStart=/home/proxyie/arc-orchestrator/.venv/bin/python main.py serve
+Restart=always
+RestartSec=15
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
