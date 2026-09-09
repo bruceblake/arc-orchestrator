@@ -34,6 +34,9 @@ class DriverResult:
     transcript_path: str = ""
     text: str = ""
     seconds: float = 0.0
+    tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 _semaphores = {}
@@ -73,6 +76,32 @@ def parse_transcript(raw):
     return sid_holder[0], ("".join(texts) or raw)[-3000:]
 
 
+def transcript_tokens(raw):
+    """(tokens, prompt, completion) summed over opencode `step_finish` usage.
+
+    opencode emits {"type":"step_finish", "part":{"tokens":{"total","input",
+    "output","reasoning","cache":{"read","write"}}}} per step, where
+    total = input + output + reasoning + cache.read + cache.write.
+    Kimi stream-json carries no usage (kimi-code wire logs capture it instead).
+    """
+    tokens = prompt = completion = 0
+    for line in raw.splitlines():
+        if '"step_finish"' not in line or '"tokens"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        t = e.get("tokens") or (e.get("part") or {}).get("tokens")
+        if not isinstance(t, dict):
+            continue
+        tokens += t.get("total") or 0
+        cache = t.get("cache") or {}
+        prompt += (t.get("input") or 0) + (cache.get("read") or 0) + (cache.get("write") or 0)
+        completion += (t.get("output") or 0) + (t.get("reasoning") or 0)
+    return tokens, prompt, completion
+
+
 class Driver:
     harness = "?"
     model = "?"
@@ -106,7 +135,9 @@ class Driver:
             gate.release()
             events.emit("driver.done", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
-                        seconds=round(result.seconds, 1))
+                        seconds=round(result.seconds, 1),
+                        tokens=result.tokens, prompt_tokens=result.prompt_tokens,
+                        completion_tokens=result.completion_tokens)
             return result
 
     async def _once(self, prompt, worktree, session_id, task_id, attempt):
@@ -129,13 +160,15 @@ class Driver:
         TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
         tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
         tpath.write_bytes(out)
-        sid, text = parse_transcript(out.decode(errors="replace"))
+        raw = out.decode(errors="replace")
+        sid, text = parse_transcript(raw)
+        toks, ptok, ctok = transcript_tokens(raw)
         if proc.returncode != 0:
             raise DriverError(
                 f"{argv[0]} exited {proc.returncode}: {err.decode(errors='replace')[-300:]}")
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             session_id or sid, str(tpath), text,
-                            round(time.monotonic() - t0, 1))
+                            round(time.monotonic() - t0, 1), toks, ptok, ctok)
 
 
 class KimiDriver(Driver):
