@@ -43,6 +43,23 @@ for stem in "${QUEUE[@]}"; do
         say "SKIP $stem (no such task file: $tf)"
         continue
     fi
+    # Another process may already be running this exact file — the dashboard's
+    # Run button, or a terminal. Two runs of one task file share task ids and
+    # worktrees, so wait it out rather than racing or reporting a false failure.
+    waited=0
+    while $PY - "$tf" <<'PYEOF' >/dev/null 2>&1
+import sys, pathlib, reconcile
+tf = str(pathlib.Path(sys.argv[1]).resolve())
+sys.exit(0 if any(r.get("taskfile") and str(pathlib.Path(r["taskfile"]).resolve()) == tf
+                  for r in reconcile.live_runs()) else 1)
+PYEOF
+    do
+        [ "$waited" -eq 0 ] && say "WAIT $stem (already running elsewhere)"
+        waited=1
+        sleep 20
+    done
+    [ "$waited" -eq 1 ] && say "RESUME $stem (the other run finished)"
+
     say "START $stem"
     $PY main.py code run "$tf" >>"$LOG" 2>&1
     rc=$?                       # captured BEFORE any other command runs

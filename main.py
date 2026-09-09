@@ -214,6 +214,21 @@ def cmd_code(args):
             sys.exit(f"repo not found: {taskset['repo']}")
         store = Store(db_path(args, False))
         tf = str(Path(args.taskfile).resolve())
+        # Two processes on the SAME task file would share task ids, worktrees
+        # and branches and fight over them; the stale-reset each performs at
+        # startup would also clobber the other's live rows. Driver leases keep
+        # the account within its caps, but they cannot make this coherent.
+        # (Different task files in parallel are fine and expected.)
+        import reconcile as _rec
+        others = [r["pid"] for r in _rec.live_runs()
+                  if r.get("taskfile")
+                  and str(Path(r["taskfile"]).resolve()) == tf]
+        if others and not args.force:
+            sys.exit(
+                f"{Path(tf).name} is already being run by pid "
+                f"{', '.join(map(str, others))}.\n"
+                f"Wait for it, stop it (dashboard Stop, or `kill {others[0]}`), "
+                f"or pass --force to run a second one anyway.")
         # Resume semantics: this process just started, so any 'running' rows
         # for THIS taskfile belong to a dead attempt — reset and report the
         # plan before the graph re-executes (merged tasks are skipped inside
@@ -464,6 +479,8 @@ def main():
     cr_p.add_argument("taskfile", help="path to task JSON")
     cr_p.add_argument("--repo", default=None, help="override repo path from task file")
     cr_p.add_argument("--dry-run", action="store_true", help="print the resolved DAG, no models, no git")
+    cr_p.add_argument("--force", action="store_true",
+                      help="run even if another process is already running this task file")
     cr_p.add_argument("--db", default=None, help="sqlite database path")
     cr_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cp_p = code_sub.add_parser("plan", help="ask Kimi-K3 to draft a task file for a goal")

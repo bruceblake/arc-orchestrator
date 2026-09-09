@@ -1214,6 +1214,17 @@ def _run_project(body):
     if rec:
         return {"error": "this task file already has a running process",
                 "pid": rec.get("pid"), "log": rec.get("log")}, 409
+    # The registry only knows runs THIS dashboard launched. A run started from
+    # a terminal or by run-queue.sh is invisible to it, and two processes on
+    # the same task file share task ids, worktrees and branches.
+    import reconcile
+    others = [r["pid"] for r in reconcile.live_runs()
+              if r.get("taskfile") and Path(r["taskfile"]).name == fname]
+    if others:
+        return {"error": f"this task file is already being run by pid "
+                         f"{', '.join(map(str, others))} (started outside this "
+                         f"dashboard — the queue, or a terminal)",
+                "pid": others[0]}, 409
     argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py", "code", "run",
             str(path)]
     if dry_run:

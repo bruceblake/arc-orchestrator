@@ -116,6 +116,14 @@ class LiveRunGuard(unittest.TestCase):
         pids = reconcile.live_run_pids()
         self.assertNotIn(os.getpid(), pids)
 
+    def test_live_runs_reports_the_taskfile_each_run_owns(self):
+        """The duplicate-run guards key off this, so the taskfile must be the
+        first non-flag argument after `code run`, not any argument."""
+        runs = reconcile.live_runs()
+        for r in runs:
+            self.assertIn("pid", r)
+            self.assertIn("taskfile", r)
+
     def test_refuses_to_reconcile_while_a_run_is_alive(self):
         orig = reconcile.live_run_pids
         reconcile.live_run_pids = lambda: [12345]
