@@ -62,22 +62,30 @@ if __name__ == "__main__":
 
 
 class HarnessContextBudget(unittest.TestCase):
-    """The fleet declares a context budget to its harnesses.
+    """The budget is per harness, because they fail differently at it.
 
-    Lowering it below the harness default was tried and reverted: it made
-    compaction fire earlier exactly as intended, and kimi-code's compaction
-    never completes against this provider (20 full_compaction.begin across the
-    whole session history, 0 full_compaction.end). Reaching a broken path
-    sooner is strictly worse, so the budget stays at the default unless
-    compaction is fixed upstream.
+    opencode's compaction works — measured firing twice inside one GLM-5.3 run
+    which then carried on to 621KB, against ~350KB at the default where it
+    never compacted. A smaller budget is a win there.
+
+    kimi's compaction never completes against this provider: 20
+    `full_compaction.begin` across the whole session history, 0
+    `full_compaction.end`. Lowering its budget only reaches that dead end
+    sooner — tried, measured, reverted.
     """
 
-    def test_budget_does_not_force_compaction_earlier_than_the_default(self):
+    def test_opencode_budget_is_small_enough_to_force_compaction(self):
+        self.assertLess(config.OPENCODE_CONTEXT, 131072,
+                        "opencode never compacts at the default, and its "
+                        "compaction is the one that works")
+        self.assertGreaterEqual(config.OPENCODE_CONTEXT, 16000,
+                                "too small to hold a real task's working set")
+
+    def test_kimi_budget_does_not_force_its_broken_compaction(self):
         self.assertGreaterEqual(
-            config.HARNESS_CONTEXT, 131072,
-            "lowering this makes the fleet hit kimi-code's broken compaction "
-            "sooner; the working lever is not growing context (see "
-            "code_tasks._impl_prompt), not compacting it")
+            config.KIMI_CONTEXT, 131072,
+            "kimi compaction never completes; firing it earlier is strictly "
+            "worse than not firing it")
 
     def test_kimi_gets_an_alias_only_when_the_config_defines_it(self):
         """A missing alias must degrade to the default model, not fail the run

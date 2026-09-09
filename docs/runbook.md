@@ -231,46 +231,38 @@ diff against.
 deliberately: nothing arrives after one of these hangs, so waiting is pure
 cost. Raise it only if you see stalls that later recover on their own.
 
-### Context budget, and why compaction cannot save you
+### Context budget (per harness — they fail differently)
 
 Both harnesses ship configured for a **131072-token** context and compact near
 that ceiling — kimi at `max_context_size - reserved_context_size`, opencode at
-`limit.context * compaction.threshold`.
+`limit.context * compaction.threshold`. Neither reached it before requests grew
+too large to come back. But the right response differs, because their
+compaction differs (measured 2026-09-09):
 
-Lowering the fleet's budget to 65536 so compaction fires earlier was tried on
-2026-09-09 **and reverted**. It worked exactly as designed — compaction fired
-at 49042 tokens — and made things worse, because:
+| harness | compaction | budget | why |
+| --- | --- | --- | --- |
+| opencode | **works** — fired twice inside one GLM-5.3 run, which then carried on to 621KB (vs ~350KB at the default, where it never compacted) | `ARC_OPENCODE_CONTEXT`, default **65536** | a smaller budget keeps each request small enough to come back |
+| kimi | **never completes** — 20 `full_compaction.begin` across the whole session history, 0 `full_compaction.end`, interactive sessions included | `ARC_KIMI_CONTEXT`, default **131072** | lowering it only reaches that dead end sooner (tried, measured, reverted) |
 
-> **kimi-code's compaction never completes against this provider.**
-> Across the entire session history: 20 `full_compaction.begin`, **0**
-> `full_compaction.end`. Including interactive sessions.
+How each budget is applied — interactive sessions keep the harness defaults:
 
-Firing a broken compaction at ~49k instead of ~115k only reaches the wall
-sooner. `ARC_HARNESS_CONTEXT` therefore stays at the harness default; lower it
-only if compaction is fixed upstream. **The lever that works is not growing
-the context**, which is why implement prompts carry explicit context
-discipline.
-
-The alias plumbing is kept because it is the knob to turn if that changes, and
-because it keeps fleet and interactive settings separable:
-
-| harness | how the budget is applied |
+| harness | mechanism |
 | --- | --- |
-| kimi | model alias `arc/kimi-k3-fleet` in `~/.kimi-code/config.toml` (same `model = "Kimi-K3"`, lower `max_context_size`), passed as `-m` |
-| opencode | a generated `~/.config/opencode/opencode-fleet.json`, selected per-process via `$OPENCODE_CONFIG` |
+| kimi | alias `arc/kimi-k3-fleet` in `~/.kimi-code/config.toml` (same `model = "Kimi-K3"`, its own `max_context_size`), passed as `-m` |
+| opencode | generated `~/.config/opencode/opencode-fleet.json`, selected per-process via `$OPENCODE_CONFIG` |
 
 opencode needs the whole-file approach because it sends the model **key** to
 the API — a differently-keyed alias comes back `{"detail":"Model not found"}`.
 Its fleet config is regenerated from your own `opencode.json` whenever that
-changes, so provider settings and API keys stay in one place.
+changes, so provider settings and API keys stay in one place. If the kimi alias
+is missing, the driver falls back to the default model rather than failing.
+`ARC_USE_FLEET_ALIASES=0` disables both.
 
-If the kimi alias is missing (a reset or reinstalled config) the driver falls
-back to the default model rather than failing the run. Set
-`ARC_USE_FLEET_ALIASES=0` to disable both and use the harnesses as configured.
-
-Implement prompts also tell the agent to grep before reading, read line ranges
-rather than whole files, and not re-read what it has already seen — context
-growth is the underlying problem, and compaction is only the backstop.
+**None of this is a cure.** Compaction lets an opencode task run roughly twice
+as far; it still stalled eventually. The lever that actually reduces risk is
+not growing the context, which is why implement prompts tell the agent to grep
+before reading, read line ranges rather than whole files, and not re-read what
+it has already seen.
 
 ### Reaping orphans (`code reconcile`)
 

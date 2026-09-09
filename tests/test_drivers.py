@@ -423,7 +423,7 @@ class FleetContextConfig(unittest.TestCase):
                 doc = json.loads(Path(path).read_text())
                 arc = doc["provider"]["ARC"]
                 self.assertEqual(arc["models"]["Kimi-K3"]["limit"]["context"],
-                                 config.HARNESS_CONTEXT)
+                                 config.OPENCODE_CONTEXT)
                 self.assertEqual(arc["options"]["apiKey"], "secret",
                                  "provider settings must carry over")
                 self.assertTrue(doc["compaction"]["auto"])

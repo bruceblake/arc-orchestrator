@@ -233,10 +233,13 @@ _fleet_cfg = {"key": None, "path": None}
 def opencode_fleet_config():
     """Path to a fleet-scoped opencode config, or None to use the default.
 
-    opencode ships a 131072-token context limit and compacts at 75% of it, so
-    it never compacts before ARC stops answering (~55-60k). It sends the model
-    KEY to the API, so a lower-limit alias is rejected — the budget has to come
-    from a whole config file, selected per-process via $OPENCODE_CONFIG.
+    opencode ships a 131072-token limit and compacts at 75% of it, so it never
+    compacted at all before requests got too large to come back. Its
+    compaction DOES work (unlike kimi's), so a smaller budget is a genuine win
+    — measured: two compactions inside one GLM-5.3 run, which then carried on
+    to 621KB against ~350KB at the default. It sends the model KEY to the API,
+    so a lower-limit alias is rejected; the budget has to come from a whole
+    config file, selected per-process via $OPENCODE_CONFIG.
 
     Derived from the operator's own config so provider settings and API keys
     stay in one place, and regenerated whenever that source changes. The
@@ -249,13 +252,13 @@ def opencode_fleet_config():
         st = src.stat()
     except OSError:
         return None
-    key = (st.st_size, st.st_mtime_ns, config.HARNESS_CONTEXT)
+    key = (st.st_size, st.st_mtime_ns, config.OPENCODE_CONTEXT)
     if _fleet_cfg["key"] == key and _fleet_cfg["path"]:
         return _fleet_cfg["path"]
     try:
         doc = json.loads(src.read_text(encoding="utf-8"))
         for m in (doc.get("provider", {}).get("ARC", {}).get("models") or {}).values():
-            m.setdefault("limit", {})["context"] = config.HARNESS_CONTEXT
+            m.setdefault("limit", {})["context"] = config.OPENCODE_CONTEXT
         doc.setdefault("compaction", {})["auto"] = True
         doc["compaction"].setdefault("threshold", 0.75)
         config.OPENCODE_FLEET_CONFIG.write_text(

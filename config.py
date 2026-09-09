@@ -179,19 +179,23 @@ MAX_ESCALATIONS = int(os.getenv("ARC_MAX_ESCALATIONS",
 # Interactive sessions keep the full window: they use the unsuffixed aliases.
 USE_FLEET_ALIASES = os.getenv("ARC_USE_FLEET_ALIASES", "1").lower() not in (
     "0", "false", "no", "")
-# Context budget the fleet declares to its harnesses.
+# Context budget the fleet declares to its harnesses — PER HARNESS, because
+# the two behave differently when they hit it (measured 2026-09-09):
 #
-# Deliberately NOT lowered below the harness default. Lowering it to 65536 was
-# tried on 2026-09-09 to make compaction fire before requests got large; it
-# worked exactly as designed and made things worse, because kimi-code's
-# compaction never completes against this provider — 20 `full_compaction.begin`
-# events across the whole session history, zero `full_compaction.end`. Firing a
-# broken compaction at ~49k instead of ~115k just reaches the wall sooner.
+#   opencode  compaction works. Observed firing twice inside one GLM-5.3 run,
+#             after which the session carried on to 621KB of output — against
+#             ~350KB when it was left at the 131072 default and never
+#             compacted at all. A smaller budget is a WIN here: it keeps each
+#             request small enough to come back.
 #
-# The lever that does work is not growing the context in the first place (see
-# the context-discipline rules in code_tasks._impl_prompt). Set
-# ARC_HARNESS_CONTEXT lower only if compaction is ever fixed upstream.
-HARNESS_CONTEXT = int(os.getenv("ARC_HARNESS_CONTEXT", "131072"))
+#   kimi      compaction never completes against this provider. Across the
+#             whole session history: 20 `full_compaction.begin`, 0
+#             `full_compaction.end`, interactive sessions included. Lowering
+#             its budget only makes it reach that dead end sooner — tried,
+#             measured, reverted. It stays at the harness default until
+#             compaction is fixed upstream.
+OPENCODE_CONTEXT = int(os.getenv("ARC_OPENCODE_CONTEXT", "65536"))
+KIMI_CONTEXT = int(os.getenv("ARC_KIMI_CONTEXT", "131072"))
 KIMI_CONFIG = Path.home() / ".kimi-code" / "config.toml"
 OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 OPENCODE_FLEET_CONFIG = OPENCODE_CONFIG.with_name("opencode-fleet.json")
