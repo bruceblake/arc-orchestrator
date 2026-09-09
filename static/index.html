@@ -2,8 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ARC Orchestrator Dashboard</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ARC Orchestrator · Projects</title>
 <style>
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
@@ -11,471 +11,423 @@
   --err: #f85149; --run: #e3b341; --purple: #bc8cff;
 }
 * { box-sizing: border-box; }
-body {
-  margin: 0; background: var(--bg); color: var(--text);
-  font: 13px/1.45 "SF Mono", "Cascadia Code", Consolas, monospace;
-}
-header {
-  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
-  padding: 10px 16px; border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; background: var(--bg); z-index: 10;
-}
+body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 10; }
 header h1 { font-size: 15px; margin: 0; color: var(--accent); }
-.pill {
-  padding: 2px 10px; border: 1px solid var(--border); border-radius: 12px;
-  color: var(--dim); white-space: nowrap;
-}
+.pill { padding: 2px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--dim); white-space: nowrap; text-decoration: none; cursor: pointer; background: none; font: inherit; }
 .pill b { color: var(--text); }
-main { padding: 14px 16px; display: grid; gap: 14px; grid-template-columns: 1fr 420px; }
-.panel {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
-  padding: 12px; overflow: auto;
-}
-.panel h2 {
-  font-size: 12px; margin: 0 0 8px; color: var(--dim); text-transform: uppercase;
-  letter-spacing: .08em;
-}
-.col { display: grid; gap: 14px; align-content: start; }
-svg text { font-family: inherit; }
+a.pill:hover, .pill.on { border-color: var(--accent); color: var(--accent); }
+main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
+.panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.grid { display: grid; gap: 10px; }
+.projgrid { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+.card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #0d1117; cursor: pointer; }
+.card:hover { border-color: var(--accent); }
 table { border-collapse: collapse; width: 100%; }
-th, td { padding: 3px 8px; border-bottom: 1px solid var(--border); text-align: left; }
-th { color: var(--dim); font-weight: normal; font-size: 11px; }
-td.num, th.num { text-align: right; }
+th, td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { color: var(--dim); font-weight: normal; font-size: 11px; white-space: nowrap; }
+tr.clickable { cursor: pointer; } tr.clickable:hover td { background: #1c2128; }
 .good { color: var(--ok); } .bad { color: var(--err); } .warn { color: var(--warn); }
-#stream { max-height: 340px; overflow: auto; }
-#stream table { font-size: 11px; }
-#stream td { padding: 2px 6px; }
-.tag { padding: 0 6px; border-radius: 8px; background: #21262d; color: var(--dim); }
-.t-request { color: var(--dim); } .t-node { color: var(--accent); }
-.t-gate { color: var(--warn); } .t-review, .t-verify { color: var(--purple); }
-.t-round_start, .t-round_end, .t-iteration_start, .t-iteration_end { color: var(--ok); }
-.t-integration, .t-wiring, .t-plan, .t-assemble, .t-build_metrics { color: #79c0ff; }
-select, button {
-  background: #21262d; color: var(--text); border: 1px solid var(--border);
-  border-radius: 6px; padding: 3px 8px; font: inherit;
-}
-button { cursor: pointer; }
-#codeview { max-height: 340px; overflow: auto; white-space: pre; font-size: 11px; color: #a5d6ff; }
-.mchips { display: flex; flex-wrap: wrap; gap: 8px; }
-.chip {
-  border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; min-width: 118px;
-  font-size: 11px; background: #0d1117;
-}
-.chip .mname { color: var(--text); font-weight: bold; }
-.chip .mstat { color: var(--dim); }
-.matrixcell { text-align: center; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 8px; background: #21262d; color: var(--dim); margin: 1px 2px; font-size: 11px; white-space: nowrap; }
 .hint { color: var(--dim); font-size: 11px; }
-.pulse { animation: pulse 1.2s infinite; }
-@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
-footer { padding: 8px 16px; color: var(--dim); font-size: 11px; border-top: 1px solid var(--border); }
-@media (max-width: 1100px) { main { grid-template-columns: 1fr; } }
+.empty { color: var(--dim); font-size: 12px; padding: 10px 0; }
+button.act { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+button.act:hover { border-color: var(--accent); color: var(--accent); }
+button.act.primary { border-color: var(--accent); color: var(--accent); }
+button.act.danger { border-color: var(--err); color: var(--err); }
+.kv { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; }
+.kv b { color: var(--text); }
+.live { display: inline-block; padding: 0 8px; border-radius: 9px; border: 1px solid var(--ok); color: var(--ok); font-size: 10px; animation: pulse 1.4s infinite; }
+@keyframes pulse { 50% { opacity: .35; } }
+@keyframes boxpulse { 50% { stroke-opacity: .3; } }
+.chip { display: inline-block; padding: 0 6px; border-radius: 7px; font-size: 10px; margin-right: 3px; border: 1px solid; }
+.chip.merged, .chip.done { color: var(--ok); border-color: var(--ok); }
+.chip.running { color: var(--accent); border-color: var(--accent); }
+.chip.failed, .chip.conflict { color: var(--err); border-color: var(--err); }
+.chip.pending { color: var(--dim); border-color: var(--border); }
+.modal { position: fixed; inset: 0; background: rgba(1,4,9,.7); z-index: 60; display: none; align-items: flex-start; justify-content: center; padding-top: 8vh; }
+.modal.open { display: flex; }
+.dialog { width: min(720px, 94vw); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.dialog h3 { margin: 0 0 10px; font-size: 14px; color: var(--accent); }
+.dialog input, .dialog textarea, .dialog select { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 10px; }
+.dialog textarea { resize: vertical; }
+.tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+.drawer { position: fixed; top: 0; right: 0; width: min(640px, 95vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform .15s ease; display: flex; flex-direction: column; }
+.drawer.open { transform: none; }
+.drawer header { position: static; }
+.drawer pre { flex: 1; overflow: auto; margin: 0; padding: 10px 12px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+.subrow td { background: #0d1117; font-size: 11px; }
+.err { color: var(--err); font-size: 12px; margin-top: 6px; }
+.okmsg { color: var(--ok); font-size: 12px; margin-top: 6px; }
+svg text { font-family: ui-monospace, monospace; }
 </style>
 </head>
 <body>
 <header>
-  <h1>ARC Orchestrator</h1>
-  <span class="pill">research <b id="h-research">–</b></span>
-  <span class="pill">builds <b id="h-builds">–</b></span>
-  <span class="pill">events <b id="h-events">0</b></span>
-  <span class="pill">api <b id="h-api" class="good">live</b></span>
-  <span class="pill" id="h-clock">–</span>
-  <a class="pill" href="/usage.html" style="text-decoration:none">usage →</a>
+  <h1>ARC · Projects</h1>
+  <span class="pill on">Projects</span>
+  <a class="pill" href="/usage.html">Usage &amp; Agents</a>
+  <a class="pill" href="/phone.html">Phone</a>
+  <span style="flex:1"></span>
+  <span class="pill">updated <b id="clock">-</b></span>
 </header>
-
 <main>
-  <div class="col">
+  <div id="view-list">
     <div class="panel">
-      <h2>Research Round Graph <span class="hint">(topic → questions → 4-model answers + web → critique → synthesis → verify ⇄ refine → store)</span></h2>
-      <div id="g-round"></div>
+      <h2>Projects <span class="hint" id="proj-meta"></span>
+        <span style="flex:1"></span>
+        <button class="act primary" id="btn-new">+ New project</button>
+      </h2>
+      <div class="grid projgrid" id="projects"></div>
+      <div class="empty" id="projects-empty" style="display:none">No task files in ~/tasks yet — create one with “+ New project”.</div>
     </div>
     <div class="panel">
-      <h2>Minecraft Build Graph <span class="hint">(planner → module gauntlet ×6 → assemble → integration ⇄ wiring fix → metrics)</span></h2>
-      <div id="g-build"></div>
-    </div>
-    <div class="panel">
-      <h2>Event Stream</h2>
-      <div style="margin-bottom:6px">
-        filter:
-        <select id="evfilter">
-          <option value="all">all</option>
-          <option value="request">requests</option>
-          <option value="node">nodes</option>
-          <option value="gate">gates</option>
-          <option value="review">reviews</option>
-          <option value="verify">verify</option>
-          <option value="integration">integration</option>
-          <option value="round">rounds/builds</option>
-        </select>
-        <span class="hint" style="float:right" id="cursorinfo"></span>
-      </div>
-      <div id="stream"><table><tbody id="streambody"></tbody></table></div>
+      <h2>Orchestration graphs</h2>
+      <div id="graphs" class="hint">loading…</div>
     </div>
   </div>
 
-  <div class="col">
+  <div id="view-detail" style="display:none">
     <div class="panel">
-      <h2>Model Leaderboard</h2>
-      <table id="lb"><thead><tr>
-        <th>family</th><th class="num">reqs</th><th class="num">tokens</th>
-        <th class="num">lat s</th><th class="num">res.score</th>
-        <th class="num">mods</th><th class="num">pass%</th><th class="num">rev</th><th>best at</th>
-      </tr></thead><tbody id="lbbody"><tr><td colspan="9" class="hint">waiting for data…</td></tr></tbody></table>
-      <p class="hint" id="lbhint"></p>
+      <h2><button class="act" id="btn-back">← all projects</button> <span id="d-title"></span> <span id="d-live"></span>
+        <span style="flex:1"></span>
+        <button class="act" id="btn-dry">Dry run</button>
+        <button class="act primary" id="btn-run">▶ Run</button>
+      </h2>
+      <div class="kv" id="d-meta"></div>
+      <div style="margin-top:8px" id="d-git"></div>
     </div>
     <div class="panel">
-      <h2>Critique Matrix <span class="hint">(avg score author receives from critic)</span></h2>
-      <div id="matrix" class="hint">no critique data yet</div>
+      <h2>Task graph <span class="hint" id="d-dagmeta"></span></h2>
+      <div id="dag" style="overflow-x:auto"></div>
     </div>
     <div class="panel">
-      <h2>Build Gauntlet <span class="hint">(current iteration)</span></h2>
-      <div class="mchips" id="gauntlet"><span class="hint">no build events yet</span></div>
-      <p class="hint">integration: <span id="integ-info">–</span></p>
+      <h2>Happening now <span class="hint">latest events for this project first</span></h2>
+      <div id="feed"></div>
     </div>
     <div class="panel">
-      <h2>Research Stats</h2>
-      <div id="rstats" class="hint">no data</div>
-      <h2 style="margin-top:12px">Recent Builds</h2>
-      <table><tbody id="btable"><tr><td class="hint">none yet</td></tr></tbody></table>
-    </div>
-    <div class="panel">
-      <h2>Build Artifacts</h2>
-      <div style="margin-bottom:6px">
-        <select id="filelist"></select>
-        <button onclick="loadCode()">reload</button>
-        <span class="hint">serve game: <code>cd production/minecraft && python3 -m http.server 8080</code></span>
-      </div>
-      <div id="codeview">select a file</div>
+      <h2>Tasks <span class="hint">— click a row for run history &amp; transcripts</span></h2>
+      <table id="tasks">
+        <thead><tr><th>task</th><th>title</th><th>implement</th><th>review</th><th>status</th><th>attempts</th><th>last duration</th><th>verdict</th></tr></thead>
+        <tbody></tbody>
+      </table>
     </div>
   </div>
 </main>
 
-<footer>ARC orchestrator dashboard — reads events.jsonl + orchestrator.db; graphs colored by most recent node event.</footer>
+<div class="modal" id="modal">
+  <div class="dialog">
+    <h3>New project</h3>
+    <div class="tabs">
+      <button class="pill tab on" data-t="plan">Plan with Kimi-K3</button>
+      <button class="pill tab" data-t="json">Write tasks JSON</button>
+    </div>
+    <div id="tab-plan">
+      <div class="hint">Describe the goal in one or two sentences — Kimi-K3 drafts the task DAG (implemented by gpt-oss/DeepSeek, reviewed by GLM/Kimi) into ~/tasks/.</div>
+      <label class="hint">repo</label>
+      <select id="p-repo">
+        <option>/home/proxyie/minecraft-web</option>
+        <option>/home/proxyie/repos/multi-harness-sandbox</option>
+        <option value="__custom">custom path…</option>
+      </select>
+      <input id="p-repo-custom" placeholder="/home/proxyie/…" style="display:none">
+      <label class="hint">goal</label>
+      <textarea id="p-goal" rows="3" placeholder="e.g. Add a settings menu with volume sliders to the minecraft clone"></textarea>
+      <button class="act primary" id="p-go">Plan project</button>
+      <div id="p-msg"></div>
+    </div>
+    <div id="tab-json" style="display:none">
+      <label class="hint">title</label><input id="j-title" placeholder="my feature">
+      <label class="hint">repo</label>
+      <select id="j-repo">
+        <option>/home/proxyie/minecraft-web</option>
+        <option>/home/proxyie/repos/multi-harness-sandbox</option>
+        <option value="__custom">custom path…</option>
+      </select>
+      <input id="j-repo-custom" placeholder="/home/proxyie/…" style="display:none">
+      <label class="hint">tasks JSON</label>
+      <textarea id="j-tasks" rows="9">[
+  {"id": "first-task", "title": "short title", "prompt": "what to build, in detail"}
+]</textarea>
+      <button class="act primary" id="j-go">Create task file</button>
+      <div id="j-msg"></div>
+    </div>
+    <div style="margin-top:10px;text-align:right"><button class="act" id="modal-close">cancel</button></div>
+  </div>
+</div>
+
+<div class="drawer" id="drawer">
+  <header>
+    <h1 id="drawer-title">transcript</h1>
+    <span class="pill hint" id="drawer-sub"></span>
+    <span style="flex:1"></span>
+    <button class="act" id="drawer-close">close ✕</button>
+  </header>
+  <pre id="drawer-body">loading…</pre>
+</div>
 
 <script>
 "use strict";
-const $ = id => document.getElementById(id);
-const FAMS = ["gpt-oss", "glm", "kimi", "deepseek"];
-let cursor = 0;
-let graphs = null;
-let summaries = null;
-let filter = "all";
-let state = {
-  requests: {},          // family -> {n, tokens, ms, errs}
-  nodeStates: {},        // `${w}|${rk}|${g}|${node}` -> {state, ts}
-  current: {research: 0, "minecraft-build": 0},
-  gauntlet: {},          // module -> {syntax, contract, extract, reviewScore, verdict, attempt, producer}
-  integration: null,
-  rows: [],              // stream rows
-};
+const $ = s => document.querySelector(s);
+const COLORS = {"gpt-oss":"#3fb950","glm":"#58a6ff","kimi":"#bc8cff","deepseek":"#d29922","kimi-code":"#8b949e","harness":"#e3b341"};
+const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash"};
+const short = m => SHORT[m] || m || "—";
+let PROJECTS = [], CUR = null, listTimer = null, detailTimer = null, drawerFile = null;
 
-const LAYOUTS = {
-  round: {
-    pick_topic: [30, 24], gen_questions: [30, 104],
-    answer_gpt_oss: [165, 8], answer_glm: [165, 63], answer_kimi: [165, 118],
-    answer_deepseek: [165, 173], research_web: [165, 228],
-    critique: [305, 118], synthesize: [440, 118], verify: [575, 118], store_results: [710, 118],
-  },
-  build: {
-    planner: [30, 140],
-    produce_engine: [175, 8], produce_world: [175, 61], produce_player: [175, 114],
-    produce_ui: [175, 167], produce_main: [175, 220], produce_html: [175, 273],
-    assemble: [330, 140], integration_review: [485, 100], wiring_fix: [485, 200],
-    metrics_store: [645, 100],
-  },
-};
-const NODE_W = 128, NODE_H = 30;
+const fmtT = iso => { if (!iso) return "—"; const s = (Date.now() - new Date(iso).getTime())/1000;
+  if (s < 60) return Math.round(s)+"s ago"; if (s < 3600) return Math.round(s/60)+"m ago";
+  if (s < 86400) return (s/3600).toFixed(1)+"h ago"; return (s/86400).toFixed(1)+"d ago"; };
+const tick = s => { s = Math.round(s||0); if (s < 60) return s+"s"; if (s < 3600) return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; };
+async function jget(u) { const r = await fetch(u, {cache:"no-store"}); return r.json(); }
+async function jpost(u, body) { const r = await fetch(u, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)}); return {code: r.status, body: await r.json()}; }
 
-function fmtSec(ms) { return ms == null ? "–" : (ms / 1000).toFixed(1); }
-function fmtTs(ts) { const d = new Date(ts * 1000); return d.toTimeString().slice(0, 8); }
-function esc(s) { return String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+function chip(status, n) { return `<span class="chip ${status}">${status} ${n}</span>`; }
 
-function applyEvent(e) {
-  const w = e.workload || "research";
-  const rk = e.round || e.iteration || 0;
-  if ((e.round || e.iteration) && (state.current[w] || 0) < rk) state.current[w] = rk;
-  if (e.type === "request") {
-    const f = state.requests[e.family] || (state.requests[e.family] = {n: 0, tokens: 0, ms: 0, errs: 0});
-    if (e.ok) { f.n++; f.tokens += e.tokens || 0; f.ms += e.latency_ms || 0; }
-    else f.errs++;
-  } else if (e.type === "node_start" || e.type === "node_end" || e.type === "node_error") {
-    const k = `${w}|${rk}|${e.graph}|${e.node}`;
-    state.nodeStates[k] = {
-      state: e.type === "node_start" ? "run" : (e.type === "node_end" ? "ok" : "err"),
-      run: e.run, seconds: e.seconds, ts: e.ts, error: e.error,
-    };
-  } else if (e.type === "iteration_start") {
-    state.gauntlet = {}; state.integration = null;
-  } else if (e.type === "gate") {
-    const g = state.gauntlet[e.module] || (state.gauntlet[e.module] = {});
-    g[e.gate] = e.passed; g.attempt = e.attempt;
-  } else if (e.type === "review") {
-    const g = state.gauntlet[e.module] || (state.gauntlet[e.module] = {});
-    g.reviewScore = e.score; g.verdict = e.verdict; g.reviewer = e.reviewer; g.attempt = e.attempt;
-  } else if (e.type === "integration") {
-    state.integration = e;
-  }
-  state.rows.unshift(e);
-  if (state.rows.length > 250) state.rows.pop();
-}
-
-function eventRow(e) {
-  const w = e.workload === "minecraft-build" ? "build" : (e.workload || "–");
-  const rk = e.round || e.iteration || "";
-  let detail = "";
-  switch (e.type) {
-    case "request":
-      detail = `${e.family}/${e.model} ${e.purpose}${e.websearch ? " (web)" : ""} ` +
-        (e.ok ? `${e.tokens}t ${fmtSec(e.latency_ms)}s` : `ERR ${e.error || ""}`); break;
-    case "node_start": detail = `${e.node} …`; break;
-    case "node_end": detail = `${e.node} ${e.seconds}s${e.run > 1 ? " (run " + e.run + ")" : ""}`; break;
-    case "node_error": detail = `${e.node}: ${e.error}`; break;
-    case "gate": detail = `${e.module} ${e.gate} ${e.passed ? "PASS" : "FAIL"}${e.missing ? " " + e.missing : ""}`; break;
-    case "review": detail = `${e.module} by ${e.reviewer}: ${e.score}/10 ${e.verdict}`; break;
-    case "verify": detail = `q${e.question_index} ${e.passed ? "PASS" : "FAIL"} ${e.score}/10 (round ${e.round_n})`; break;
-    case "integration": detail = `round ${e.round} ${e.passed ? "PASS" : "FAIL"} ${e.score}/10 (${e.fixes} fixes)`; break;
-    case "wiring": detail = `round ${e.round}: ${e.modules.join(", ")}`; break;
-    case "plan": detail = `${e.family}: ${Object.keys(e.contracts || {}).join(", ")}`; break;
-    case "assemble": detail = `${e.gauntlet_passed}/${e.modules} passed gauntlet`; break;
-    case "round_start": detail = `${e.topic}`; break;
-    case "round_end": detail = `${e.status} in ${e.seconds}s${e.stored != null ? " — " + e.stored + " items" : ""}${e.error ? " " + e.error : ""}`; break;
-    case "iteration_start": detail = `build ${e.build_id} mode=${e.mode}`; break;
-    case "iteration_end": detail = `${e.status} in ${e.seconds}s${e.integration_rounds != null ? ", integ rounds " + e.integration_rounds : ""}${e.error ? " — " + e.error : ""}`; break;
-    default: detail = JSON.stringify(Object.entries(e).filter(([k]) => !["ts","type","workload","round","iteration"].includes(k)).slice(0,4));
-  }
-  return `<tr><td class="hint">${fmtTs(e.ts)}</td><td>${w}${rk ? " " + rk : ""}</td>` +
-    `<td class="tag t-${e.type}">${e.type.replace(/_/g, " ")}</td>` +
-    `<td class="t-${e.type}">${esc(detail).slice(0, 160)}</td></tr>`;
-}
-
-function matchesFilter(t) {
-  if (filter === "all") return true;
-  if (filter === "round") return t.startsWith("round") || t.startsWith("iteration") || t.startsWith("build");
-  if (filter === "integration") return ["integration", "wiring", "plan", "assemble", "build_metrics"].includes(t);
-  return t === filter || t.startsWith(filter);
-}
-
-function renderStream() {
-  $("streambody").innerHTML = state.rows.filter(e => matchesFilter(e.type))
-    .slice(0, 150).map(eventRow).join("");
-  $("cursorinfo").textContent = `cursor ${cursor}`;
-}
-
-function renderGraph(containerId, topo, layoutKey, workload) {
-  const layout = LAYOUTS[layoutKey] || {};
-  const el = $(containerId);
-  if (!topo) { el.innerHTML = '<span class="hint">graph unavailable</span>'; return; }
-  const rk = state.current[workload] || 0;
-  const positions = {};
-  let extraY = 0;
-  topo.nodes.forEach(n => {
-    if (layout[n.name]) positions[n.name] = layout[n.name];
-    else positions[n.name] = [820, (extraY++) * 55 + 10];
-  });
-  const xs = Object.values(positions).map(p => p[0]);
-  const ys = Object.values(positions).map(p => p[1]);
-  const W = Math.max(...xs) + NODE_W + 20, H = Math.max(...ys) + NODE_H + 20;
-  let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">`;
-  svg += `<defs><marker id="arr" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">` +
-    `<path d="M0,0 L6,3 L0,6 z" fill="#484f58"/></marker></defs>`;
-  topo.edges.forEach(e => {
-    const a = positions[e.src], b = positions[e.dst];
-    if (!a || !b) return;
-    const x1 = a[0] + NODE_W, y1 = a[1] + NODE_H / 2, x2 = b[0], y2 = b[1] + NODE_H / 2;
-    const back = x2 < x1;
-    const d = back
-      ? `M${x1 - 10},${y1} C${x1 + 40},${y1} ${x2 - 40},${y2} ${x2},${y2}`
-      : `M${x1},${y1} L${x2 - 4},${y2}`;
-    svg += `<path d="${d}" fill="none" stroke="#484f58" stroke-width="1.4" ` +
-      `${e.conditional || back ? 'stroke-dasharray="5 3" ' : ""}marker-end="url(#arr)"/>`;
-  });
-  topo.nodes.forEach(n => {
-    const [x, y] = positions[n.name];
-    const st = state.nodeStates[`${workload}|${rk}|${topo.name}|${n.name}`];
-    let fill = "#21262d", stroke = "#484f58", cls = "";
-    if (st) {
-      if (st.state === "run") { fill = "#3d2e00"; stroke = "var(--run)"; cls = "pulse"; }
-      else if (st.state === "ok") { fill = "#12261e"; stroke = "var(--ok)"; }
-      else if (st.state === "err") { fill = "#3a1216"; stroke = "var(--err)"; }
-    }
-    svg += `<g class="${cls}"><rect x="${x}" y="${y}" rx="6" width="${NODE_W}" height="${NODE_H}" ` +
-      `fill="${fill}" stroke="${stroke}" stroke-width="1.2"/>` +
-      `<text x="${x + NODE_W / 2}" y="${y + 19}" text-anchor="middle" font-size="11" fill="var(--text)">` +
-      `${esc(n.name)}${n.gather ? " ⋓" : ""}</text></g>`;
-  });
-  svg += "</svg>";
-  el.innerHTML = `<span class="hint">${workload} round/iteration ${rk || "–"} · ${topo.nodes.length} nodes</span>` + svg;
-}
-
-function renderLeaderboard() {
-  const reqs = state.requests;
-  const rs = summaries && summaries.research;
-  const ansScore = {};
-  if (rs && rs.answers_score) Object.assign(ansScore, rs.answers_score);
-  const bs = summaries && summaries.build;
-  const byFam = {};
-  if (bs && bs.by_family) bs.by_family.forEach(r => { byFam[r.family] = r; });
-  let rows = "";
-  const rank = [];
-  for (const f of FAMS) {
-    const r = reqs[f] || {n: 0, tokens: 0, ms: 0, errs: 0};
-    const b = byFam[f];
-    const resScore = ansScore[f];
-    const passPct = b && b.modules ? Math.round(100 * b.passed / b.modules) : null;
-    let best = [];
-    if (b && b.modules >= 2 && passPct >= 60) best.push("produce");
-    if (resScore != null && resScore >= 7) best.push("answers");
-    if (b && b.avg_latency_ms && b.avg_latency_ms < 40000) best.push("fast-path");
-    if (!best.length) best.push("–");
-    rank.push({f, r, b, resScore, passPct, best});
-    rows += `<tr><td>${f}</td><td class="num">${r.n}${r.errs ? ` <span class="bad">+${r.errs}e</span>` : ""}</td>` +
-      `<td class="num">${(r.tokens / 1000).toFixed(1)}k</td>` +
-      `<td class="num">${r.n ? fmtSec(r.ms / r.n) : "–"}</td>` +
-      `<td class="num">${resScore != null ? resScore.toFixed(1) : "–"}</td>` +
-      `<td class="num">${b ? b.modules : "–"}</td>` +
-      `<td class="num">${passPct != null ? passPct + "%" : "–"}</td>` +
-      `<td class="num">${b && b.avg_review != null ? b.avg_review.toFixed(1) : "–"}</td>` +
-      `<td class="hint">${best.join(", ")}</td></tr>`;
-  }
-  $("lbbody").innerHTML = rows || '<tr><td colspan="9" class="hint">no requests yet</td></tr>';
-  const tops = rank.filter(x => x.r.n > 0).sort((a, b2) => b2.r.n - a.r.n);
-  $("lbhint").textContent = tops.length
-    ? `most used: ${tops[0].f} (${tops[0].r.n} reqs) · totals: ${Object.values(reqs).reduce((s, x) => s + x.n, 0)} reqs, ` +
-      `${(Object.values(reqs).reduce((s, x) => s + x.tokens, 0) / 1000).toFixed(1)}k tokens`
-    : "no request events yet";
-}
-
-function renderMatrix() {
-  const cm = summaries && summaries.critique_matrix;
-  if (!cm || !cm.cells.length) { $("matrix").innerHTML = '<span class="hint">no critique data yet</span>'; return; }
-  const critics = cm.critics.length ? cm.critics : FAMS;
-  let html = '<table><tr><th>author ╲ critic</th>' + critics.map(c => `<th>${c}</th>`).join("") + "</tr>";
-  for (const a of cm.authors) {
-    html += `<tr><td>${a}</td>` + critics.map(c => {
-      const cell = cm.cells.find(x => x.author === a && x.critic === c);
-      if (!cell || cell.score == null) return `<td class="matrixcell hint">–</td>`;
-      const hue = Math.round(cell.score * 12);
-      return `<td class="matrixcell" style="background:hsla(${hue},60%,30%,.55)">${cell.score.toFixed(1)}</td>`;
-    }).join("") + "</tr>";
-  }
-  $("matrix").innerHTML = html + "</table>";
-}
-
-function renderGauntlet() {
-  const g = state.gauntlet;
-  const keys = Object.keys(g);
-  if (!keys.length) { $("gauntlet").innerHTML = '<span class="hint">no build events yet</span>'; return; }
-  $("gauntlet").innerHTML = keys.sort().map(m => {
-    const x = g[m];
-    const gateIcon = t => x[t] == null ? "·" : (x[t] ? "✓" : "✗");
-    const gateCls = t => x[t] == null ? "hint" : (x[t] ? "good" : "bad");
-    const rev = x.reviewScore != null
-      ? `<span class="${x.verdict === "ok" ? "good" : "warn"}">${x.reviewScore}/10 ${x.verdict || ""}</span>`
-      : '<span class="hint">pending</span>';
-    return `<div class="chip"><div class="mname">${m}</div>` +
-      `<div>syn <span class="${gateCls("syntax")}">${gateIcon("syntax")}</span> ` +
-      `con <span class="${gateCls("contract")}">${gateIcon("contract")}</span> ` +
-      `ext <span class="${gateCls("extract")}">${gateIcon("extract")}</span></div>` +
-      `<div class="mstat">${rev} · try ${x.attempt || "–"}</div></div>`;
-  }).join("");
-  const it = state.integration;
-  $("integ-info").textContent = it
-    ? `round ${it.round} — ${it.passed ? "PASS" : "FAIL"} (${it.score}/10, ${it.fixes} fixes, reviewer ${it.family})`
-    : "not run yet";
-}
-
-function renderStats() {
-  const rs = summaries && summaries.research;
-  if (rs) {
-    const avg = rs.avg_score != null ? rs.avg_score.toFixed(2) : "–";
-    const rate = rs.pass_rate != null ? Math.round(rs.pass_rate * 100) + "%" : "–";
-    const ansScore = {};
-    $("rstats").innerHTML =
-      `<table><tr><td>rounds</td><td>${JSON.stringify(rs.rounds)}</td></tr>` +
-      `<tr><td>items done</td><td>${rs.items_done}</td></tr>` +
-      `<tr><td>avg verify score</td><td>${avg}</td></tr>` +
-      `<tr><td>pass rate</td><td>${rate}</td></tr>` +
-      `<tr><td>answers by family</td><td>${JSON.stringify(rs.answers)}</td></tr>` +
-      `<tr><td>seeds unused</td><td>${rs.seeds_unused}</td></tr></table>` +
-      (rs.recent_topics && rs.recent_topics.length
-        ? `<p class="hint">recent: ${rs.recent_topics.slice(0, 3).map(esc).join(" · ")}</p>` : "");
-    $("h-research").textContent = `${(rs.rounds.ok || 0)} ok / ${(rs.rounds.failed || 0)} fail · ${rs.items_done} items`;
-  }
-  const bs = summaries && summaries.build;
-  if (bs) {
-    $("h-builds").textContent = `${(bs.builds.ok || 0)} ok / ${(bs.builds.failed || 0)} fail`;
-    if (bs.recent && bs.recent.length) {
-      $("btable").innerHTML = "<tr><th>#</th><th>mode</th><th>status</th><th>passed</th><th>integ</th><th>time</th></tr>" +
-        bs.recent.map(b => `<tr><td>${b.iteration}</td><td>${b.mode}</td>` +
-          `<td class="${b.status === "ok" ? "good" : "bad"}">${b.status}</td>` +
-          `<td>${b.passed == null ? "–" : (b.passed ? "yes" : "no")}</td>` +
-          `<td>${b.integration_rounds == null ? "–" : b.integration_rounds}</td>` +
-          `<td class="hint">${(b.finished_at || b.started_at || "").slice(5, 16)}</td></tr>`).join("");
-    }
-  }
-}
-
-async function pollEvents() {
+async function loadProjects() {
   try {
-    const r = await fetch(`/api/events?after=${cursor}`);
-    const d = await r.json();
-    if (d.reset) { state.requests = {}; state.nodeStates = {}; state.gauntlet = {}; state.integration = null; state.rows = []; }
-    cursor = d.next;
-    d.events.forEach(applyEvent);
-    $("h-events").textContent = cursor;
-    renderAll();
-  } catch (e) {
-    $("h-api").textContent = "down"; $("h-api").className = "bad";
-    return;
-  }
-  $("h-api").textContent = "live"; $("h-api").className = "good";
-}
-
-async function pollSummary() {
-  try {
-    const r = await fetch("/api/summary");
-    summaries = await r.json();
-    renderStats();
-  } catch (e) { /* transient */ }
+    const d = await jget("/api/projects");
+    PROJECTS = d.projects || [];
+    $("#clock").textContent = new Date().toLocaleTimeString();
+    $("#proj-meta").textContent = `(${PROJECTS.length})`;
+    $("#projects-empty").style.display = PROJECTS.length ? "none" : "";
+    $("#projects").innerHTML = PROJECTS.map((p, i) => {
+      const chips = Object.entries(p.statuses||{}).map(([s,n]) => chip(s,n)).join("") || '<span class="hint">never run</span>';
+      return `<div class="card" data-i="${i}">
+        <div><b>${p.title}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</div>
+        <div class="hint" style="margin:4px 0">${p.repo || "no repo"} · ${p.n_tasks} task${p.n_tasks===1?"":"s"}</div>
+        <div>${chips}</div>
+        <div style="margin-top:5px">${p.models.map(m=>`<span class="tag">${short(m)}</span>`).join("")}
+          ${(p.reviewers||[]).map(m=>`<span class="tag">review: ${short(m)}</span>`).join("")}</div>
+        <div class="hint" style="margin-top:5px">${p.file} · ${fmtT(p.last_activity)}</div>
+      </div>`; }).join("");
+    document.querySelectorAll("#projects .card").forEach(c => c.onclick = () => openDetail(PROJECTS[+c.dataset.i].file));
+  } catch (e) {}
 }
 
 async function loadGraphs() {
   try {
-    const r = await fetch("/api/graphs");
-    graphs = await r.json();
-    renderAll();
-  } catch (e) { /* transient */ }
+    const g = await jget("/api/graphs");
+    $("#graphs").innerHTML = Object.entries(g).map(([name, gr]) => renderGraph(name, gr)).join("");
+  } catch (e) { $("#graphs").textContent = "graphs unavailable"; }
+}
+function renderGraph(name, g) {
+  const lvl = {}; g.starts.forEach(s => lvl[s] = 0);
+  let changed = true, guard = 0;
+  while (changed && guard++ < 50) { changed = false;
+    for (const e of g.edges) if (lvl[e.src] !== undefined && (lvl[e.dst] === undefined || lvl[e.dst] < lvl[e.src]+1)) { lvl[e.dst] = lvl[e.src]+1; changed = true; } }
+  g.nodes.forEach(n => lvl[n.name] = lvl[n.name] || 0);
+  const cols = {}; g.nodes.forEach(n => (cols[lvl[n.name]] = cols[lvl[n.name]] || []).push(n.name));
+  const pos = {}; Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => pos[n] = {x: 20 + (+l)*150, y: 14 + i*36}));
+  const H = Math.max(...Object.values(pos).map(p => p.y)) + 34, W = 20 + Object.keys(cols).length*170;
+  const edges = g.edges.map(e => { const a = pos[e.src], b = pos[e.dst]; if (!a||!b) return "";
+    return `<path d="M${a.x+120},${a.y+11} C${a.x+150},${a.y+11} ${b.x-30},${b.y+11} ${b.x},${b.y+11}" stroke="${e.conditional?"#d29922":"#30363d"}" fill="none" ${e.conditional?'stroke-dasharray="4"':''}/>`; }).join("");
+  const boxes = g.nodes.map(n => { const p = pos[n.name];
+    return `<rect x="${p.x}" y="${p.y}" width="120" height="22" rx="5" fill="#0d1117" stroke="${n.gather?"#bc8cff":"#58a6ff"}"/><text x="${p.x+60}" y="${p.y+15}" font-size="10" fill="#c9d1d9" text-anchor="middle">${n.name.slice(0,20)}</text>`; }).join("");
+  return `<div class="hint" style="margin:8px 0 2px"><b style="color:var(--accent)">${name}</b> · ${g.nodes.length} nodes · ${g.edges.length} edges · dashed gold = conditional</div>
+    <svg width="${W}" height="${H}" style="max-width:100%">${edges}${boxes}</svg>`;
 }
 
-async function loadCode() {
-  const f = $("filelist").value;
-  if (!f) return;
-  try {
-    const r = await fetch(`/api/code?file=${encodeURIComponent(f)}`);
-    const d = await r.json();
-    $("codeview").textContent = d.code || d.error || "(empty)";
-  } catch (e) { $("codeview").textContent = "fetch failed"; }
+function statusOf(rows, id) {
+  const r = (rows||[]).filter(r => r.id === id || r.id === id.replace(/-x\d+$/,""));
+  if (!r.length) return {status: "pending", attempts: 0, seconds: null, verdict: null};
+  const s = r[0].status;
+  return {status: s === "merged" ? "merged" : s, attempts: r.length, row: r[0]};
 }
 
-function renderAll() {
-  renderStream();
-  renderGraph("g-round", graphs && graphs.round, "round", "research");
-  renderGraph("g-build", graphs && graphs.build, "build", "minecraft-build");
-  renderLeaderboard();
-  renderMatrix();
-  renderGauntlet();
+async function openDetail(file) {
+  clearInterval(listTimer); listTimer = null;
+  $("#view-list").style.display = "none";
+  $("#view-detail").style.display = "";
+  CUR = file;
+  await refreshDetail();
+  detailTimer = setInterval(refreshDetail, 5000);
+}
+$("#btn-back").onclick = () => { clearInterval(detailTimer); detailTimer = null; CUR = null;
+  $("#view-detail").style.display = "none"; $("#view-list").style.display = ""; loadProjects();
+  listTimer = setInterval(loadProjects, 5000); };
+
+async function refreshDetail() {
+  if (!CUR) return;
+  const d = await jget("/api/project?file=" + encodeURIComponent(CUR));
+  if (d.error) { $("#d-title").textContent = "error: " + d.error; return; }
+  $("#clock").textContent = new Date().toLocaleTimeString();
+  $("#d-title").textContent = d.title;
+  const running = (d.rows||[]).some(r => r.status === "running");
+  $("#d-live").innerHTML = running ? '<span class="live">LIVE</span>' : "";
+  $("#d-meta").innerHTML = `<span>repo <b>${d.repo}</b></span><span>file <b>${d.file}</b></span>
+    <span><b>${(d.tasks||[]).length}</b> tasks</span><span><b>${(d.runs||[]).length}</b> harness runs</span>`;
+  const g = d.git || {};
+  $("#d-git").innerHTML = g.error ? `<span class="hint">${g.error}</span>` : `<div class="kv">
+      <span>branch <b>${g.branch||"—"}</b></span><span>dirty files <b class="${(g.dirty||[]).length?"warn":""}">${(g.dirty||[]).length}</b></span>
+      <span>worktrees <b>${(g.worktrees||[]).length}</b></span></div>
+    ${(g.log||[]).length? `<div class="hint" style="margin-top:5px">${g.log.map(l=>"&nbsp;&nbsp;"+l).join("<br>")}</div>` : ""}
+    ${(g.worktrees||[]).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.join("<br>")}</div>` : ""}`;
+  renderDag(d); renderFeed(d); renderTasks(d);
 }
 
-const FILES = ["index.html", "js/engine.js", "js/world.js", "js/player.js", "js/ui.js", "js/main.js"];
-$("filelist").innerHTML = FILES.map(f => `<option>${f}</option>`).join("");
-$("filelist").onchange = loadCode;
-$("evfilter").onchange = () => { filter = $("evfilter").value; renderStream(); };
-$("h-clock").textContent = new Date().toTimeString().slice(0, 8);
-setInterval(() => { $("h-clock").textContent = new Date().toTimeString().slice(0, 8); }, 1000);
-loadGraphs();
-pollSummary();
-pollEvents();
-setInterval(pollEvents, 2000);
-setInterval(pollSummary, 5000);
+function layerLayout(tasks) {
+  const ids = tasks.map(t => t.id);
+  const lvl = {}; ids.forEach(id => lvl[id] = 0);
+  let ch = true, guard = 0;
+  while (ch && guard++ < 50) { ch = false;
+    for (const t of tasks) for (const dep of (t.deps||t.depends||[]))
+      if (lvl[dep] !== undefined && lvl[t.id] < lvl[dep]+1) { lvl[t.id] = lvl[dep]+1; ch = true; } }
+  return lvl;
+}
+function renderDag(d) {
+  const tasks = d.tasks || [];
+  const rowsById = {}; (d.rows||[]).forEach(r => rowsById[r.id] = r);
+  const lvl = layerLayout(tasks);
+  const cols2 = {}; tasks.forEach(t => { const l = lvl[t.id]; (cols2[l] = cols2[l] || []).push(t); });
+  const pos = {}; Object.entries(cols2).forEach(([l, ts]) => ts.forEach((t, i) => pos[t.id] = {x: 16 + (+l)*240, y: 14 + i*74}));
+  const W = 16 + (Object.keys(cols2).length||1)*240 + 210, H = Math.max(...Object.values(pos).map(p=>p.y), 60) + 84;
+  const STATUSC = {merged:"#3fb950", done:"#3fb950", running:"#58a6ff", failed:"#f85149", conflict:"#f85149", pending:"#484f58"};
+  let edges = "", boxes = "";
+  for (const t of tasks) for (const dep of (t.deps||t.depends||[])) { const a = pos[dep], b = pos[t.id]; if (!a||!b) continue;
+    edges += `<path d="M${a.x+200},${a.y+24} C${a.x+230},${a.y+24} ${b.x-30},${b.y+24} ${b.x},${b.y+24}" stroke="#30363d" fill="none"/>`; }
+  for (const t of tasks) { const p = pos[t.id]; const st = (rowsById[t.id]||{}).status || "pending";
+    const c = STATUSC[st] || STATUSC.pending;
+    const anim = st === "running" ? ' style="animation:boxpulse 1.2s infinite"' : "";
+    boxes += `<rect x="${p.x}" y="${p.y}" width="200" height="48" rx="7" fill="#0d1117" stroke="${c}" stroke-width="1.6"${anim}/>
+      <text x="${p.x+10}" y="${p.y+18}" font-size="11" fill="#c9d1d9">${t.id.slice(0,26)}</text>
+      <text x="${p.x+10}" y="${p.y+34}" font-size="9" fill="#8b949e">${short(t.model)} → review ${short(t.reviewer)}</text>
+      <text x="${p.x+10}" y="${p.y+45}" font-size="9" fill="${c}">${st}</text>`; }
+  $("#d-dagmeta").textContent = `(left → right = dependency order; colored border = status)`;
+  $("#dag").innerHTML = tasks.length ? `<svg width="${W}" height="${H}" style="max-width:none">${edges}${boxes}</svg>` : '<div class="empty">no tasks in this file</div>';
+}
+
+function friendly(e) {
+  const m = short(e.model);
+  switch (e.type) {
+    case "driver.start": return `${m} <b>${e.role}</b> started · ${e.task} (attempt ${e.attempt})`;
+    case "driver.done": return `${m} <b>${e.role}</b> finished · ${e.task} in ${e.seconds}s${e.tokens?` · ${e.tokens} tok`:""}`;
+    case "driver.error": return `<span class="bad">${m} error · ${e.task}: ${(e.error||"").slice(0,140)}</span>`;
+    case "worktree.alloc": return `worktree ready · <span class="hint">${e.branch||e.path||""}</span>`;
+    case "worktree.free": return `worktree released · <span class="hint">${e.branch||""}</span>`;
+    case "task.start": return `task started · ${e.task}`;
+    case "task.end": return `task ended · ${e.task} → ${e.status||""}`;
+    case "node_start": return `<span class="hint">node ${e.node} · ${e.task||""}</span>`;
+    case "node_end": return `<span class="hint">node ${e.node} done · ${e.task||""}</span>`;
+    default: return `<span class="hint">${e.type} ${e.task||""}</span>`;
+  }
+}
+function renderFeed(d) {
+  const evs = (d.events||[]).slice(-30).reverse();
+  $("#feed").innerHTML = evs.length ? evs.map(e => {
+    const t = e.ts ? new Date(e.ts*1000).toLocaleTimeString() : "";
+    return `<div style="padding:3px 0;border-bottom:1px solid var(--border)"><span class="hint">${t}</span> ${friendly(e)}</div>`;
+  }).join("") : '<div class="empty">No events recorded for this project yet.</div>';
+}
+
+function renderTasks(d) {
+  const tb = $("#tasks tbody"); tb.innerHTML = "";
+  const rowsById = {}; (d.rows||[]).forEach(r => rowsById[r.id] = r);
+  const runsByTask = {}; (d.runs||[]).forEach(r => (runsByTask[r.task_id] = runsByTask[r.task_id] || []).push(r));
+  for (const t of (d.tasks||[])) {
+    const row = rowsById[t.id] || {};
+    const st = row.status || "pending";
+    const runs = runsByTask[t.id] || [];
+    const secs = runs.length && runs[0].seconds ? tick(runs[0].seconds) : (row.finished_at ? "" : "—");
+    const verdict = runs.length ? (runs[0].verdict || "") : "";
+    const tr = document.createElement("tr"); tr.className = "clickable";
+    tr.innerHTML = `<td>${t.id}</td><td class="hint">${t.title||""}</td><td>${short(t.model)}</td>
+      <td>${short(t.reviewer)}</td><td>${chip(st, "")}</td><td>${runs.length||"—"}</td>
+      <td>${secs||"—"}</td><td class="${verdict.includes("pass")?"good":verdict?"bad":""}">${(verdict||"—").slice(0,40)}</td>`;
+    const sr = document.createElement("tr"); sr.className = "subrow"; sr.style.display = "none";
+    sr.innerHTML = `<td colspan="8">${runs.length ? runs.map(r =>
+      `<div style="padding:3px 0"><span class="tag">${r.role}</span> <span class="tag">${r.harness}</span>
+        attempt ${r.attempt} · exit ${r.exit_code} · ${r.seconds?tick(r.seconds):"?"} · ${r.verdict||""}
+        ${r.transcript? `<button class="act" data-t="${r.transcript.split("/").pop()}" data-m="${short(r.model)}" data-r="${r.role}" data-task="${t.id}">transcript</button>` : ""}</div>`).join("")
+      : '<span class="hint">no runs yet</span>'} <div class="hint" style="margin-top:4px">prompt: ${(t.prompt||"").slice(0,260)}…</div></td>`;
+    tr.onclick = () => sr.style.display = sr.style.display === "none" ? "" : "none";
+    tb.appendChild(tr); tb.appendChild(sr);
+  }
+  tb.querySelectorAll("button[data-t]").forEach(b => b.onclick = ev => { ev.stopPropagation();
+    openTranscript(b.dataset.t, `${b.dataset.m} ${b.dataset.r}`, b.dataset.task); });
+}
+
+function openTranscript(file, title, sub) {
+  $("#drawer").classList.add("open");
+  $("#drawer-title").textContent = title;
+  $("#drawer-sub").textContent = sub;
+  drawerFile = file;
+  pollTranscript();
+}
+async function pollTranscript() {
+  if (!drawerFile) return;
+  const d = await jget("/api/transcript?file=" + encodeURIComponent(drawerFile) + "&tail=120");
+  if (d.error) { $("#drawer-body").textContent = d.error; return; }
+  $("#drawer-sub").textContent = $("#drawer-sub").textContent.split(" · ")[0] + ` · ${d.total_lines} lines`;
+  $("#drawer-body").textContent = d.lines.map(l => { try { const o = JSON.parse(l);
+    return o.type === "step_finish" ? "— step (" + ((o.part&&o.part.tokens&&o.part.tokens.total)||"?") + " tok)"
+      : o.type === "text" ? (o.part&&o.part.text||"").slice(0,400)
+      : o.type === "tool_use" ? "🔧 " + ((o.part&&o.part.tool)||"tool")
+      : o.type; } catch { return l.slice(0,300); } }).join("\n");
+}
+setInterval(() => { if (drawerFile && $("#drawer").classList.contains("open")) pollTranscript(); }, 3000);
+$("#drawer-close").onclick = () => { $("#drawer").classList.remove("open"); drawerFile = null; };
+
+// ---- new project modal ----
+const modal = $("#modal");
+$("#btn-new").onclick = () => { modal.classList.add("open"); $("#p-msg").textContent = ""; $("#j-msg").textContent = ""; };
+$("#modal-close").onclick = () => modal.classList.remove("open");
+modal.onclick = ev => { if (ev.target === modal) modal.classList.remove("open"); };
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tab").forEach(x => x.classList.remove("on")); b.classList.add("on");
+  $("#tab-plan").style.display = b.dataset.t === "plan" ? "" : "none";
+  $("#tab-json").style.display = b.dataset.t === "json" ? "" : "none";
+});
+const repoSel = (sel, inp) => { const el = $(sel); return () => el.value === "__custom" ? $(inp).value.trim() : el.value; };
+const planRepo = repoSel("#p-repo", "#p-repo-custom"), jsonRepo = repoSel("#j-repo", "#j-repo-custom");
+$("#p-repo").onchange = e => $("#p-repo-custom").style.display = e.target.value === "__custom" ? "" : "none";
+$("#j-repo").onchange = e => $("#j-repo-custom").style.display = e.target.value === "__custom" ? "" : "none";
+
+$("#p-go").onclick = async () => {
+  const goal = $("#p-goal").value.trim(), repo = planRepo();
+  const msg = $("#p-msg"); msg.className = "";
+  if (!goal || !repo) { msg.className = "err"; msg.textContent = "repo and goal are required"; return; }
+  msg.textContent = "asking Kimi-K3 to draft the task file… (this takes a minute)";
+  const {code, body} = await jpost("/api/projects/create", {goal, repo});
+  if (code !== 200) { msg.className = "err"; msg.textContent = body.error || "failed"; return; }
+  msg.className = "okmsg";
+  msg.textContent = `planning started (pid ${body.pid}, log ${body.log}) — waiting for ${body.taskfile}…`;
+  const expect = body.taskfile, t0 = Date.now();
+  const poll = setInterval(async () => {
+    await loadProjects();
+    if (PROJECTS.some(p => p.file === expect)) { clearInterval(poll);
+      msg.textContent = "task file ready — opening it."; setTimeout(() => { modal.classList.remove("open"); openDetail(expect); }, 600); }
+    else if (Date.now() - t0 > 240000) { clearInterval(poll);
+      msg.className = "err"; msg.textContent = `still planning… see logs/${body.log} — close this and check back.`; }
+  }, 5000);
+};
+
+$("#j-go").onclick = async () => {
+  const title = $("#j-title").value.trim(), repo = jsonRepo(), msg = $("#j-msg"); msg.className = "";
+  let tasks;
+  try { tasks = JSON.parse($("#j-tasks").value); } catch (e) { msg.className = "err"; msg.textContent = "invalid JSON: " + e.message; return; }
+  if (!title || !repo) { msg.className = "err"; msg.textContent = "title and repo are required"; return; }
+  const {code, body} = await jpost("/api/projects/create", {title, repo, tasks});
+  if (code !== 200) { msg.className = "err"; msg.textContent = body.error || "failed"; return; }
+  msg.className = "okmsg"; msg.textContent = `created ${body.file} (${body.n_tasks} tasks).`;
+  await loadProjects();
+  setTimeout(() => { modal.classList.remove("open"); openDetail(body.file); }, 500);
+};
+
+// ---- run buttons ----
+async function doRun(dry) {
+  if (!CUR) return;
+  const what = dry ? "a DRY run (resolves the DAG, no models, no git changes)" : "a REAL run (spends model tokens, mutates repo branches)";
+  if (!confirm(`Start ${what} for ${CUR}?`)) return;
+  const {code, body} = await jpost("/api/projects/run", {file: CUR, dry_run: dry});
+  alert(code === 200 ? `started (pid ${body.pid})\nlog: logs/${body.log}` : `not started: ${body.error}`);
+  refreshDetail();
+}
+$("#btn-run").onclick = () => doRun(false);
+$("#btn-dry").onclick = () => doRun(true);
+
+loadProjects(); loadGraphs();
+listTimer = setInterval(loadProjects, 5000);
 </script>
 </body>
 </html>

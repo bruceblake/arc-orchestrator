@@ -324,6 +324,46 @@ class Store:
             ]
         return {"tasks": tasks, "runs": runs}
 
+    def code_tasks_all(self, limit=500):
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT id, taskfile, title, model, reviewer, status, branch, "
+                    "worktree, error, created_at, finished_at FROM code_tasks "
+                    "ORDER BY created_at DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            ]
+
+    def harness_runs_for(self, task_ids, limit=400):
+        ids = list(task_ids)
+        if not ids:
+            return []
+        q = ",".join("?" * len(ids))
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    f"SELECT task_id, harness, model, role, attempt, exit_code, "
+                    f"transcript, seconds, verdict, created_at FROM harness_runs "
+                    f"WHERE task_id IN ({q}) ORDER BY id DESC LIMIT ?",
+                    (*ids, limit),
+                ).fetchall()
+            ]
+
+    def harness_runs_all(self, limit=1500):
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT task_id, harness, model, role, attempt, exit_code, "
+                    "transcript, seconds, verdict, created_at FROM harness_runs "
+                    "ORDER BY id DESC LIMIT ?",
+                    (limit,),
+                ).fetchall()
+            ]
+
     def stats(self):
         with self.lock:
             rounds = {

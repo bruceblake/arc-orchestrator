@@ -2,10 +2,22 @@
 
 Run alongside the orchestrator (separate process):
     python main.py serve [--port 8787]
+
+Usage layers (why a model can appear under more than one source):
+  arc-pool          raw API requests the pool made (request/request_end events, carry tokens)
+  driver:<harness>  whole agent task runs in an external CLI harness (driver.* events;
+                    driver.done carries tokens since drivers.py learned transcript_tokens)
+  kimi-code         per-API-call usage parsed from kimi-code session wire logs
+                    (covers every kimi-code session, interactive ones included)
 """
+import errno
 import json
 import logging
+import re
+import socket
+import subprocess
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -17,6 +29,19 @@ log = logging.getLogger("dashboard")
 
 _lines_cache = {"key": None, "lines": []}
 MAX_EVENTS_PER_RESPONSE = 3000
+
+PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
+          "DeepSeek-V4-Flash": "DeepSeek V4 Flash"}
+
+RANGES = ["1h", "24h", "7d", "all"]
+
+_launch_registry = {}  # abspath taskfile -> {"pid", "log", "started", "dry_run"}
+
+
+def _pretty(model):
+    if model in PRETTY:
+        return PRETTY[model]
+    return re.sub(r"-(thinking|legacy)[\w-]*$", "", model or "unknown").replace("-", " ")
 
 
 def _load_event_lines():
@@ -33,6 +58,10 @@ def _load_event_lines():
         except OSError:
             return []
     return _lines_cache["lines"]
+
+
+def _ts(v):
+    return v if isinstance(v, (int, float)) else None
 
 
 _kimi_cache = {}  # wire.jsonl path -> {"key": (size, mtime_ns), "agg": parsed}
@@ -56,6 +85,11 @@ def _parse_kimi_wire(path):
     alias_real = {}
     last_req = None  # (ts_s, real_model, agent)
     last_done = 0.0
+    pending = []  # ts_s of requests not yet answered, FIFO
+    latency_total_ms = 0.0
+    latency_count = 0
+    file_totals = {"requests": 0, "ok": 0, "prompt": 0, "completion": 0,
+                   "cache_read": 0, "last_ts": None}
     try:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
@@ -81,9 +115,13 @@ def _parse_kimi_wire(path):
             mod = models.setdefault(alias, {"requests": 0, "ok": 0, "prompt": 0,
                                             "completion": 0, "last_ts": None})
             mod["requests"] += 1
+            file_totals["requests"] += 1
+            pending.append(ts)
             if ts:
                 mod["last_ts"] = ts
                 recent.append((ts, 1, 0))
+                if file_totals["last_ts"] is None or ts > file_totals["last_ts"]:
+                    file_totals["last_ts"] = ts
                 if last_req is None or ts >= last_req[0]:
                     last_req = (ts, e.get("model") or alias, e.get("agentId") or path.parent.name)
             continue
@@ -102,20 +140,33 @@ def _parse_kimi_wire(path):
             mod["ok"] += 1
             mod["prompt"] += inp
             mod["completion"] += out
+            file_totals["ok"] += 1
+            file_totals["prompt"] += inp
+            file_totals["completion"] += out
+            file_totals["cache_read"] += u.get("inputCacheRead") or 0
+            if pending and ts is not None and pending[0] is not None:
+                dt = ts - pending[0]
+                if 0 <= dt < 3600:
+                    latency_total_ms += dt * 1000
+                    latency_count += 1
+            if pending:
+                pending.pop(0)
             if ts:
                 mod["last_ts"] = ts
+                if file_totals["last_ts"] is None or ts > file_totals["last_ts"]:
+                    file_totals["last_ts"] = ts
                 recent.append((ts, 0, inp + out))
     return {"models": models, "alias_real": alias_real, "recent": recent,
-            "last_req": last_req, "last_done": last_done}
+            "last_req": last_req, "last_done": last_done, "file_totals": file_totals,
+            "avg_latency_ms": round(latency_total_ms / latency_count) if latency_count else None}
 
 
 def _kimi_code_usage(now):
-    """Aggregate all kimi-code session logs into dashboard-shaped rows."""
+    """Aggregate all kimi-code session logs into dashboard-shaped rows + points."""
     root = Path.home() / ".kimi-code" / "sessions"
-    window_start = int((now - 3600) // 60)
-    series = [{"t": (window_start + i) * 60, "requests": 0, "tokens": 0} for i in range(61)]
     agg = {}
     inflight = []
+    points = []  # (ts, requests_delta, tokens_delta)
     live = set()
     paths = root.glob("*/*/agents/*/wire.jsonl") if root.is_dir() else []
     for path in paths:
@@ -135,8 +186,10 @@ def _kimi_code_usage(now):
             real = data["alias_real"].get(alias, alias)
             if real == "unknown":
                 continue  # internal calls without a model field (titles, cron)
-            row = agg.setdefault(real, {"model": real, "family": "kimi-code", "requests": 0,
-                                        "ok": 0, "errors": 0, "failed_attempts": 0, "tokens": 0,
+            row = agg.setdefault(real, {"model": real, "pretty": _pretty(real),
+                                        "family": "kimi-code", "source": "kimi-code",
+                                        "requests": 0, "ok": 0, "errors": 0,
+                                        "failed_attempts": 0, "tokens": 0,
                                         "prompt_tokens": 0, "completion_tokens": 0,
                                         "avg_latency_ms": None, "last_ts": None})
             row["requests"] += m["requests"]
@@ -145,32 +198,167 @@ def _kimi_code_usage(now):
             row["completion_tokens"] += m["completion"]
             if m["last_ts"] and (row["last_ts"] is None or m["last_ts"] > row["last_ts"]):
                 row["last_ts"] = m["last_ts"]
-        for ts, req, tok in data["recent"]:
-            idx = int(ts // 60) - window_start
-            if 0 <= idx < len(series):
-                series[idx]["requests"] += req
-                series[idx]["tokens"] += tok
+        points.extend(data["recent"])
         lr = data["last_req"]
         if lr and lr[1] != "unknown" and lr[0] > data["last_done"] and (now - lr[0]) < STALE_INFLIGHT_S:
             inflight.append({"req_id": "kimi-code/" + lr[2], "family": "kimi-code",
-                             "model": lr[1], "purpose": "kimi-code session",
-                             "websearch": False, "started": lr[0],
-                             "elapsed_s": round(now - lr[0], 1)})
+                             "model": lr[1], "pretty": _pretty(lr[1]), "source": "kimi-code",
+                             "purpose": "kimi-code session", "harness": "kimi-code",
+                             "role": None, "task": None, "websearch": False,
+                             "started": lr[0], "elapsed_s": round(now - lr[0], 1),
+                             "transcript": None})
     for sp in [p for p in _kimi_cache if p not in live]:
         del _kimi_cache[sp]
     models = list(agg.values())
     for m in models:
         m["tokens"] = m["prompt_tokens"] + m["completion_tokens"]
-    return {"models": models, "inflight": inflight, "series": series}
+    return {"models": models, "inflight": inflight, "points": points}
 
 
-def _usage():
-    """Usage aggregates over the event log for the /api/usage endpoint."""
+def _series_window(range_key, now, min_ts):
+    """(start_epoch, bucket_secs, n_points) — 1h axis stays exactly as it always was."""
+    if range_key == "24h":
+        return int((now - 86400) // 300) * 300, 300, 289
+    if range_key == "7d":
+        return int((now - 7 * 86400) // 3600) * 3600, 3600, 169
+    if range_key == "all":
+        if not min_ts:
+            min_ts = now - 3600
+        span = now - min_ts
+        bucket = 86400
+        if span > 120 * 86400:
+            import math
+            bucket = math.ceil(span / (119 * 86400)) * 86400
+        return int(min_ts // bucket) * bucket, bucket, min(int(span // bucket) + 2, 120)
+    return int((now - 3600) // 60) * 60, 60, 61
+
+
+_transcript_cache = {}  # path -> {"key": (size, mtime_ns), "tok": (tokens, prompt, completion)}
+
+
+def _xkey(task):
+    """('world-persistence', 2) from 'world-persistence-x2' — DB ids carry no -xN suffix."""
+    m = re.match(r"^(.*?)-x(\d+)$", task or "")
+    return (m.group(1), int(m.group(2))) if m else (task, None)
+
+
+def _opencode_token_backfill(store, done_tok_keys):
+    """Token points for OLD opencode runs whose driver.done pre-dates token plumbing.
+
+    Returns list of (ts, model, tokens, prompt, completion). A run is skipped when a
+    driver.done event for the same (harness, model, task, attempt) already carried
+    tokens (event log wins) or the transcript vanished.
+    """
+    if store is None:
+        return []
+    try:
+        from drivers import transcript_tokens
+    except Exception:
+        return []
+    points = []
+    try:
+        rows = store.harness_runs_all()
+    except Exception:
+        return points
+    for row in rows:
+        if row.get("harness") != "opencode":
+            continue  # kimi usage is already counted from the wire logs
+        key = (row.get("harness"), row.get("model"), row.get("task_id"), row.get("attempt"))
+        if key in done_tok_keys:
+            continue
+        tp = row.get("transcript") or ""
+        path = Path(tp)
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        ck = (st.st_size, st.st_mtime_ns)
+        ent = _transcript_cache.get(tp)
+        if ent is None or ent["key"] != ck:
+            try:
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            ent = {"key": ck, "tok": transcript_tokens(raw)}
+            _transcript_cache[tp] = ent
+        tokens, prompt, completion = ent["tok"]
+        if not tokens:
+            continue
+        try:
+            ts = datetime.fromisoformat(row["created_at"]).timestamp()
+        except (TypeError, ValueError):
+            continue
+        points.append((ts, row.get("model"), tokens, prompt, completion))
+    return points
+
+
+def _collect_inflight(now):
+    """Unmatched start events across all three layers -> live agent rows."""
+    rows = []
+    starts = {}      # request_start req_id -> event (in-flight raw pool/stream requests)
+    driver_starts = {}  # (harness, model, role, task, attempt) -> event (in-flight task runs)
+    for line in _load_event_lines():
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue
+        etype = e.get("type")
+        if etype == "request_start":
+            rid = e.get("req_id")
+            if rid:
+                starts[rid] = e
+        elif etype in ("request", "request_end"):
+            starts.pop(e.get("req_id"), None)
+        elif etype == "driver.start":
+            driver_starts[(e.get("harness"), e.get("model"), e.get("role"),
+                           e.get("task"), e.get("attempt"))] = e
+        elif etype in ("driver.done", "driver.error"):
+            key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
+            if key in driver_starts:
+                del driver_starts[key]
+            else:  # driver.error carries no role; settle its start by the other fields
+                for k in list(driver_starts):
+                    if k[:2] == key[:2] and k[3:] == key[3:]:
+                        del driver_starts[k]
+                        break
+    for rid, e in starts.items():
+        started = _ts(e.get("ts")) or now
+        rows.append({"req_id": rid, "family": e.get("family"), "model": e.get("model"),
+                     "pretty": _pretty(e.get("model")), "source": "arc-pool",
+                     "purpose": e.get("purpose"), "harness": None,
+                     "role": None, "task": None, "websearch": bool(e.get("websearch")),
+                     "started": started, "elapsed_s": round(max(0.0, now - started), 1),
+                     "transcript": None})
+    for (harness, model, role, task, attempt), e in driver_starts.items():
+        started = _ts(e.get("ts")) or now
+        transcript = None
+        if task:
+            hits = sorted(Path(config.ROOT, "logs", "harness").glob(
+                f"{task}-{role}-{attempt}.jsonl")) if role else []
+            if hits:
+                transcript = hits[-1].name
+        rows.append({"req_id": f"driver/{harness}:{model}:{role}:{task}",
+                     "family": config.MODEL_FAMILY.get(model, "harness"), "model": model,
+                     "pretty": _pretty(model), "source": f"driver:{harness}",
+                     "purpose": f"{harness} {role}", "harness": harness,
+                     "role": role, "task": task, "websearch": False,
+                     "started": started, "elapsed_s": round(max(0.0, now - started), 1),
+                     "transcript": transcript})
+    kimi = _kimi_code_usage(now)
+    rows.extend(kimi["inflight"])
+    rows.sort(key=lambda r: -r["elapsed_s"])
+    return rows, kimi
+
+
+def _usage(store=None, range_key=None):
+    """Usage aggregates for /api/usage. Default (no range) keeps the historical shape."""
     now = time.time()
+    range_key = range_key if range_key in RANGES else "1h"
 
-    def new_model(model, family):
-        return {"model": model, "family": family, "requests": 0, "ok": 0, "errors": 0,
-                "failed_attempts": 0, "tokens": 0, "prompt_tokens": 0, "completion_tokens": 0,
+    def new_model(model, family, source):
+        return {"model": model, "pretty": _pretty(model), "family": family, "source": source,
+                "requests": 0, "ok": 0, "errors": 0, "failed_attempts": 0, "tokens": 0,
+                "prompt_tokens": 0, "completion_tokens": 0,
                 "latency_total_ms": 0, "avg_latency_ms": None, "last_ts": None}
 
     def new_family(family):
@@ -183,12 +371,13 @@ def _usage():
 
     by_model = {}
     by_family = {f: new_family(f) for f in config.FAMILY_ORDER}
-    starts = {}
     totals = {"requests": 0, "ok": 0, "errors": 0, "failed_attempts": 0, "tokens": 0,
               "prompt_tokens": 0, "completion_tokens": 0}
-    window_start = int((now - 3600) // 60)
-    series = {f: [{"t": (window_start + i) * 60, "requests": 0, "tokens": 0} for i in range(61)]
-              for f in config.FAMILY_ORDER}
+    pts = []  # (ts, family, req_delta, tok_delta, task_run_delta)
+    done_tok_keys = set()
+
+    # models/inflight/points for kimi-code sessions up front (cached, shared with inflight)
+    inflight, kimi = _collect_inflight(now)
 
     for line in _load_event_lines():
         try:
@@ -196,20 +385,57 @@ def _usage():
         except Exception:
             continue
         etype = e.get("type")
+        if etype in ("driver.start", "driver.done", "driver.error"):
+            if etype == "driver.start":
+                continue
+            model = e.get("model") or "unknown"
+            family = config.MODEL_FAMILY.get(model, "harness")
+            source = f"driver:{e.get('harness') or 'unknown'}"
+            mod = by_model.setdefault((family, model, source), new_model(model, family, source))
+            mod["harness"] = e.get("harness")
+            fam = by_family.setdefault(family, new_family(family))
+            if etype == "driver.error":
+                mod["failed_attempts"] += 1
+                fam["failed_attempts"] += 1
+                totals["failed_attempts"] += 1
+                continue
+            mod["requests"] += 1
+            mod["ok"] += 1
+            fam["requests"] += 1
+            fam["ok"] += 1
+            totals["requests"] += 1
+            totals["ok"] += 1
+            ts = _ts(e.get("ts"))
+            mod["last_ts"] = ts
+            seconds = e.get("seconds")
+            if isinstance(seconds, (int, float)):
+                mod["latency_total_ms"] += round(seconds * 1000)
+            toks = e.get("tokens") or 0
+            if toks:
+                base, xnum = _xkey(e.get("task"))
+                done_tok_keys.add((e.get("harness"), model, base, xnum))
+                ptoks = e.get("prompt_tokens") or 0
+                ctoks = e.get("completion_tokens") or 0
+                mod["tokens"] += toks
+                mod["prompt_tokens"] += ptoks
+                mod["completion_tokens"] += ctoks
+                fam["tokens"] += toks
+                totals["tokens"] += toks
+                totals["prompt_tokens"] += ptoks
+                totals["completion_tokens"] += ctoks
+            if ts:
+                pts.append((ts, family, 1, toks, 1))
+            continue
         if etype not in ("request", "request_start", "request_end"):
+            continue
+        if etype == "request_start":
             continue
         model = e.get("model") or "unknown"
         family = e.get("family") or "unknown"
-        mod = by_model.setdefault((family, model), new_model(model, family))
-        fam = by_family.setdefault(family, new_family(family))
-        if etype == "request_start":
-            rid = e.get("req_id")
-            if rid:
-                starts[rid] = e
+        if model == "dry-run" or family == "dry-run":
             continue
-        rid = e.get("req_id")
-        if rid:
-            starts.pop(rid, None)
+        mod = by_model.setdefault((family, model, "arc-pool"), new_model(model, family, "arc-pool"))
+        fam = by_family.setdefault(family, new_family(family))
         if etype == "request_end":
             mod["failed_attempts"] += 1
             fam["failed_attempts"] += 1
@@ -219,6 +445,7 @@ def _usage():
         fam["requests"] += 1
         totals["requests"] += 1
         mod["last_ts"] = e.get("ts")
+        ts = _ts(e.get("ts"))
         if e.get("ok"):
             mod["ok"] += 1
             fam["ok"] += 1
@@ -234,48 +461,35 @@ def _usage():
             lat = e.get("latency_ms")
             if isinstance(lat, (int, float)):
                 mod["latency_total_ms"] += lat
+            if ts:
+                pts.append((ts, family, 1, tokens, 0))
         else:
             mod["errors"] += 1
             fam["errors"] += 1
             totals["errors"] += 1
-        ts = e.get("ts")
-        if isinstance(ts, (int, float)) and e.get("ok"):
-            idx = int(ts // 60) - window_start
-            pts = series.get(family)
-            if pts is not None and 0 <= idx < len(pts):
-                pts[idx]["requests"] += 1
-                pts[idx]["tokens"] += e.get("tokens") or 0
 
-    inflight = []
-    for rid, e in starts.items():
-        try:
-            started = float(e.get("ts") or now)
-        except (TypeError, ValueError):
-            started = now
-        inflight.append({"req_id": rid, "family": e.get("family"), "model": e.get("model"),
-                         "purpose": e.get("purpose"), "websearch": bool(e.get("websearch")),
-                         "started": started, "elapsed_s": round(max(0.0, now - started), 1)})
-    inflight.sort(key=lambda r: -r["elapsed_s"])
-    for row in inflight:
-        fam = by_family.get(row["family"])
-        if fam is not None:
-            fam["inflight"] += 1
-
-    models = []
-    for mod in by_model.values():
-        if mod["ok"]:
-            mod["avg_latency_ms"] = round(mod["latency_total_ms"] / mod["ok"])
-        del mod["latency_total_ms"]
-        models.append(mod)
-    models.sort(key=lambda m: -m["requests"])
-
-    families = [by_family[f] for f in config.FAMILY_ORDER]
-    families += [v for k, v in sorted(by_family.items()) if k not in config.FAMILY_ORDER]
+    # Backfill opencode tokens from transcripts for pre-plumbing runs.
+    for ts, model, toks, ptoks, ctoks in _opencode_token_backfill(store, done_tok_keys):
+        family = config.MODEL_FAMILY.get(model, "harness")
+        mod = by_model.setdefault((family, model, "driver:opencode"),
+                                  new_model(model, family, "driver:opencode"))
+        mod["harness"] = "opencode"
+        fam = by_family.setdefault(family, new_family(family))
+        mod["tokens"] += toks
+        mod["prompt_tokens"] += ptoks
+        mod["completion_tokens"] += ctoks
+        fam["tokens"] += toks
+        totals["tokens"] += toks
+        totals["prompt_tokens"] += ptoks
+        totals["completion_tokens"] += ctoks
+        if mod["last_ts"] is None or ts > mod["last_ts"]:
+            mod["last_ts"] = ts
+        pts.append((ts, family, 0, toks, 0))
 
     # Merge kimi-code CLI sessions so the dashboard also shows interactive traffic,
     # which goes straight to llm-api.arc.vt.edu and never touches the event log.
-    kimi = _kimi_code_usage(now)
-    if kimi["models"] or kimi["inflight"]:
+    pts.extend((ts, "kimi-code", req, tok, 0) for ts, req, tok in kimi["points"])
+    if kimi["models"]:
         fam = new_family("kimi-code")
         for row in kimi["models"]:
             fam["requests"] += row["requests"]
@@ -286,15 +500,335 @@ def _usage():
             totals["tokens"] += row["tokens"]
             totals["prompt_tokens"] += row["prompt_tokens"]
             totals["completion_tokens"] += row["completion_tokens"]
-        fam["inflight"] = len(kimi["inflight"])
-        families.append(fam)
-        series["kimi-code"] = kimi["series"]
-        models.extend(kimi["models"])
-        models.sort(key=lambda m: -m["requests"])
-        inflight.extend(kimi["inflight"])
-        inflight.sort(key=lambda r: -r["elapsed_s"])
-    return {"now": now, "models": models, "families": families,
-            "inflight": inflight, "totals": totals, "series": series}
+        by_family["kimi-code"] = fam
+        by_model.update({(r["family"], r["model"], r["source"]): r for r in kimi["models"]})
+
+    for row in inflight:
+        fam = by_family.get(row["family"])
+        if fam is not None:
+            fam["inflight"] += 1
+
+    start, bucket, n = _series_window(range_key, now, min((p[0] for p in pts), default=None))
+    series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
+              for f in config.FAMILY_ORDER}
+    for ts, family, req, tok, _tr in pts:
+        if not ts or ts < start:
+            continue
+        idx = int((ts - start) // bucket)
+        if idx >= n:
+            continue
+        pts_list = series.setdefault(family, [{"t": start + i * bucket, "requests": 0,
+                                               "tokens": 0} for i in range(n)])
+        pts_list[idx]["requests"] += req
+        pts_list[idx]["tokens"] += tok
+
+    day0 = int(now // 86400)
+    daily = []
+    day_idx = {}
+    for i in range(30):
+        d = day0 - 29 + i
+        rec = {"date": time.strftime("%Y-%m-%d", time.localtime(d * 86400)),
+               "requests": 0, "tokens": 0, "task_runs": 0, "families": {}}
+        day_idx[d] = rec
+        daily.append(rec)
+    for ts, family, req, tok, tr in pts:
+        if not ts:
+            continue
+        rec = day_idx.get(int(ts // 86400))
+        if rec is None:
+            continue
+        rec["requests"] += req
+        rec["tokens"] += tok
+        rec["task_runs"] += tr
+        f = rec["families"].setdefault(family, {"requests": 0, "tokens": 0, "task_runs": 0})
+        f["requests"] += req
+        f["tokens"] += tok
+        f["task_runs"] += tr
+
+    models = []
+    for mod in by_model.values():
+        lat = mod.pop("latency_total_ms", 0) or 0
+        if mod["ok"] and lat:
+            mod["avg_latency_ms"] = round(lat / mod["ok"])
+        models.append(mod)
+    models.sort(key=lambda m: -m["requests"])
+
+    families = [by_family[f] for f in config.FAMILY_ORDER]
+    families += [v for k, v in sorted(by_family.items()) if k not in config.FAMILY_ORDER]
+
+    return {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
+            "models": models, "families": families, "inflight": inflight,
+            "totals": totals, "series": series}
+
+
+def _task_slug(text):
+    return re.sub(r"[^a-z0-9]+", "-", (text or "").lower())[:40].strip("-")
+
+
+def _valid_repo(p):
+    if not isinstance(p, str) or not p.startswith("/home/proxyie/"):
+        return None
+    path = Path(p)
+    return path if path.is_dir() else None
+
+
+def _projects(store):
+    inflight, _kimi = _collect_inflight(time.time())
+    live_tasks = set()
+    for row in inflight:
+        if row.get("task"):
+            base, _x = _xkey(row["task"])
+            live_tasks.add(row["task"])
+            if base:
+                live_tasks.add(base)
+    try:
+        rows_all = store.code_tasks_all() if store else []
+    except Exception:
+        rows_all = []
+    out = []
+    tdir = Path(config.TASKS_DIR)
+    for f in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
+        try:
+            data = json.loads(f.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            continue
+        proj = data.get("project") or {}
+        tdefs = [t for t in (proj.get("tasks") or []) if isinstance(t, dict)]
+        ids = [t.get("id") for t in tdefs if t.get("id")]
+        rows = [r for r in rows_all if r.get("taskfile")
+                and (r["taskfile"] == str(f) or r["taskfile"].endswith("/" + f.name))]
+        statuses = {}
+        last = None
+        for r in rows:
+            statuses[r["status"]] = statuses.get(r["status"], 0) + 1
+            for k in ("created_at", "finished_at"):
+                v = r.get(k)
+                if v and (last is None or v > last):
+                    last = v
+        try:
+            mtime_iso = datetime.utcfromtimestamp(f.stat().st_mtime).isoformat() + "+00:00"
+        except OSError:
+            mtime_iso = None
+        out.append({"file": f.name, "title": proj.get("title") or f.stem,
+                    "repo": proj.get("repo"), "n_tasks": len(tdefs), "task_ids": ids,
+                    "models": sorted({t.get("model") for t in tdefs if t.get("model")}),
+                    "reviewers": sorted({t.get("reviewer") for t in tdefs if t.get("reviewer")}),
+                    "statuses": statuses,
+                    "active": statuses.get("running", 0) > 0 or any(i in live_tasks for i in ids),
+                    "last_activity": last or mtime_iso})
+    out.sort(key=lambda p: p["last_activity"] or "", reverse=True)
+    return out
+
+
+def _git_block(repo):
+    info = {"repo": str(repo), "branch": None, "log": [], "worktrees": [], "dirty": []}
+    if not repo or not repo.is_dir():
+        info["error"] = "repo not found on disk"
+        return info
+
+    def git(*args):
+        try:
+            r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
+                               text=True, timeout=5)
+            return r.stdout if r.returncode == 0 else ""
+        except Exception:
+            return ""
+    info["branch"] = git("branch", "--show-current").strip() or None
+    info["log"] = [l for l in git("log", "--oneline", "-6").splitlines() if l]
+    info["worktrees"] = [l.strip() for l in git("worktree", "list").splitlines() if l.strip()]
+    info["dirty"] = [l for l in git("status", "--short").splitlines() if l]
+    return info
+
+
+def _project_detail(store, fname):
+    if not re.fullmatch(r"[\w.-]+\.json", fname or ""):
+        return {"error": "bad file name"}, 400
+    path = Path(config.TASKS_DIR) / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except Exception as exc:
+        return {"error": f"invalid JSON: {exc}"}, 400
+    proj = data.get("project") or {}
+    tdefs = [t for t in (proj.get("tasks") or []) if isinstance(t, dict)]
+    ids = [t.get("id") for t in tdefs if t.get("id")]
+    idset = set(ids)
+    try:
+        rows_all = store.code_tasks_all() if store else []
+        rows = [r for r in rows_all if r.get("taskfile")
+                and (r["taskfile"] == str(path) or r["taskfile"].endswith("/" + fname))]
+        runs = store.harness_runs_for(ids) if store else []
+    except Exception:
+        rows, runs = [], []
+    lines = _load_event_lines()
+    events = []
+    for line in reversed(lines):
+        hit = next((i for i in ids if i and i in line), None)
+        if hit:
+            try:
+                events.append(json.loads(line))
+            except Exception:
+                pass
+            if len(events) >= 80:
+                break
+    events.reverse()
+    repo_v = _valid_repo(proj.get("repo") or "")
+    return {"file": fname, "title": proj.get("title") or path.stem,
+            "repo": proj.get("repo"),
+            "tasks": tdefs, "rows": rows, "runs": runs, "events": events,
+            "git": _git_block(repo_v)}, 200
+
+
+def _agents(store):
+    now = time.time()
+    inflight, _kimi = _collect_inflight(now)
+    _prune_registry()
+    runs = [{"taskfile": k, **v} for k, v in _launch_registry.items()]
+    return {"now": now, "agents": inflight, "runs": runs}
+
+
+_TRANSCRIPT_RE = re.compile(r"^[\w.-]+\.jsonl$")
+
+
+def _transcript_tail(fname, tail):
+    if not _TRANSCRIPT_RE.fullmatch(fname or ""):
+        return {"error": "bad file name"}, 400
+    path = Path(config.ROOT) / "logs" / "harness" / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        return {"error": str(exc)}, 500
+    return {"file": fname, "total_lines": len(lines), "lines": lines[-tail:]}, 200
+
+
+def _prune_registry():
+    for key, rec in list(_launch_registry.items()):
+        pid = rec.get("pid")
+        alive = False
+        if pid:
+            try:
+                import os
+                os.kill(pid, 0)
+                alive = True
+            except ProcessLookupError:
+                alive = False
+            except PermissionError:
+                alive = True
+            except Exception:
+                alive = False
+        if not alive:
+            del _launch_registry[key]
+
+
+def _spawn_logged(argv, log_name):
+    log_dir = Path(config.ROOT) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    lf = open(log_dir / log_name, "ab", buffering=0)
+    proc = subprocess.Popen(argv, cwd=str(config.ROOT), stdout=lf, stderr=subprocess.STDOUT,
+                            start_new_session=True, close_fds=True)
+    return proc, log_name
+
+
+def _create_project(body):
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    repo = _valid_repo(body.get("repo"))
+    if repo is None:
+        return {"error": "repo must be an existing absolute path under /home/proxyie"}, 400
+    overwrite = bool(body.get("overwrite"))
+    py = str(Path(config.ROOT) / ".venv" / "bin" / "python")
+
+    goal = (body.get("goal") or "").strip() if isinstance(body.get("goal"), str) else ""
+    if goal:
+        if not (3 <= len(goal) <= 2000):
+            return {"error": "goal must be 3..2000 chars"}, 400
+        slug = _task_slug(goal)
+        expect = slug + ".json"
+        if (Path(config.TASKS_DIR) / expect).exists() and not overwrite:
+            return {"error": f"{expect} already exists; pass overwrite=true to replan",
+                    "exists": True, "file": expect}, 409
+        proc, log_name = _spawn_logged(
+            [py, "main.py", "code", "plan", goal, str(repo)], f"plan-{slug}.log")
+        _launch_registry[str(Path(config.TASKS_DIR) / expect)] = {
+            "pid": proc.pid, "log": log_name, "started": time.time(), "dry_run": False,
+            "kind": "plan"}
+        return {"mode": "plan", "pid": proc.pid, "log": log_name,
+                "taskfile": expect, "note": "Kimi-K3 is drafting the task file"}, 200
+
+    title = (body.get("title") or "").strip() if isinstance(body.get("title"), str) else ""
+    tasks = body.get("tasks")
+    if not title:
+        return {"error": "title required (or pass goal to plan with Kimi-K3)"}, 400
+    if not isinstance(tasks, list) or not tasks or len(tasks) > 50:
+        return {"error": "tasks must be a list of 1..50 task objects"}, 400
+    clean, seen = [], set()
+    for i, t in enumerate(tasks):
+        if not isinstance(t, dict):
+            return {"error": f"task {i} is not an object"}, 400
+        tid = (t.get("id") or "").strip() if isinstance(t.get("id"), str) else ""
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,60}", tid):
+            return {"error": f"task {i}: id must match [a-z0-9][a-z0-9-]{{0,60}}"}, 400
+        if tid in seen:
+            return {"error": f"duplicate task id {tid!r}"}, 400
+        seen.add(tid)
+        if not (t.get("title") or "").strip() or not (t.get("prompt") or "").strip():
+            return {"error": f"task {tid}: title and prompt are required"}, 400
+        entry = {"id": tid, "title": t["title"].strip(), "prompt": t["prompt"].strip()}
+        for opt in ("model", "reviewer", "verify_cmd", "base"):
+            if isinstance(t.get(opt), str) and t[opt].strip():
+                entry[opt] = t[opt].strip()
+        entry.setdefault("model", "DeepSeek-V4-Flash")
+        entry.setdefault("reviewer", "kimi")
+        deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
+        if isinstance(deps_in, list):
+            deps = [d for d in deps_in if isinstance(d, str)]
+            all_ids = {x.get("id") for x in tasks if isinstance(x, dict) and x.get("id")}
+            unknown = [d for d in deps if d not in all_ids]
+            if unknown:
+                return {"error": f"task {tid}: deps references unknown id(s) {unknown}"}, 400
+            if deps:
+                entry["deps"] = deps
+        clean.append(entry)
+    fname = _task_slug(title) + ".json"
+    fpath = Path(config.TASKS_DIR) / fname
+    if fpath.exists() and not overwrite:
+        return {"error": f"{fname} already exists; pass overwrite=true", "exists": True,
+                "file": fname}, 409
+    Path(config.TASKS_DIR).mkdir(parents=True, exist_ok=True)
+    doc = {"project": {"repo": str(repo), "title": title, "tasks": clean}}
+    fpath.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    return {"mode": "tasks", "file": fname, "n_tasks": len(clean)}, 200
+
+
+def _run_project(body):
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    fname = body.get("file") or ""
+    if not re.fullmatch(r"[\w.-]+\.json", fname):
+        return {"error": "bad file name"}, 400
+    path = Path(config.TASKS_DIR) / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    dry_run = bool(body.get("dry_run"))
+    _prune_registry()
+    key = str(path)
+    rec = _launch_registry.get(key)
+    if rec:
+        return {"error": "this task file already has a running process",
+                "pid": rec.get("pid"), "log": rec.get("log")}, 409
+    argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py", "code", "run",
+            str(path)]
+    if dry_run:
+        argv.append("--dry-run")
+    slug = _task_slug(path.stem)
+    log_name = f"run-{slug}-{int(time.time())}.log"
+    proc, log_name = _spawn_logged(argv, log_name)
+    _launch_registry[key] = {"pid": proc.pid, "log": log_name, "started": time.time(),
+                             "dry_run": dry_run, "kind": "run"}
+    return {"pid": proc.pid, "log": log_name, "dry_run": dry_run}, 200
 
 
 def _graph_topology(g):
@@ -320,7 +854,7 @@ def _build_graph_topologies():
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ArcDashboard/1.0"
+    server_version = "ArcDashboard/2.0"
     store = None
 
     def log_message(self, fmt, *args):
@@ -357,7 +891,26 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/phone.html":
                 return self._file(Path(config.ROOT) / "static" / "phone.html", "text/html; charset=utf-8")
             if u.path == "/api/usage":
-                return self._json(_usage())
+                q = parse_qs(u.query)
+                range_key = q.get("range", ["1h"])[0]
+                return self._json(_usage(Handler.store, range_key))
+            if u.path == "/api/projects":
+                return self._json({"projects": _projects(Handler.store)})
+            if u.path == "/api/project":
+                q = parse_qs(u.query)
+                obj, code = _project_detail(Handler.store, q.get("file", [""])[0])
+                return self._json(obj, code)
+            if u.path == "/api/agents":
+                return self._json(_agents(Handler.store))
+            if u.path == "/api/transcript":
+                q = parse_qs(u.query)
+                tail = q.get("tail", ["200"])[0]
+                try:
+                    tail = min(max(int(tail), 1), 1000)
+                except ValueError:
+                    tail = 200
+                obj, code = _transcript_tail(q.get("file", [""])[0], tail)
+                return self._json(obj, code)
             if u.path == "/api/summary":
                 st = Handler.store
                 return self._json({
@@ -403,14 +956,86 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def do_POST(self):
+        u = urlparse(self.path)
+        try:
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                length = 0
+            if length <= 0 or length > 256 * 1024:
+                return self._json({"error": "body size must be 1 byte..256KB"}, 400)
+            try:
+                body = json.loads(self.rfile.read(length).decode("utf-8", errors="replace"))
+            except ValueError as exc:
+                return self._json({"error": f"invalid JSON: {exc}"}, 400)
+            if u.path == "/api/projects/create":
+                obj, code = _create_project(body)
+                return self._json(obj, code)
+            if u.path == "/api/projects/run":
+                obj, code = _run_project(body)
+                return self._json(obj, code)
+            return self._json({"error": "not found"}, 404)
+        except BrokenPipeError:
+            pass
+        except Exception as exc:
+            log.exception("handler error")
+            try:
+                self._json({"error": str(exc)}, 500)
+            except Exception:
+                pass
+
+
+def _lan_addresses():
+    """Best-effort list of this machine's non-loopback IPv4 addresses, for printing URLs."""
+    addrs = []
+    try:
+        import fcntl
+        import struct
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            for _, ifname in socket.if_nameindex():
+                if ifname == "lo":
+                    continue
+                try:
+                    res = fcntl.ioctl(sock.fileno(), 0x8915, struct.pack("256s", ifname.encode()[:15]))  # SIOCGIFADDR
+                except OSError:
+                    continue
+                ip = socket.inet_ntoa(res[20:24])
+                if not ip.startswith("127.") and ip not in addrs:
+                    addrs.append(ip)
+        finally:
+            sock.close()
+    except Exception:
+        pass
+    if not addrs:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            sock.connect(("192.0.2.1", 80))  # TEST-NET: picks the outbound interface, sends nothing
+            addrs.append(sock.getsockname()[0])
+            sock.close()
+        except OSError:
+            pass
+    return addrs
+
 
 def serve(port=None, db_path=None):
     port = port or config.DASHBOARD_PORT
     db_path = db_path or config.DB_PATH
     Handler.store = Store(db_path)
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    try:
+        httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+    except OSError as exc:
+        if exc.errno == errno.EADDRINUSE:
+            print(f"port {port} is already in use -- the dashboard is probably already running.")
+            print(f"just open http://localhost:{port} in a browser (or run ./stop.sh, then start it again).")
+            raise SystemExit(1)
+        raise
     log.info("dashboard on http://0.0.0.0:%d (db=%s, events=%s)", port, db_path, config.EVENTS_LOG)
-    print(f"dashboard: http://localhost:{port}")
+    print(f"dashboard: http://localhost:{port}", flush=True)
+    for ip in _lan_addresses():
+        print(f"  from your laptop/phone: http://{ip}:{port}  (small screens: http://{ip}:{port}/phone.html)", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

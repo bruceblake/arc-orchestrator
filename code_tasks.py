@@ -120,12 +120,22 @@ def _review_prompt(t, diff):
 
 
 def _parse_verdict(text):
-    for m in reversed(list(re.finditer(r"\{[^{}]*\}", text))):
+    """Last balanced span carrying a "pass" key wins.
+
+    The flat regex could not span braces inside quoted code in the verdict
+    prose (e.g. "{WORLD_X,WORLD_Z,WORLD_H}"), silently dropping real verdicts.
+    """
+    spans = []
+    for m in re.finditer(r"\{", text):
+        span = _balanced_span(text, m.start())
+        if span is not None:
+            spans.append(span)
+    for span in reversed(spans):
         try:
-            obj = json.loads(m.group(0))
+            obj = json.loads(span)
         except ValueError:
             continue
-        if "pass" in obj:
+        if isinstance(obj, dict) and "pass" in obj:
             return {"pass": bool(obj["pass"]),
                     "issues": [str(i) for i in obj.get("issues", [])]}
     return {"pass": False, "issues": ["reviewer returned no parseable verdict"]}
