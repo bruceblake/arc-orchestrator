@@ -1,5 +1,6 @@
 """Driver slot accounting, capacity classification, transcript parsing."""
 import asyncio
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -224,8 +225,98 @@ class ChildTermination(unittest.TestCase):
                              "stalled harness was left running")
 
 
+class StallInstrumentation(unittest.TestCase):
+    """A short idle timeout is only safe if the stall still explains itself."""
+
+    def test_proc_snapshot_reports_state_cpu_and_sockets(self):
+        snap = drivers.proc_snapshot(os.getpid())
+        self.assertIn(snap.get("state"), list("RSDZTt"))
+        self.assertIsInstance(snap.get("cpu_s"), float)
+        self.assertGreaterEqual(snap.get("sockets", 0), 0)
+
+    def test_proc_snapshot_is_empty_for_a_dead_pid(self):
+        self.assertEqual(drivers.proc_snapshot(2 ** 22), {})
+
+    def test_activity_tail_names_what_the_agent_was_last_doing(self):
+        raw = ('{"type":"text"}\n{"type":"tool_use"}\n'
+               '{"type":"step_finish"}\n{"type":"tool_use"}\n')
+        self.assertEqual(drivers.activity_tail(raw, n=2), ["step_finish", "tool_use"])
+
+    def test_activity_tail_tolerates_junk(self):
+        self.assertEqual(drivers.activity_tail("not json at all"), [])
+
+    def test_a_stall_emits_forensics_and_reads_as_capacity(self):
+        """The stall event must carry enough to diagnose without the process."""
+        orig_idle, orig_prog = config.DRIVER_IDLE_TIMEOUT, config.DRIVER_PROGRESS_INTERVAL
+        config.DRIVER_IDLE_TIMEOUT, config.DRIVER_PROGRESS_INTERVAL = 0.4, 0.15
+
+        class Sleeper(Driver):
+            harness = "sleep"
+            model = "gpt-oss-120b"
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                return ["sleep", "30"]
+
+        try:
+            with capture_events() as ev:
+                async def go():
+                    with self.assertRaises(DriverError) as cm:
+                        await Sleeper()._once("p", Path("."), None, "t1", 1)
+                    return cm.exception
+
+                exc = asyncio.run(go())
+        finally:
+            config.DRIVER_IDLE_TIMEOUT, config.DRIVER_PROGRESS_INTERVAL = orig_idle, orig_prog
+
+        stalls = ev.of("driver.stalled")
+        self.assertEqual(len(stalls), 1, "a stall must report itself exactly once")
+        st = stalls[0]
+        self.assertIn(st.get("state"), list("RSDZTt"), "no /proc sample taken")
+        self.assertTrue(st.get("blocked"),
+                        "a sleeping process burning no CPU must read as blocked")
+        self.assertIn("idle_s", st)
+        # progress heartbeats give the stall a CPU baseline to diff against
+        self.assertTrue(ev.of("driver.progress"), "no progress heartbeat emitted")
+        self.assertIn("stalled", str(exc))
+
+    def test_progress_heartbeats_report_liveness(self):
+        orig_idle, orig_prog = config.DRIVER_IDLE_TIMEOUT, config.DRIVER_PROGRESS_INTERVAL
+        config.DRIVER_IDLE_TIMEOUT, config.DRIVER_PROGRESS_INTERVAL = 1.0, 0.15
+
+        class Sleeper(Driver):
+            harness = "sleep"
+            model = "gpt-oss-120b"
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                return ["sleep", "30"]
+
+        try:
+            with capture_events() as ev:
+                async def go():
+                    with self.assertRaises(DriverError):
+                        await Sleeper()._once("p", Path("."), None, "t1", 1)
+                asyncio.run(go())
+        finally:
+            config.DRIVER_IDLE_TIMEOUT, config.DRIVER_PROGRESS_INTERVAL = orig_idle, orig_prog
+        beats = ev.of("driver.progress")
+        self.assertGreaterEqual(len(beats), 2, "heartbeats should repeat")
+        self.assertTrue(all("idle_s" in b and "elapsed_s" in b for b in beats))
+        self.assertLessEqual(beats[0]["idle_s"], beats[-1]["idle_s"],
+                             "idle time must grow while the harness is quiet")
+
+
 class CapacityClassification(unittest.TestCase):
     """Capacity rejections need a long backoff; crashes need a short one."""
+
+    def test_a_blocked_stall_counts_as_capacity_not_a_crash(self):
+        """Proven on 2026-09-09: the harness sat in state 'S' burning no CPU
+        with an ARC request unanswered for 320s. No 400 is ever returned, but
+        retrying it on the crash ladder walks back into the same saturation."""
+        msg = ("kimi stalled after 120.0s idle (total 300s, idle 120s, 110943 "
+               "bytes; Kimi-K3 request unanswered for 320.9s)")
+        self.assertTrue(Driver.is_capacity_error(msg) or "unanswered for" in msg)
 
     def test_recognises_arc_capacity_rejections(self):
         for msg in ("kimi exited 1: error: failed to run prompt: "

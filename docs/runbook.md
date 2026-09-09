@@ -191,6 +191,37 @@ work never leaks into a retry — and merges are stash-tolerant (see
 "Task conflict"). Never hand-write a reduced task file to retry a subset;
 that was the old workaround, it is no longer needed.
 
+### A harness stalled (`driver.stalled`)
+
+The fleet's dominant failure mode: the harness stops producing output while its
+API request hangs. Every stall event carries the evidence needed to tell the
+two possible causes apart, gathered from `/proc` **before** the process is
+killed (`drivers._pump`):
+
+| field | meaning |
+| --- | --- |
+| `state` / `cpu_delta_s` | `S`/`D` with a near-zero CPU delta = blocked, not spinning |
+| `blocked` | the above, as a boolean |
+| `wire.awaiting_api` | (kimi) its session log ends on an unanswered `llm.request` |
+| `wire.waiting_s` | how long ARC has left that request open |
+| `last_activity` | the last few event types the agent emitted |
+| `bytes` | how much it produced before going quiet |
+
+A stall with `blocked: true` and `wire.awaiting_api: true` is **ARC holding an
+over-cap request open**, not a harness bug — measured 2026-09-09: state `S`,
+no CPU burn, request outstanding 320s. Those are classified as capacity errors
+and retried on the long jittered backoff, because retrying immediately walks
+straight back into whatever is saturated.
+
+`driver.progress` heartbeats (every `ARC_DRIVER_PROGRESS_INTERVAL`, default
+60s) carry the same sample while the agent is healthy, so the Fleet panel can
+show "quiet 90s" on a live agent and the stall event has a CPU baseline to
+diff against.
+
+`ARC_DRIVER_IDLE_TIMEOUT` (default 120s) is the kill threshold. It is short
+deliberately: nothing arrives after one of these hangs, so waiting is pure
+cost. Raise it only if you see stalls that later recover on their own.
+
 ### Reaping orphans (`code reconcile`)
 
 A run that died before it could clean up leaves three kinds of orphan, all of

@@ -93,6 +93,11 @@ svg text { font-family: ui-monospace, monospace; }
 .errbox { margin-top: 6px; border-left: 2px solid var(--err); padding: 3px 0 3px 8px;
           color: var(--err); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
 .cardnote { margin-top: 5px; color: var(--err); font-size: 11px; }
+.agentrow { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+            padding: 3px 0; font-size: 11px; border-bottom: 1px solid var(--border); }
+.agentrow.stuck { color: var(--warn); }
+.agentrow .who { color: var(--text); }
+.agentrow .quiet { color: var(--warn); }
 </style>
 </head>
 <body>
@@ -115,6 +120,7 @@ svg text { font-family: ui-monospace, monospace; }
         <button class="act" id="btn-problems">recent problems</button>
       </h2>
       <div class="health" id="health-models"></div>
+      <div id="health-agents"></div>
       <div class="problems" id="health-problems" style="display:none"></div>
     </div>
     <div class="panel">
@@ -355,14 +361,34 @@ function renderHealth(h) {
       ${esc(m.pretty)} <b>${m.drivers}/${cap || "?"}</b>${extra ? `<span class="hint">${extra}</span>` : ""}
       <span class="gauge"><i style="width:${pct}%"></i></span></span>`;
   }).join("") || '<span class="hint">no models reporting</span>';
+  // Live agents: elapsed, bytes produced, and how long since the harness last
+  // said anything. "quiet for Ns" is the difference between a working agent
+  // and one whose API request the server never answered.
+  const agents = (h.agents || []).filter(a => a.task);
+  $("#health-agents").innerHTML = agents.length ? agents.map(a => {
+    const quiet = a.idle_s != null && a.stuck
+      ? `<span class="quiet">quiet ${tick(a.idle_s)}${a.state ? ` · ${esc(a.state)}` : ""}${(a.cpu_delta_s != null && a.cpu_delta_s < 0.5) ? " · no CPU" : ""}</span>`
+      : (a.idle_s != null ? `<span class="hint">quiet ${tick(a.idle_s)}</span>` : "");
+    return `<div class="agentrow ${a.stuck ? "stuck" : ""}">
+      <span class="who">${esc(a.pretty)} ${esc(a.role || "")}</span>
+      <span>${esc(a.task)}</span>
+      <span class="hint">${tick(a.elapsed_s)}</span>
+      ${a.bytes ? `<span class="hint">${fmtK(a.bytes)}B out</span>` : ""}
+      ${quiet}</div>`;
+  }).join("") : "";
   const probs = (h.problems || []);
   $("#btn-problems").textContent = `recent problems (${probs.length})`;
   $("#health-problems").innerHTML = probs.length ? probs.map(e => {
     const what = PROBLEM_LABEL[e.type] || e.type;
     const who = [e.model && short(e.model), e.task].filter(Boolean).map(esc).join(" · ");
-    const detail = e.error || e.reason || e.note ||
+    let detail = e.error || e.reason || e.note ||
       (e.in_use != null ? `${e.in_use}/${e.cap} slots in use` : "") ||
       (e.inflight != null ? `${e.inflight}/${e.limit} in flight` : "");
+    if (e.wire && e.wire.awaiting_api)
+      detail = `API never answered — ${esc(e.wire.model || "request")} outstanding ` +
+               `${e.wire.waiting_s}s (${fmtK(e.bytes || 0)}B written first)`;
+    else if (e.blocked)
+      detail = `blocked in state ${esc(e.state || "?")}, no CPU burn — ${detail}`;
     const cls = e.type === "driver.cap_wait" ? "warn" : "bad";
     return `<div><span class="hint">${AGO(e.ts)} ago</span>
       <span class="${cls}">${esc(what)}</span> ${who}

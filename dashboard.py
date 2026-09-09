@@ -392,6 +392,7 @@ def _collect_inflight(now, store=None):
     rows = []
     starts = {}      # request_start req_id -> event (in-flight raw pool/stream requests)
     driver_starts = {}  # (harness, model, role, task, attempt) -> event (in-flight task runs)
+    driver_progress = {}  # same key -> newest driver.progress heartbeat
     for line in _load_event_lines():
         try:
             e = json.loads(line)
@@ -407,6 +408,12 @@ def _collect_inflight(now, store=None):
         elif etype == "driver.start":
             driver_starts[(e.get("harness"), e.get("model"), e.get("role"),
                            e.get("task"), e.get("attempt"))] = e
+        elif etype == "driver.progress":
+            # Not a terminal event — it settles nothing. It is proof the driver
+            # was alive at that moment, and carries the idle/CPU sample that
+            # says whether it is working or blocked.
+            driver_progress[(e.get("harness"), e.get("model"), e.get("role"),
+                             e.get("task"), e.get("attempt"))] = e
         elif etype in ("driver.done", "driver.error", "driver.stale",
                        "driver.cancelled"):
             key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
@@ -457,12 +464,23 @@ def _collect_inflight(now, store=None):
                 f"{task}-{role}-{attempt}.jsonl")) if role else []
             if hits:
                 transcript = hits[-1].name
+        prog = driver_progress.get((harness, model, role, task, attempt)) or {}
+        prog_ts = _ts(prog.get("ts"))
+        # Idle time from the newest heartbeat, carried forward to now.
+        idle_s = None
+        if prog_ts is not None and isinstance(prog.get("idle_s"), (int, float)):
+            idle_s = round(prog["idle_s"] + max(0.0, now - prog_ts), 1)
         rows.append({"req_id": f"driver/{harness}:{model}:{role}:{task}",
                      "family": config.MODEL_FAMILY.get(model, "harness"), "model": model,
                      "pretty": _pretty(model), "source": f"driver:{harness}",
                      "purpose": f"{harness} {role}", "harness": harness,
                      "role": role, "task": task, "websearch": False,
                      "started": started, "elapsed_s": round(max(0.0, now - started), 1),
+                     "idle_s": idle_s, "bytes": prog.get("bytes"),
+                     "state": prog.get("state"),
+                     "cpu_delta_s": prog.get("cpu_delta_s"),
+                     "stuck": bool(idle_s is not None
+                                   and idle_s > config.DRIVER_IDLE_TIMEOUT * 0.5),
                      "transcript": transcript})
     kimi = _kimi_code_usage(now, _fleet_task_names(store))
     rows.extend(kimi["inflight"])
@@ -1311,7 +1329,9 @@ def _health(store):
         problems.append({k: e[k] for k in
                          ("type", "ts", "model", "harness", "role", "task", "attempt",
                           "error", "note", "reason", "family", "inflight", "limit",
-                          "in_use", "cap", "idle_s", "capacity", "taskfile")
+                          "in_use", "cap", "idle_s", "capacity", "taskfile",
+                          "blocked", "wire", "state", "cpu_delta_s", "bytes",
+                          "last_activity")
                          if k in e})
         if len(problems) >= 25:
             break

@@ -11,7 +11,9 @@ import asyncio
 import json
 import logging
 import os
+import pathlib
 import random
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -84,6 +86,103 @@ async def _lease_acquire(model, task_id, emit_ctx):
 
 def _lease_release(model, task_id):
     _lease_db().release_driver_lease(model, os.getpid(), task_id)
+
+
+def proc_snapshot(pid):
+    """Cheap /proc forensics for a harness that has gone quiet.
+
+    The question a stall raises is always the same: is the process spinning
+    (an agent loop) or blocked (a hung API request)? `state` and the CPU
+    counters answer it. 'S' with flat CPU and an open socket is a request the
+    server never answered — which is what ARC does at its concurrency cap.
+    """
+    out = {}
+    try:
+        stat = pathlib.Path(f"/proc/{pid}/stat").read_text()
+        # comm may contain spaces/parens; fields after the final ')' are fixed.
+        fields = stat[stat.rfind(")") + 2:].split()
+        ticks = os.sysconf("SC_CLK_TCK") or 100
+        out["state"] = fields[0]
+        out["cpu_s"] = round((int(fields[11]) + int(fields[12])) / ticks, 2)
+        out["threads"] = int(fields[17])
+    except (OSError, IndexError, ValueError):
+        pass
+    try:
+        fds = pathlib.Path(f"/proc/{pid}/fd")
+        socks = 0
+        for fd in fds.iterdir():
+            try:
+                if os.readlink(fd).startswith("socket:"):
+                    socks += 1
+            except OSError:
+                continue
+        out["sockets"] = socks
+    except OSError:
+        pass
+    return out
+
+
+_EVENT_TYPE_RE = re.compile(r'"type"\s*:\s*"([^"]{1,40})"')
+
+
+def activity_tail(raw, n=6):
+    """The last few event types the harness emitted before going quiet.
+
+    Names what the agent was doing at the moment it hung (a tool call, a
+    message, a step boundary) without dragging whole transcript payloads into
+    the event log.
+    """
+    kinds = _EVENT_TYPE_RE.findall(raw[-20000:])
+    return kinds[-n:]
+
+
+def _wire_stall_evidence(task_id):
+    """For kimi: does its session log end on an unanswered llm.request?
+
+    That is the difference between "the agent is thinking" and "the API never
+    replied", and it is the single most useful fact about one of these stalls.
+    """
+    if not task_id:
+        return None
+    base = re.sub(r"-x\d+$", "", task_id)
+    root = pathlib.Path.home() / ".kimi-code" / "sessions"
+    newest, newest_m = None, 0
+    try:
+        for d in root.glob(f"wd_{base}_*"):
+            for wire in d.glob("*/agents/*/wire.jsonl"):
+                try:
+                    m = wire.stat().st_mtime
+                except OSError:
+                    continue
+                if m > newest_m:
+                    newest, newest_m = wire, m
+    except OSError:
+        return None
+    if newest is None:
+        return None
+    last_req = last_done = None
+    try:
+        for line in newest.read_text(errors="replace").splitlines()[-400:]:
+            if '"llm.request"' in line:
+                last_req = line
+                last_done = None
+            elif '"usage.record"' in line or '"step.end"' in line:
+                last_done = line
+    except OSError:
+        return None
+    if last_req is None:
+        return None
+    if last_done is not None:
+        return {"awaiting_api": False, "wire": newest.name}
+    try:
+        req = json.loads(last_req)
+    except ValueError:
+        req = {}
+    ts = req.get("time")
+    return {"awaiting_api": True,
+            "model": req.get("model"),
+            "waiting_s": round(time.time() - ts / 1000, 1) if isinstance(ts, (int, float)) else None,
+            "session": newest.parent.parent.parent.name}
 
 
 async def _terminate(proc):
@@ -207,7 +306,11 @@ class Driver:
                     events.emit("driver.resume", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt,
                                 session_id=sid)
-                capacity = self.is_capacity_error(str(exc))
+                # A stall where the process was blocked with an unanswered
+                # request outstanding IS a capacity symptom, even though the
+                # error text carries no 400 — retrying it on the crash ladder
+                # walks straight back into whatever is saturated.
+                capacity = self.is_capacity_error(str(exc)) or "unanswered for" in str(exc)
                 events.emit("driver.error", harness=self.harness, model=self.model,
                             task=task_id, attempt=attempt, error=str(exc)[:300],
                             will_resume=bool(sid), capacity=capacity)
@@ -283,19 +386,58 @@ class Driver:
 
     async def _pump(self, proc, err_task, argv, tpath, t0,
                     session_id, task_id, attempt):
-        """Drain the harness's stdout into the transcript until it exits."""
+        """Drain the harness's stdout into the transcript until it exits.
+
+        Also the instrumentation point. A harness that goes quiet is the fleet's
+        dominant failure mode, and stdout silence alone cannot say why — so
+        this samples /proc while the process is still alive (spinning or
+        blocked?), records what the agent was last doing, and for kimi checks
+        whether its session log ends on an unanswered llm.request. Those facts
+        are gone the moment the process is killed, so they are gathered first.
+        """
         chunks = []
         last_chunk_t = time.monotonic()
+        last_progress_t = time.monotonic()
+        last_cpu = None
         deadline = t0 + config.DRIVER_TIMEOUT
+        interval = config.DRIVER_PROGRESS_INTERVAL
+
+        def written():
+            return sum(len(c) for c in chunks)
+
         try:
             with open(tpath, "wb") as fh:
                 while True:
-                    idle_for = time.monotonic() - last_chunk_t
-                    remaining = min(deadline - time.monotonic(),
-                                    config.DRIVER_IDLE_TIMEOUT - idle_for)
-                    if remaining <= 0:
+                    now = time.monotonic()
+                    idle_for = now - last_chunk_t
+                    if idle_for >= config.DRIVER_IDLE_TIMEOUT or now >= deadline:
                         raise asyncio.TimeoutError
-                    chunk = await asyncio.wait_for(proc.stdout.read(65536), remaining)
+                    wait = max(0.05, min(deadline - now,
+                                         config.DRIVER_IDLE_TIMEOUT - idle_for,
+                                         interval - (now - last_progress_t)))
+                    try:
+                        chunk = await asyncio.wait_for(proc.stdout.read(65536), wait)
+                    except asyncio.TimeoutError:
+                        # Nothing arrived in this window. The loop head decides
+                        # whether that is a stall; here we only emit a heartbeat
+                        # so a live agent's progress is observable, and so the
+                        # CPU delta at stall time has something to compare to.
+                        if time.monotonic() - last_progress_t >= interval:
+                            snap = proc_snapshot(proc.pid)
+                            cpu = snap.get("cpu_s")
+                            events.emit(
+                                "driver.progress", harness=self.harness,
+                                model=self.model, role=self.role, task=task_id,
+                                attempt=attempt, bytes=written(),
+                                idle_s=round(time.monotonic() - last_chunk_t, 1),
+                                elapsed_s=round(time.monotonic() - t0, 1),
+                                cpu_delta_s=(round(cpu - last_cpu, 2)
+                                             if cpu is not None and last_cpu is not None
+                                             else None),
+                                **snap)
+                            last_cpu = cpu
+                            last_progress_t = time.monotonic()
+                        continue
                     if not chunk:
                         break
                     chunks.append(chunk)
@@ -303,22 +445,40 @@ class Driver:
                     fh.write(chunk)
                     fh.flush()
         except asyncio.TimeoutError:
-            await _terminate(proc)
+            # Gather evidence BEFORE the kill — /proc vanishes with the process.
+            snap = proc_snapshot(proc.pid)
             partial = b"".join(chunks).decode(errors="replace")
+            wire = _wire_stall_evidence(task_id) if self.harness == "kimi" else None
+            await _terminate(proc)
             psid, _ = parse_transcript(partial)
             idle = round(time.monotonic() - last_chunk_t, 1)
             total = round(time.monotonic() - t0, 1)
-            if idle >= config.DRIVER_IDLE_TIMEOUT - 30:
-                kind, limit = "stalled", f"{config.DRIVER_IDLE_TIMEOUT}s idle"
-            else:
-                kind, limit = "timed out", f"{config.DRIVER_TIMEOUT}s total"
-            events.emit("driver.stalled" if kind == "stalled" else "driver.timeout",
-                        harness=self.harness, model=self.model, task=task_id,
-                        attempt=attempt, bytes=sum(len(c) for c in chunks),
-                        idle_s=idle, session_id=psid or session_id)
+            stalled = idle >= config.DRIVER_IDLE_TIMEOUT - 1
+            kind = "stalled" if stalled else "timed out"
+            limit = (f"{config.DRIVER_IDLE_TIMEOUT}s idle" if stalled
+                     else f"{config.DRIVER_TIMEOUT}s total")
+            cpu_delta = (round(snap["cpu_s"] - last_cpu, 2)
+                         if last_cpu is not None and "cpu_s" in snap else None)
+            # Blocked, burning no CPU, with an unanswered request outstanding =
+            # the server never replied. That is a capacity symptom, not a crash,
+            # and Driver.run backs off accordingly.
+            blocked = (snap.get("state") in ("S", "D") and (cpu_delta or 0) < 0.5)
+            events.emit("driver.stalled" if stalled else "driver.timeout",
+                        harness=self.harness, model=self.model, role=self.role,
+                        task=task_id, attempt=attempt, bytes=written(),
+                        idle_s=idle, elapsed_s=total,
+                        cpu_delta_s=cpu_delta, blocked=blocked,
+                        last_activity=activity_tail(partial),
+                        wire=wire, session_id=psid or session_id, **snap)
+            detail = ""
+            if wire and wire.get("awaiting_api"):
+                detail = (f"; {wire.get('model')} request unanswered for "
+                          f"{wire.get('waiting_s')}s")
+            elif blocked:
+                detail = "; process blocked with no CPU burn"
             raise DriverError(
                 f"{argv[0]} {kind} after {limit} "
-                f"(total {total}s, idle {idle}s, {sum(len(c) for c in chunks)} bytes)",
+                f"(total {total}s, idle {idle}s, {written()} bytes{detail})",
                 session_id=psid or session_id)
         err = await err_task
         await proc.wait()

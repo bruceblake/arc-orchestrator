@@ -118,10 +118,21 @@ TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 # 149KB with only 80s of idle — it was demonstrably still working, and each
 # such kill costs a full retry (MAX_RETRIES=4, so an hour per task).
 DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
-# A harness that stops producing stdout for this long has a hung API request
-# (observed: ARC holds rejected/queued requests open indefinitely); kill and
-# retry instead of waiting out the full DRIVER_TIMEOUT.
-DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "300"))
+# A harness that stops producing stdout for this long has a hung API request;
+# kill and retry instead of waiting out the full DRIVER_TIMEOUT.
+#
+# Confirmed rather than inferred, 2026-09-09: at the moment of a stall the
+# harness sits in state 'S' burning no CPU, and its kimi session log ends on an
+# llm.request that ARC had left unanswered for 320s. Nothing arrives after the
+# hang, so waiting is pure cost — lowered 300 -> 120. drivers._pump records
+# that evidence on every driver.stalled event, so shortening the wait does not
+# cost us the diagnosis.
+DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "120"))
+# While a driver runs, emit driver.progress this often: bytes written, idle
+# time, and a /proc sample. Makes a live agent's progress observable instead of
+# inferred from transcript file size, and gives the stall event a CPU baseline
+# to diff against (spinning agent vs blocked request).
+DRIVER_PROGRESS_INTERVAL = float(os.getenv("ARC_DRIVER_PROGRESS_INTERVAL", "60"))
 # A harness rejected at the ARC account cap never got a slot, so retrying it
 # on the crash schedule (2s, 4s, 8s) walks straight back into the same cap.
 # Capacity rejections back off on this longer, jittered ladder instead.
