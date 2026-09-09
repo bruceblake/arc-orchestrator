@@ -475,4 +475,4 @@ Multi-model orchestration is governed by [AGENTS.md](AGENTS.md).
 - [docs/concurrency-limits.md](docs/concurrency-limits.md) (concurrency limits and overrides)
 - [docs/taskfile-schema.md](docs/taskfile-schema.md) (taskfile reference)
 - [docs/runbook.md](docs/runbook.md) (operator runbook)
-- [docs/audit-2026-09-09.md](docs/audit-2026-09-09.md) (reliability audit: the eleven defects behind the stalled fleet, and why each fix is shaped the way it is)
+- [docs/audit-2026-09-09.md](docs/audit-2026-09-09.md) (reliability audit: the twelve defects behind the stalled fleet, and why each fix is shaped the way it is)

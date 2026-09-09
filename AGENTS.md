@@ -430,7 +430,7 @@ The full operator runbook, with troubleshooting, is
 - [docs/runbook.md](docs/runbook.md) — operator runbook: dashboard,
   plan → dry-run → run, troubleshooting
 - [docs/audit-2026-09-09.md](docs/audit-2026-09-09.md) — reliability audit
-  of 2026-09-09: the eleven coupled defects behind stalled fleet runs
+  of 2026-09-09: the twelve coupled defects behind stalled fleet runs
   (moving-ref review diffs, escalation on interrupted runs, leaked driver
   slots, uncleaned shutdown) and the reasoning behind each fix
 - [README.md](README.md) — project overview, dashboard quick start, 24/7
