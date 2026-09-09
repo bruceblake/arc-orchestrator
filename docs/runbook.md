@@ -207,11 +207,20 @@ killed (`drivers._pump`):
 | `last_activity` | the last few event types the agent emitted |
 | `bytes` | how much it produced before going quiet |
 
-A stall with `blocked: true` and `wire.awaiting_api: true` is **ARC holding an
-over-cap request open**, not a harness bug — measured 2026-09-09: state `S`,
-no CPU burn, request outstanding 320s. Those are classified as capacity errors
-and retried on the long jittered backoff, because retrying immediately walks
-straight back into whatever is saturated.
+A stall with `blocked: true` and `wire.awaiting_api: true` means the harness
+is waiting on a request that has not come back. **It does not by itself prove
+the server is at fault**: a harness we SIGKILL also ends on an unanswered
+request, so this signal cannot separate "server never replied" from "we killed
+it mid-flight". Read it together with `waiting_s` — a wait far longer than a
+comparable direct API call (typically under 10s, even at 48k tokens with tools)
+is the part that indicts the request.
+
+What ARC does at its concurrency cap is **reject instantly**, not hang:
+measured 2026-09-09, 5 concurrent Kimi-K3 requests against a cap of 3 gave 3
+successes and 2 `400 {"detail": "concurrent session limit reached"}` in 0.2s.
+Earlier notes in this repo claiming ARC "holds rejected requests open
+indefinitely" are wrong; those 400s are real and are what the capacity backoff
+is for.
 
 `driver.progress` heartbeats (every `ARC_DRIVER_PROGRESS_INTERVAL`, default
 60s) carry the same sample while the agent is healthy, so the Fleet panel can
@@ -222,18 +231,28 @@ diff against.
 deliberately: nothing arrives after one of these hangs, so waiting is pure
 cost. Raise it only if you see stalls that later recover on their own.
 
-### Context budget (why tasks used to die mid-run)
+### Context budget, and why compaction cannot save you
 
-Both harnesses ship configured for a **131072-token** context and only compact
-near that ceiling — kimi at `max_context_size - reserved_context_size`,
-opencode at `limit.context * compaction.threshold`. ARC leaves requests
-unanswered well before it (measured: hangs cluster around 55-60k input
-tokens). So neither harness ever reached its own compaction point; each simply
-grew context until the server stopped replying, and the task died there.
+Both harnesses ship configured for a **131072-token** context and compact near
+that ceiling — kimi at `max_context_size - reserved_context_size`, opencode at
+`limit.context * compaction.threshold`.
 
-The fleet therefore declares its own, smaller budget (`ARC_HARNESS_CONTEXT`,
-default 65536) so compaction fires in time. **Interactive sessions keep the
-full window** — the two paths are kept separate:
+Lowering the fleet's budget to 65536 so compaction fires earlier was tried on
+2026-09-09 **and reverted**. It worked exactly as designed — compaction fired
+at 49042 tokens — and made things worse, because:
+
+> **kimi-code's compaction never completes against this provider.**
+> Across the entire session history: 20 `full_compaction.begin`, **0**
+> `full_compaction.end`. Including interactive sessions.
+
+Firing a broken compaction at ~49k instead of ~115k only reaches the wall
+sooner. `ARC_HARNESS_CONTEXT` therefore stays at the harness default; lower it
+only if compaction is fixed upstream. **The lever that works is not growing
+the context**, which is why implement prompts carry explicit context
+discipline.
+
+The alias plumbing is kept because it is the knob to turn if that changes, and
+because it keeps fleet and interactive settings separable:
 
 | harness | how the budget is applied |
 | --- | --- |

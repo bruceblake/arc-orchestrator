@@ -62,17 +62,22 @@ if __name__ == "__main__":
 
 
 class HarnessContextBudget(unittest.TestCase):
-    """The fleet must declare a context budget ARC will actually serve.
+    """The fleet declares a context budget to its harnesses.
 
-    Both harnesses ship configured for 131072 tokens and only compact near
-    that ceiling, but ARC leaves requests unanswered around 55-60k — so
-    neither ever compacts, and context grows until the server stops replying.
+    Lowering it below the harness default was tried and reverted: it made
+    compaction fire earlier exactly as intended, and kimi-code's compaction
+    never completes against this provider (20 full_compaction.begin across the
+    whole session history, 0 full_compaction.end). Reaching a broken path
+    sooner is strictly worse, so the budget stays at the default unless
+    compaction is fixed upstream.
     """
 
-    def test_budget_is_below_where_hangs_were_measured(self):
-        self.assertLessEqual(config.HARNESS_CONTEXT, 100000)
-        self.assertGreaterEqual(config.HARNESS_CONTEXT, 16000,
-                                "too small to hold a real task's working set")
+    def test_budget_does_not_force_compaction_earlier_than_the_default(self):
+        self.assertGreaterEqual(
+            config.HARNESS_CONTEXT, 131072,
+            "lowering this makes the fleet hit kimi-code's broken compaction "
+            "sooner; the working lever is not growing context (see "
+            "code_tasks._impl_prompt), not compacting it")
 
     def test_kimi_gets_an_alias_only_when_the_config_defines_it(self):
         """A missing alias must degrade to the default model, not fail the run

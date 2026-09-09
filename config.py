@@ -179,9 +179,19 @@ MAX_ESCALATIONS = int(os.getenv("ARC_MAX_ESCALATIONS",
 # Interactive sessions keep the full window: they use the unsuffixed aliases.
 USE_FLEET_ALIASES = os.getenv("ARC_USE_FLEET_ALIASES", "1").lower() not in (
     "0", "false", "no", "")
-# Context budget the fleet declares to its harnesses. Below the range where
-# ARC starts leaving requests unanswered, so compaction fires in time.
-HARNESS_CONTEXT = int(os.getenv("ARC_HARNESS_CONTEXT", "65536"))
+# Context budget the fleet declares to its harnesses.
+#
+# Deliberately NOT lowered below the harness default. Lowering it to 65536 was
+# tried on 2026-09-09 to make compaction fire before requests got large; it
+# worked exactly as designed and made things worse, because kimi-code's
+# compaction never completes against this provider — 20 `full_compaction.begin`
+# events across the whole session history, zero `full_compaction.end`. Firing a
+# broken compaction at ~49k instead of ~115k just reaches the wall sooner.
+#
+# The lever that does work is not growing the context in the first place (see
+# the context-discipline rules in code_tasks._impl_prompt). Set
+# ARC_HARNESS_CONTEXT lower only if compaction is ever fixed upstream.
+HARNESS_CONTEXT = int(os.getenv("ARC_HARNESS_CONTEXT", "131072"))
 KIMI_CONFIG = Path.home() / ".kimi-code" / "config.toml"
 OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 OPENCODE_FLEET_CONFIG = OPENCODE_CONFIG.with_name("opencode-fleet.json")
