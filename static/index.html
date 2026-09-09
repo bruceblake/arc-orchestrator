@@ -328,22 +328,31 @@ const PROBLEM_LABEL = {
 
 function renderHealth(h) {
   const models = h.models || [];
-  const busy = models.reduce((n, m) => n + m.inflight, 0);
+  // Two caps per model: fleet drivers against driver_cap, and everything on
+  // the ARC account (drivers + your own interactive kimi sessions) against
+  // account_cap. Only the first is something the fleet controls.
+  const drivers = models.reduce((n, m) => n + m.drivers, 0);
+  const account = models.reduce((n, m) => n + m.account, 0);
   const over = models.filter(m => m.over_cap), at = models.filter(m => m.at_cap && !m.over_cap);
-  $("#health-sum").textContent = `${busy} agent${busy === 1 ? "" : "s"}`;
+  $("#health-sum").textContent = `${drivers} agent${drivers === 1 ? "" : "s"}`;
   $("#health-pill").className = "pill" + (over.length ? " on" : "");
   const runs = (h.runs || []).length;
+  const interactive = account - drivers;
   $("#health-meta").textContent =
-    `(${busy} agent${busy === 1 ? "" : "s"} in flight · ${runs} run${runs === 1 ? "" : "s"}` +
+    `(${drivers} fleet agent${drivers === 1 ? "" : "s"} · ${runs} run${runs === 1 ? "" : "s"}` +
+    `${interactive > 0 ? ` · ${interactive} interactive session${interactive === 1 ? "" : "s"} sharing the account` : ""}` +
     `${over.length ? " · OVER CAP: " + over.map(m => m.pretty).join(", ") : ""}` +
     `${!over.length && at.length ? " · at cap: " + at.map(m => m.pretty).join(", ") : ""})`;
   $("#health-models").innerHTML = models.map(m => {
     const cap = m.driver_cap || 0;
-    const pct = cap ? Math.min(100, 100 * m.inflight / cap) : 0;
-    const cls = m.over_cap ? "over" : m.at_cap ? "atcap" : m.inflight ? "busy" : "";
-    const age = m.inflight && m.oldest_s ? ` · oldest ${tick(m.oldest_s)}` : "";
-    return `<span class="mcap ${cls}" title="concurrent harness instances for ${esc(m.model)}${age}">
-      ${esc(m.pretty)} <b>${m.inflight}/${cap || "?"}</b>
+    const pct = cap ? Math.min(100, 100 * m.drivers / cap) : 0;
+    const cls = m.over_cap ? "over" : m.at_cap ? "atcap" : m.drivers ? "busy" : "";
+    const extra = m.account > m.drivers ? ` +${m.account - m.drivers}` : "";
+    const age = m.account && m.oldest_s ? ` · oldest ${tick(m.oldest_s)}` : "";
+    const tip = `${esc(m.model)}: ${m.drivers}/${cap} fleet drivers` +
+      `, ${m.account}/${m.account_cap || "?"} on the ARC account${extra ? " (the +N are interactive sessions sharing your account)" : ""}${age}`;
+    return `<span class="mcap ${cls}" title="${tip}">
+      ${esc(m.pretty)} <b>${m.drivers}/${cap || "?"}</b>${extra ? `<span class="hint">${extra}</span>` : ""}
       <span class="gauge"><i style="width:${pct}%"></i></span></span>`;
   }).join("") || '<span class="hint">no models reporting</span>';
   const probs = (h.problems || []);

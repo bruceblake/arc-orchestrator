@@ -179,8 +179,57 @@ def _parse_kimi_wire(path):
             "avg_latency_ms": round(latency_total_ms / latency_count) if latency_count else None}
 
 
-def _kimi_code_usage(now):
-    """Aggregate all kimi-code session logs into dashboard-shaped rows + points."""
+_fleet_names_cache = {"key": 0.0, "names": frozenset()}
+
+
+def _fleet_task_names(store):
+    """Task ids the fleet has ever run — cached ~30s.
+
+    kimi-code names each session directory `wd_<cwd-basename>_<hash>`, and a
+    fleet driver runs with cwd set to its worktree, whose basename is the task
+    id. That is how a session is recognised as the fleet's own.
+    """
+    now = time.time()
+    if now - _fleet_names_cache["key"] < 30:
+        return _fleet_names_cache["names"]
+    names = set()
+    try:
+        for row in (store.code_tasks_all() if store else []):
+            if row.get("id"):
+                names.add(row["id"])
+    except Exception:
+        pass
+    try:
+        root = Path(config.WORKTREE_ROOT)
+        for repo_dir in root.iterdir() if root.is_dir() else []:
+            for wt in repo_dir.iterdir() if repo_dir.is_dir() else []:
+                names.add(wt.name)
+    except OSError:
+        pass
+    _fleet_names_cache.update(key=now, names=frozenset(names))
+    return _fleet_names_cache["names"]
+
+
+def _session_task(path):
+    """Task id from a `.../wd_<task>_<hash>/session_*/agents/<a>/wire.jsonl`."""
+    for part in path.parts:
+        if part.startswith("wd_"):
+            stem = part[3:]
+            return stem.rsplit("_", 1)[0] if "_" in stem else stem
+    return None
+
+
+def _kimi_code_usage(now, fleet_names=frozenset()):
+    """Aggregate all kimi-code session logs into dashboard-shaped rows + points.
+
+    Token totals cover every session (kimi's stream-json carries no usage, so
+    the wire logs are the only source). The IN-FLIGHT list, however, excludes
+    sessions belonging to the fleet's own worktrees: those are already counted
+    from driver.start/driver.done, and counting them twice made a single fleet
+    driver read as several agents against the ARC account cap — killed attempts
+    leave an unanswered llm.request that looks live for STALE_INFLIGHT_S, so a
+    retried task inflated the number further.
+    """
     root = Path.home() / ".kimi-code" / "sessions"
     agg = {}
     inflight = []
@@ -218,6 +267,9 @@ def _kimi_code_usage(now):
                 row["last_ts"] = m["last_ts"]
         points.extend(data["recent"])
         lr = data["last_req"]
+        owner = _session_task(path)
+        if owner and owner in fleet_names:
+            continue  # the fleet's own driver — already counted via driver.*
         if lr and lr[1] != "unknown" and lr[0] > data["last_done"] and (now - lr[0]) < STALE_INFLIGHT_S:
             inflight.append({"req_id": "kimi-code/" + lr[2], "family": "kimi-code",
                              "model": lr[1], "pretty": _pretty(lr[1]), "source": "kimi-code",
@@ -335,7 +387,7 @@ def _opencode_token_backfill(store, done_tok_keys):
     return points
 
 
-def _collect_inflight(now):
+def _collect_inflight(now, store=None):
     """Unmatched start events across all three layers -> live agent rows."""
     rows = []
     starts = {}      # request_start req_id -> event (in-flight raw pool/stream requests)
@@ -412,7 +464,7 @@ def _collect_inflight(now):
                      "role": role, "task": task, "websearch": False,
                      "started": started, "elapsed_s": round(max(0.0, now - started), 1),
                      "transcript": transcript})
-    kimi = _kimi_code_usage(now)
+    kimi = _kimi_code_usage(now, _fleet_task_names(store))
     rows.extend(kimi["inflight"])
     rows.sort(key=lambda r: -r["elapsed_s"])
     return rows, kimi
@@ -445,7 +497,7 @@ def _usage(store=None, range_key=None):
     done_tok_keys = set()
 
     # models/inflight/points for kimi-code sessions up front (cached, shared with inflight)
-    inflight, kimi = _collect_inflight(now)
+    inflight, kimi = _collect_inflight(now, store)
 
     ev_lines = _load_event_lines()
     for line in ev_lines:
@@ -803,7 +855,7 @@ def _task_loop_stats(store, task_ids):
 
 def _projects(store):
     now = time.time()
-    inflight, _kimi = _collect_inflight(now)
+    inflight, _kimi = _collect_inflight(now, store)
     live_tasks = set()
     live = {}  # base task id -> {"seconds": latest elapsed, "tokens": partial transcript tokens}
     for row in inflight:
@@ -1025,7 +1077,7 @@ def _project_detail(store, fname):
 
 def _agents(store):
     now = time.time()
-    inflight, _kimi = _collect_inflight(now)
+    inflight, _kimi = _collect_inflight(now, store)
     _prune_registry()
     runs = [{"taskfile": k, **v} for k, v in _launch_registry.items()]
     return {"now": now, "agents": inflight, "runs": runs}
@@ -1187,35 +1239,52 @@ def _health(store):
     showed nothing when the fleet was wedged at its concurrency cap.
     """
     now = time.time()
-    inflight, _kimi = _collect_inflight(now)
+    inflight, _kimi = _collect_inflight(now, store)
     import reconcile
 
+    # Two different caps govern the same model and must not be conflated:
+    #   driver_cap  — how many harness instances THIS fleet may run
+    #                 (config.driver_limit), deliberately below the account cap
+    #                 so interactive use still has room;
+    #   account_cap — ARC's per-account limit (config.family_limit), which the
+    #                 fleet's drivers AND the operator's own interactive
+    #                 kimi-code sessions both consume.
+    # Counting interactive sessions against driver_cap reported "Kimi-K3 4/2
+    # OVER CAP" while the fleet was correctly running a single driver.
     per_model = {}
+
+    def ent_for(model, family=None):
+        return per_model.setdefault(model, {
+            "model": model, "pretty": _pretty(model),
+            "family": config.MODEL_FAMILY.get(model, family or "harness"),
+            "drivers": 0, "account": 0, "driver_cap": None, "account_cap": None,
+            "oldest_s": 0.0})
+
+    for model in config.IMPLEMENTER_MODELS:
+        ent_for(model)          # always show every governed model, even at 0
     for row in inflight:
         model = row.get("model")
         if not model:
             continue
-        ent = per_model.setdefault(model, {
-            "model": model, "pretty": _pretty(model),
-            "family": config.MODEL_FAMILY.get(model, row.get("family") or "harness"),
-            "inflight": 0, "driver_cap": None, "oldest_s": 0.0})
-        ent["inflight"] += 1
+        ent = ent_for(model, row.get("family"))
+        ent["account"] += 1
+        if str(row.get("source") or "").startswith("driver:"):
+            ent["drivers"] += 1
         ent["oldest_s"] = max(ent["oldest_s"], row.get("elapsed_s") or 0.0)
-    # Show every governed model, not only the busy ones: "Kimi-K3 0/2" is the
-    # reassurance that nothing is stuck, and costs one row.
-    for model in config.IMPLEMENTER_MODELS:
-        per_model.setdefault(model, {
-            "model": model, "pretty": _pretty(model),
-            "family": config.MODEL_FAMILY.get(model, "harness"),
-            "inflight": 0, "driver_cap": None, "oldest_s": 0.0})
     for ent in per_model.values():
         try:
             ent["driver_cap"] = config.driver_limit(ent["model"])
         except Exception:
             ent["driver_cap"] = None
-        cap = ent["driver_cap"]
-        ent["at_cap"] = bool(cap and ent["inflight"] >= cap)
-        ent["over_cap"] = bool(cap and ent["inflight"] > cap)
+        try:
+            ent["account_cap"] = config.family_limit(ent["family"])
+        except Exception:
+            ent["account_cap"] = None
+        dcap, acap = ent["driver_cap"], ent["account_cap"]
+        ent["at_cap"] = bool(dcap and ent["drivers"] >= dcap)
+        ent["over_cap"] = bool((dcap and ent["drivers"] > dcap)
+                               or (acap and ent["account"] > acap))
+        ent["account_at_cap"] = bool(acap and ent["account"] >= acap)
 
     problems = []
     for line in reversed(_load_event_lines()):
@@ -1241,7 +1310,7 @@ def _health(store):
     except Exception:
         leases = []
     return {"now": now, "models": sorted(per_model.values(),
-                                         key=lambda m: (-m["inflight"], m["model"])),
+                                         key=lambda m: (-m["account"], m["model"])),
             "agents": inflight, "runs": reconcile.live_runs(),
             "leases": leases, "problems": problems}
 
