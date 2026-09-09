@@ -1,13 +1,27 @@
 """Shared test scaffolding: import path, event capture, fake store."""
+import atexit
 import logging
+import pathlib
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import config  # noqa: E402
 import events  # noqa: E402
+
+# Tests must never write to the operator's real event log. Several of them
+# deliberately drive failure paths, and check.sh runs the suite inside every
+# task's verify gate — without this redirect each gate run injected fake
+# node_error/driver.error records into logs/events.jsonl, where the dashboard
+# reported them to the operator as real fleet problems.
+_EVENT_DIR = tempfile.mkdtemp(prefix="arc-tests-events-")
+config.EVENTS_LOG = str(pathlib.Path(_EVENT_DIR) / "events.jsonl")
+atexit.register(lambda: shutil.rmtree(_EVENT_DIR, ignore_errors=True))
 
 # Several tests deliberately drive failure paths (node crashes, driver retry
 # ladders, gather deadlocks). Their log output is expected, and printing it

@@ -4,3 +4,5 @@
 __pycache__/
 *.pyclogs/*.lock
 logs/.run-queue.lock
+logs/events.jsonl.prefilter-bak
+logs/*.pre-check-bak
