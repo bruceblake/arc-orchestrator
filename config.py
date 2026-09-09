@@ -118,16 +118,28 @@ TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 # 149KB with only 80s of idle — it was demonstrably still working, and each
 # such kill costs a full retry (MAX_RETRIES=4, so an hour per task).
 DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
-# A harness that stops producing stdout for this long has a hung API request;
-# kill and retry instead of waiting out the full DRIVER_TIMEOUT.
+# A harness that produces no stdout for this long is killed and retried.
 #
-# Confirmed rather than inferred, 2026-09-09: at the moment of a stall the
-# harness sits in state 'S' burning no CPU, and its kimi session log ends on an
-# llm.request that ARC had left unanswered for 320s. Nothing arrives after the
-# hang, so waiting is pure cost — lowered 300 -> 120. drivers._pump records
-# that evidence on every driver.stalled event, so shortening the wait does not
-# cost us the diagnosis.
-DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "120"))
+# This is NOT a hang detector, and treating it as one cost real work. ARC
+# QUEUES requests rather than refusing them: measured across 1927 completed
+# steps, median time-to-first-token is 1.0s at every context size, but the
+# tail grows with context and reaches 308.9s — after which the response
+# streams normally in 0.3s. Time-to-first-token IS stdout silence, so a short
+# idle timeout kills requests that were about to succeed.
+#
+# Per-task probability of killing healthy work at >=40k context (and these are
+# LOWER bounds — steps we killed leave no telemetry, so the real tail is worse):
+#
+#     idle    per-step   median task   p90 task
+#      60s      0.91%        5.3%       18.1%
+#     120s      0.41%        2.4%        8.7%
+#     300s      0.08%        0.5%        1.8%
+#     420s      0.00%        0.0%        0.0%
+#
+# 420s clears the observed tail. A genuinely dead request costs 7 minutes;
+# DRIVER_TIMEOUT bounds the total. Shortening this to "fail fast" trades a
+# small latency saving for a large chance of destroying finished work.
+DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "420"))
 # While a driver runs, emit driver.progress this often: bytes written, idle
 # time, and a /proc sample. Makes a live agent's progress observable instead of
 # inferred from transcript file size, and gives the stall event a CPU baseline

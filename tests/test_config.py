@@ -112,3 +112,26 @@ class HarnessContextBudget(unittest.TestCase):
             self.assertIsNone(config.harness_model("Kimi-K3", "kimi"))
         finally:
             config.USE_FLEET_ALIASES = orig
+
+
+class IdleTimeoutClearsTheLatencyTail(unittest.TestCase):
+    """The idle timeout must exceed how long ARC makes a healthy request wait.
+
+    ARC queues rather than refuses: median time-to-first-token is ~1s at every
+    context size, but the tail reaches 308.9s (measured over 1927 completed
+    steps) before the response streams normally. Time-to-first-token is stdout
+    silence, so an idle timeout below that tail kills work that was about to
+    succeed — at 120s, ~8.7% of context-heavy tasks.
+    """
+
+    OBSERVED_TTFT_TAIL_S = 309
+
+    def test_idle_timeout_exceeds_the_observed_tail(self):
+        self.assertGreater(
+            config.DRIVER_IDLE_TIMEOUT, self.OBSERVED_TTFT_TAIL_S,
+            "slow is not dead: this kills requests ARC would have answered")
+
+    def test_total_timeout_allows_several_slow_steps(self):
+        self.assertGreaterEqual(
+            config.DRIVER_TIMEOUT, config.DRIVER_IDLE_TIMEOUT * 4,
+            "the wall clock must not become the binding limit again")

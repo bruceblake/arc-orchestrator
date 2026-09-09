@@ -191,45 +191,67 @@ work never leaks into a retry — and merges are stash-tolerant (see
 "Task conflict"). Never hand-write a reduced task file to retry a subset;
 that was the old workaround, it is no longer needed.
 
-### A harness stalled (`driver.stalled`)
+### A harness went quiet (`driver.stalled`)
 
-The fleet's dominant failure mode: the harness stops producing output while its
-API request hangs. Every stall event carries the evidence needed to tell the
-two possible causes apart, gathered from `/proc` **before** the process is
-killed (`drivers._pump`):
+**Read this before shortening `ARC_DRIVER_IDLE_TIMEOUT`.** Silence is not a
+hang. ARC *queues* requests rather than refusing them, and time-to-first-token
+is exactly what stdout silence measures.
+
+Measured over 1927 completed steps from the session wire logs:
+
+| input tokens | median TTFT | p90 | max |
+| --- | --- | --- | --- |
+| 0-20k | 1.0s | 3.5s | 14.1s |
+| 35-50k | 1.0s | 7.4s | 238.1s |
+| 65-90k | 1.1s | 15.8s | 262.5s |
+| 90k+ | 1.0s | 16.4s | **308.9s** |
+
+The median never moves. The **tail** grows with context — and those slow steps
+then stream their response normally in ~0.3s. They were healthy all along.
+
+So an idle timeout below that tail destroys finished work. Per-task
+probability of killing a healthy request at >=40k context:
+
+| idle timeout | per step | median task | p90 task |
+| --- | --- | --- | --- |
+| 60s | 0.91% | 5.3% | 18.1% |
+| 120s | 0.41% | 2.4% | 8.7% |
+| 300s | 0.08% | 0.5% | 1.8% |
+| **420s** (default) | 0.00% | 0.0% | 0.0% |
+
+These are **lower bounds**: a step we killed leaves no `step.end`, so it is
+absent from the telemetry entirely and the real tail is worse.
+
+`config.DRIVER_TIMEOUT` (2700s) bounds the total cost, so a genuinely dead
+request costs one idle window, not the whole budget.
+
+**Forensics.** Every stall event still records, gathered from `/proc` before
+the kill:
 
 | field | meaning |
 | --- | --- |
-| `state` / `cpu_delta_s` | `S`/`D` with a near-zero CPU delta = blocked, not spinning |
+| `state` / `cpu_delta_s` | `S`/`D` with near-zero CPU = waiting, not spinning |
 | `blocked` | the above, as a boolean |
-| `wire.awaiting_api` | (kimi) its session log ends on an unanswered `llm.request` |
-| `wire.waiting_s` | how long ARC has left that request open |
-| `last_activity` | the last few event types the agent emitted |
-| `bytes` | how much it produced before going quiet |
+| `wire.awaiting_api` / `waiting_s` | a request is outstanding, and for how long |
+| `last_activity` | the last few tool calls before it went quiet |
+| `bytes` / `records` | how much it produced first |
 
-A stall with `blocked: true` and `wire.awaiting_api: true` means the harness
-is waiting on a request that has not come back. **It does not by itself prove
-the server is at fault**: a harness we SIGKILL also ends on an unanswered
-request, so this signal cannot separate "server never replied" from "we killed
-it mid-flight". Read it together with `waiting_s` — a wait far longer than a
-comparable direct API call (typically under 10s, even at 48k tokens with tools)
-is the part that indicts the request.
+Note what these can and cannot tell you. `blocked: true` with
+`awaiting_api: true` means the harness is waiting on the server — it does
+**not** distinguish "queued and about to answer" from "never coming back", and
+a harness we SIGKILL also ends on an unanswered request. `waiting_s` against
+the table above is the only real discriminator.
 
-What ARC does at its concurrency cap is **reject instantly**, not hang:
-measured 2026-09-09, 5 concurrent Kimi-K3 requests against a cap of 3 gave 3
-successes and 2 `400 {"detail": "concurrent session limit reached"}` in 0.2s.
-Earlier notes in this repo claiming ARC "holds rejected requests open
-indefinitely" are wrong; those 400s are real and are what the capacity backoff
-is for.
+What ARC does at its concurrency cap is **reject instantly**: 5 concurrent
+Kimi-K3 requests against a cap of 3 gave 3 successes and 2
+`400 {"detail": "concurrent session limit reached"}` in 0.2s. Earlier notes in
+this repo claiming ARC "holds rejected requests open indefinitely" are wrong.
+Those 400s are real and are what the capacity backoff is for; the long
+silences are queueing, which is a different thing.
 
 `driver.progress` heartbeats (every `ARC_DRIVER_PROGRESS_INTERVAL`, default
-60s) carry the same sample while the agent is healthy, so the Fleet panel can
-show "quiet 90s" on a live agent and the stall event has a CPU baseline to
-diff against.
-
-`ARC_DRIVER_IDLE_TIMEOUT` (default 120s) is the kill threshold. It is short
-deliberately: nothing arrives after one of these hangs, so waiting is pure
-cost. Raise it only if you see stalls that later recover on their own.
+60s) carry the same `/proc` sample while an agent is healthy, so the Fleet
+panel can show "quiet 90s" on a live agent without it meaning trouble.
 
 ### Context budget (per harness — they fail differently)
 
