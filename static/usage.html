@@ -69,6 +69,21 @@ th, td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: l
 th { color: var(--dim); font-weight: normal; font-size: 11px; }
 td { font-size: 12px; }
 .r { text-align: right; }
+tr.over td { background: rgba(248,81,73,.12); }
+tr.over td.f-in-cell { color: var(--err); font-weight: 600; }
+tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
+.capflag { font-size: 10px; padding: 1px 5px; border-radius: 4px; margin-left: 5px; }
+.capflag.over { background: var(--err); color: #fff; }
+.capflag.at { background: #d29922; color: #000; }
+
+/* driver events / errors panel */
+#drv-events { max-height: 320px; overflow: auto; }
+.evrow { display: flex; gap: 8px; padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 11px; align-items: baseline; }
+.evrow .et { white-space: nowrap; font-weight: 600; }
+.evrow .et.bad { color: var(--err); }
+.evrow .et.warn { color: #d29922; }
+.evrow .em { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.evrow .ew { color: var(--dim); white-space: nowrap; }
 
 .empty { color: var(--dim); font-size: 12px; padding: 10px 0; }
 
@@ -95,6 +110,8 @@ td { font-size: 12px; }
   <span class="stat">refresh <b id="count">5s</b></span>
   <span class="stat">updated <b id="clock">—</b></span>
   <span class="badge" id="stale" style="display:none">stale (retrying)</span>
+  <span class="badge" id="overcap" style="display:none;background:var(--err);color:#fff"></span>
+  <a class="seg" href="/" style="text-decoration:none">Projects</a>
 </header>
 <main>
   <section class="panel">
@@ -119,11 +136,17 @@ td { font-size: 12px; }
   </section>
 
   <section class="panel">
-    <h2>Families</h2>
+    <h2>Families <small style="color:var(--dim);font-weight:normal">kimi + kimi-code share one ARC account (combined)</small></h2>
     <table>
       <thead><tr><th>family</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
       <tbody id="fam-body"></tbody>
     </table>
+  </section>
+
+  <section class="panel">
+    <h2>Driver events <small style="color:var(--dim);font-weight:normal">errors · stalls · timeouts · pruned phantoms · cap breaches</small></h2>
+    <div id="drv-events"></div>
+    <div class="empty" id="drv-empty" style="display:none">No driver errors, stalls or cap breaches on record.</div>
   </section>
 </main>
 
@@ -259,6 +282,7 @@ function familyRow(f) {
 function updateFamilies(families) {
   const tb = $("#fam-body");
   const seen = new Set();
+  let worst = null;
   for (const f of (families || [])) {
     seen.add(f.family);
     let tr = tb.querySelector('[data-fam="' + f.family.replace(/"/g, '\\"') + '"]');
@@ -269,7 +293,27 @@ function updateFamilies(families) {
     tr.querySelector(".f-cap").textContent = f.limit != null ? f.limit : "—";
     tr.querySelector(".f-req").textContent = fmt(f.requests);
     tr.querySelector(".f-tok").textContent = fmt(f.tokens);
-    tr.querySelector(".f-in").textContent = f.inflight;
+    const inc = tr.querySelector(".f-in");
+    inc.classList.add("f-in-cell");
+    const eff = f.inflight_shared != null ? f.inflight_shared : f.inflight;
+    inc.innerHTML = esc(eff)
+      + (f.over_cap ? '<span class="capflag over">OVER LIMIT</span>'
+        : (f.at_cap ? '<span class="capflag at">AT LIMIT</span>' : ""));
+    tr.classList.toggle("over", !!f.over_cap);
+    tr.classList.toggle("atcap", !f.over_cap && !!f.at_cap);
+    if (f.over_cap) worst = f;
+    else if (f.at_cap && !worst) worst = f;
+  }
+  const badge = $("#overcap");
+  if (worst) {
+    badge.style.display = "";
+    badge.textContent = worst.over_cap
+      ? "OVER LIMIT: " + worst.family + " " + (worst.inflight_shared ?? worst.inflight) + "/" + worst.limit
+      : "at limit: " + worst.family + " " + (worst.inflight_shared ?? worst.inflight) + "/" + worst.limit;
+    badge.style.background = worst.over_cap ? "var(--err)" : "#d29922";
+    badge.style.color = worst.over_cap ? "#fff" : "#000";
+  } else {
+    badge.style.display = "none";
   }
   tb.querySelectorAll("tr[data-fam]").forEach(tr => {
     if (!seen.has(tr.dataset.fam)) tr.style.display = "none";
@@ -282,12 +326,33 @@ function updateFamilies(families) {
   } else if (empty) { empty.remove(); }
 }
 
+const EV_BAD = {"driver.error":1, "driver.timeout":1, "driver.stalled":1, "inflight.over_cap":1, "task.failed":1};
+function updateDriverEvents(events) {
+  const box = $("#drv-events");
+  events = events || [];
+  $("#drv-empty").style.display = events.length ? "none" : "";
+  box.innerHTML = events.slice().reverse().map(e => {
+    const bad = EV_BAD[e.type];
+    const label = esc(e.type);
+    const detail = e.error || e.note ||
+      [e.family && (e.inflight != null ? e.family + " " + e.inflight + "/" + e.limit : e.family),
+       e.task].filter(Boolean).join(" ");
+    const meta = [e.model, e.role, e.task, e.attempt != null ? "attempt " + e.attempt : ""]
+      .filter(Boolean).join(" · ");
+    const when = e.ts ? ago(e.ts) : "";
+    return '<div class="evrow"><span class="et ' + (bad ? "bad" : "warn") + '">' + label + '</span>'
+      + '<span class="em" title="' + esc(meta) + '">' + esc(detail) + '</span>'
+      + '<span class="ew">' + esc(when) + '</span></div>';
+  }).join("");
+}
+
 function updateUI(u, fleet) {
   USAGE = u; FLEET = fleet;
   fillTotal(u);
   fillToolbar(fleet);
   updateModels(u.models, fleet.caps, u.totals.tokens);
   updateFamilies(u.families);
+  updateDriverEvents(u.recent_driver_events);
 }
 
 async function load() {

@@ -66,6 +66,22 @@ def _ts(v):
 
 _kimi_cache = {}  # wire.jsonl path -> {"key": (size, mtime_ns), "agg": parsed}
 STALE_INFLIGHT_S = 600  # ignore unanswered llm.request older than this (dead client)
+# An unmatched driver.start can never outlive DRIVER_TIMEOUT + retry backoff:
+# the driver itself errors (and settles) every attempt it owns. Anything older
+# belongs to a killed run and must not count against concurrency caps.
+DRIVER_STALE_S = config.DRIVER_TIMEOUT + 240
+POOL_STALE_S = 7200  # unmatched pool request_start older than this is a dead client
+_stale_emitted = set()  # keys already reported via driver.stale / request.stale
+_over_emitted = set()   # families already reported via inflight.over_cap
+
+
+def _emit_event(etype, **fields):
+    """Best-effort event emission from the dashboard process (instrumentation)."""
+    try:
+        import events
+        events.emit(etype, **fields)
+    except Exception:
+        pass
 
 
 def _parse_kimi_wire(path):
@@ -242,6 +258,31 @@ def _xkey(task):
     return (m.group(1), int(m.group(2))) if m else (task, None)
 
 
+def _transcript_toks(tpath):
+    """(tokens, prompt, completion) for one transcript file, cached by size+mtime."""
+    if not tpath:
+        return (0, 0, 0)
+    try:
+        from drivers import transcript_tokens
+    except Exception:
+        return (0, 0, 0)
+    tp = str(tpath)
+    try:
+        st = Path(tp).stat()
+    except OSError:
+        return (0, 0, 0)
+    ck = (st.st_size, st.st_mtime_ns)
+    ent = _transcript_cache.get(tp)
+    if ent is None or ent["key"] != ck:
+        try:
+            raw = Path(tp).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return (0, 0, 0)
+        ent = {"key": ck, "tok": transcript_tokens(raw)}
+        _transcript_cache[tp] = ent
+    return ent["tok"]
+
+
 def _opencode_token_backfill(store, done_tok_keys):
     """Token points for OLD opencode runs whose driver.done pre-dates token plumbing.
 
@@ -312,15 +353,39 @@ def _collect_inflight(now):
         elif etype == "driver.start":
             driver_starts[(e.get("harness"), e.get("model"), e.get("role"),
                            e.get("task"), e.get("attempt"))] = e
-        elif etype in ("driver.done", "driver.error"):
+        elif etype in ("driver.done", "driver.error", "driver.stale"):
             key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
             if key in driver_starts:
                 del driver_starts[key]
-            else:  # driver.error carries no role; settle its start by the other fields
+            else:  # driver.error/stale may carry no role; settle by the other fields
                 for k in list(driver_starts):
                     if k[:2] == key[:2] and k[3:] == key[3:]:
                         del driver_starts[k]
                         break
+        elif etype == "request.stale":
+            starts.pop(e.get("req_id"), None)
+    # Prune phantom in-flight rows: starts that can no longer be real because
+    # their owner would have errored out long ago (killed runs never settle).
+    # Emit one event per pruned key so the reconciliation survives restarts.
+    for rid, e in list(starts.items()):
+        started = _ts(e.get("ts")) or now
+        if started < now - POOL_STALE_S:
+            del starts[rid]
+            skey = ("req", rid)
+            if skey not in _stale_emitted:
+                _stale_emitted.add(skey)
+                _emit_event("request.stale", req_id=rid, model=e.get("model"),
+                            family=e.get("family"), age_s=round(now - started),
+                            note="request_start with no end for >2h — dead client, pruned from in-flight")
+    for key, e in list(driver_starts.items()):
+        started = _ts(e.get("ts")) or now
+        if started < now - DRIVER_STALE_S:
+            del driver_starts[key]
+            if key not in _stale_emitted:
+                _stale_emitted.add(key)
+                _emit_event("driver.stale", harness=key[0], model=key[1], role=key[2],
+                            task=key[3], attempt=key[4], age_s=round(now - started),
+                            note="driver.start older than DRIVER_TIMEOUT+buffer with no done/error — run was killed, pruned from in-flight")
     for rid, e in starts.items():
         started = _ts(e.get("ts")) or now
         rows.append({"req_id": rid, "family": e.get("family"), "model": e.get("model"),
@@ -379,7 +444,8 @@ def _usage(store=None, range_key=None):
     # models/inflight/points for kimi-code sessions up front (cached, shared with inflight)
     inflight, kimi = _collect_inflight(now)
 
-    for line in _load_event_lines():
+    ev_lines = _load_event_lines()
+    for line in ev_lines:
         try:
             e = json.loads(line)
         except Exception:
@@ -508,6 +574,49 @@ def _usage(store=None, range_key=None):
         if fam is not None:
             fam["inflight"] += 1
 
+    # Over-cap detection. Kimi-K3 headless drivers (family "kimi") and kimi CLI
+    # sessions (family "kimi-code") share ONE ARC account, so their combined
+    # in-flight count is checked against kimi's limit.
+    shared = {"kimi": ("kimi", "kimi-code")}
+    for fkey, fam in by_family.items():
+        parts = shared.get(fkey, (fkey,))
+        eff = sum(by_family.get(p, {}).get("inflight", 0) for p in parts)
+        fam["inflight_shared"] = eff
+        lim = fam.get("limit")
+        fam["at_cap"] = bool(lim and eff >= lim)
+        fam["over_cap"] = bool(lim and eff > lim)
+        if fam["over_cap"]:
+            if fkey not in _over_emitted:
+                _over_emitted.add(fkey)
+                _emit_event("inflight.over_cap", family=fkey, inflight=eff, limit=lim,
+                            shared_with=list(parts[1:]),
+                            note="in-flight above per-account ARC cap — killed runs left phantom rows or a real breach")
+        elif not fam["at_cap"]:
+            _over_emitted.discard(fkey)
+
+    # Recent driver-level problems for the dashboard error panel (newest last).
+    recent_driver = []
+    _DRV_TYPES = ("driver.error", "driver.stalled", "driver.timeout", "driver.stale",
+                  "inflight.over_cap", "request.stale", "task.failed")
+    for line in reversed(ev_lines):
+        if '"driver.' not in line and '"task.failed"' not in line and '"inflight.' not in line \
+                and '"request.stale"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") not in _DRV_TYPES:
+            continue
+        recent_driver.append({k: e[k] for k in
+                              ("type", "ts", "harness", "model", "role", "task", "attempt",
+                               "error", "note", "family", "inflight", "limit", "idle_s",
+                               "age_s", "session_id")
+                              if k in e})
+        if len(recent_driver) >= 40:
+            break
+    recent_driver.reverse()
+
     start, bucket, n = _series_window(range_key, now, min((p[0] for p in pts), default=None))
     series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
               for f in config.FAMILY_ORDER}
@@ -558,6 +667,7 @@ def _usage(store=None, range_key=None):
 
     return {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
             "models": models, "families": families, "inflight": inflight,
+            "recent_driver_events": recent_driver,
             "totals": totals, "series": series}
 
 
@@ -579,6 +689,7 @@ def _fleet(store):
         return {"totals": _fleet_cache["totals"], "models": _fleet_cache["models"],
                 "ranges": RANGES, "ts": now}
     usage = _usage(store, "all")
+    fam_state = {f["family"]: f for f in usage["families"]}
     agg = {}
     for m in usage["models"]:
         row = agg.setdefault(m["model"], {
@@ -613,7 +724,11 @@ def _fleet(store):
                        "completion_tokens": row["completion_tokens"],
                        "avg_latency_ms": round(row["lat_ms"] / row["lat_n"]) if row["lat_n"] else None,
                        "last_ts": row["last_ts"], "account_cap": account_cap,
-                       "driver_cap": driver_cap})
+                       "driver_cap": driver_cap,
+                       "inflight": fam_state.get(row["family"], {}).get("inflight", 0),
+                       "inflight_shared": fam_state.get(row["family"], {}).get("inflight_shared", 0),
+                       "at_cap": fam_state.get(row["family"], {}).get("at_cap", False),
+                       "over_cap": fam_state.get(row["family"], {}).get("over_cap", False)})
     models.sort(key=lambda m: -m["requests"])
     totals = {f: usage["totals"][f] for f in
               ("requests", "ok", "errors", "tokens", "prompt_tokens", "completion_tokens")}
@@ -633,20 +748,30 @@ def _valid_repo(p):
 
 
 def _projects(store):
-    inflight, _kimi = _collect_inflight(time.time())
+    now = time.time()
+    inflight, _kimi = _collect_inflight(now)
     live_tasks = set()
+    live = {}  # base task id -> {"seconds": latest elapsed, "tokens": partial transcript tokens}
     for row in inflight:
-        if row.get("task"):
-            base, _x = _xkey(row["task"])
-            live_tasks.add(row["task"])
-            if base:
-                live_tasks.add(base)
+        if not row.get("task"):
+            continue
+        base, _x = _xkey(row["task"])
+        if not base:
+            continue
+        live_tasks.add(row["task"])
+        live_tasks.add(base)
+        ent = live.setdefault(base, {"seconds": 0.0, "tokens": 0})
+        ent["seconds"] = max(ent["seconds"], row.get("elapsed_s") or 0.0)
+        if row.get("transcript"):
+            toks, _p, _c = _transcript_toks(Path(config.ROOT) / "logs" / "harness" / row["transcript"])
+            ent["tokens"] = max(ent["tokens"], toks)
     try:
         rows_all = store.code_tasks_all() if store else []
     except Exception:
         rows_all = []
     # per-task tokens/seconds from driver.done events (historical, all sources)
     ev_stats = {}  # base task id -> {"tokens","seconds","runs"}
+    ev_done_keys = set()  # (harness, model, role, base, xnum) already counted
     for ln in _load_event_lines():
         if '"driver.done"' not in ln:
             continue
@@ -654,13 +779,33 @@ def _projects(store):
             e = json.loads(ln)
         except ValueError:
             continue
-        base, _x = _xkey(e.get("task"))
+        base, xnum = _xkey(e.get("task"))
         if not base:
             continue
+        ev_done_keys.add((e.get("harness"), e.get("model"), e.get("role"), base, xnum))
         s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0})
         s["tokens"] += e.get("tokens") or 0
         s["seconds"] += e.get("seconds") or 0.0
         s["runs"] += 1
+    # Supplement from harness_runs rows whose driver.done fell out of the event
+    # log (the log is bounded; the DB keeps every run). Seconds always; tokens
+    # via cached transcript parse (kimi transcripts carry no usage -> 0 there,
+    # but agent-time is complete either way).
+    try:
+        hrows = store.harness_runs_all() if store else []
+    except Exception:
+        hrows = []
+    for row in hrows:
+        base = row.get("task_id")
+        if not base:
+            continue
+        key = (row.get("harness"), row.get("model"), row.get("role"), base, row.get("attempt"))
+        if key in ev_done_keys:
+            continue
+        s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0})
+        s["seconds"] += row.get("seconds") or 0.0
+        s["runs"] += 1
+        s["tokens"] += _transcript_toks(row.get("transcript"))[0]
     out = []
     tdir = Path(config.TASKS_DIR)
     for f in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
@@ -690,16 +835,21 @@ def _projects(store):
             if not tid:
                 continue
             ev = ev_stats.get(tid, {})
+            lv = live.get(tid, {})
             nodes.append({"id": tid, "title": t.get("title") or tid,
                           "model": t.get("model"), "reviewer": t.get("reviewer"),
                           "status": per_task.get(tid, "pending"),
                           "live": tid in live_tasks,
                           "tokens": ev.get("tokens", 0),
-                          "seconds": round(ev.get("seconds", 0.0), 1)})
+                          "seconds": round(ev.get("seconds", 0.0), 1),
+                          "live_tokens": lv.get("tokens", 0),
+                          "live_seconds": round(lv.get("seconds", 0.0), 1)})
         edges = [{"src": d, "dst": t["id"]} for t in tdefs if t.get("id")
                  for d in (t.get("deps") or t.get("depends") or []) if d in ids]
         tok_total = sum(n["tokens"] for n in nodes)
         sec_total = round(sum(n["seconds"] for n in nodes), 1)
+        live_tok = sum(n["live_tokens"] for n in nodes)
+        live_sec = round(sum(n["live_seconds"] for n in nodes), 1)
         merged_n = sum(1 for n in nodes if n["status"] == "merged")
         try:
             mtime_iso = datetime.utcfromtimestamp(f.stat().st_mtime).isoformat() + "+00:00"
@@ -712,7 +862,9 @@ def _projects(store):
                     "statuses": statuses,
                     "dag": {"nodes": nodes, "edges": edges},
                     "progress": {"done": merged_n, "total": len(ids)},
-                    "tokens": tok_total, "seconds": sec_total,
+                    "tokens": tok_total + live_tok, "seconds": round(sec_total + live_sec, 1),
+                    "done_tokens": tok_total, "done_seconds": sec_total,
+                    "live_tokens": live_tok, "live_seconds": live_sec,
                     "active": statuses.get("running", 0) > 0 or any(i in live_tasks for i in ids),
                     "last_activity": last or mtime_iso})
     out.sort(key=lambda p: p["last_activity"] or "", reverse=True)
