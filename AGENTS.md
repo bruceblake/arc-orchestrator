@@ -264,7 +264,12 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   dashed amber self-arcs with xN counts, `conflict` nodes in **orange**
   (distinct from `failed` red), and the last review verdict on each node.
 - Harness-level resilience: `config.DRIVER_TIMEOUT` = 900 s per harness
-  invocation (override `ARC_DRIVER_TIMEOUT`), retries with exponential
+  invocation (override `ARC_DRIVER_TIMEOUT`) as a total-runtime backstop, and
+  `config.DRIVER_IDLE_TIMEOUT` = 300 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
+  a **stall detector**: a harness that produces no stdout for that long has a
+  hung API request (the ARC platform holds rejected/queued requests open
+  instead of erroring — observed as ~800 s of silence after rapid progress),
+  so it is killed and retried rather than waited out. Retries use exponential
   backoff (capped at 30 s) up to `config.MAX_RETRIES` = 4. If every retry
   fails, the attempt is recorded as a harness run (exit 1) and treated as a
   failed attempt — the task re-enters the bounded fix loop and, if the

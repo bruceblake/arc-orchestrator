@@ -182,7 +182,9 @@ class Driver:
         try:
             with open(tpath, "wb") as fh:
                 while True:
-                    remaining = deadline - time.monotonic()
+                    idle_for = time.monotonic() - last_chunk_t
+                    remaining = min(deadline - time.monotonic(),
+                                    config.DRIVER_IDLE_TIMEOUT - idle_for)
                     if remaining <= 0:
                         raise asyncio.TimeoutError
                     chunk = await asyncio.wait_for(proc.stdout.read(65536), remaining)

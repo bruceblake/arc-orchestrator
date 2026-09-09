@@ -109,6 +109,10 @@ def family_limit(name):
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
 TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "900"))
+# A harness that stops producing stdout for this long has a hung API request
+# (observed: ARC holds rejected/queued requests open indefinitely); kill and
+# retry instead of waiting out the full DRIVER_TIMEOUT.
+DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "300"))
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 
