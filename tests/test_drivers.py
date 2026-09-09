@@ -1,5 +1,6 @@
 """Driver slot accounting, capacity classification, transcript parsing."""
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -237,13 +238,33 @@ class StallInstrumentation(unittest.TestCase):
     def test_proc_snapshot_is_empty_for_a_dead_pid(self):
         self.assertEqual(drivers.proc_snapshot(2 ** 22), {})
 
-    def test_activity_tail_names_what_the_agent_was_last_doing(self):
-        raw = ('{"type":"text"}\n{"type":"tool_use"}\n'
-               '{"type":"step_finish"}\n{"type":"tool_use"}\n')
-        self.assertEqual(drivers.activity_tail(raw, n=2), ["step_finish", "tool_use"])
+    def test_activity_tail_reads_the_opencode_shape(self):
+        raw = ('{"type":"text","part":{}}\n'
+               '{"type":"tool_use","part":{"tool":"edit"}}\n'
+               '{"type":"step_finish"}\n')
+        self.assertEqual(drivers.activity_tail(raw),
+                         ["text", "tool_use:edit", "step_finish"])
+
+    def test_activity_tail_reads_the_kimi_shape(self):
+        """kimi emits OpenAI-style role/tool_calls, not opencode's type field."""
+        raw = ('{"role":"assistant","tool_calls":[{"function":{"name":"Read"}},'
+               '{"function":{"name":"Grep"}}]}\n'
+               '{"role":"tool","tool_call_id":"c1","content":"..."}\n')
+        self.assertEqual(drivers.activity_tail(raw),
+                         ["assistant:Read+Grep", "tool"])
+
+    def test_activity_tail_survives_a_single_huge_record(self):
+        """One kimi tool result can be 50KB; slicing a byte tail lands
+        mid-line and parses nothing, which silently emptied the field."""
+        huge = json.dumps({"role": "tool", "tool_call_id": "c1",
+                           "content": "x" * 60000})
+        raw = '{"role":"assistant","tool_calls":[{"function":{"name":"Read"}}]}\n' + huge + "\n"
+        self.assertEqual(drivers.activity_tail(raw), ["assistant:Read", "tool"])
 
     def test_activity_tail_tolerates_junk(self):
         self.assertEqual(drivers.activity_tail("not json at all"), [])
+        self.assertEqual(drivers.activity_tail(""), [])
+        self.assertEqual(drivers.activity_tail('{"unrecognised": 1}'), [])
 
     def test_a_stall_emits_forensics_and_reads_as_capacity(self):
         """The stall event must carry enough to diagnose without the process."""

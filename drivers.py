@@ -122,18 +122,60 @@ def proc_snapshot(pid):
     return out
 
 
-_EVENT_TYPE_RE = re.compile(r'"type"\s*:\s*"([^"]{1,40})"')
+def _describe_record(obj):
+    """One short label for a transcript record, across both harness shapes.
+
+    opencode emits {"type": "step_finish"|"text"|"tool_use", ...}; kimi emits
+    OpenAI-style {"role": "assistant"|"tool", "tool_calls": [...]}. What we
+    want from either is the same: what was the agent doing.
+    """
+    if not isinstance(obj, dict):
+        return None
+    kind = obj.get("type")
+    if isinstance(kind, str):
+        tool = (obj.get("part") or {}).get("tool") if isinstance(obj.get("part"), dict) else None
+        return f"{kind}:{tool}" if tool else kind
+    role = obj.get("role")
+    if not isinstance(role, str):
+        return None
+    calls = obj.get("tool_calls")
+    if isinstance(calls, list) and calls:
+        names = []
+        for c in calls[:3]:
+            fn = (c or {}).get("function") if isinstance(c, dict) else None
+            name = (fn or {}).get("name") if isinstance(fn, dict) else None
+            if name:
+                names.append(str(name)[:30])
+        if names:
+            return f"{role}:{'+'.join(names)}"
+    return role
 
 
 def activity_tail(raw, n=6):
-    """The last few event types the harness emitted before going quiet.
+    """The last few things the harness did before going quiet.
 
-    Names what the agent was doing at the moment it hung (a tool call, a
-    message, a step boundary) without dragging whole transcript payloads into
-    the event log.
+    Names what the agent was doing at the moment it hung — which tool it had
+    just called, whether it was mid-message — without dragging whole transcript
+    payloads into the event log. If the hang always follows a particular kind
+    of step, this is where that shows up.
     """
-    kinds = _EVENT_TYPE_RE.findall(raw[-20000:])
-    return kinds[-n:]
+    # Split by LINES, not by a byte tail: one kimi record can be 50KB (a big
+    # tool result), so slicing the last N characters lands mid-line and nothing
+    # parses. Transcripts are already fully in memory here.
+    out = []
+    for line in reversed(raw.splitlines()[-40:]):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            label = _describe_record(json.loads(line))
+        except ValueError:
+            continue
+        if label:
+            out.append(label)
+            if len(out) >= n:
+                break
+    return list(reversed(out))
 
 
 def _wire_stall_evidence(task_id):
@@ -469,6 +511,7 @@ class Driver:
                         idle_s=idle, elapsed_s=total,
                         cpu_delta_s=cpu_delta, blocked=blocked,
                         last_activity=activity_tail(partial),
+                        records=partial.count("\n"),
                         wire=wire, session_id=psid or session_id, **snap)
             detail = ""
             if wire and wire.get("awaiting_api"):
