@@ -95,8 +95,14 @@ exhausted on the final escalation tier.
 project (`code_tasks.build_code_graph`) — it never starts a new one. Tasks at
 `merged` are skipped wholesale (their subgraph collapses to a stub publish
 node returning `merged`; dependents treat them as satisfied, no models/git
-spent). Tasks at `failed` re-execute **one escalation tier higher** than
-their recorded model with a full fresh fix budget. Tasks at `conflict`
+spent). Tasks at `failed` re-execute one escalation tier higher than their
+recorded model with a full fresh fix budget **only when the recorded failure
+reason is a capability failure** (`code_tasks._is_capability_failure`: the
+model exhausted its fix rounds or escalation path). A failure that records an
+infrastructure reason — the run process was killed, the graph cancelled, the
+harness crashed — re-executes at the **same** tier: being interrupted is no
+evidence the model was too weak, and escalating on it funnels every
+interrupted task onto the scarcest tier at once. Tasks at `conflict`
 re-execute at the **same** model, and their publish node first tries repair:
 if `task/<tid>` is still ahead of `main` (`gitstore.branch_ahead` — the
 reviewed, gate-passing commit survived), it merges that branch directly under
@@ -104,4 +110,17 @@ the merge lock instead of re-running implement+review; only a failed repair
 falls back to full re-execution. Stale `running` rows are marked `failed` at
 startup, scoped to that taskfile. Startup prints a resume plan (skipped /
 retried / escalated) and emits `run.resume`
-`{skipped_merged, retried, escalated_on_resume}`.
+`{skipped_merged, retried, escalated_on_resume}`, where `escalated_on_resume`
+is measured against where each task **last ran**, not the taskfile's routing.
+
+**Review diffs** are taken against the **merge base** of the task branch and
+the base ref, never the live `main` (`gitstore.diff_full`). Merges are
+serialized but tasks run in parallel, so `main` advances while a task works;
+diffing against it presents every file a sibling merged since alloc as a
+deletion by this task, and the reviewer rejects the scope violation.
+
+**Run shutdown** is a contract too: on every exit path — clean finish, node
+crash, `SIGINT`, `SIGTERM` — a run cancels in-flight work, kills its harness
+child processes, marks its unfinished tasks `failed` with an infrastructure
+reason, and releases the driver leases it held. `main.py code reconcile`
+reaps orphans from runs that died before this was true.

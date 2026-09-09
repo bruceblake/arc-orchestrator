@@ -80,9 +80,20 @@ async def diff_stat(wt):
 
 
 async def diff_full(wt, base, max_chars=24000):
-    """Working-tree diff vs base for review; includes untracked files."""
+    """Working-tree diff vs the point this task branched from; untracked included.
+
+    Diffed against the MERGE BASE, not the live `base` ref. Merges are
+    serialized but tasks run in parallel, so `main` moves forward while a task
+    is still working: diffing against it made every file a sibling had merged
+    since alloc appear as a deletion by THIS task. Reviewers then correctly
+    rejected the change as an out-of-scope deletion, burning a fix round every
+    time — the more the fleet parallelized, the more often correct work was
+    rejected and escalated to a stronger model for no reason.
+    """
     await _git(["add", "-A", "-N"], cwd=wt, check=False)  # intent-to-add
-    _, diff, _ = await _git(["diff", base], cwd=wt, check=False)
+    rc, mb, _ = await _git(["merge-base", base, "HEAD"], cwd=wt, check=False)
+    ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
+    _, diff, _ = await _git(["diff", ref], cwd=wt, check=False)
     if len(diff) > max_chars:
         diff = diff[:max_chars] + f"\n... [truncated at {max_chars} chars]"
     return diff or "(empty diff)"

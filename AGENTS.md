@@ -156,7 +156,13 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   the taskfile's reviewer. Each escalation emits `task.escalated`
   `{from_model, to_model, n}`; the `code_tasks` row is updated with the
   current model/reviewer and `harness_runs` rows record the model actually
-  used. Only when the last tier exhausts is the task marked `failed`, and
+  used. On **resume**, escalation is conditional: only a row whose recorded
+  failure reason is a capability failure (exhausted fix rounds / escalation)
+  starts a tier higher. A row written because the run process was killed or
+  the graph was cancelled restarts at the **same** tier — an interrupted run
+  is not evidence the model was too weak, and escalating on it sends every
+  interrupted task to the scarcest tier simultaneously.
+  Only when the last tier exhausts is the task marked `failed`, and
   the failure message names the last model tried (`exhausted escalation up
   to Kimi-K3`, code_tasks.py:243). Concurrency footnote: worst-case harness
   runs per task multiply by tier count (fix rounds × tiers); all caps of

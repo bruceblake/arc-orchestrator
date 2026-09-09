@@ -183,7 +183,61 @@ Then one real round before committing to 24/7:
 .venv/bin/python main.py serve [--port P]         # dashboard manually (prints all addresses too)
 .venv/bin/python main.py status                   # DB statistics
 .venv/bin/python main.py graph                    # print both graph topologies
+.venv/bin/python main.py bench list               # benchmark suites/tasks
+.venv/bin/python main.py bench run [options]      # run benchmark jobs
+.venv/bin/python main.py bench report [--run-id N]  # score tables (default: latest run)
+.venv/bin/python main.py bench runs               # past benchmark runs
 ```
+
+### Benchmarking models x harnesses
+
+`bench` answers: which ARC model, effort level, harness, and option set solves
+coding tasks best. Three suites (31 tasks total; `bench list` details):
+
+- `humaneval` — 15 canonical HumanEval-style tasks (sanity baseline; saturated
+  for frontier models, treat accordingly)
+- `original` — 11 hand-written 2026 function tasks with deterministic edge
+  cases (contamination-resistant)
+- `package` — 5 multi-file mini-project specs (suited to the CLI harnesses)
+
+Variables swept independently:
+
+- **model x effort**: `--models 'gpt-oss:low;high,glm,kimi,...'` (efforts
+  after `:` are `;`-separated) or `all`
+  (per-family effort names validated against `config.FAMILIES`; deepseek uses
+  `max`, not `high`)
+- **harness**: `direct` (single chat call -> extract code -> run tests),
+  `fanout` (best-of-N parallel samples, test-based selection),
+  `fixloop` (aider-style test feedback, <= `--max-rounds`),
+  `review` (cross-family reviewer over test results),
+  `opencode` / `kimi` (full CLI agents with shell access in a scratch dir;
+  the kimi harness only runs for the kimi family)
+- **sampling**: `--n` direct samples per cell (pass@1 = mean over samples),
+  `--fanout-n` inner samples for fanout (default 4), `--temperature`
+
+Metrics per (model, effort, harness) cell: pass@1 %, any-sample coverage %,
+avg seconds, avg tokens; plus suite x model and tier x harness matrices and
+unbiased pass@k / pass^n for multi-sample cells (`bench report`). Every job
+writes `logs/bench/<run>/<task>__<model-effort>__<harness>__s<i>/` with the
+candidate files and runs the task's tests in a subprocess. Results live in
+the `bench_runs`/`bench_results` SQLite tables.
+
+Methodology note: published results (SWE-bench, aider, Terminal-Bench) show
+the same model swings 10-25 points across scaffolds, so the *harness is the
+unit of measurement* — never compare a `direct` score for model A against a
+`fixloop` score for model B and call the model better.
+
+```bash
+.venv/bin/python main.py bench run --plan --models all \
+    --harnesses direct,fanout,fixloop,review --n 4   # print matrix, run nothing
+.venv/bin/python main.py bench run --limit 6 --models all --efforts default \
+    --harnesses direct --n 4 --dry-run               # validate plumbing, no API calls
+.venv/bin/python main.py bench run --models all --harnesses direct,fanout \
+    --n 4 --label weekly                            # real run
+```
+
+`ARC_BENCH_JOBS` (default 24) caps parallel jobs; per-family API concurrency
+is still governed by the pool semaphores in `.env`.
 
 All commands accept `--dry-run` (simulated model calls, separate `dry-run.db`;
 the build workload writes to `production/minecraft-dry-run/` so it can never
@@ -233,6 +287,22 @@ A round makes roughly `13 x questions` model calls. Defaults are polite; the
 per-model semaphores are the hard guarantee that you never exceed ARC's
 documented concurrency limits.
 
+## Tests
+
+Stdlib `unittest`, no extra dependencies:
+
+```bash
+.venv/bin/python -m unittest discover -s tests -t tests
+```
+
+They cover the parts that historically broke silently: graph execution and
+drain-on-failure semantics, taskfile validation, reviewer-verdict parsing,
+resume/escalation planning, driver slot accounting and backoff classification,
+lease caps, orphan reaping, and review-diff isolation between parallel tasks
+(the last two run against real temporary git repos). Run them before
+committing engine changes — several of the bugs they encode were found only
+by running the fleet for hours.
+
 ## Extending
 
 Add a node in `work.py`, wire it with edges, and (if it joins parallel
@@ -267,7 +337,10 @@ the service evolves. Only `config.py`, `work.py`, and `.env` ever need touching.
 | `build_work.py` | the Minecraft build graph + verification gauntlet |
 | `events.py` | append-only JSONL event log (contextvars-tagged) |
 | `dashboard.py` + `static/` | read-only live dashboard (desktop, phone, usage pages) |
-| `main.py` | CLI: run / once / build / serve / status / graph |
+| `main.py` | CLI: run / once / build / serve / status / graph / bench / code |
+| `bench.py` | benchmark runner: solvers, scoring (pass@k), report tables |
+| `bench_data.py` | 31-task dataset (humaneval / original / package suites) |
+| `orchbench.py` | orchestration variant benchmark: governed DAG per policy variant |
 
 ---
 
@@ -336,7 +409,10 @@ already contains each dep's merge.
 ```bash
 .venv/bin/python main.py code run tasks.json [--dry-run] [--repo PATH] [-v]
 .venv/bin/python main.py code plan "one-sentence goal" /path/to/repo
-.venv/bin/python main.py code status
+.venv/bin/python main.py code status [--reset-stale]
+.venv/bin/python main.py code reconcile [--dry-run] [--force]
+.venv/bin/python main.py code bench run [--variants LIST|all] [--plan] [--stamp S]
+.venv/bin/python main.py code bench report [--stamp S]
 ```
 
 - `code run --dry-run` prints the resolved DAG (implement/review pairing,
@@ -345,6 +421,21 @@ already contains each dep's merge.
   entries and writes the file to `~/tasks/`, ready for `code run`.
 - `code status` dumps the `code_tasks` and `harness_runs` tables: per-task
   status, and per-firing harness/model/role/attempt/seconds/verdict rows.
+  `code reconcile` reaps everything a killed run left behind — stale
+  `running` rows, driver leases held by dead processes, and orphaned
+  worktrees. It refuses to run while a `code run` is alive, and never deletes
+  a worktree holding uncommitted agent edits or a branch with unmerged
+  commits. `--dry-run` reports without changing anything.
+
+  `--reset-stale` marks tasks stuck at `running` (their run process died)
+  as `failed` — use only when no run is alive.
+- `code bench` is the orchestration-level benchmark (`orchbench.py`):
+  instead of scoring one model on one task, it runs the **entire governed
+  DAG** on a fresh `filetoolkit` repo (6 tiered tasks) once per declared
+  policy variant — reviewer carousel, implement-only models, self/no-review,
+  harness swaps, flat and mis-routing, fix-loop bounds (`orchbench.VARIANTS`).
+  Each variant appends merges/green-tests/fix-rounds/review-rejects/timings
+  to `logs/orchbench/<stamp>/results.jsonl`; `report` prints the table.
 
 ### Paths
 

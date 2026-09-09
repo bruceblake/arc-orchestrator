@@ -145,11 +145,21 @@ new one:
 - `merged` tasks are **skipped** — their subgraph is replaced by a stub
   publish node returning `merged`, so dependents treat them as satisfied and
   no models or git ops are wasted.
-- `failed` tasks are **retried one escalation tier higher** than the model in
-  their `code_tasks` row (`config.ESCALATION_PATH`, default
-  `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`) with a full fresh
-  fix budget — the old run already proved that model insufficient. Within a
-  run the same tier-escalation happens live: a task that exhausts
+- `failed` tasks are retried, and **whether they escalate depends on why they
+  failed** (`code_tasks._is_capability_failure`):
+  - A **capability failure** — the row's `error` says the model exhausted its
+    fix rounds or escalation path — retries **one tier higher** in
+    `config.ESCALATION_PATH` (default
+    `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`) with a fresh fix
+    budget, because the old run proved that model insufficient.
+  - An **infrastructure failure** — the run process was killed, the graph was
+    cancelled, the harness crashed — retries at the **same tier**. Being
+    interrupted says nothing about the model. Escalating on it used to send
+    every interrupted task to Kimi-K3, the scarcest tier (driver cap 2): one
+    killed queue put four tasks there at once, exceeded the account cap, and
+    every request came back as an instant `provider.api_error: 400`.
+
+  Within a run the same tier-escalation happens live: a task that exhausts
   `MAX_FIX_ROUNDS` at one model escalates instead of failing, and the final
   failure message names the last model tried (`exhausted escalation up to
   Kimi-K3`).
@@ -162,16 +172,49 @@ new one:
   re-execution.
 - stale `running` rows (crashed-run leftovers) are marked `failed` at
   startup, **scoped to this task file** — it is safe to start a run while
-  other projects' rows are idle.
+  other projects' rows are idle. The reason recorded is an infrastructure
+  one, so these rows retry at the same tier (above).
 
 Startup prints a resume plan (skipped / retried / escalated lists) and emits a
 `run.resume` event `{skipped_merged, retried, escalated_on_resume}`.
+`escalated_on_resume` reports tiers higher than **where the task last ran**,
+not higher than the task file's original routing.
+
+A run now also cleans up after itself on every exit path — clean finish, node
+crash, Ctrl-C, or SIGTERM: unfinished tasks are marked `failed`, the driver
+leases it held are released, and its harness child processes are killed. See
+"Reaping orphans" below for wreckage left by runs that predate this.
 
 Re-running is safe because `gitstore.alloc` always **resets branch
 `task/<task-id>` to the base ref** on (re)alloc — a failed attempt's rejected
 work never leaks into a retry — and merges are stash-tolerant (see
 "Task conflict"). Never hand-write a reduced task file to retry a subset;
 that was the old workaround, it is no longer needed.
+
+### Reaping orphans (`code reconcile`)
+
+A run that died before it could clean up leaves three kinds of orphan, all of
+which make the fleet behave worse until reaped:
+
+| orphan | effect |
+| --- | --- |
+| `code_tasks` rows stuck at `running` | dashboard shows work that is not happening; the resume planner reads them as failures |
+| `driver_leases` rows | count against the per-model cap until their TTL, so the fleet throttles itself against ghosts |
+| worktrees + `task/<id>` branches | accumulate under `~/worktrees` |
+
+```bash
+.venv/bin/python main.py code reconcile --dry-run   # report only
+.venv/bin/python main.py code reconcile             # reap
+```
+
+It **refuses to run while a `code run` process is alive** (pass `--force` only
+if you know that process is wedged), and it **never deletes a worktree holding
+uncommitted agent edits or a branch with unmerged commits** — the orchestrator
+only commits at publish, so an interrupted implement's entire output lives in
+its worktree as uncommitted files. Those are reported under "worktrees KEPT";
+resume the task file to land them.
+
+`run-queue.sh` reconciles automatically before its first task file.
 
 ### Task failed (`exhausted escalation`)
 
