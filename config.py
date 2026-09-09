@@ -113,6 +113,11 @@ DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "900"))
 # (observed: ARC holds rejected/queued requests open indefinitely); kill and
 # retry instead of waiting out the full DRIVER_TIMEOUT.
 DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "300"))
+# Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
+# orchestrator processes — a terminal queue and dashboard-launched runs cannot
+# stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
+# first). Must exceed DRIVER_TIMEOUT + retry backoffs.
+DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "1800"))
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 

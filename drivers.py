@@ -52,6 +52,39 @@ def _gate(model):
     return _semaphores[model]
 
 
+_lease_store = None
+
+
+def _lease_db():
+    global _lease_store
+    if _lease_store is None:
+        import store as _s
+        _lease_store = _s.Store(config.DB_PATH)
+    return _lease_store
+
+
+async def _lease_acquire(model, task_id, emit_ctx):
+    """Wait until this model is below its cross-process cap (store holds the
+    lease). Emits driver.cap_wait roughly once a minute while waiting."""
+    waits = 0
+    while True:
+        in_use = _lease_db().acquire_driver_lease(
+            model, os.getpid(), task_id,
+            config.driver_limit(model), config.DRIVER_LEASE_TTL)
+        if in_use is None:
+            return
+        if waits % 3 == 0:
+            events.emit("driver.cap_wait", model=model, task=task_id,
+                        in_use=in_use, cap=config.driver_limit(model),
+                        **emit_ctx)
+        waits += 1
+        await asyncio.sleep(20)
+
+
+def _lease_release(model, task_id):
+    _lease_db().release_driver_lease(model, os.getpid(), task_id)
+
+
 def _dig(obj, texts, sid_holder):
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -125,10 +158,13 @@ class Driver:
                         role=self.role, task=task_id, attempt=attempt,
                         resume=bool(sid))
             await gate.acquire()
+            await _lease_acquire(self.model, task_id,
+                                 {"harness": self.harness, "role": self.role})
             try:
                 result = await self._once(continuation or prompt, worktree, sid,
                                           task_id, attempt)
             except DriverError as exc:
+                _lease_release(self.model, task_id)
                 gate.release()
                 if exc.session_id and not sid:
                     sid = exc.session_id
@@ -151,6 +187,7 @@ class Driver:
                             self.model, attempt, exc, backoff)
                 await asyncio.sleep(backoff)
                 continue
+            _lease_release(self.model, task_id)
             gate.release()
             events.emit("driver.done", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
@@ -201,14 +238,18 @@ class Driver:
             partial = b"".join(chunks).decode(errors="replace")
             psid, _ = parse_transcript(partial)
             idle = round(time.monotonic() - last_chunk_t, 1)
-            kind = "stalled" if idle < config.DRIVER_TIMEOUT - 30 else "timed out"
+            total = round(time.monotonic() - t0, 1)
+            if idle >= config.DRIVER_IDLE_TIMEOUT - 30:
+                kind, limit = "stalled", f"{config.DRIVER_IDLE_TIMEOUT}s idle"
+            else:
+                kind, limit = "timed out", f"{config.DRIVER_TIMEOUT}s total"
             events.emit("driver.stalled" if kind == "stalled" else "driver.timeout",
                         harness=self.harness, model=self.model, task=task_id,
                         attempt=attempt, bytes=sum(len(c) for c in chunks),
                         idle_s=idle, session_id=psid or session_id)
             raise DriverError(
-                f"{argv[0]} {kind} after {config.DRIVER_TIMEOUT}s "
-                f"(idle {idle}s, {sum(len(c) for c in chunks)} bytes)",
+                f"{argv[0]} {kind} after {limit} "
+                f"(total {total}s, idle {idle}s, {sum(len(c) for c in chunks)} bytes)",
                 session_id=psid or session_id)
         err = await err_task
         await proc.wait()

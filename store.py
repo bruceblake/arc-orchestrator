@@ -1,5 +1,7 @@
+import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 
 
@@ -139,6 +141,13 @@ CREATE TABLE IF NOT EXISTS bench_results(
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bench_results_run ON bench_results(run_id);
+CREATE TABLE IF NOT EXISTS driver_leases(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  model TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  task TEXT,
+  acquired_at REAL NOT NULL
+);
 """
 
 
@@ -376,6 +385,47 @@ class Store:
                     "WHERE status='running' AND taskfile=?", (_now(), taskfile))
             self.conn.commit()
             return cur.rowcount
+
+    def acquire_driver_lease(self, model, pid, task, cap, ttl):
+        """Cross-process driver concurrency guard. Returns None and holds a
+        lease row on success; returns the live in-use count when the model is
+        at `cap`. SQLite WAL + this lock serialize acquisitions across all
+        orchestrator processes sharing the DB, so a terminal queue and a
+        dashboard-launched run cannot stack caps. Stale rows (older than ttl
+        or owned by a dead pid) are reaped on every call."""
+        with self.lock:
+            now = time.time()
+            rows = list(self.conn.execute(
+                "SELECT id, pid, acquired_at FROM driver_leases WHERE model=?",
+                (model,)))
+            live = 0
+            for r in rows:
+                fresh = r["acquired_at"] > now - ttl
+                alive = True
+                try:
+                    os.kill(r["pid"], 0)
+                except OSError:
+                    alive = False
+                if fresh and alive:
+                    live += 1
+                else:
+                    self.conn.execute("DELETE FROM driver_leases WHERE id=?",
+                                      (r["id"],))
+            if live >= cap:
+                self.conn.commit()
+                return live
+            self.conn.execute(
+                "INSERT INTO driver_leases(model, pid, task, acquired_at) "
+                "VALUES (?,?,?,?)", (model, pid, task, now))
+            self.conn.commit()
+            return None
+
+    def release_driver_lease(self, model, pid, task):
+        with self.lock:
+            self.conn.execute(
+                "DELETE FROM driver_leases WHERE model=? AND pid=? AND task IS ?",
+                (model, pid, task))
+            self.conn.commit()
 
     def code_tasks_all(self, limit=500):
         with self.lock:

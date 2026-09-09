@@ -66,6 +66,24 @@ launching the subprocess and `gate.release()` when it finishes (`drivers.py:123,
 These semaphores are process-local (a module-level dict), so **each** `main.py
 code run` process gets its own set.
 
+### Layer 2b — cross-process driver leases (`store.driver_leases`)
+
+Process-local semaphores have a hole: a terminal queue (`run-queue.sh`), a
+`main.py code run` spawned from the dashboard's Run buttons, and a bench run
+each hold their own full set of caps, so N processes can stack to N× the
+account limit. The lease table closes it: after taking the semaphore,
+`Driver.run` calls `drivers._lease_acquire`, which inserts a row into
+`driver_leases` (model, pid, task, acquired_at) only if the model currently
+has fewer live rows than `config.driver_limit(model)`. Over cap, the task
+**waits**, polling every 20 s and emitting `driver.cap_wait {model, task,
+in_use, cap}` about once a minute — that event is the fleet's "concurrency
+limit reached" warning. Rows are reaped when older than
+`config.DRIVER_LEASE_TTL` (default 1800 s, `ARC_DRIVER_LEASE_TTL`) or owned by
+a dead pid, so a killed run frees its slots within seconds and a crashed one
+within the TTL. All of this is in addition to — never instead of — the
+semaphore: the semaphore is the fast in-process path, the lease is the
+cross-process truth.
+
 Summing the driver caps: **8 + 8 + 3 + 2 = 21**. This is the maximum number
 of harness instances one orchestrator run can have in flight at once.
 

@@ -231,14 +231,24 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
 
 | Layer | Where | gpt-oss | deepseek | glm | kimi | Override |
 |---|---|---|---|---|---|---|
-| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per key) | 10 | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
+| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
 | Driver semaphores | `config._MODEL_DRIVER_CAP` via `drivers._gate` → `config.driver_limit` | 8 | 8 | 3 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| Driver leases | `store.driver_leases` via `drivers._lease_acquire` — same caps, enforced **across processes** | shared | shared | shared | shared | `ARC_DRIVER_LEASE_TTL` |
 
 - The **account caps are per API key, not per process** — other agents and
   interactive sessions share them (config.py:88).
 - The **driver semaphores bound concurrent `kimi`/`opencode` harness
   instances in this process** and sit deliberately below the account caps to
   reserve headroom for interactive use (config.py:108, drivers.py:47).
+- The **driver leases close the cross-process hole**: semaphores alone let a
+  terminal queue AND dashboard-launched runs each hold their own cap and stack
+  to 2× the account limit. Before spawning a harness, `drivers._lease_acquire`
+  takes a row in the shared `driver_leases` table under that model's driver
+  cap; over cap the task **waits** (poll every 20 s) and emits
+  `driver.cap_wait {model, task, in_use, cap}` about once a minute — that event
+  is the warning surface for "a new task is about to exceed concurrency".
+  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (1800 s) or when
+  the owning pid is dead, so killed runs never deadlock the fleet.
 - For the research workload, `pool.py` additionally enforces per-family
   `asyncio.Semaphore(config.family_limit(f))` client-side.
 - Full explanation, including how the ARC API rejects over-limit requests:
