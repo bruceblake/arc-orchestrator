@@ -23,7 +23,9 @@ TRANSCRIPT_DIR = Path(config.ROOT) / "logs" / "harness"
 
 
 class DriverError(RuntimeError):
-    pass
+    def __init__(self, message, session_id=None):
+        super().__init__(message)
+        self.session_id = session_id
 
 
 @dataclass
@@ -116,17 +118,32 @@ class Driver:
         gate = _gate(self.model)
         attempt = 0
         sid = session_id
+        continuation = None
         while True:
             attempt += 1
             events.emit("driver.start", harness=self.harness, model=self.model,
-                        role=self.role, task=task_id, attempt=attempt)
+                        role=self.role, task=task_id, attempt=attempt,
+                        resume=bool(sid))
             await gate.acquire()
             try:
-                result = await self._once(prompt, worktree, sid, task_id, attempt)
+                result = await self._once(continuation or prompt, worktree, sid,
+                                          task_id, attempt)
             except DriverError as exc:
                 gate.release()
+                if exc.session_id and not sid:
+                    sid = exc.session_id
+                    continuation = (
+                        "The previous attempt was interrupted by a timeout/harness "
+                        "error before finishing. Do NOT restart from scratch: inspect "
+                        "the files you already wrote in this worktree, then continue "
+                        "exactly where you left off until the task is fully done."
+                    )
+                    events.emit("driver.resume", harness=self.harness,
+                                model=self.model, task=task_id, attempt=attempt,
+                                session_id=sid)
                 events.emit("driver.error", harness=self.harness, model=self.model,
-                            task=task_id, attempt=attempt, error=str(exc)[:300])
+                            task=task_id, attempt=attempt, error=str(exc)[:300],
+                            will_resume=bool(sid))
                 if attempt > config.MAX_RETRIES:
                     raise
                 backoff = min(30, 2 ** attempt)
@@ -160,6 +177,7 @@ class Driver:
         # stderr never deadlocks the child on a full pipe.
         err_task = asyncio.create_task(proc.stderr.read())
         chunks = []
+        last_chunk_t = time.monotonic()
         deadline = t0 + config.DRIVER_TIMEOUT
         try:
             with open(tpath, "wb") as fh:
@@ -171,13 +189,25 @@ class Driver:
                     if not chunk:
                         break
                     chunks.append(chunk)
+                    last_chunk_t = time.monotonic()
                     fh.write(chunk)
                     fh.flush()
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
             err_task.cancel()
-            raise DriverError(f"{argv[0]} timed out after {config.DRIVER_TIMEOUT}s")
+            partial = b"".join(chunks).decode(errors="replace")
+            psid, _ = parse_transcript(partial)
+            idle = round(time.monotonic() - last_chunk_t, 1)
+            kind = "stalled" if idle < config.DRIVER_TIMEOUT - 30 else "timed out"
+            events.emit("driver.stalled" if kind == "stalled" else "driver.timeout",
+                        harness=self.harness, model=self.model, task=task_id,
+                        attempt=attempt, bytes=sum(len(c) for c in chunks),
+                        idle_s=idle, session_id=psid or session_id)
+            raise DriverError(
+                f"{argv[0]} {kind} after {config.DRIVER_TIMEOUT}s "
+                f"(idle {idle}s, {sum(len(c) for c in chunks)} bytes)",
+                session_id=psid or session_id)
         err = await err_task
         await proc.wait()
         out = b"".join(chunks)
@@ -186,7 +216,8 @@ class Driver:
         toks, ptok, ctok = transcript_tokens(raw)
         if proc.returncode != 0:
             raise DriverError(
-                f"{argv[0]} exited {proc.returncode}: {err.decode(errors='replace')[-300:]}")
+                f"{argv[0]} exited {proc.returncode}: {err.decode(errors='replace')[-300:]}",
+                session_id=sid or session_id)
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             session_id or sid, str(tpath), text,
                             round(time.monotonic() - t0, 1), toks, ptok, ctok)
@@ -196,8 +227,8 @@ class KimiDriver(Driver):
     harness = "kimi"
     model = "Kimi-K3"
 
-    def __init__(self, role):
-        if role not in ("planner", "reviewer", "implementer"):
+    def __init__(self, role, bench=False):
+        if not bench and role not in ("planner", "reviewer", "implementer"):
             raise ValueError(f"KimiDriver role must be planner|reviewer|implementer, got {role!r}")
         self.role = role
 
@@ -211,13 +242,14 @@ class KimiDriver(Driver):
 class OpencodeDriver(Driver):
     harness = "opencode"
 
-    def __init__(self, model, role):
-        if model in ("gpt-oss-120b", "DeepSeek-V4-Flash") and role != "implementer":
-            raise ValueError(f"{model} may only implement, not {role!r}")
-        if model == "GLM-5.3" and role not in ("planner", "reviewer", "implementer"):
-            raise ValueError(f"GLM-5.3 may only plan/review/implement, not {role!r}")
-        if model not in config.IMPLEMENTER_MODELS:
-            raise ValueError(f"unmapped opencode model: {model!r}")
+    def __init__(self, model, role, bench=False):
+        if not bench:
+            if model in ("gpt-oss-120b", "DeepSeek-V4-Flash") and role != "implementer":
+                raise ValueError(f"{model} may only implement, not {role!r}")
+            if model == "GLM-5.3" and role not in ("planner", "reviewer", "implementer"):
+                raise ValueError(f"GLM-5.3 may only plan/review/implement, not {role!r}")
+            if model not in config.IMPLEMENTER_MODELS:
+                raise ValueError(f"unmapped opencode model: {model!r}")
         self.model = model
         self.role = role
 
