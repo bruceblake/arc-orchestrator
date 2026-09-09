@@ -5,6 +5,7 @@ raising DRIVER_TIMEOUT without raising DRIVER_LEASE_TTL makes leases expire
 under running drivers, which lets a model exceed its ARC cap — the exact
 failure the lease table exists to prevent.
 """
+import pathlib
 import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
@@ -58,3 +59,43 @@ class RoutingInvariants(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class HarnessContextBudget(unittest.TestCase):
+    """The fleet must declare a context budget ARC will actually serve.
+
+    Both harnesses ship configured for 131072 tokens and only compact near
+    that ceiling, but ARC leaves requests unanswered around 55-60k — so
+    neither ever compacts, and context grows until the server stops replying.
+    """
+
+    def test_budget_is_below_where_hangs_were_measured(self):
+        self.assertLessEqual(config.HARNESS_CONTEXT, 100000)
+        self.assertGreaterEqual(config.HARNESS_CONTEXT, 16000,
+                                "too small to hold a real task's working set")
+
+    def test_kimi_gets_an_alias_only_when_the_config_defines_it(self):
+        """A missing alias must degrade to the default model, not fail the run
+        with 'model not found'."""
+        real = config.harness_model("Kimi-K3", "kimi")
+        self.assertIn(real, (None, "arc/kimi-k3-fleet"))
+        orig = config.KIMI_CONFIG
+        config.KIMI_CONFIG = pathlib.Path("/nonexistent/config.toml")
+        try:
+            self.assertIsNone(config.harness_model("Kimi-K3", "kimi"))
+        finally:
+            config.KIMI_CONFIG = orig
+
+    def test_opencode_never_gets_a_model_alias(self):
+        """opencode sends the model KEY to the API, so a renamed alias comes
+        back 'Model not found' — its budget comes from OPENCODE_CONFIG."""
+        for m in config.IMPLEMENTER_MODELS:
+            self.assertIsNone(config.harness_model(m, "opencode"))
+
+    def test_the_switch_disables_every_alias(self):
+        orig = config.USE_FLEET_ALIASES
+        config.USE_FLEET_ALIASES = False
+        try:
+            self.assertIsNone(config.harness_model("Kimi-K3", "kimi"))
+        finally:
+            config.USE_FLEET_ALIASES = orig

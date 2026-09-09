@@ -164,6 +164,52 @@ ESCALATION_PATH = [m.strip() for m in os.getenv(
 MAX_ESCALATIONS = int(os.getenv("ARC_MAX_ESCALATIONS",
                                 str(max(0, len(ESCALATION_PATH) - 1))))
 
+# --- harness context budget -------------------------------------------------
+# Both harnesses ship configured for a 131072-token context and only compact
+# near that ceiling (kimi: max_context_size - reserved_context_size; opencode:
+# limit.context * compaction.threshold). ARC leaves requests unanswered well
+# before it — measured 2026-09-09, hangs cluster around 55-60k input tokens —
+# so neither harness ever reaches its own compaction point. It simply grows
+# context until the server stops replying, and the task dies with it.
+#
+# The fix is config, not code: fleet-only model aliases declaring a context
+# budget the server will actually serve, so the harness compacts in time.
+#   ~/.kimi-code/config.toml        [models."arc/<m>-fleet"] max_context_size
+#   ~/.config/opencode/opencode.json  ARC.models["<m>-fleet"].limit.context
+# Interactive sessions keep the full window: they use the unsuffixed aliases.
+USE_FLEET_ALIASES = os.getenv("ARC_USE_FLEET_ALIASES", "1").lower() not in (
+    "0", "false", "no", "")
+# Context budget the fleet declares to its harnesses. Below the range where
+# ARC starts leaving requests unanswered, so compaction fires in time.
+HARNESS_CONTEXT = int(os.getenv("ARC_HARNESS_CONTEXT", "65536"))
+KIMI_CONFIG = Path.home() / ".kimi-code" / "config.toml"
+OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
+OPENCODE_FLEET_CONFIG = OPENCODE_CONFIG.with_name("opencode-fleet.json")
+_KIMI_ALIAS = {"Kimi-K3": "arc/kimi-k3-fleet"}
+
+
+def harness_model(model, harness):
+    """The model alias to pass the CLI, or None to use its configured default.
+
+    opencode takes its budget from OPENCODE_CONFIG instead (see drivers): it
+    sends the model KEY to the API, so a differently-keyed alias is rejected
+    with "Model not found" — verified, not assumed.
+    """
+    if not USE_FLEET_ALIASES or harness != "kimi":
+        return None
+    alias = _KIMI_ALIAS.get(model)
+    if not alias:
+        return None
+    # Fall back to the default model rather than failing the run if the alias
+    # is missing (a reset or reinstalled kimi config).
+    try:
+        if f'"{alias}"' not in KIMI_CONFIG.read_text(encoding="utf-8"):
+            return None
+    except OSError:
+        return None
+    return alias
+
+
 IMPLEMENTER_MODELS = {"gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"}
 IMPLEMENT_TIERS = {"basic": ["gpt-oss-120b"], "medium": ["DeepSeek-V4-Flash"],
                    "hard": ["GLM-5.3", "Kimi-K3"]}

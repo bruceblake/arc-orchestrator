@@ -227,6 +227,46 @@ def _wire_stall_evidence(task_id):
             "session": newest.parent.parent.parent.name}
 
 
+_fleet_cfg = {"key": None, "path": None}
+
+
+def opencode_fleet_config():
+    """Path to a fleet-scoped opencode config, or None to use the default.
+
+    opencode ships a 131072-token context limit and compacts at 75% of it, so
+    it never compacts before ARC stops answering (~55-60k). It sends the model
+    KEY to the API, so a lower-limit alias is rejected — the budget has to come
+    from a whole config file, selected per-process via $OPENCODE_CONFIG.
+
+    Derived from the operator's own config so provider settings and API keys
+    stay in one place, and regenerated whenever that source changes. The
+    operator's interactive opencode keeps the full window.
+    """
+    if not config.USE_FLEET_ALIASES:
+        return None
+    src = config.OPENCODE_CONFIG
+    try:
+        st = src.stat()
+    except OSError:
+        return None
+    key = (st.st_size, st.st_mtime_ns, config.HARNESS_CONTEXT)
+    if _fleet_cfg["key"] == key and _fleet_cfg["path"]:
+        return _fleet_cfg["path"]
+    try:
+        doc = json.loads(src.read_text(encoding="utf-8"))
+        for m in (doc.get("provider", {}).get("ARC", {}).get("models") or {}).values():
+            m.setdefault("limit", {})["context"] = config.HARNESS_CONTEXT
+        doc.setdefault("compaction", {})["auto"] = True
+        doc["compaction"].setdefault("threshold", 0.75)
+        config.OPENCODE_FLEET_CONFIG.write_text(
+            json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        log.warning("could not build the fleet opencode config: %s", exc)
+        return None
+    _fleet_cfg.update(key=key, path=str(config.OPENCODE_FLEET_CONFIG))
+    return _fleet_cfg["path"]
+
+
 async def _terminate(proc):
     """Kill a harness process if it is still running; safe to call twice."""
     if proc.returncode is not None:
@@ -404,6 +444,10 @@ class Driver:
         # and a subprocess inherits the parent's $PWD — set it to the worktree
         # or edits land wherever the orchestrator was launched from.
         env = dict(os.environ, PWD=str(worktree))
+        if self.harness == "opencode":
+            cfg = opencode_fleet_config()
+            if cfg:
+                env["OPENCODE_CONFIG"] = cfg
         TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
         tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
         proc = await asyncio.create_subprocess_exec(
@@ -548,6 +592,9 @@ class KimiDriver(Driver):
 
     def argv(self, prompt, session_id):
         a = ["kimi"]
+        alias = config.harness_model(self.model, "kimi")
+        if alias:
+            a += ["-m", alias]
         if session_id:
             a += ["--session", session_id]
         return a + ["-p", prompt, "--output-format", "stream-json"]
@@ -568,7 +615,8 @@ class OpencodeDriver(Driver):
         self.role = role
 
     def argv(self, prompt, session_id):
-        a = ["opencode", "run", "-m", f"ARC/{self.model}", "--auto", "--format", "json"]
+        alias = config.harness_model(self.model, "opencode") or f"ARC/{self.model}"
+        a = ["opencode", "run", "-m", alias, "--auto", "--format", "json"]
         if session_id:
             a.append("-c")
         return a + [prompt]

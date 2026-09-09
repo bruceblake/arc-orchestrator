@@ -116,6 +116,16 @@ def _impl_prompt(t, feedback):
     p += (
         "\nRules: make only the changes this task requires; do not git-commit "
         "(the orchestrator handles git); keep changes minimal and working.\n"
+        "\nWork within a small context. Every tool result stays in the "
+        "conversation, and requests that grow too large are dropped by the "
+        "API mid-task — losing all of your progress. So:\n"
+        "- Locate code with grep/search FIRST; read only the line ranges you "
+        "need, never a whole large file.\n"
+        "- Do not re-read a file you have already seen; rely on what is "
+        "already in the conversation.\n"
+        "- Make targeted edits to specific ranges rather than rewriting whole "
+        "files.\n"
+        "- Prefer several small, verified steps over one sweeping change.\n"
     )
     if feedback:
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"

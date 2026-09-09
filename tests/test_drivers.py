@@ -399,3 +399,53 @@ class RoleGuards(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FleetContextConfig(unittest.TestCase):
+    """opencode's budget travels via $OPENCODE_CONFIG, generated from the
+    operator's own config so provider settings and keys stay in one place."""
+
+    def test_generated_config_lowers_limits_and_keeps_the_provider(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "opencode.json"
+            src.write_text(json.dumps({
+                "provider": {"ARC": {"options": {"apiKey": "secret"}, "models": {
+                    "Kimi-K3": {"name": "Kimi-K3",
+                                "limit": {"context": 131072, "output": 16384}}}}},
+                "model": "ARC/Kimi-K3"}))
+            orig_src, orig_out = config.OPENCODE_CONFIG, config.OPENCODE_FLEET_CONFIG
+            config.OPENCODE_CONFIG = src
+            config.OPENCODE_FLEET_CONFIG = Path(d) / "opencode-fleet.json"
+            drivers._fleet_cfg.update(key=None, path=None)
+            try:
+                path = drivers.opencode_fleet_config()
+                self.assertIsNotNone(path)
+                doc = json.loads(Path(path).read_text())
+                arc = doc["provider"]["ARC"]
+                self.assertEqual(arc["models"]["Kimi-K3"]["limit"]["context"],
+                                 config.HARNESS_CONTEXT)
+                self.assertEqual(arc["options"]["apiKey"], "secret",
+                                 "provider settings must carry over")
+                self.assertTrue(doc["compaction"]["auto"])
+                # the operator's own config must be left alone
+                self.assertEqual(
+                    json.loads(src.read_text())["provider"]["ARC"]["models"]
+                    ["Kimi-K3"]["limit"]["context"], 131072)
+            finally:
+                config.OPENCODE_CONFIG, config.OPENCODE_FLEET_CONFIG = orig_src, orig_out
+                drivers._fleet_cfg.update(key=None, path=None)
+
+    def test_missing_source_config_degrades_to_the_default(self):
+        orig = config.OPENCODE_CONFIG
+        config.OPENCODE_CONFIG = Path("/nonexistent/opencode.json")
+        drivers._fleet_cfg.update(key=None, path=None)
+        try:
+            self.assertIsNone(drivers.opencode_fleet_config())
+        finally:
+            config.OPENCODE_CONFIG = orig
+            drivers._fleet_cfg.update(key=None, path=None)
+
+    def test_opencode_argv_keeps_the_real_model_key(self):
+        argv = drivers.OpencodeDriver("GLM-5.3", "reviewer").argv("p", None)
+        self.assertIn("ARC/GLM-5.3", argv,
+                      "a renamed key is rejected by ARC as 'Model not found'")

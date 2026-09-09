@@ -222,6 +222,37 @@ diff against.
 deliberately: nothing arrives after one of these hangs, so waiting is pure
 cost. Raise it only if you see stalls that later recover on their own.
 
+### Context budget (why tasks used to die mid-run)
+
+Both harnesses ship configured for a **131072-token** context and only compact
+near that ceiling — kimi at `max_context_size - reserved_context_size`,
+opencode at `limit.context * compaction.threshold`. ARC leaves requests
+unanswered well before it (measured: hangs cluster around 55-60k input
+tokens). So neither harness ever reached its own compaction point; each simply
+grew context until the server stopped replying, and the task died there.
+
+The fleet therefore declares its own, smaller budget (`ARC_HARNESS_CONTEXT`,
+default 65536) so compaction fires in time. **Interactive sessions keep the
+full window** — the two paths are kept separate:
+
+| harness | how the budget is applied |
+| --- | --- |
+| kimi | model alias `arc/kimi-k3-fleet` in `~/.kimi-code/config.toml` (same `model = "Kimi-K3"`, lower `max_context_size`), passed as `-m` |
+| opencode | a generated `~/.config/opencode/opencode-fleet.json`, selected per-process via `$OPENCODE_CONFIG` |
+
+opencode needs the whole-file approach because it sends the model **key** to
+the API — a differently-keyed alias comes back `{"detail":"Model not found"}`.
+Its fleet config is regenerated from your own `opencode.json` whenever that
+changes, so provider settings and API keys stay in one place.
+
+If the kimi alias is missing (a reset or reinstalled config) the driver falls
+back to the default model rather than failing the run. Set
+`ARC_USE_FLEET_ALIASES=0` to disable both and use the harnesses as configured.
+
+Implement prompts also tell the agent to grep before reading, read line ranges
+rather than whole files, and not re-read what it has already seen — context
+growth is the underlying problem, and compaction is only the backstop.
+
 ### Reaping orphans (`code reconcile`)
 
 A run that died before it could clean up leaves three kinds of orphan, all of
