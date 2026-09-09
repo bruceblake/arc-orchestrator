@@ -3,8 +3,9 @@
 Per task: alloc worktree -> implement (opencode: gpt-oss-120b / DeepSeek-V4-Flash)
 -> deterministic verify gate (verify_cmd) -> cross-family review (Kimi-K3 via
 kimi CLI, or GLM-5.3 via opencode) -> bounded fix loop -> publish commit ->
-merge to main (serialized) -> cleanup. Reviews are mandatory; a reviewer never
-shares a model family with the implementer it reviews.
+merge to main (serialized) -> cleanup. Reviews are mandatory and cross-family
+by default; an explicit bench `policy` (see orchbench.py) may relax
+routing/review rules to measure what the governance defaults buy.
 """
 import asyncio
 import json
@@ -15,7 +16,7 @@ from pathlib import Path
 import config
 import events
 import gitstore
-from drivers import KimiDriver, OpencodeDriver
+from drivers import DriverError, KimiDriver, OpencodeDriver
 from graph import Graph
 
 log = logging.getLogger("code-tasks")
@@ -23,28 +24,36 @@ log = logging.getLogger("code-tasks")
 _merge_lock = asyncio.Lock()
 
 
-def load_taskfile(path):
+def load_taskfile(path, policy=None):
+    """Load + validate a taskfile. `policy` (bench variant overrides) may widen
+    the allowed implementers/reviewers, permit self-review, or disable review;
+    with policy=None the governance defaults apply byte-for-byte."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     repo = Path(data["project"]["repo"]).resolve()
+    pol = policy or {}
+    models = set(config.IMPLEMENTER_MODELS) | set(pol.get("implementers", []))
+    reviewers = tuple(pol.get("reviewers", ("kimi", "glm")))
+    review_on = pol.get("review", True)
+    allow_self = bool(pol.get("allow_self_review"))
     tasks = {}
     for t in data["project"]["tasks"]:
         tid = t["id"]
         if tid in tasks:
             raise ValueError(f"duplicate task id: {tid}")
         model = t.get("model", "")
-        if model not in config.IMPLEMENTER_MODELS:
+        if model not in models:
             raise ValueError(
-                f"task {tid}: model {model!r} must be an implementer "
-                f"({sorted(config.IMPLEMENTER_MODELS)})"
+                f"task {tid}: model {model!r} must be an implementer ({sorted(models)})"
             )
         reviewer = t.get("reviewer", "")
-        if reviewer not in ("kimi", "glm"):
-            raise ValueError(f"task {tid}: reviewer must be 'kimi' or 'glm', got {reviewer!r}")
+        if review_on and reviewer not in reviewers:
+            raise ValueError(f"task {tid}: reviewer must be one of {reviewers}, got {reviewer!r}")
         impl_family = config.MODEL_FAMILY[model]
-        if impl_family in ("kimi", "glm") and reviewer == impl_family:
+        rev_family = config.MODEL_FAMILY.get(reviewer, reviewer)
+        if review_on and not allow_self and impl_family == rev_family:
             raise ValueError(
                 f"task {tid}: reviewer {reviewer!r} must not be the harness that "
-                f"implemented ({model}); use the other one"
+                f"implemented ({model}); use another one"
             )
         tasks[tid] = {
             "id": tid,
@@ -61,7 +70,8 @@ def load_taskfile(path):
             if d not in tasks:
                 raise ValueError(f"task {tid}: unknown dep {d!r}")
     _topo(tasks)  # raises on cycles
-    return {"repo": repo, "tasks": tasks, "title": data.get("project", {}).get("title", "")}
+    return {"repo": repo, "tasks": tasks, "title": data.get("project", {}).get("title", ""),
+            "policy": pol}
 
 
 def _topo(tasks):
@@ -87,7 +97,7 @@ def describe(taskset):
     for tid in _topo(taskset["tasks"]):
         t = taskset["tasks"][tid]
         impl_fam = config.MODEL_FAMILY[t["model"]]
-        rev_fam = "kimi" if t["reviewer"] == "kimi" else "glm"
+        rev_fam = config.MODEL_FAMILY.get(t["reviewer"], t["reviewer"])
         cross = "cross-family" if impl_fam != rev_fam else "SAME-FAMILY(!)"
         lines.append(
             f"  {tid}: implement={t['model']} review={rev_fam}({cross}) "
@@ -147,10 +157,112 @@ def _parse_verdict(text):
     return {"pass": False, "issues": ["reviewer returned no parseable verdict"]}
 
 
-def build_code_graph(store, taskset, taskfile=""):
+def _driver(model, role, policy):
+    """Implementer/reviewer driver. policy['harness'] maps model -> kimi|opencode
+    (bench variants); default keeps the governed routing (Kimi-K3 -> kimi CLI)."""
+    pol = policy or {}
+    harness = pol.get("harness", {}).get(model)
+    if harness is None:
+        harness = "kimi" if model == "Kimi-K3" else "opencode"
+    if harness == "kimi":
+        return KimiDriver(role, bench=bool(pol))
+    return OpencodeDriver(model, role, bench=bool(pol))
+
+
+def _reviewer_driver(t, policy):
+    token = t["reviewer"]
+    if token == "kimi":
+        return KimiDriver("reviewer", bench=bool(policy))
+    if token == "glm":
+        return OpencodeDriver("GLM-5.3", "reviewer", bench=bool(policy))
+    return _driver(token, "reviewer", policy)
+
+
+def build_code_graph(store, taskset, taskfile="", policy=None):
     repo = taskset["repo"]
     tasks = taskset["tasks"]
+    pol = policy if policy is not None else taskset.get("policy") or None
+    mfr = (pol or {}).get("max_fix_rounds", config.MAX_FIX_ROUNDS)
+    review_on = (pol or {}).get("review", True)
+    escalate_on = (pol or {}).get("escalate", True)
     g = Graph("code-tasks", max_steps=config.MAX_GRAPH_STEPS)
+
+    # --- resume: statuses recorded by earlier runs of THIS taskfile ----------
+    # Re-running `code run <taskfile>` is a resume of the same project: merged
+    # tasks collapse into skip stubs, failed/conflict/stale/pending tasks run
+    # again — failed ones one tier higher, conflict ones keeping their model.
+    prior = {}
+    if taskfile and store is not None:
+        try:
+            prior = {r["id"]: r for r in store.code_tasks_for(taskfile)}
+        except Exception:
+            prior = {}
+
+    def _tier_index(model):
+        try:
+            return config.ESCALATION_PATH.index(model)
+        except ValueError:
+            return None
+
+    def reviewer_for(t, model):
+        """Cross-review preserved under escalation: a strong model's work is
+        reviewed by the other strong harness; basic/medium keep the taskfile
+        reviewer."""
+        fam = config.MODEL_FAMILY.get(model)
+        if fam == "kimi":
+            return "glm"
+        if fam == "glm":
+            return "kimi"
+        return t["reviewer"]
+
+    def start_model(tid):
+        """Model a (possibly resumed) run starts this task at."""
+        t = tasks[tid]
+        r = prior.get(tid)
+        if not r or not escalate_on:
+            return t["model"]
+        if r["status"] == "failed":
+            idx = _tier_index(r.get("model") or t["model"])
+            if idx is not None and idx + 1 < len(config.ESCALATION_PATH):
+                return config.ESCALATION_PATH[idx + 1]
+        # conflict resumes at the same model — a merge conflict is not a
+        # model-capability signal.
+        return r.get("model") or t["model"]
+
+    if prior:
+        skipped = sorted(tid for tid, r in prior.items()
+                         if r["status"] == "merged" and tid in tasks)
+        retried = sorted(tid for tid, r in prior.items()
+                         if r["status"] != "merged" and tid in tasks)
+        higher = {tid: m for tid in retried
+                  if (m := start_model(tid)) != tasks[tid]["model"]}
+        events.emit("run.resume", taskfile=taskfile, skipped_merged=skipped,
+                    retried=retried, escalated_on_resume=higher)
+
+    async def _pr_hook(tid, t):
+        """Best-effort push + PR after a successful merge; never raises."""
+        try:
+            url, note = await gitstore.push_and_open_pr(
+                repo, tid, t["title"], taskfile)
+            if url:
+                events.emit("task.pr_opened", task=tid, url=url)
+            else:
+                events.emit("task.pr_skipped", task=tid, reason=note)
+        except Exception as exc:  # publish must never fail on the PR hook
+            events.emit("task.pr_skipped", task=tid, reason=f"pr hook: {exc}"[:200])
+
+    def make_skip(t):
+        """Merged task: collapse to a stub publish so dependents see it as done."""
+        tid = t["id"]
+
+        async def publish(ctx):
+            return {"merged": True, "skipped": True, "head": None}
+
+        g.node(f"publish_{tid}", publish)
+        if t["deps"]:
+            g.edge(f"publish_{t['deps'][-1]}", f"publish_{tid}")
+        else:
+            g.start(f"publish_{tid}")
 
     def make_chain(t):
         tid = t["id"]
@@ -159,11 +271,33 @@ def build_code_graph(store, taskset, taskfile=""):
         # main already contains every dep (dep branches are deleted at
         # cleanup, before any dependent allocs).
         base = "main"
+        model0 = start_model(tid)
+        prior_status = (prior.get(tid) or {}).get("status")
+
+        def cur_model(ctx):
+            esc = ctx.get("results", {}).get(f"escalate_{tid}")
+            return esc["to_model"] if esc else model0
+
+        def esc_n(ctx):
+            return ctx.get("runs", {}).get(f"escalate_{tid}", 0)
+
+        def within_budget(ctx):
+            """Fix budget at the current tier: mfr rounds per tier, refreshed
+            by every escalation (implement runs are counted globally)."""
+            runs = ctx.get("runs", {})
+            return runs.get(f"implement_{tid}", 0) <= mfr * (esc_n(ctx) + 1)
+
+        def can_escalate(ctx):
+            if not escalate_on or esc_n(ctx) >= config.MAX_ESCALATIONS:
+                return False
+            idx = _tier_index(cur_model(ctx))
+            return idx is not None and idx + 1 < len(config.ESCALATION_PATH)
 
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
-            store.upsert_code_task(taskfile, tid, t["title"], t["model"], t["reviewer"],
-                                   "running", branch=f"task/{tid}", worktree=str(wt))
+            store.upsert_code_task(taskfile, tid, t["title"], model0,
+                                   reviewer_for(t, model0), "running",
+                                   branch=f"task/{tid}", worktree=str(wt))
             events.set_context(module=tid)
             events.emit("worktree.alloc", path=str(wt), base=base)
             return {"worktree": str(wt)}
@@ -178,17 +312,31 @@ def build_code_graph(store, taskset, taskfile=""):
             if not feedback and gate and not gate.get("passed"):
                 feedback = f"verify gate failed, output:\n{gate.get('output', '')}"
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
-            driver = (KimiDriver("implementer") if t["model"] == "Kimi-K3"
-                      else OpencodeDriver(t["model"], "implementer"))
-            res = await driver.run(
-                _impl_prompt(t, feedback), Path(results[f"alloc_{tid}"]["worktree"]),
-                task_id=f"{tid}-x{attempt}")
-            store.save_harness_run(tid, driver.harness, t["model"], "implementer",
+            model = cur_model(ctx)
+            driver = _driver(model, "implementer", pol)
+            try:
+                res = await driver.run(
+                    _impl_prompt(t, feedback), Path(results[f"alloc_{tid}"]["worktree"]),
+                    task_id=f"{tid}-x{attempt}")
+            except DriverError as exc:
+                if not (pol or {}).get("tolerate_driver_error", True):
+                    raise
+                store.save_harness_run(tid, driver.harness, model, "implementer",
+                                       attempt, 1, "", 0.0)
+                events.emit("driver.error", task=tid, role="implementer",
+                            error=str(exc)[:200])
+                return {"crashed": True, "error": str(exc)[:200],
+                        "harness": driver.harness}
+            store.save_harness_run(tid, driver.harness, model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
-            return {"session_id": res.session_id}
+            return {"session_id": res.session_id, "harness": driver.harness}
 
         async def gate(ctx):
             cmd = t["verify_cmd"]
+            prev = ctx.get("results", {}).get(f"implement_{tid}", {})
+            if prev.get("crashed"):
+                return {"passed": False,
+                        "output": f"implementer crashed: {prev.get('error', '')}"}
             if not cmd:
                 return {"passed": True, "output": ""}
             wt = ctx["results"][f"alloc_{tid}"]["worktree"]
@@ -206,49 +354,103 @@ def build_code_graph(store, taskset, taskfile=""):
             return {"passed": proc.returncode == 0, "output": output}
 
         async def review(ctx):
+            if not review_on:
+                events.emit("task.reviewed", passed=True, reviewer="none",
+                            skipped=True)
+                return {"pass": True, "issues": [], "skipped": True}
             wt = Path(ctx["results"][f"alloc_{tid}"]["worktree"])
             diff = await gitstore.diff_full(wt, base)
-            driver = (KimiDriver("reviewer") if t["reviewer"] == "kimi"
-                      else OpencodeDriver("GLM-5.3", "reviewer"))
+            rev_tok = reviewer_for(t, cur_model(ctx))
+            driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
-            res = await driver.run(_review_prompt(t, diff), wt, task_id=f"{tid}-x{attempt}")
+            try:
+                res = await driver.run(_review_prompt(t, diff), wt, task_id=f"{tid}-x{attempt}")
+            except DriverError as exc:
+                if not (pol or {}).get("tolerate_driver_error", True):
+                    raise
+                store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
+                                       attempt, 1, "", 0.0,
+                                       verdict='{"pass": false, "issues": ["reviewer crashed"]}')
+                events.emit("driver.error", task=tid, role="reviewer",
+                            error=str(exc)[:200])
+                return {"pass": False, "issues": [f"reviewer crashed: {exc}"[:200]]}
             verdict = _parse_verdict(res.text)
             store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
-            events.emit("task.reviewed", passed=verdict["pass"], reviewer=t["reviewer"])
+            events.emit("task.reviewed", passed=verdict["pass"], reviewer=rev_tok)
             return verdict
 
+        async def escalate(ctx):
+            src = cur_model(ctx)
+            nxt = config.ESCALATION_PATH[_tier_index(src) + 1]
+            rev = reviewer_for(t, nxt)
+            store.upsert_code_task(taskfile, tid, t["title"], nxt, rev, "running")
+            events.emit("task.escalated", task=tid, from_model=src, to_model=nxt,
+                        n=esc_n(ctx) + 1)
+            return {"from_model": src, "to_model": nxt, "n": esc_n(ctx) + 1}
+
         async def publish(ctx):
-            wt = Path(ctx["results"][f"alloc_{tid}"]["worktree"])
+            results = ctx.get("results", {})
+            alloc_res = results.get(f"alloc_{tid}")
+            if alloc_res is None:
+                # conflict repair: the reviewed, gate-passing commit survived
+                # on task/<tid> — merge it directly instead of re-running
+                # implement+review. Falls through to a full re-execution (via
+                # the publish -> alloc edge below) only when repair fails.
+                if not await gitstore.branch_ahead(repo, tid, base):
+                    return {"merged": False, "repair": "no-branch"}
+                async with _merge_lock:
+                    try:
+                        await gitstore.merge_to_main(repo, tid)
+                        await gitstore.cleanup(repo, tid)
+                    except gitstore.GitError as exc:
+                        store.upsert_code_task(taskfile, tid, t["title"], model0,
+                                               reviewer_for(t, model0), "conflict",
+                                               error=str(exc)[:300], finished=True)
+                        events.emit("task.conflict", task=tid, reason=str(exc)[:200])
+                        return {"merged": False, "repair": str(exc)[:200]}
+                store.upsert_code_task(taskfile, tid, t["title"], model0,
+                                       reviewer_for(t, model0), "merged", finished=True)
+                events.emit("task.merged", task=tid, repaired=True)
+                await _pr_hook(tid, t)
+                return {"merged": True, "repaired": True}
+            wt = Path(alloc_res["worktree"])
+            impl = results.get(f"implement_{tid}", {})
             head = await gitstore.publish(
                 wt, f"task({tid}): {t['title']}",
-                {"Harness": "opencode", "Model": t["model"],
-                 "Reviewer": t["reviewer"], "Task-Id": tid})
+                {"Harness": impl.get("harness", "?"), "Model": cur_model(ctx),
+                 "Reviewer": reviewer_for(t, cur_model(ctx)), "Task-Id": tid})
             async with _merge_lock:
                 try:
                     await gitstore.merge_to_main(repo, tid)
                     await gitstore.cleanup(repo, tid)
                 except gitstore.GitError as exc:
-                    store.upsert_code_task(taskfile, tid, t["title"], t["model"],
-                                           t["reviewer"], "conflict", error=str(exc)[:300],
-                                           finished=True)
-                    events.emit("task.failed", reason=str(exc)[:200])
+                    store.upsert_code_task(taskfile, tid, t["title"], cur_model(ctx),
+                                           reviewer_for(t, cur_model(ctx)), "conflict",
+                                           error=str(exc)[:300], finished=True)
+                    events.emit("task.conflict", task=tid, reason=str(exc)[:200])
                     return {"merged": False, "head": head}
-            store.upsert_code_task(taskfile, tid, t["title"], t["model"], t["reviewer"],
-                                   "merged", finished=True)
-            events.emit("task.merged", head=head)
+            store.upsert_code_task(taskfile, tid, t["title"], cur_model(ctx),
+                                   reviewer_for(t, cur_model(ctx)), "merged", finished=True)
+            events.emit("task.merged", task=tid, head=head)
+            await _pr_hook(tid, t)
             return {"merged": True, "head": head}
 
         async def fail(ctx):
             reason = ctx.get("results", {}).get(f"gate_{tid}", {})
-            store.upsert_code_task(taskfile, tid, t["title"], t["model"], t["reviewer"],
-                                   "failed", error="exhausted fix rounds", finished=True)
-            events.emit("task.failed", reason="exhausted fix rounds")
+            last = cur_model(ctx)
+            store.upsert_code_task(taskfile, tid, t["title"], last,
+                                   reviewer_for(t, last), "failed",
+                                   error=f"exhausted escalation up to {last}",
+                                   finished=True)
+            events.emit("task.failed", task=tid,
+                        reason=f"exhausted escalation up to {last}")
             return {"failed": True, "gate": reason}
 
         chain = {"alloc": alloc, "implement": implement, "gate": gate,
-                 "review": review, "publish": publish, "fail": fail}
+                 "review": review, "escalate": escalate, "publish": publish,
+                 "fail": fail}
         for suffix, fn in chain.items():
             g.node(f"{suffix}_{tid}", fn)
         g.edge(f"alloc_{tid}", f"implement_{tid}")
@@ -258,18 +460,30 @@ def build_code_graph(store, taskset, taskfile=""):
         for src in ("gate", "review"):
             key = "passed" if src == "gate" else "pass"
             g.edge(f"{src}_{tid}", f"implement_{tid}",
-                   when=lambda r, c, k=key, i=tid: not r[k]
-                   and c.get("runs", {}).get(f"implement_{i}", 0) <= config.MAX_FIX_ROUNDS)
+                   when=lambda r, c, k=key: not r[k] and within_budget(c))
+            g.edge(f"{src}_{tid}", f"escalate_{tid}",
+                   when=lambda r, c, k=key: not r[k]
+                   and not within_budget(c) and can_escalate(c))
             g.edge(f"{src}_{tid}", f"fail_{tid}",
-                   when=lambda r, c, k=key, i=tid: not r[k]
-                   and c.get("runs", {}).get(f"implement_{i}", 0) > config.MAX_FIX_ROUNDS)
+                   when=lambda r, c, k=key: not r[k]
+                   and not within_budget(c) and not can_escalate(c))
+        g.edge(f"escalate_{tid}", f"implement_{tid}")
+        # Conflict-repair fallthrough: only when the repair-mode publish ran
+        # (no alloc in results yet) and could not merge the old branch.
+        g.edge(f"publish_{tid}", f"alloc_{tid}",
+               when=lambda r, c, i=tid: not r.get("merged")
+               and f"alloc_{i}" not in c.get("results", {}))
+        first = "publish" if prior_status == "conflict" else "alloc"
         if t["deps"]:
-            g.edge(f"publish_{t['deps'][-1]}", f"alloc_{tid}")
+            g.edge(f"publish_{t['deps'][-1]}", f"{first}_{tid}")
         else:
-            g.start(f"alloc_{tid}")
+            g.start(f"{first}_{tid}")
 
     for tid in _topo(tasks):
-        make_chain(tasks[tid])
+        if (prior.get(tid) or {}).get("status") == "merged":
+            make_skip(tasks[tid])
+        else:
+            make_chain(tasks[tid])
     return g
 
 

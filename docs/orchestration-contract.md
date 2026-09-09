@@ -29,7 +29,11 @@ rules, enforced by `code_tasks.load_taskfile`).
 6. **Verify gate** — a deterministic `verify_cmd` per task (tests, build,
    `node --check`, a `grep` contract). It runs in the task's worktree
    *before* review; failure loops the task back to the implementer
-   (max `config.MAX_FIX_ROUNDS` = 3 rounds, then the task fails).
+   (max `config.MAX_FIX_ROUNDS` = 3 rounds per tier, then the task
+   **escalates** to the next model in `config.ESCALATION_PATH` — default
+   `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`, env
+   `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS` — with a fresh fix budget,
+   instead of failing).
 7. **Collision avoidance** — `files_hint` must be disjoint across
    dep-independent tasks; two parallel agents editing the same file is the
    main cause of `conflict` failures at merge time.
@@ -46,21 +50,58 @@ rules, enforced by `code_tasks.load_taskfile`).
 - **Concurrency caps** (`drivers.py` semaphores): see
   [concurrency-limits.md](concurrency-limits.md). Queued tasks wait
   politely — they never push an account over its ARC limit.
+- **Retry safety** (`gitstore.alloc`, `gitstore.merge_to_main`): alloc always
+  resets branch `task/<tid>` to the base ref on (re)alloc, so a failed
+  attempt's rejected work never leaks into a retry; merges tolerate a dirty
+  blessed-repo working tree (path-scoped `git stash push` of conflicting
+  local edits before the merge, `stash pop` after — the merge stays landed
+  even if the pop conflicts).
+- **Publish hook** (`gitstore.push_and_open_pr`): after a successful local
+  merge, best-effort push of `task/<tid>` + `main` to origin and a GitHub PR
+  via `gh pr create` — emits `task.pr_opened` `{url}` or
+  `task.pr_skipped` `{reason}`, never fails the task.
 - **Evidence**: every run lands in `logs/harness/*.jsonl` (streamed live),
   `logs/events.jsonl`, and the SQLite tables `code_tasks` / `harness_runs`.
-  The dashboard reads all of it — see [runbook.md](runbook.md).
+  Escalations, conflicts, resume plans, and the publish hook surface as
+  `task.escalated` / `task.conflict` / `run.resume` / `task.pr_opened` /
+  `task.pr_skipped` events. The dashboard reads all of it — see
+  [runbook.md](runbook.md).
 
 ## Task-chain shape (per task)
 
 ```
-alloc → implement → gate ──pass──▶ review ──pass──▶ publish(merge)
+alloc → implement → gate ──pass──▶ review ──pass──▶ publish(merge + PR hook)
          ▲            │                │
-         └──── fail ◀─┴───── fail ◀────┘   (≤3 fix rounds)
-                          │ exhausted
-                          ▼
-                         fail
+         └──── fail ◀─┴───── fail ◀────┘   (≤ MAX_FIX_ROUNDS fix rounds per tier)
+         │
+         │   fix rounds exhausted
+         ▼
+      escalate_<tid>  ── next model in config.ESCALATION_PATH
+         │                 (gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3),
+         │                 fresh fix budget, latest failure carried as feedback;
+         │                 reviewer flips when the new implementer is kimi/glm
+         │                 family (glm→kimi, kimi→glm), basic/medium keep theirs
+         │
+         └──▶ implement (again)      ... until the last tier exhausts:
+                                         task failed, message names the last
+                                         model tried
 ```
 
 Statuses recorded in `code_tasks`: `pending → running → merged |
-conflict | failed`. `conflict` = merge collision (needs a human or a
-re-plan with disjoint files); `failed` = fix rounds exhausted.
+conflict | failed`. `conflict` = merge collision; `failed` = fix rounds
+exhausted on the final escalation tier.
+
+**Resume**: re-running `main.py code run` on the same taskfile resumes the
+project (`code_tasks.build_code_graph`) — it never starts a new one. Tasks at
+`merged` are skipped wholesale (their subgraph collapses to a stub publish
+node returning `merged`; dependents treat them as satisfied, no models/git
+spent). Tasks at `failed` re-execute **one escalation tier higher** than
+their recorded model with a full fresh fix budget. Tasks at `conflict`
+re-execute at the **same** model, and their publish node first tries repair:
+if `task/<tid>` is still ahead of `main` (`gitstore.branch_ahead` — the
+reviewed, gate-passing commit survived), it merges that branch directly under
+the merge lock instead of re-running implement+review; only a failed repair
+falls back to full re-execution. Stale `running` rows are marked `failed` at
+startup, scoped to that taskfile. Startup prints a resume plan (skipped /
+retried / escalated) and emits `run.resume`
+`{skipped_merged, retried, escalated_on_resume}`.

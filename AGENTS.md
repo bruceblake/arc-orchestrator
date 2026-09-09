@@ -121,7 +121,9 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
 - `gitstore.alloc` (gitstore.py:47) creates `~/worktrees/<project>/<task-id>`
   on branch `task/<task-id>` from base `main` (`config.WORKTREE_ROOT`,
   override `ARC_WORKTREE_ROOT`). A blessed clone at `~/repos/<project>` keeps
-  `main` clean.
+  `main` clean. On (re)alloc `gitstore.alloc` always **resets branch
+  `task/<task-id>` to the base ref** — a failed attempt's branch holds
+  rejected work and never leaks into a retry (Rules 4–5).
 - Tasks with no `deps` are graph start nodes and run in parallel; a dependent
   task is wired `publish_<last-dep> -> alloc_<tid>` (code_tasks.py:267) so it
   allocates only after its dependency has merged.
@@ -142,8 +144,23 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   review_<tid>` fires only `when r["passed"]`, code_tasks.py:256).
 - A gate or review failure loops back to `implement` with the failure output
   as feedback while `runs <= config.MAX_FIX_ROUNDS` (3, override
-  `ARC_MAX_FIX_ROUNDS`); after that the task is marked `failed`
-  (code_tasks.py:243).
+  `ARC_MAX_FIX_ROUNDS`). Exhausting the fix rounds does **not** fail the task
+  yet: it **escalates one tier up `config.ESCALATION_PATH`** (default
+  `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`, overrides
+  `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS`) — an `escalate_<tid>` graph
+  node routes back to `implement_<tid>` with a **fresh fix budget**, carrying
+  the latest gate/review failure as feedback. Cross-review holds on
+  escalation (`code_tasks.build_code_graph`): when the new implementer's
+  family is `kimi` or `glm` the reviewer token flips to the other one
+  (glm implementer → kimi reviewer, kimi → glm); basic/medium models keep
+  the taskfile's reviewer. Each escalation emits `task.escalated`
+  `{from_model, to_model, n}`; the `code_tasks` row is updated with the
+  current model/reviewer and `harness_runs` rows record the model actually
+  used. Only when the last tier exhausts is the task marked `failed`, and
+  the failure message names the last model tried (`exhausted escalation up
+  to Kimi-K3`, code_tasks.py:243). Concurrency footnote: worst-case harness
+  runs per task multiply by tier count (fix rounds × tiers); all caps of
+  Rule 6 still apply.
 - The loader permits an empty `verify_cmd` (it then passes trivially,
   code_tasks.py:192) — which is exactly why this rule is normative: a
   taskfile with no honest gate is a bug. The planner prompt requires a
@@ -160,11 +177,52 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   (code_tasks.py:23): `gitstore.merge_to_main` (`git merge --no-ff`) plus
   `gitstore.cleanup` (worktree + branch removal) happen one at a time, so
   concurrent task completions cannot interleave merges.
+- A task whose previous run ended in `conflict` first tries **repair** in
+  its publish node: if branch `task/<tid>` still has commits ahead of
+  `main` (the reviewed, gate-passing commit survived; `gitstore.branch_ahead`),
+  it merges that branch directly under the merge lock instead of re-running
+  implement+review. Only if repair fails does it fall back to a full
+  re-execution (alloc resets the branch to `main`). A fresh conflict is
+  recorded as status `conflict` with a distinct `task.conflict` event (not
+  lumped into `task.failed`).
+- `gitstore.merge_to_main` tolerates a **dirty blessed-repo working tree**
+  (the blessed repo is also the operator's working copy): files that the
+  merge would update and that have uncommitted local edits are path-scoped
+  `git stash push`'d before the merge and `git stash pop`'d after. If the
+  pop conflicts, the merge stays landed and the error tells the operator to
+  resolve the stash — no more "Your local changes ... would be overwritten"
+  aborts because someone was mid-edit.
+- **Publish hook** (`gitstore.push_and_open_pr`): after every successful
+  local merge the orchestrator **best-effort** pushes `task/<tid>` and
+  `main` to origin and opens a GitHub PR via `gh pr create` (base `main`,
+  head `task/<tid>`) — pushing `main` afterwards makes GitHub auto-mark the
+  PR merged. It never fails the task: it emits `task.pr_opened` `{url}` or
+  `task.pr_skipped` `{reason}` (reasons: no git remote configured / gh CLI
+  not installed / push failed / `gh pr create` failed). No remote is
+  configured on this repo today, so expect `pr_skipped` until an origin +
+  `gh auth login` exist.
 - Task status lifecycle (table `code_tasks` in `store.py`; `pending` is the
   schema default): `running` at alloc → `merged` on success, `conflict` if the
   merge raises `gitstore.GitError` (main is left untouched — that is how it
-  stays green), or `failed` when fix rounds are exhausted. Watch them with
-  `main.py code status`.
+  stays green), or `failed` when fix rounds are exhausted **on every
+  escalation tier** (Rule 4; a persistent harness outage ends the same way —
+  Rule 7). Watch statuses with `main.py code status`.
+- **Resume semantics** (`code_tasks.build_code_graph` + the `cmd_code run`
+  path): re-running `main.py code run <taskfile>` on a taskfile with existing
+  `code_tasks` rows is a **resume of the same project**, never a new one.
+  `merged` tasks are skipped entirely — their subgraph is replaced by a stub
+  publish node returning `merged`, so dependents treat them as satisfied and
+  no models/git are wasted. `failed` tasks resume **one tier higher** in
+  `ESCALATION_PATH` than the model recorded in their row, with a full fresh
+  fix budget (the old run proved that model insufficient); `conflict` tasks
+  resume at the **same** model (a merge conflict is not a capability signal)
+  and try repair first (above); `pending` tasks just run. At startup the run
+  also marks *this taskfile's* stale `running` rows `failed` (scoped to the
+  taskfile — safe to start a run while other projects are idle; the manual
+  `code status --reset-stale` escape hatch still exists), and prints a resume
+  plan (skipped/retried/escalated lists) plus a `run.resume` event
+  `{skipped_merged, retried, escalated_on_resume}`. **Retrying anything is
+  always "just re-run the same taskfile".**
 - Because merges are serialized and dependent allocs wait for
   `publish_<dep>`, every task branches from a `main` that already contains
   all of its dependencies (comment at code_tasks.py:157).
@@ -199,10 +257,19 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   (`config.EVENTS_LOG`; append-only JSONL with workload context, rotated at
   100 MiB to `events.jsonl.1`): `driver.start` / `driver.done` /
   `driver.error`, `worktree.alloc`, `task.gate`, `task.reviewed`,
-  `task.merged`, `task.failed`.
+  `task.merged`, `task.conflict`, `task.failed`, `task.escalated`
+  (Rule 4), `task.pr_opened` / `task.pr_skipped` (Rule 5), and `run.resume`
+  (Rule 5 resume plan).
+- The dashboard Projects DAG view renders the loops: fix-loop attempts as
+  dashed amber self-arcs with xN counts, `conflict` nodes in **orange**
+  (distinct from `failed` red), and the last review verdict on each node.
 - Harness-level resilience: `config.DRIVER_TIMEOUT` = 900 s per harness
   invocation (override `ARC_DRIVER_TIMEOUT`), retries with exponential
-  backoff (capped at 30 s) up to `config.MAX_RETRIES` = 4.
+  backoff (capped at 30 s) up to `config.MAX_RETRIES` = 4. If every retry
+  fails, the attempt is recorded as a harness run (exit 1) and treated as a
+  failed attempt — the task re-enters the bounded fix loop and, if the
+  outage persists through the fix rounds and escalation tiers, ends `failed`
+  (Rule 4); the rest of the run continues.
 - If you cannot show a transcript or an event for a claim about a run, do not
   make the claim.
 
@@ -217,6 +284,44 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   read it. A dry-run that surprises you is a taskfile bug; fix the taskfile,
   not the dry-run.
 
+### Benchmarking exception — the bench `policy` escape hatch
+
+`code_tasks.load_taskfile` / `code_tasks.build_code_graph` accept an optional
+`policy` dict that widens the rules above **for benchmark variant runs
+only**. The default (`policy=None`) enforces Rules 1–8 byte-for-byte, and
+every normal path (`code plan`, `code run`, dashboard project runs) passes
+no policy.
+
+`orchbench.py` (`main.py code bench`) declares the benchmark matrix: each
+entry in `orchbench.VARIANTS` is an explicit, named policy — e.g.
+`glm-implement-only` (GLM implements, never reviews), `kimi-implement-only`,
+`deepseek-reviews` / `gptoss-reviews` (implement-only models reviewing),
+`self-review`, `no-review`, `kimi-via-opencode` (harness swap),
+`all-glm` / `all-deepseek` / `all-kimi` (flat routing), `misroute`
+(tier-inverted routing), `no-fixloop` / `fixloop-1` (`max_fix_rounds` 0/1) —
+so we can measure which governance options actually matter. Two policy keys
+also affect runtime behavior:
+
+- `tolerate_driver_error` — **default on since 2026-09-09, in every path.**
+  A harness that exhausts its `MAX_RETRIES` retries fails the attempt
+  through the normal fix loop/`fail` node (gate: "implementer crashed";
+  review: a crash verdict) instead of raising `DriverError` out of the
+  graph — one crashed model no longer aborts an entire run. The policy
+  key remains only as an opt-out (`False` restores the old abort).
+- `review` / `max_fix_rounds` — gate toggles for the corresponding
+  variants.
+
+Every variant run stamps a fresh `filetoolkit` repo at
+`~/repos/orchbench-<stamp>-<code>`, runs the full governed DAG (alloc →
+implement → gate → review → publish → serialized merge) on six tiered
+tasks, records harness sessions to its own db
+(`logs/orchbench/<stamp>/orchbench.db`), and scores merged `main` with
+`orchbench.integration_score` (the repo's own test suite). Results append
+to `logs/orchbench/<stamp>/results.jsonl`; the table is
+`main.py code bench report [--stamp <stamp>]`. Transcripts, events, and
+`harness_runs` rows are produced exactly as in normal runs (Rule 7 holds
+for benchmarks too).
+
 ---
 
 ## 4. Repo file map
@@ -226,14 +331,16 @@ Top-level Python modules (one role each):
 | File | Role |
 |---|---|
 | `build_work.py` | Minecraft-style browser-game build workload: planner → 6 parallel module producers (each an implement → syntax gate → contract check → cross-model review → fix gauntlet) → assemble → bounded integration-review cycle |
-| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail`, fix-loop edges, serialized merge lock |
+| `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
+| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, resume of re-run taskfiles, serialized merge lock |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `gitstore.py` | The only git actor: blessed clone `~/repos/<project>`, worktree `alloc`/`publish`/`merge_to_main`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout) |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
-| `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, and `code {plan,run,status}` |
+| `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), and `code {plan,run,status,bench}` |
+| `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
 | `pool.py` | `AsyncOpenAI` request pool for the research workload: per-family semaphores, retry/backoff, token accounting |
 | `scheduler.py` | `Supervisor`: runs research rounds continuously (pipeline concurrency, round cooldown, periodic stats) |
 | `store.py` | sqlite persistence: `rounds`, `items`, `answers`, `seeds`, `builds`, `build_modules`, `harness_runs`, `code_tasks` |
@@ -278,7 +385,10 @@ The full operator runbook, with troubleshooting, is
 3. **Dry-run** — `.venv/bin/python main.py code run <taskfile> --dry-run`
    (validates everything; no models, no git — Rule 8).
 4. **Run** — `.venv/bin/python main.py code run <taskfile>`; check
-   `main.py code status` for task and harness-run stats.
+   `main.py code status` for task and harness-run stats. **Re-running the
+   same command is also the retry/resume path** (Rule 5): merged tasks are
+   skipped, failed tasks resume one escalation tier up, conflicts try
+   repair — never write a reduced taskfile to retry a subset.
 5. **Watch** — `./start.sh`, then open `http://localhost:8787`
    (`http://<lan-ip>:8787` from laptop/phone, `/phone.html` on phones).
 
@@ -288,7 +398,8 @@ The full operator runbook, with troubleshooting, is
 
 - [docs/orchestration-contract.md](docs/orchestration-contract.md) — the
   end-to-end per-task pipeline contract (alloc → implement → gate → review →
-  publish → merge, fix loops, failure semantics)
+  publish → merge, fix loops, tier escalation, resume semantics, failure
+  semantics)
 - [docs/model-tiers.md](docs/model-tiers.md) — model fleet, tiers, and
   allowed roles in full
 - [docs/concurrency-limits.md](docs/concurrency-limits.md) — the two layers

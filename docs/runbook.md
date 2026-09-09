@@ -81,6 +81,9 @@ cd /home/proxyie/arc-orchestrator
 
 - This builds the graph and executes every task: alloc worktree -> implement ->
   verify gate -> cross-family review -> publish/merge -> cleanup.
+- **Re-running this command is also the retry/resume path** — see §5 "Retrying
+  / resuming": already-`merged` tasks are skipped, `failed` tasks resume one
+  escalation tier up, `conflict` tasks try repair first.
 - Watch progress with `.venv/bin/python main.py code status` (dumps the
   `code_tasks` and `harness_runs` tables as JSON), and the dashboard live at
   `http://localhost:8787/`.
@@ -126,32 +129,89 @@ Fix the task file per `docs/taskfile-schema.md` (valid `model`, reviewer
 `kimi`/`glm`, cross-family reviewer, known deps, no cycles), re-run the
 dry-run, then re-run.
 
-### Task failed (`exhausted fix rounds`)
+### Retrying / resuming
+
+**Retrying anything is always: re-run the same task file.**
+
+```bash
+cd /home/proxyie/arc-orchestrator
+.venv/bin/python main.py code run ~/tasks/<taskfile>.json
+```
+
+A `code run` on a task file that already has rows in the `code_tasks` table
+resumes the same project (`code_tasks.build_code_graph`) — it never starts a
+new one:
+
+- `merged` tasks are **skipped** — their subgraph is replaced by a stub
+  publish node returning `merged`, so dependents treat them as satisfied and
+  no models or git ops are wasted.
+- `failed` tasks are **retried one escalation tier higher** than the model in
+  their `code_tasks` row (`config.ESCALATION_PATH`, default
+  `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`) with a full fresh
+  fix budget — the old run already proved that model insufficient. Within a
+  run the same tier-escalation happens live: a task that exhausts
+  `MAX_FIX_ROUNDS` at one model escalates instead of failing, and the final
+  failure message names the last model tried (`exhausted escalation up to
+  Kimi-K3`).
+- `conflict` tasks are **retried at the same model** (a merge conflict is not
+  a capability signal) and their publish node first tries **conflict repair**:
+  if branch `task/<task-id>` still has commits ahead of `main` — the reviewed,
+  gate-passing commit survived the failed run (`gitstore.branch_ahead`) — it
+  merges that branch directly under the merge lock instead of re-running
+  implement+review. Only if repair fails does the task fall back to full
+  re-execution.
+- stale `running` rows (crashed-run leftovers) are marked `failed` at
+  startup, **scoped to this task file** — it is safe to start a run while
+  other projects' rows are idle.
+
+Startup prints a resume plan (skipped / retried / escalated lists) and emits a
+`run.resume` event `{skipped_merged, retried, escalated_on_resume}`.
+
+Re-running is safe because `gitstore.alloc` always **resets branch
+`task/<task-id>` to the base ref** on (re)alloc — a failed attempt's rejected
+work never leaks into a retry — and merges are stash-tolerant (see
+"Task conflict"). Never hand-write a reduced task file to retry a subset;
+that was the old workaround, it is no longer needed.
+
+### Task failed (`exhausted escalation`)
 
 The implementer failed the verify gate or review `MAX_FIX_ROUNDS` (default 3)
-times, so the task is marked `failed`. To debug:
+times **at every tier of `config.ESCALATION_PATH`**, so the task is marked
+`failed` — the failure message names the last model tried (`exhausted
+escalation up to Kimi-K3`). To debug:
 
 ```bash
 ls -t /home/proxyie/arc-orchestrator/logs/harness/<task>-x*-implementer-*.jsonl
 ```
 
-Read the latest implementer transcript and the reviewer verdict. Fix the task's
-`prompt`/`verify_cmd` in `~/tasks/<taskfile>.json`, then re-run.
-
-**Actual re-run behaviour (verified in `main.py` + `code_tasks.py`):** re-running
-a task file does **NOT** resume or retry only the previously-failed tasks.
-`code_tasks.build_code_graph` rebuilds the whole graph from the file and
-`gitstore.alloc` **force-removes and recreates every worktree** for every task
-in the file, so a re-run re-executes the **entire task set from scratch** —
-including tasks that already `merged`. There is no "skip already-merged/skip
-failed" resume logic. If you only want to re-run a subset, hand-write a
-reduced task file listing just those tasks (and their deps) and run that.
+Read the latest implementer transcript and the reviewer verdict (each tier
+records its own `harness_runs` rows with the model actually used). Fix the
+task's `prompt`/`verify_cmd` in `~/tasks/<taskfile>.json`, then **re-run the
+same task file** — it resumes (see "Retrying / resuming"): merged tasks are
+skipped and this task restarts one escalation tier higher than its recorded
+model with a fresh fix budget.
 
 ### Task conflict
 
 When a merge collides, `publish` marks the task `conflict` (`error` holds the
-merge error). The worktree and `task/<task-id>` branch are **left in place**,
-so you can resolve on disk:
+merge error; event `task.conflict` — distinct from `task.failed`). The
+worktree and `task/<task-id>` branch are **left in place**, so the next
+`code run` of the same task file tries **repair** first: if
+`task/<task-id>` still has commits ahead of `main` — the reviewed,
+gate-passing commit survived (`gitstore.branch_ahead`) — the publish node
+merges that branch directly under the merge lock instead of re-running
+implement+review. Only if repair fails does the task fall back to a full
+re-execution (alloc resets the branch to `main`).
+
+Merges also tolerate a **dirty blessed-repo working tree** (the blessed repo
+is usually your working copy too): `gitstore.merge_to_main` path-scoped
+`git stash push`'s files that the merge would update and that have
+uncommitted local edits, then `git stash pop`'s them after. If the pop
+conflicts, the merge stays landed and the error tells you to resolve the
+stash (`git stash list` / `git stash show -p`) — no more "Your local
+changes ... would be overwritten" aborts just because someone was mid-edit.
+
+You can still resolve on disk:
 
 ```bash
 ls ~/worktrees/<project>/<conflicted-task>     # inspect the worktree
@@ -184,8 +244,9 @@ dashboard.
 
 - **Never hand-edit a worktree mid-run.** The orchestrator is the only git
   actor and harnesses write files inside their worktree; the implementer reads
-  the worktree as-is, and `gitstore.alloc` **force-removes** it on a re-run, so
-  any manual edit is either clobbered or races the agent.
+  the worktree as-is, and `gitstore.alloc` **resets its `task/<task-id>`
+  branch to the base ref** on a re-run, so any manual edit is either clobbered
+  or races the agent.
 - **Publish/merge lock (verified in `gitstore.py` + `code_tasks.py`):**
   `gitstore.py` itself holds **no lock**. The serialization is the in-process
   `_merge_lock = asyncio.Lock()` in `code_tasks.py`, taken around

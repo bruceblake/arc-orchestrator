@@ -107,6 +107,38 @@ CREATE TABLE IF NOT EXISTS harness_runs(
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_harness_runs_task ON harness_runs(task_id);
+CREATE TABLE IF NOT EXISTS bench_runs(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT,
+  suites TEXT NOT NULL,
+  label TEXT,
+  config TEXT,
+  status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS bench_results(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id INTEGER NOT NULL,
+  task_id TEXT NOT NULL,
+  suite TEXT NOT NULL,
+  tier TEXT,
+  model TEXT NOT NULL,
+  effort TEXT,
+  harness TEXT NOT NULL,
+  temperature REAL,
+  n INTEGER NOT NULL DEFAULT 1,
+  sample INTEGER NOT NULL DEFAULT 0,
+  passed INTEGER,
+  rounds INTEGER,
+  seconds REAL,
+  tokens INTEGER,
+  prompt_tokens INTEGER,
+  completion_tokens INTEGER,
+  error TEXT,
+  output_path TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bench_results_run ON bench_results(run_id);
 """
 
 
@@ -324,6 +356,27 @@ class Store:
             ]
         return {"tasks": tasks, "runs": runs}
 
+    def reset_stale_code_tasks(self, taskfile=None):
+        """Mark 'running' code tasks 'failed' — for when the run process that
+        owned them is known dead. With `taskfile`, only that file's rows are
+        touched (safe at the start of a new run of this taskfile; concurrent
+        runs of OTHER taskfiles keep their rows). Without it, every running
+        row is reset — never call that blanket form while a run is alive:
+        concurrent code-run processes share this table."""
+        with self.lock:
+            if taskfile is None:
+                cur = self.conn.execute(
+                    "UPDATE code_tasks SET status='failed', "
+                    "error='reset-stale: owning run process died', finished_at=? "
+                    "WHERE status='running'", (_now(),))
+            else:
+                cur = self.conn.execute(
+                    "UPDATE code_tasks SET status='failed', "
+                    "error='reset-stale: owning run process died', finished_at=? "
+                    "WHERE status='running' AND taskfile=?", (_now(), taskfile))
+            self.conn.commit()
+            return cur.rowcount
+
     def code_tasks_all(self, limit=500):
         with self.lock:
             return [
@@ -333,6 +386,27 @@ class Store:
                     "worktree, error, created_at, finished_at FROM code_tasks "
                     "ORDER BY created_at DESC LIMIT ?",
                     (limit,),
+                ).fetchall()
+            ]
+
+    def code_tasks_for(self, taskfile):
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT id, title, model, reviewer, status, error FROM code_tasks "
+                    "WHERE taskfile=? ORDER BY id", (taskfile,),
+                ).fetchall()
+            ]
+
+    def harness_runs_prefix(self, task_id_prefix):
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT task_id, harness, model, role, attempt, exit_code, "
+                    "seconds, verdict FROM harness_runs WHERE task_id LIKE ? "
+                    "ORDER BY id", (task_id_prefix + "%",),
                 ).fetchall()
             ]
 
@@ -363,6 +437,71 @@ class Store:
                     (limit,),
                 ).fetchall()
             ]
+
+    def start_bench_run(self, suites, label, config):
+        with self.lock:
+            cur = self.conn.execute(
+                "INSERT INTO bench_runs(started_at, suites, label, config, status) "
+                "VALUES (?, ?, ?, ?, 'running')",
+                (_now(), suites, label, config),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def finish_bench_run(self, rid, status):
+        with self.lock:
+            self.conn.execute(
+                "UPDATE bench_runs SET finished_at=?, status=? WHERE id=?",
+                (_now(), status, rid),
+            )
+            self.conn.commit()
+
+    def fail_stale_bench_runs(self):
+        with self.lock:
+            cur = self.conn.execute(
+                "UPDATE bench_runs SET status='failed', finished_at=? WHERE status='running'",
+                (_now(),),
+            )
+            self.conn.commit()
+            return cur.rowcount
+
+    def save_bench_result(self, run_id, task_id, suite, tier, model, effort, harness,
+                          temperature, n, sample, passed, rounds, seconds, tokens,
+                          prompt_tokens, completion_tokens, error, output_path):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO bench_results(run_id, task_id, suite, tier, model, effort,"
+                " harness, temperature, n, sample, passed, rounds, seconds, tokens,"
+                " prompt_tokens, completion_tokens, error, output_path, created_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (run_id, task_id, suite, tier, model, effort, harness, temperature,
+                 n, sample, passed, rounds, seconds, tokens, prompt_tokens,
+                 completion_tokens, error, output_path, _now()),
+            )
+            self.conn.commit()
+
+    def bench_runs_list(self, limit=50):
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT id, started_at, finished_at, suites, label, status FROM"
+                    " bench_runs ORDER BY id DESC LIMIT ?", (limit,),
+                ).fetchall()
+            ]
+
+    def bench_results(self, run_ids=None, limit=100000):
+        sql = ("SELECT run_id, task_id, suite, tier, model, effort, harness,"
+               " temperature, n, sample, passed, rounds, seconds, tokens,"
+               " prompt_tokens, completion_tokens, error FROM bench_results")
+        args = []
+        if run_ids:
+            sql += " WHERE run_id IN (" + ",".join("?" * len(run_ids)) + ")"
+            args = list(run_ids)
+        sql += " ORDER BY id LIMIT ?"
+        args.append(limit)
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
     def stats(self):
         with self.lock:

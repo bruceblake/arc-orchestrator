@@ -41,11 +41,24 @@ async def _ensure_identity(repo):
                      ("user.email", "arc-orchestrator@localhost")):
         rc, out, _ = await _git(["config", "--get", key], cwd=repo, check=False)
         if rc != 0 or not out.strip():
-            await _git(["config", key, val], cwd=repo)
+            try:
+                await _git(["config", key, val], cwd=repo)
+            except GitError:
+                # parallel allocs on a fresh repo race to write .git/config;
+                # re-check instead of failing — another writer may have won
+                rc, out, _ = await _git(["config", "--get", key],
+                                        cwd=repo, check=False)
+                if rc != 0 or not out.strip():
+                    raise
 
 
 async def alloc(repo, task_id, base="main"):
-    """Create (or recreate, on retry) the task worktree; returns its Path."""
+    """Create (or recreate, on retry) the task worktree; returns its Path.
+
+    A re-alloc always resets task/<task_id> to the base: a failed/crashed
+    attempt's branch holds rejected work and must not leak into the retry.
+    (The conflict-repair path in code_tasks.publish merges the old branch
+    BEFORE alloc runs, so reviewed commits are never discarded silently.)"""
     repo = Path(repo).resolve()
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
     branch = f"task/{task_id}"
@@ -54,11 +67,8 @@ async def alloc(repo, task_id, base="main"):
         await _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
     rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
     base_ref = "origin/main" if remotes.strip() else base
-    rc, _, _ = await _git(["rev-parse", "--verify", branch], cwd=repo, check=False)
-    if rc == 0:
-        await _git(["worktree", "add", "--force", str(wt), branch], cwd=repo)
-    else:
-        await _git(["worktree", "add", "-b", branch, str(wt), base_ref], cwd=repo)
+    await _git(["worktree", "add", "--force", "-B", branch, str(wt), base_ref],
+               cwd=repo)
     return wt
 
 
@@ -92,17 +102,107 @@ async def publish(wt, message, trailers=None):
     return head.strip()
 
 
+async def _dirty_paths(repo):
+    """Paths with uncommitted (tracked or untracked) changes in the repo."""
+    _, st, _ = await _git(["status", "--porcelain"], cwd=repo)
+    out = set()
+    for line in st.splitlines():
+        if not line:
+            continue
+        p = line[3:]
+        if " -> " in p:
+            p = p.split(" -> ", 1)[1]
+        out.add(p)
+    return out
+
+
+async def branch_ahead(repo, task_id, base="main"):
+    """True if task/<task_id> exists and has commits base does not."""
+    repo = Path(repo).resolve()
+    branch = f"task/{task_id}"
+    rc, _, _ = await _git(["rev-parse", "--verify", branch], cwd=repo, check=False)
+    if rc != 0:
+        return False
+    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
+    base_ref = "origin/main" if remotes.strip() else base
+    rc, out, _ = await _git(["rev-list", "--count", f"{base_ref}..{branch}"],
+                            cwd=repo, check=False)
+    return rc == 0 and (out.strip() or "0").isdigit() and int(out.strip() or 0) > 0
+
+
 async def merge_to_main(repo, task_id):
+    """Merge --no-ff task branch into main; tolerates a dirty working tree.
+
+    The blessed repo doubles as the operator's working copy, so uncommitted
+    edits may exist. Files the merge needs to update that are locally
+    modified are path-scoped stashed first, then restored after the merge —
+    a merge no longer fails just because someone was editing an unrelated
+    file the branch also touched."""
     repo = Path(repo).resolve()
     _, cur, _ = await _git(["branch", "--show-current"], cwd=repo)
     if cur.strip() != "main":
         await _git(["checkout", "main"], cwd=repo)
+    branch = f"task/{task_id}"
+    _, names, _ = await _git(["diff", "--name-only", f"main...{branch}"], cwd=repo)
+    changed = {n.strip() for n in names.splitlines() if n.strip()}
+    blocking = sorted(changed & await _dirty_paths(repo))
+    stashed = False
+    if blocking:
+        rc, _, _ = await _git(
+            ["stash", "push", "-q", "-u", "-m", f"arc-pre-merge {task_id}",
+             "--", *blocking], cwd=repo, check=False)
+        stashed = rc == 0
     rc, _, err = await _git(
-        ["merge", "--no-ff", "-m", f"merge task/{task_id}", f"task/{task_id}"],
+        ["merge", "--no-ff", "-m", f"merge task/{task_id}", branch],
         cwd=repo, check=False,
     )
     if rc != 0:
-        raise GitError(f"merge task/{task_id} failed: {err.strip()[:300]}")
+        if stashed:
+            await _git(["stash", "pop", "-q"], cwd=repo, check=False)
+        raise GitError(f"merge {branch} failed: {err.strip()[:300]}")
+    if stashed:
+        rc, _, err = await _git(["stash", "pop", "-q"], cwd=repo, check=False)
+        if rc != 0:
+            raise GitError(
+                f"merged {branch}, but restoring stashed local edits to {blocking} "
+                f"conflicted — resolve with `git stash pop`: {err.strip()[:200]}")
+
+
+async def push_and_open_pr(repo, task_id, title, taskfile=""):
+    """Best-effort GitHub publish: push branch + main, open a PR.
+
+    Never raises; returns (pr_url_or_None, note). With no remote / no gh /
+    no auth it reports a skip note via the events emitted by the caller —
+    local merge has already landed, so this is purely additive."""
+    import shutil
+    repo = Path(repo).resolve()
+    branch = f"task/{task_id}"
+    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
+    if not remotes.strip():
+        return None, "no git remote configured"
+    if not shutil.which("gh"):
+        return None, "gh CLI not installed"
+    try:
+        await _git(["push", "-u", "origin", branch], cwd=repo)
+        await _git(["push", "origin", "main"], cwd=repo)
+    except GitError as exc:
+        return None, f"push failed: {exc}"[:200]
+    proc = await asyncio.create_subprocess_exec(
+        "gh", "pr", "create", "--base", "main", "--head", branch,
+        "--title", f"task({task_id}): {title}",
+        "--body", f"Task `{task_id}` from `{taskfile or '?'}`\n\n"
+        "Merged locally into main by the orchestrator; pushing main marks "
+        "this PR merged.", cwd=str(repo),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), 60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return None, "gh pr create timed out"
+    if proc.returncode != 0:
+        return None, f"gh pr create failed: {err.decode(errors='replace').strip()[:200]}"
+    return out.decode(errors="replace").strip(), "opened"
 
 
 async def cleanup(repo, task_id, delete_branch=True):
