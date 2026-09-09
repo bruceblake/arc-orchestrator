@@ -609,7 +609,12 @@ async def plan_tasks(goal, repo, out_path=None):
         "- verify_cmd: a deterministic shell check run in the task's "
         "worktree (tests, build, node --check, grep). Leave empty only for "
         "purely cosmetic tasks. A failing gate bounces the task back to the "
-        "implementer (max 3 fix rounds), so make it honest.\n\n"
+        "implementer (max 3 fix rounds), so make it honest. A grep only "
+        "proves a string is present, never that the change WORKS — if the "
+        "repo has a test suite or a self-check script (e.g. ./check.sh), make "
+        "it the FIRST clause of every gate that touches code: "
+        "'./check.sh && grep -q ...'. A task that edits the orchestrator "
+        "itself must not be able to merge a change that breaks it.\n\n"
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )

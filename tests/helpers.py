@@ -1,4 +1,5 @@
 """Shared test scaffolding: import path, event capture, fake store."""
+import logging
 import sys
 from pathlib import Path
 
@@ -7,6 +8,15 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import events  # noqa: E402
+
+# Several tests deliberately drive failure paths (node crashes, driver retry
+# ladders, gather deadlocks). Their log output is expected, and printing it
+# buries a real failure in the runner's output — and in check.sh's.
+logging.getLogger("drivers").setLevel(logging.CRITICAL)
+logging.getLogger("code-tasks").setLevel(logging.CRITICAL)
+for _name in ("graph.t", "graph.code-tasks"):
+    logging.getLogger(_name).setLevel(logging.CRITICAL)
+logging.getLogger().addHandler(logging.NullHandler())
 
 
 class capture_events:

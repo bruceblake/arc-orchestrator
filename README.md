@@ -295,6 +295,13 @@ Stdlib `unittest`, no extra dependencies:
 .venv/bin/python -m unittest discover -s tests -t tests
 ```
 
+`./check.sh` is the fuller gate — module compilation and imports, the unit
+tests, a JavaScript syntax check plus a DOM-reference check on every dashboard
+page, and validation of every task file in `~/tasks`. Every task file that
+edits **this** repo starts its `verify_cmd` with `./check.sh &&`, so the fleet
+cannot merge a change that breaks the orchestrator it is running on. A grep
+gate only proves a string is present; it never proves the change works.
+
 They cover the parts that historically broke silently: graph execution and
 drain-on-failure semantics, taskfile validation, reviewer-verdict parsing,
 resume/escalation planning, driver slot accounting and backoff classification,
