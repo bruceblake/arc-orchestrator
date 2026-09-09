@@ -8,154 +8,294 @@
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
   --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
-  --err: #f85149; --purple: #bc8cff;
+  --err: #f85149; --purple: #bc8cff; --grey: #484f58;
 }
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font: 14px/1.45 "SF Mono", "Cascadia Code", Consolas, monospace;
+  font: 12.5px/1.4 "SF Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
 }
-header {
-  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 12px 14px; border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; background: var(--bg); z-index: 10;
+.strip {
+  position: sticky; top: 0; z-index: 10; background: var(--bg);
+  border-bottom: 1px solid var(--border); max-width: 720px; margin: 0 auto;
+  padding: 7px 10px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
 }
-header h1 { font-size: 16px; margin: 0; color: var(--accent); flex: 1; }
-#h-api { font-size: 12px; color: var(--ok); }
-#h-api.bad { color: var(--err); }
-main { padding: 12px; display: grid; gap: 12px; max-width: 640px; margin: 0 auto; }
-.panel {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
-  padding: 12px 14px; overflow: auto;
+.strip .s-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+.strip .s-label { font-size: 9.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
+.strip b { font-weight: 700; font-size: 13px; }
+.strip b.g { color: var(--ok); } .strip b.b { color: var(--err); } .strip b.w { color: var(--warn); }
+.chip {
+  display: inline-block; font-size: 10px; padding: 0 6px; border-radius: 7px;
+  border: 1px solid; line-height: 16px; margin: 0 2px;
 }
+#s-stale {
+  font-size: 10px; color: var(--err); border: 1px solid var(--err);
+  border-radius: 7px; padding: 0 6px; line-height: 16px;
+}
+main { padding: 8px; display: grid; gap: 8px; max-width: 720px; margin: 0 auto; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
 .panel h2 {
-  font-size: 11px; margin: 0 0 10px; color: var(--dim); text-transform: uppercase;
-  letter-spacing: .08em;
+  font-size: 10px; margin: 0; padding: 8px 12px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 6px;
 }
-.big { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; text-align: center; }
-.big .v { font-size: 22px; font-weight: 700; }
-.big .k { font-size: 11px; color: var(--dim); }
-.good { color: var(--ok); } .bad { color: var(--err); } .warn { color: var(--warn); }
-table { border-collapse: collapse; width: 100%; }
-th, td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; font-size: 12.5px; }
-th { color: var(--dim); font-weight: normal; font-size: 11px; }
-td.num, th.num { text-align: right; }
-.tag { padding: 1px 7px; border-radius: 8px; background: #21262d; color: var(--dim); font-size: 11px; }
-.empty { color: var(--dim); font-size: 12px; padding: 6px 0; }
-.famrow { display: grid; grid-template-columns: 84px 1fr 56px; gap: 8px; align-items: center; margin: 8px 0; font-size: 12px; }
-.barwrap { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; height: 16px; overflow: hidden; }
-.bar { height: 100%; transition: width .4s; }
-a.btn {
-  display: block; text-align: center; text-decoration: none;
-  background: var(--accent); color: #0d1117; font-weight: 700; font-size: 16px;
-  padding: 14px; border-radius: 10px;
+.panel h2 .cnt { margin-left: auto; color: var(--text); }
+.empty { color: var(--dim); font-size: 11.5px; padding: 10px 12px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
+@keyframes pulse { 50% { opacity: .3; } }
+
+.agent { border-bottom: 1px solid var(--border); }
+.agent:last-child { border-bottom: none; }
+.a-head {
+  display: flex; align-items: center; gap: 6px; padding: 9px 10px;
+  min-height: 38px; cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
-a.ghost {
-  display: block; text-align: center; text-decoration: none; color: var(--accent);
-  border: 1px solid var(--border); padding: 10px; border-radius: 10px; font-size: 13px;
+.a-head:hover { background: #1c2128; }
+.a-head .m { font-weight: 700; font-size: 12px; flex: 0 0 auto; }
+.a-head .role { color: var(--dim); font-size: 10.5px; flex: 0 0 auto; }
+.a-head .task { color: var(--accent); font-size: 11px; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
+.a-head .att { color: var(--warn); font-size: 10.5px; flex: 0 0 auto; }
+.a-head .elp { color: var(--dim); font-size: 11px; flex: 0 0 auto; }
+.a-head .chev { color: var(--dim); font-size: 11px; flex: 0 0 auto; }
+.a-tx { background: #0d1117; border-top: 1px solid var(--border); }
+.a-tx .tx-meta { font-size: 10px; color: var(--dim); padding: 5px 10px 0; }
+.a-tx .tx-body {
+  margin: 0; padding: 6px 10px 10px; font-size: 10.5px; white-space: pre-wrap;
+  word-break: break-all; max-height: 220px; overflow: auto; color: var(--text);
 }
-.hint { color: var(--dim); font-size: 11px; text-align: center; }
+
+.task {
+  display: flex; align-items: center; gap: 7px; padding: 8px 10px;
+  min-height: 36px; border-bottom: 1px solid var(--border);
+}
+.task:last-child { border-bottom: none; }
+.task .tname { font-size: 11.5px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
+.task .tmodel { font-size: 10px; flex: 0 0 auto; }
+.task .tstate { font-size: 9.5px; text-transform: uppercase; flex: 0 0 auto; }
+.foot { color: var(--dim); font-size: 10px; text-align: center; padding: 6px; }
+.foot a { color: var(--accent); text-decoration: none; }
 </style>
 </head>
 <body>
-<header>
-  <h1>ARC Phone</h1>
-  <span id="h-api">live</span>
-  <span id="h-clock" class="hint"></span>
+<header class="strip">
+  <div class="s-group"><span class="s-label">agents</span><b id="s-agents">0</b></div>
+  <span id="s-chips"></span>
+  <div class="s-group"><span class="s-label">tok/1h</span><b id="s-tok">–</b></div>
+  <span id="s-fleet" hidden></span>
+  <div class="s-group"><span class="s-label">merged</span><b id="s-merged" class="g">0</b></div>
+  <div class="s-group"><span class="s-label">failed</span><b id="s-failed" class="b">0</b></div>
+  <span id="s-stale" hidden>stale</span>
 </header>
 <main>
-  <a class="btn" id="btn-term" href="#">&#9000;&#xfe0e; Open Terminal</a>
-
-  <div class="panel">
-    <div class="big">
-      <div><div class="v" id="t-req">–</div><div class="k">requests</div></div>
-      <div><div class="v" id="t-tok">–</div><div class="k">tokens</div></div>
-      <div><div class="v" id="t-err">–</div><div class="k">errors</div></div>
-    </div>
-  </div>
-
-  <div class="panel">
-    <h2>In flight now</h2>
-    <div id="inflight"><div class="empty">nothing running</div></div>
-  </div>
-
-  <div class="panel">
-    <h2>Concurrency by family</h2>
-    <div id="fams"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Per-model (all time)</h2>
-    <table>
-      <thead><tr>
-        <th>model</th><th>family</th><th class="num">req</th>
-        <th class="num">err</th><th class="num">tokens</th>
-      </tr></thead>
-      <tbody id="models"></tbody>
-    </table>
-  </div>
-
-  <a class="ghost" href="/usage.html">Full dashboard &rarr;</a>
-  <a class="ghost" href="/">Flows &rarr;</a>
-  <div class="hint">refresh every 2s</div>
+  <section class="panel">
+    <h2>Agents running now <span class="cnt" id="ag-cnt"></span></h2>
+    <div id="agents"><div class="empty">loading…</div></div>
+  </section>
+  <section class="panel">
+    <h2>Tasks <span class="cnt" id="task-cnt"></span></h2>
+    <div id="tasks"><div class="empty">loading…</div></div>
+  </section>
+  <div class="foot">auto-refresh 5s · <a href="/">flows</a> · <a href="/usage.html">usage</a></div>
 </main>
 
 <script>
-const TERM_URL = (location.hostname.endsWith('.ts.net'))
-  ? location.protocol + '//' + location.hostname + ':8443/'
-  : 'https://bruce-pc.taila54b46.ts.net:8443/';
-document.getElementById('btn-term').href = TERM_URL;
-
-const fmt = n => n == null ? '–' : n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
+"use strict";
+const $ = s => document.getElementById(s);
 const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const COLORS = { 'gpt-oss':'var(--accent)', glm:'var(--purple)', kimi:'var(--ok)', deepseek:'var(--warn)', 'kimi-code':'#cba6f7' };
+const fmt = n => n == null ? '–' : n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
+const SHORT = {"Kimi-K3":"K3","GLM-5.3":"GLM","gpt-oss-120b":"120B","DeepSeek-V4-Flash":"V4"};
+const short = m => SHORT[m] || m || '—';
+const COLORS = {'gpt-oss':'#3fb950', glm:'#58a6ff', kimi:'#bc8cff', deepseek:'#d29922', 'kimi-code':'#8b949e', harness:'#e3b341'};
+const DOT = {pending:'#484f58', running:'#58a6ff', merged:'#3fb950', conflict:'#d29922', failed:'#f85149'};
+function familyOf(model) {
+  const m = String(model || '').toLowerCase();
+  if (m.includes('kimi')) return 'kimi';
+  if (m.includes('glm')) return 'glm';
+  if (m.includes('gpt-oss')) return 'gpt-oss';
+  if (m.includes('deepseek')) return 'deepseek';
+  return 'harness';
+}
+const colorOf = a => COLORS[a.family] || COLORS[familyOf(a.model)] || COLORS.harness;
+const baseOf = t => (t || '').replace(/-x\d+$/, '');
+const attOf = t => { const m = (t || '').match(/-x(\d+)$/); return m ? +m[1] : null; };
+
+const state = {agents: [], projects: [], tok1h: 0, fleet: null, fleetTried: false,
+               expanded: null, tx: {}, txScroll: {}, stale: false};
+const akey = a => a.req_id || (a.model + '|' + a.role + '|' + a.task);
+const agentByKey = k => state.agents.find(a => akey(a) === k);
+
+async function j(url) {
+  const r = await fetch(url, {cache: 'no-store'});
+  if (!r.ok) throw new Error(r.status);
+  return r.json();
+}
+
+function allNodes() {
+  const out = [];
+  for (const p of state.projects)
+    for (const n of ((p.dag && p.dag.nodes) || []))
+      out.push({id: n.id, title: n.title || n.id, model: n.model, status: n.status, live: !!n.live});
+  return out;
+}
+function rank(n) {
+  if (n.status === 'running' || n.live) return 0;
+  if (n.status === 'pending') return 1;
+  if (n.status === 'conflict') return 2;
+  if (n.status === 'failed') return 3;
+  return 4;
+}
+
+function agentChips() {
+  const seen = {};
+  for (const a of state.agents) { const m = short(a.pretty || a.model); if (!seen[m]) seen[m] = colorOf(a); }
+  return Object.entries(seen).map(([m, c]) => `<span class="chip" style="color:${c};border-color:${c}">${esc(m)}</span>`).join('');
+}
+
+function renderStrip() {
+  $('s-agents').textContent = state.agents.length;
+  $('s-chips').innerHTML = agentChips();
+  $('s-tok').textContent = fmt(state.tok1h);
+  let merged = 0, failed = 0;
+  for (const n of allNodes()) {
+    if (n.status === 'merged') merged++;
+    else if (n.status === 'failed' || n.status === 'conflict') failed++;
+  }
+  $('s-merged').textContent = merged;
+  $('s-failed').textContent = failed;
+  const fl = $('s-fleet');
+  if (state.fleet && state.fleet.totals && state.fleet.totals.tokens != null) {
+    fl.hidden = false;
+    fl.innerHTML = `<div class="s-group"><span class="s-label">alltime</span><b>${fmt(state.fleet.totals.tokens)}</b></div>`;
+  } else fl.hidden = true;
+  $('s-stale').hidden = !state.stale;
+}
+
+function renderAgents() {
+  const list = $('agents');
+  if (state.expanded && !agentByKey(state.expanded)) state.expanded = null;
+  $('ag-cnt').textContent = state.agents.length ? '(' + state.agents.length + ')' : '';
+  if (!state.agents.length) { list.innerHTML = '<div class="empty">nothing running</div>'; return; }
+  list.innerHTML = state.agents.map(a => {
+    const k = akey(a);
+    const open = state.expanded === k;
+    const c = colorOf(a);
+    const att = attOf(a.task);
+    return `<div class="agent" data-key="${esc(k)}">
+      <div class="a-head">
+        <span class="dot" style="background:${c}${open ? ';animation:pulse 1.2s infinite' : ''}"></span>
+        <span class="m" style="color:${c}">${esc(short(a.pretty || a.model))}</span>
+        <span class="role">${esc(a.role || a.purpose || '')}</span>
+        <span class="task" title="${esc(a.task || '')}">${esc(baseOf(a.task))}</span>
+        ${att ? `<span class="att">×${att}</span>` : ''}
+        <span class="elp">${(a.elapsed_s || 0).toFixed(0)}s</span>
+        <span class="chev">${open ? '▾' : '▸'}</span>
+      </div>
+      <div class="a-tx" hidden>
+        <div class="tx-meta"></div>
+        <pre class="tx-body"></pre>
+      </div>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.agent').forEach(el => {
+    el.querySelector('.a-head').onclick = () => toggleAgent(el.dataset.key);
+  });
+  if (state.expanded) renderExpanded(state.expanded);
+}
+
+function toggleAgent(k) {
+  state.expanded = state.expanded === k ? null : k;
+  renderAgents();
+  if (state.expanded) pollTranscript(state.expanded);
+}
+
+function fmtLines(lines) {
+  return lines.map(l => {
+    try {
+      const o = JSON.parse(l);
+      if (o.type === 'text') return (o.part && o.part.text) || '';
+      if (o.type === 'step_finish') return '— step (' + ((o.part && o.part.tokens && o.part.tokens.total) || '?') + ' tok)';
+      if (o.type === 'tool_use') return '🔧 ' + ((o.part && o.part.tool) || 'tool');
+      return o.type;
+    } catch (e) { return l.slice(0, 300); }
+  }).join('\n');
+}
+
+function renderExpanded(k) {
+  let row = null;
+  document.querySelectorAll('#agents .agent').forEach(el => { if (el.dataset.key === k) row = el; });
+  if (!row) return;
+  const open = state.expanded === k;
+  const tx = row.querySelector('.a-tx');
+  tx.hidden = !open;
+  row.querySelector('.chev').textContent = open ? '▾' : '▸';
+  if (!open) return;
+  const cached = state.tx[k];
+  const meta = row.querySelector('.tx-meta');
+  const body = row.querySelector('.tx-body');
+  if (cached) {
+    meta.textContent = cached.lines + ' lines';
+    body.textContent = cached.text;
+    body.scrollTop = state.txScroll[k] || 0;
+  }
+  body.onscroll = () => { state.txScroll[k] = body.scrollTop; };
+}
+
+async function pollTranscript(k) {
+  const a = agentByKey(k);
+  if (!a || !a.transcript) return;
+  try {
+    const d = await j('/api/transcript?file=' + encodeURIComponent(a.transcript) + '&tail=60');
+    state.tx[k] = {text: fmtLines(d.lines || []), lines: d.total_lines};
+    renderExpanded(k);
+  } catch (e) {}
+}
+
+function renderTasks() {
+  const list = $('tasks');
+  const rows = allNodes().sort((a, b) => rank(a) - rank(b) || String(a.id).localeCompare(String(b.id))).slice(0, 80);
+  $('task-cnt').textContent = rows.length ? '(' + rows.length + ')' : '';
+  if (!rows.length) { list.innerHTML = '<div class="empty">no tasks yet</div>'; return; }
+  list.innerHTML = rows.map(t => {
+    const c = DOT[t.status] || DOT.pending;
+    return `<div class="task" title="${esc(t.title)}">
+      <span class="dot" style="background:${c}${(t.status === 'running' || t.live) ? ';animation:pulse 1.2s infinite' : ''}"></span>
+      <span class="tname">${esc(t.id)}</span>
+      ${t.model ? `<span class="tmodel" style="color:${COLORS[familyOf(t.model)] || 'var(--dim)'}">${esc(short(t.model))}</span>` : ''}
+      <span class="tstate" style="color:${c}">${esc(t.status)}</span>
+    </div>`;
+  }).join('');
+}
+
+async function tryFleet() {
+  state.fleetTried = true;
+  try {
+    const d = await j('/api/fleet');
+    if (d && d.totals && d.totals.tokens != null) { state.fleet = d; renderStrip(); }
+  } catch (e) {}
+}
 
 async function poll() {
-  try {
-    const r = await fetch('/api/usage', { cache: 'no-store' });
-    if (!r.ok) throw new Error(r.status);
-    const d = await r.json();
-    document.getElementById('h-api').textContent = 'live';
-    document.getElementById('h-api').className = 'good';
-
-    const ms = d.models || [];
-    let req = 0, tok = 0, err = 0;
-    for (const m of ms) { req += m.requests|0; tok += m.tokens|0; err += m.errors|0; }
-    document.getElementById('t-req').textContent = fmt(req);
-    document.getElementById('t-tok').textContent = fmt(tok);
-    const te = document.getElementById('t-err');
-    te.textContent = fmt(err);
-    te.className = 'v ' + (err ? 'bad' : 'good');
-
-    const inf = d.inflight || [];
-    document.getElementById('inflight').innerHTML = inf.length
-      ? '<table><tbody>' + inf.map(i =>
-          `<tr><td>${esc(i.model)}</td><td><span class="tag">${esc(i.family)}</span></td>` +
-          `<td>${esc(i.purpose)}</td><td class="num warn">${(i.elapsed ?? 0).toFixed(1)}s</td></tr>`).join('') +
-        '</tbody></table>'
-      : '<div class="empty">nothing running</div>';
-
-    document.getElementById('fams').innerHTML = (d.families || []).map(f => {
-      const pct = f.limit ? Math.min(100, (f.inflight / f.limit) * 100) : 0;
-      const col = COLORS[f.family] || 'var(--accent)';
-      return `<div class="famrow"><span>${esc(f.family)}</span>` +
-        `<span class="barwrap"><span class="bar" style="width:${pct}%;background:${col}"></span></span>` +
-        `<span class="num">${f.inflight}/${f.limit ?? '–'}</span></div>`;
-    }).join('');
-
-    document.getElementById('models').innerHTML = ms.map(m =>
-      `<tr><td>${esc(m.model)}</td><td><span class="tag">${esc(m.family)}</span></td>` +
-      `<td class="num">${fmt(m.requests)}</td>` +
-      `<td class="num ${m.errors ? 'bad' : ''}">${fmt(m.errors)}</td>` +
-      `<td class="num">${fmt(m.tokens)}</td></tr>`).join('');
-  } catch (e) {
-    document.getElementById('h-api').textContent = 'offline';
-    document.getElementById('h-api').className = 'bad';
+  const before = window.scrollY;
+  let ok = true, u = null, ag = null, pr = null;
+  try { u = await j('/api/usage?range=1h'); } catch (e) { ok = false; }
+  try { ag = await j('/api/agents'); } catch (e) { ok = false; }
+  try { pr = await j('/api/projects'); } catch (e) { ok = false; }
+  if (u) {
+    state.tok1h = u.series ? (() => { let n = 0; for (const k in u.series) for (const p of u.series[k]) n += (p.tokens || 0); return n; })() : ((u.totals && u.totals.tokens) || 0);
   }
-  document.getElementById('h-clock').textContent = new Date().toLocaleTimeString();
+  if (ag) state.agents = ag.agents || [];
+  if (pr) state.projects = pr.projects || [];
+  state.stale = !ok;
+  renderStrip();
+  renderAgents();
+  renderTasks();
+  if (!state.fleetTried) tryFleet();
+  window.scrollTo(0, before);
 }
+
 poll();
-setInterval(poll, 2000);
+setInterval(poll, 5000);
+setInterval(() => { if (state.expanded) pollTranscript(state.expanded); }, 3000);
 </script>
 </body>
 </html>
