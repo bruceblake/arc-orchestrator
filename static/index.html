@@ -205,7 +205,7 @@ async function jpost(u, body) { const r = await fetch(u, {method:"POST", headers
 
 function chip(status, n) { return `<span class="chip ${status}">${status} ${n}</span>`; }
 
-const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f85149", pending: "#484f58"};
+const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f0883e", pending: "#484f58"};
 const fmtK = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n || 0);
 const esc = s => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -215,18 +215,23 @@ function miniDag(dag) {
   const lvl = {}; nodes.forEach(n => lvl[n.id] = 0);
   let ch = true, guard = 0;
   while (ch && guard++ < 50) { ch = false;
-    for (const e of edges) if (lvl[e.src] !== undefined && lvl[e.dst] < lvl[e.src] + 1) { lvl[e.dst] = lvl[e.src] + 1; ch = true; } }
+    for (const e of edges) if (e.src !== e.dst && lvl[e.src] !== undefined && lvl[e.dst] < lvl[e.src] + 1) { lvl[e.dst] = lvl[e.src] + 1; ch = true; } }
   const CW = 96, NW = 84, NH = 16, RH = 26, cols = {};
   nodes.forEach(n => (cols[lvl[n.id]] = cols[lvl[n.id]] || []).push(n));
-  const pos = {}; Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => pos[n.id] = {x: 6 + (+l) * CW, y: 6 + i * RH}));
+  const pos = {}; Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => pos[n.id] = {x: 6 + (+l) * CW, y: 16 + i * RH}));
   const H = Math.max(...Object.values(pos).map(p => p.y)) + NH + 6, W = 12 + Object.keys(cols).length * CW;
   let s = "";
-  for (const e of edges) { const a = pos[e.src], b = pos[e.dst]; if (!a || !b) continue;
+  for (const e of edges) { const a = pos[e.src], b = pos[e.dst]; if (!a || !b || e.src === e.dst) continue;
     s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + 9},${a.y + NH / 2} ${b.x - 9},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"/>`; }
   for (const n of nodes) { const p = pos[n.id], c = STATUSC[n.status] || STATUSC.pending;
     const pulse = (n.status === "running" || n.live) ? ' style="animation:boxpulse 1.4s infinite"' : "";
     s += `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="4" fill="#0d1117" stroke="${c}"${pulse}/>` +
-         `<text x="${p.x + NW / 2}" y="${p.y + 11.5}" font-size="8.5" fill="#c9d1d9" text-anchor="middle">${esc(n.id.slice(0, 13))}</text>`; }
+         `<text x="${p.x + NW / 2}" y="${p.y + 11.5}" font-size="8.5" fill="#c9d1d9" text-anchor="middle">${esc(n.id.slice(0, 13))}</text>`;
+    if ((n.attempts || 0) > 1 || (n.escalations || 0) > 0)
+      s += `<path d="M${p.x + NW - 4},${p.y} C${p.x + NW - 4},${p.y - 12} ${p.x + 4},${p.y - 12} ${p.x + 4},${p.y}" stroke="#d29922" stroke-dasharray="3 2" fill="none"/>` +
+           `<text x="${p.x + NW / 2}" y="${p.y - 4}" font-size="7.5" fill="#d29922" text-anchor="middle">x${n.attempts || 0}${n.escalations ? "⬆" + n.escalations : ""}</text>`;
+    if (n.last_verdict && n.last_verdict.pass === false && n.status !== "merged")
+      s += `<circle cx="${p.x + NW - 4}" cy="${p.y + 4}" r="3" fill="#f85149"/>`; }
   return `<svg viewBox="0 0 ${W} ${H}" style="display:block;width:100%;margin-top:4px" preserveAspectRatio="xMinYMid meet">${s}</svg>`;
 }
 
@@ -362,17 +367,21 @@ function renderDag(d) {
   const cols2 = {}; tasks.forEach(t => { const l = lvl[t.id]; (cols2[l] = cols2[l] || []).push(t); });
   const pos = {}; Object.entries(cols2).forEach(([l, ts]) => ts.forEach((t, i) => pos[t.id] = {x: 16 + (+l)*240, y: 14 + i*74}));
   const W = 16 + (Object.keys(cols2).length||1)*240 + 210, H = Math.max(...Object.values(pos).map(p=>p.y), 60) + 84;
-  const STATUSC = {merged:"#3fb950", done:"#3fb950", running:"#58a6ff", failed:"#f85149", conflict:"#f85149", pending:"#484f58"};
+  const STATUSC = {merged:"#3fb950", done:"#3fb950", running:"#58a6ff", failed:"#f85149", conflict:"#f0883e", pending:"#484f58"};
   let edges = "", boxes = "";
   for (const t of tasks) for (const dep of (t.deps||t.depends||[])) { const a = pos[dep], b = pos[t.id]; if (!a||!b) continue;
     edges += `<path d="M${a.x+200},${a.y+24} C${a.x+230},${a.y+24} ${b.x-30},${b.y+24} ${b.x},${b.y+24}" stroke="#30363d" fill="none"/>`; }
-  for (const t of tasks) { const p = pos[t.id]; const st = (rowsById[t.id]||{}).status || "pending";
+  for (const t of tasks) { const p = pos[t.id]; const row = rowsById[t.id] || {}; const st = row.status || "pending";
+    const att = row.attempts || 0, escn = row.escalations || 0;
     const c = STATUSC[st] || STATUSC.pending;
     const anim = st === "running" ? ' style="animation:boxpulse 1.2s infinite"' : "";
     boxes += `<rect x="${p.x}" y="${p.y}" width="200" height="48" rx="7" fill="#0d1117" stroke="${c}" stroke-width="1.6"${anim}/>
-      <text x="${p.x+10}" y="${p.y+18}" font-size="11" fill="#c9d1d9">${t.id.slice(0,26)}</text>
-      <text x="${p.x+10}" y="${p.y+34}" font-size="9" fill="#8b949e">${short(t.model)} → review ${short(t.reviewer)}</text>
-      <text x="${p.x+10}" y="${p.y+45}" font-size="9" fill="${c}">${st}</text>`; }
+      <text x="${p.x+10}" y="${p.y+18}" font-size="11" fill="#c9d1d9">${t.id.slice(0,26)}${st === "merged" ? " ✓" : ""}</text>
+      <text x="${p.x+10}" y="${p.y+34}" font-size="9" fill="#8b949e">${short(t.model)} → review ${short(t.reviewer)}${att > 1 ? ` · x${att}` : ""}</text>
+      <text x="${p.x+10}" y="${p.y+45}" font-size="9" fill="${c}">${st}</text>`;
+    if (att > 1 || escn > 0)
+      boxes += `<path d="M${p.x+196},${p.y} C${p.x+196},${p.y-14} ${p.x+4},${p.y-14} ${p.x+4},${p.y}" stroke="#d29922" stroke-dasharray="4 3" fill="none"/>` +
+               `<text x="${p.x+100}" y="${p.y-4}" font-size="8.5" fill="#d29922" text-anchor="middle">x${att} loops${escn ? " · " + escn + "⬆" : ""}</text>`; }
   $("#d-dagmeta").textContent = `(left → right = dependency order; colored border = status)`;
   $("#dag").innerHTML = tasks.length ? `<svg width="${W}" height="${H}" style="max-width:none">${edges}${boxes}</svg>` : '<div class="empty">no tasks in this file</div>';
 }
@@ -387,6 +396,10 @@ function friendly(e) {
     case "worktree.free": return `worktree released · <span class="hint">${e.branch||""}</span>`;
     case "task.start": return `task started · ${e.task}`;
     case "task.end": return `task ended · ${e.task} → ${e.status||""}`;
+    case "task.escalated": return `<span class="warn">⬆ ${e.task || e.module || ""} escalated ${short(e.from_model)} → ${short(e.to_model)}</span>`;
+    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${e.task || e.module || ""}${e.error ? ": " + String(e.error).slice(0, 120) : ""}</span>`;
+    case "task.merged": return `<span class="good">⬢ ${e.task || e.module || ""} merged</span>`;
+    case "run.resume": return `↻ resumed: skipped ${(e.skipped_merged || []).length} merged, retried ${(e.retried || []).length}`;
     case "node_start": return `<span class="hint">node ${e.node} · ${e.task||""}</span>`;
     case "node_end": return `<span class="hint">node ${e.node} done · ${e.task||""}</span>`;
     default: return `<span class="hint">${e.type} ${e.task||""}</span>`;

@@ -73,7 +73,7 @@ REQUEST_TIMEOUT = float(os.getenv("ARC_REQUEST_TIMEOUT", "600"))
 MAX_RETRIES = int(os.getenv("ARC_MAX_RETRIES", "4"))
 ROUND_COOLDOWN = float(os.getenv("ARC_ROUND_COOLDOWN", "5"))
 STATS_INTERVAL = float(os.getenv("ARC_STATS_INTERVAL", "300"))
-MAX_GRAPH_STEPS = int(os.getenv("ARC_MAX_GRAPH_STEPS", "200"))
+MAX_GRAPH_STEPS = int(os.getenv("ARC_MAX_GRAPH_STEPS", "1500"))
 SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "12"))
 SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "30"))
 
@@ -111,6 +111,17 @@ TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "900"))
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
+
+# Model escalation (code workload): when a task exhausts its fix rounds at its
+# current tier, it retries one tier stronger with a fresh fix budget instead of
+# failing; it only fails when the last tier exhausts. gpt-oss-120b may
+# legitimately exhaust immediately on a task planned too optimistically, so the
+# path still reaches a strong model within a couple of escalations.
+ESCALATION_PATH = [m.strip() for m in os.getenv(
+    "ARC_ESCALATION_PATH",
+    "gpt-oss-120b,DeepSeek-V4-Flash,GLM-5.3,Kimi-K3").split(",") if m.strip()]
+MAX_ESCALATIONS = int(os.getenv("ARC_MAX_ESCALATIONS",
+                                str(max(0, len(ESCALATION_PATH) - 1))))
 
 IMPLEMENTER_MODELS = {"gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"}
 IMPLEMENT_TIERS = {"basic": ["gpt-oss-120b"], "medium": ["DeepSeek-V4-Flash"],

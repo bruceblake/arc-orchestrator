@@ -747,6 +747,56 @@ def _valid_repo(p):
     return path if path.is_dir() else None
 
 
+def _task_loop_stats(store, task_ids):
+    """Fix-loop stats per base task id: implement-attempt max (harness_runs is
+    authoritative), task.escalated/task.conflict event counts, newest reviewer
+    verdict as {"pass", "n_issues"} (or None)."""
+    want = [i for i in (task_ids or []) if i]
+    stats = {i: {"attempts": 0, "escalations": 0, "conflicts": 0, "last_verdict": None}
+             for i in want}
+    if not want:
+        return stats
+    try:
+        hrows = store.harness_runs_all() if store else []
+    except Exception:
+        hrows = []
+    verdict_seen = set()
+    for row in hrows:  # newest first (ORDER BY id DESC)
+        base = row.get("task_id")
+        if base not in stats:
+            continue
+        s = stats[base]
+        if row.get("role") == "implementer":
+            try:
+                s["attempts"] = max(s["attempts"], int(row.get("attempt") or 0))
+            except (TypeError, ValueError):
+                pass
+        elif row.get("role") == "reviewer" and base not in verdict_seen and row.get("verdict"):
+            try:
+                v = json.loads(row["verdict"])
+            except ValueError:
+                continue
+            if isinstance(v, dict) and "pass" in v:
+                s["last_verdict"] = {"pass": bool(v.get("pass")),
+                                     "n_issues": len(v.get("issues") or [])}
+                verdict_seen.add(base)
+    for ln in _load_event_lines():
+        if '"task.escalated"' not in ln and '"task.conflict"' not in ln:
+            continue
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        base, _x = _xkey(e.get("task") or e.get("module"))
+        if base not in stats:
+            continue
+        if e.get("type") == "task.escalated":
+            stats[base]["escalations"] += 1
+        elif e.get("type") == "task.conflict":
+            stats[base]["conflicts"] += 1
+    return stats
+
+
 def _projects(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now)
@@ -830,22 +880,33 @@ def _projects(store):
                 if v and (last is None or v > last):
                     last = v
         nodes = []
+        loop_stats = _task_loop_stats(store, ids)
         for t in tdefs:
             tid = t.get("id")
             if not tid:
                 continue
             ev = ev_stats.get(tid, {})
             lv = live.get(tid, {})
-            nodes.append({"id": tid, "title": t.get("title") or tid,
-                          "model": t.get("model"), "reviewer": t.get("reviewer"),
-                          "status": per_task.get(tid, "pending"),
-                          "live": tid in live_tasks,
-                          "tokens": ev.get("tokens", 0),
-                          "seconds": round(ev.get("seconds", 0.0), 1),
-                          "live_tokens": lv.get("tokens", 0),
-                          "live_seconds": round(lv.get("seconds", 0.0), 1)})
+            ls = loop_stats.get(tid, {})
+            node = {"id": tid, "title": t.get("title") or tid,
+                    "model": t.get("model"), "reviewer": t.get("reviewer"),
+                    "status": per_task.get(tid, "pending"),
+                    "live": tid in live_tasks,
+                    "tokens": ev.get("tokens", 0),
+                    "seconds": round(ev.get("seconds", 0.0), 1),
+                    "live_tokens": lv.get("tokens", 0),
+                    "live_seconds": round(lv.get("seconds", 0.0), 1),
+                    "attempts": ls.get("attempts", 0),
+                    "escalations": ls.get("escalations", 0),
+                    "conflicts": ls.get("conflicts", 0),
+                    "last_verdict": ls.get("last_verdict")}
+            nodes.append(node)
         edges = [{"src": d, "dst": t["id"]} for t in tdefs if t.get("id")
                  for d in (t.get("deps") or t.get("depends") or []) if d in ids]
+        for n in nodes:
+            if n["attempts"] > 1 or n["escalations"] > 0:
+                edges.append({"src": n["id"], "dst": n["id"], "kind": "fixloop",
+                              "attempts": n["attempts"], "escalations": n["escalations"]})
         tok_total = sum(n["tokens"] for n in nodes)
         sec_total = round(sum(n["seconds"] for n in nodes), 1)
         live_tok = sum(n["live_tokens"] for n in nodes)
@@ -912,6 +973,11 @@ def _project_detail(store, fname):
         runs = store.harness_runs_for(ids) if store else []
     except Exception:
         rows, runs = [], []
+    loop_stats = _task_loop_stats(store, ids)
+    for r in rows:
+        ls = loop_stats.get(r.get("id"))
+        if ls:
+            r.update(ls)
     lines = _load_event_lines()
     events = []
     for line in reversed(lines):
