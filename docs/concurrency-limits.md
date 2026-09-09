@@ -1,0 +1,263 @@
+# Concurrency limits (how many agents at once)
+
+This is the reference for "how many harness instances run at the same time"
+in the multi-harness code workload. It is checked against `config.py`,
+`drivers.py`, `scheduler.py`, `pool.py`, `graph.py` and `code_tasks.py`.
+
+There are **two independent layers** of limits, and they mean different
+things:
+
+| Layer | Where it is enforced | Ceiling | Applies to |
+|---|---|---|---|
+| Per-account API caps | The ARC API itself (server-side, per API key) | 27 across all models | **All** processes sharing the key |
+| Per-process driver semaphores | `drivers.py` in this process | 21 across all models | One orchestrator run |
+
+The two are not the same number on purpose. The account caps are the hard
+ceiling the API will reject you for exceeding. The driver semaphores are what
+this process actually enforces, and they sit **below** the account caps.
+
+## 1. Two layers of limits
+
+### Layer 1 — per-account API caps (`config.FAMILIES`)
+
+`config.FAMILIES` is the model registry. Each family's `limit` is the number
+of concurrent requests ARC allows for that family on one account key
+(`pool.py` builds a per-family semaphore from it, but the account cap is
+really server-side):
+
+| Model (family) | Account cap |
+|---|---|
+| gpt-oss-120b (`gpt-oss`) | 10 |
+| DeepSeek-V4-Flash (`deepseek`) | 10 |
+| GLM-5.3 (`glm`) | 4 |
+| Kimi-K3 (`kimi`) | 3 |
+
+For the **research workload** `pool.py` enforces these client-side as an
+`asyncio.Semaphore(config.family_limit(f))` per family (`pool.py:79`), so a
+single process never exceeds the per-family caps. Those semaphores live on the
+`ArcPool` instance (`self.sems`), so they are **process-local** — each
+`main.py` process builds its own set. Across processes the account cap is the
+real shared ceiling, and it is enforced by the ARC API itself: an over-limit
+request is rejected with HTTP 400, which `pool._is_session_limit` recognises by
+"session limit" / "concurrent" (`pool.py:50-55`).
+
+### Layer 2 — per-process driver semaphores (`drivers._MODEL_DRIVER_CAP`)
+
+The **code workload** does not call the API through `pool.chat`. It shells out
+to the `kimi` and `opencode` CLIs (`drivers.py`), each of which makes its own
+API calls. Concurrent harness instances are bounded by a **per-model**
+semaphore, not a per-family one:
+
+```python
+# config.py
+_MODEL_DRIVER_CAP = {"Kimi-K3": 2, "GLM-5.3": 3, "gpt-oss-120b": 8, "DeepSeek-V4-Flash": 8}
+```
+
+| Model | Driver semaphore cap |
+|---|---|
+| gpt-oss-120b | 8 |
+| DeepSeek-V4-Flash | 8 |
+| GLM-5.3 | 3 |
+| Kimi-K3 | 2 |
+
+`drivers._gate(model)` lazily creates an `asyncio.Semaphore(config.driver_limit(model))`
+per model (`drivers.py:44-50`). `Driver.run` does `await gate.acquire()` before
+launching the subprocess and `gate.release()` when it finishes (`drivers.py:123,137`).
+These semaphores are process-local (a module-level dict), so **each** `main.py
+code run` process gets its own set.
+
+Summing the driver caps: **8 + 8 + 3 + 2 = 21**. This is the maximum number
+of harness instances one orchestrator run can have in flight at once.
+
+```
+gpt-oss-120b  8   ← basic implementers (opencode)
+DeepSeek-V4   8   ← medium implementers (opencode)
+GLM-5.3       3   ← hard implementers + planners/reviewers (opencode)
+Kimi-K3       2   ← hard implementers + planners/reviewers (kimi CLI)
+────────────────
+             21   per-process ceiling
+```
+
+## 2. Why driver caps sit below account caps
+
+The driver caps are the account cap **minus headroom**. The account key is
+shared with the user's own interactive sessions, so the orchestrator must stay
+polite. `config.driver_limit` is documented as "Max concurrent harness
+instances for a model (ARC cap minus headroom)" (`config.py:128`), and the
+module docstring in `drivers.py` says ARC rejects over-limit requests per
+model, so the per-model semaphores cap concurrent harness instances *below*
+the account limits.
+
+The headroom matters because:
+
+- **Kimi-K3** — you run the `kimi` CLI interactively. Account cap 3, driver
+  cap 2 leaves exactly 1 slot for your own session during a run.
+- **GLM-5.3** — account cap 4, driver cap 3 leaves 1 slot.
+- **gpt-oss-120b / DeepSeek-V4-Flash** — account cap 10, driver cap 8 leaves
+  headroom, and also absorbs some of the burst/retry load.
+
+So on a machine where `kimi-code` and `opencode` are also used by hand, a run
+does not starve the interactive agents. This headroom is the *reason* driver
+caps are deliberately lower than the account caps.
+
+## 3. Semaphore queueing — what actually happens
+
+When more tasks become runnable than there are free slots, **the graph does
+not reorder tasks**; the driver semaphore arbitrates. The behaviour comes
+from `graph.py` and `code_tasks.py`:
+
+`scheduler.py` and `pool.py` bound a *different* workload (the research
+pipeline): `scheduler.Supervisor` launches at most `PIPELINE_ROUNDS`
+concurrent *rounds* (`scheduler.py:50`, default 2), and `pool.py` bounds
+concurrent API *requests* per family. Neither throttles the code fleet — the
+code workload has no central scheduler. Its parallelism is decided entirely by
+the DAG in `graph.py` plus the per-model driver semaphores in `drivers.py`.
+
+1. **Runnability is DAG-driven, not slot-driven.** `build_code_graph`
+   (`code_tasks.py:150`) wires each task's chain
+   `alloc → implement → gate → review → publish`, and a task with `deps` is
+   *not* a start node — instead there is an edge
+   `publish_<dep> → alloc_<task>` (`code_tasks.py:266-269`). A task (and the
+   rest of its chain) only becomes runnable once its dependency has been
+   published/merged. Tasks with no `deps` are graph start nodes.
+2. **Start nodes all launch at once.** `_Execution.run` seeds every start
+   node immediately (`graph.py:118-120`); each node runs in its own worker
+   coroutine pulling from its own `asyncio.Queue`. The graph will happily
+   dispatch *every* runnable node's function concurrently — it has no global
+   concurrency cap of its own (the guard is `MAX_GRAPH_STEPS`, fired-node
+   count, not parallelism).
+3. **The model semaphore is the real throttle.** A runnable `implement` /
+   `review` node calls `driver.run`, which does `await gate.acquire()` on
+   that model's semaphore. If the model already has `driver_limit` harnesses
+   in flight, the acquire **blocks** — the node's coroutine parks there, its
+   slot in the graph stays "in flight", and the task simply waits.
+4. **Which task gets the slot is opportunistic.** Waiters are woken in the
+   order they called `acquire()` (asyncio's semaphore is fair, FIFO), but the
+   order in which node workers reach `acquire` is the order the DAG makes them
+   runnable plus asyncio scheduling — not any explicit task priority. There is
+   no "queue the leftover tasks in a list and run the most important first".
+
+Net effect: with a big task batch, **all** runnable no-dep tasks are dispatched
+and the extra ones park on the GLM/Kimi semaphore (the tightest caps). That is
+why the effective parallelism of a run is governed by the driver caps — in
+practice the **GLM-5.3 + Kimi-K3** pair (3 + 2 = 5) is the bottleneck, since
+every review (and every hard implementation) needs one of them.
+
+## 4. Environment overrides
+
+Both layers can be overridden per family with env vars. The suffixes match the
+**family** name from `config.FAMILIES`, not the model name.
+
+### `ARC_LIMIT_<FAMILY>` — override the account cap layer
+
+`config.family_limit` builds the name by uppercasing the family key and
+replacing `-` with `_` (`config.py:88-100`):
+
+```python
+override = os.getenv(f"ARC_LIMIT_{name.upper().replace('-', '_')}")
+```
+
+| Family | Env var |
+|---|---|
+| gpt-oss | `ARC_LIMIT_GPT_OSS` |
+| deepseek | `ARC_LIMIT_DEEPSEEK` |
+| glm | `ARC_LIMIT_GLM` |
+| kimi | `ARC_LIMIT_KIMI` |
+
+Example: `ARC_LIMIT_KIMI=1`. This raises/lowers the **account-cap** layer
+(used by `pool.py`'s families and reported as `capacity`). It does **not**
+change the driver semaphores.
+
+### `ARC_DRIVER_LIMIT_<FAMILY>` — override the driver semaphore layer
+
+`config.driver_limit` maps the model to its family first, then builds the same
+suffix (`config.py:127-135`):
+
+```python
+override = os.getenv(f"ARC_DRIVER_LIMIT_{MODEL_FAMILY[model].upper().replace('-', '_')}")
+```
+
+`MODEL_FAMILY` (`config.py:118-123`) maps `gpt-oss-120b → gpt-oss`,
+`DeepSeek-V4-Flash → deepseek`, `GLM-5.3 → glm`, `Kimi-K3 → kimi`, so:
+
+| Model (family) | Env var |
+|---|---|
+| gpt-oss-120b (`gpt-oss`) | `ARC_DRIVER_LIMIT_GPT_OSS` |
+| DeepSeek-V4-Flash (`deepseek`) | `ARC_DRIVER_LIMIT_DEEPSEEK` |
+| GLM-5.3 (`glm`) | `ARC_DRIVER_LIMIT_GLM` |
+| Kimi-K3 (`kimi`) | `ARC_DRIVER_LIMIT_KIMI` |
+
+Example: `ARC_DRIVER_LIMIT_KIMI=1` (the README's example).
+
+### When to raise them
+
+| Situation | What to do |
+|---|---|
+| **Dedicated box** — no interactive `kimi`/`opencode` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=4`, `ARC_DRIVER_LIMIT_KIMI=3`) to run the fleet flat-out. |
+| You have a **higher account tier** | Raise `ARC_LIMIT_<FAMILY>` *and* the matching `ARC_DRIVER_LIMIT_<FAMILY>`. The account cap is server-side, so raising only the driver cap can hit the API's 400 "session limit" rejection. |
+| **Shared box** (you also use `kimi-code` / `opencode` by hand) | Keep defaults. The whole point of the driver caps is to leave headroom for your own sessions. |
+
+Never set a driver cap above the account cap for a family — you would only
+trade "polite headroom" for hard API rejections and retry churn.
+
+## 5. Related knobs
+
+These bound a *single* task, not the parallelism. All live in `config.py` and
+are overridable from `.env`.
+
+| Knob | Default | What it does |
+|---|---|---|
+| `DRIVER_TIMEOUT` | 900 s | Per-harness-subprocess runtime cap. `drivers.Driver._once` sets `deadline = t0 + config.DRIVER_TIMEOUT`; if the child is still producing output past it, it is killed and the run raises `DriverError` (`drivers.py:166-180`). |
+| `GATE_TIMEOUT` | 180 s | Cap on the deterministic verify gate. `code_tasks.gate` runs `verify_cmd` via `asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)`; on timeout it kills the child and returns `passed=False` (`code_tasks.py:199-203`). |
+| `MAX_FIX_ROUNDS` | 3 | Bounded (re)implement↔review fix loop per task. `code_tasks.py` re-fires `implement_<tid>` after a failed gate/review while `runs["implement_<tid>"] <= config.MAX_FIX_ROUNDS`, else it fires `fail_<tid>` (`code_tasks.py:253-265`). |
+| `MAX_RETRIES` | 4 | Per-firing retry budget in `drivers.Driver.run`: an attempt that raises `DriverError` retries (exponential backoff `2^attempt`, capped at 30 s) until `attempt > config.MAX_RETRIES`, then re-raises and fails the task (`drivers.py:126-136`). |
+
+Note `config.MAX_RETRIES` is also used by `pool.py` for API request retries
+in the research workload; in the code workload the driver retry loop above is
+what governs a single harness firing.
+
+## 6. Worked example — 12 tasks, first wave
+
+A task file has 12 tasks: 2 hard (GLM-5.3 / Kimi-K3 implementers), 4 medium
+(DeepSeek-V4-Flash), 6 basic (gpt-oss-120b), all with no `deps` (so all are
+graph start nodes and become runnable at once). Driver caps: GLM-5.3 = 3,
+Kimi-K3 = 2, DeepSeek-V4-Flash = 8, gpt-oss-120b = 8.
+
+**First wave — the implementers (12 of them) all start.** The caps are far
+from binding on implementers:
+
+| Implementer | Need | Cap | Runs? |
+|---|---|---|---|
+| gpt-oss-120b | 6 | 8 | ✓ all 6 |
+| DeepSeek-V4-Flash | 4 | 8 | ✓ all 4 |
+| GLM-5.3 | 1 (one hard task) | 3 | ✓ |
+| Kimi-K3 | 1 (the other hard task) | 2 | ✓ |
+
+Since 6 ≤ 8, 4 ≤ 8, 1 ≤ 3 and 1 ≤ 2, **all 12 implementations run
+concurrently** in the first wave. The per-model guards only bite when a model
+needs *more* than its cap.
+
+**What queues — the reviews.** Every task must then be reviewed by GLM-5.3 or
+Kimi-K3 (a reviewer never shares a family with its implementer). That is 12
+review firings, plus the hard-tasks' own implementations already counted. The
+GLM + Kimi caps together allow only **3 + 2 = 5** concurrent harness
+instances, and GLM/Kimi are also still busy with the hard implementations.
+So once the implementations start finishing, the review firings pile up on the
+`GLM-5.3` and `Kimi-K3` semaphores (`drivers._gate`): the first five reach
+`gate.acquire()` and run, the rest block in FIFO order until a reviewer frees
+its slot.
+
+**Why this is the bottleneck.** DeepSeek (cap 8) and gpt-oss (cap 8) never
+saturate with 4 and 6 tasks; the run is limited by the hard-model pair
+(GLM 3 + Kimi 2 = 5). Even though the *implementers* all ran, throughput is
+capped by review slots, so the total in-flight never reaches the 21 ceiling
+with only 12 tasks — the theoretical 21 only takes over when a batch has
+many more hard/review work items than 5.
+
+## Cross-references
+
+- [../AGENTS.md](../AGENTS.md)
+- [orchestration-contract.md](orchestration-contract.md)
+- [model-tiers.md](model-tiers.md)
+- [taskfile-schema.md](taskfile-schema.md)
+- [runbook.md](runbook.md)
