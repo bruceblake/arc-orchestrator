@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,8 +148,20 @@ class Driver:
     def argv(self, prompt, session_id):
         raise NotImplementedError
 
+    # Text ARC returns when the account is already at its per-model
+    # concurrency cap. These are NOT crashes: the harness never got a slot, so
+    # retrying 2s later just re-enters the same cap and deepens the pile-up
+    # (observed live: four taskfiles resumed at once put 9 Kimi requests
+    # against a cap of 3, and every retry came straight back as a 400).
+    _CAPACITY_MARKERS = ("provider.api_error: 400", "status code (no body)",
+                         "session limit", "concurrent", "rate limit", "429")
+
+    @classmethod
+    def is_capacity_error(cls, text):
+        low = (text or "").lower()
+        return any(m in low for m in cls._CAPACITY_MARKERS)
+
     async def run(self, prompt, worktree, session_id=None, task_id=None):
-        gate = _gate(self.model)
         attempt = 0
         sid = session_id
         continuation = None
@@ -157,15 +170,10 @@ class Driver:
             events.emit("driver.start", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
                         resume=bool(sid))
-            await gate.acquire()
-            await _lease_acquire(self.model, task_id,
-                                 {"harness": self.harness, "role": self.role})
             try:
-                result = await self._once(continuation or prompt, worktree, sid,
-                                          task_id, attempt)
+                result = await self._guarded_once(continuation or prompt, worktree,
+                                                  sid, task_id, attempt)
             except DriverError as exc:
-                _lease_release(self.model, task_id)
-                gate.release()
                 if exc.session_id and not sid:
                     sid = exc.session_id
                     continuation = (
@@ -177,24 +185,50 @@ class Driver:
                     events.emit("driver.resume", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt,
                                 session_id=sid)
+                capacity = self.is_capacity_error(str(exc))
                 events.emit("driver.error", harness=self.harness, model=self.model,
                             task=task_id, attempt=attempt, error=str(exc)[:300],
-                            will_resume=bool(sid))
+                            will_resume=bool(sid), capacity=capacity)
                 if attempt > config.MAX_RETRIES:
                     raise
-                backoff = min(30, 2 ** attempt)
-                log.warning("%s attempt %d failed (%s); retry in %ds",
-                            self.model, attempt, exc, backoff)
+                if capacity:
+                    backoff = min(config.DRIVER_CAPACITY_BACKOFF * attempt,
+                                  config.DRIVER_CAPACITY_BACKOFF_CAP)
+                    backoff += random.uniform(0, backoff * 0.25)
+                else:
+                    backoff = min(30, 2 ** attempt)
+                log.warning("%s attempt %d failed (%s%s); retry in %.0fs",
+                            self.model, attempt, "at capacity: " if capacity else "",
+                            exc, backoff)
                 await asyncio.sleep(backoff)
                 continue
-            _lease_release(self.model, task_id)
-            gate.release()
             events.emit("driver.done", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
                         seconds=round(result.seconds, 1),
                         tokens=result.tokens, prompt_tokens=result.prompt_tokens,
                         completion_tokens=result.completion_tokens)
             return result
+
+    async def _guarded_once(self, prompt, worktree, sid, task_id, attempt):
+        """One attempt, holding both concurrency slots.
+
+        Releases the in-process semaphore and the cross-process DB lease on
+        EVERY exit path. Previously only success and DriverError released them,
+        so a missing harness binary, a bug in _once, or cancellation during
+        shutdown leaked a semaphore permit for the life of the process and left
+        a lease row pinning the model at cap until its 30-minute TTL.
+        """
+        gate = _gate(self.model)
+        await gate.acquire()
+        try:
+            await _lease_acquire(self.model, task_id,
+                                 {"harness": self.harness, "role": self.role})
+            try:
+                return await self._once(prompt, worktree, sid, task_id, attempt)
+            finally:
+                _lease_release(self.model, task_id)
+        finally:
+            gate.release()
 
     async def _once(self, prompt, worktree, session_id, task_id, attempt):
         argv = self.argv(prompt, session_id)

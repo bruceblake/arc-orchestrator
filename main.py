@@ -187,6 +187,15 @@ def cmd_code(args):
     if args.code_cmd == "bench":
         cmd_code_bench(args)
         return
+    if args.code_cmd == "reconcile":
+        import reconcile as _rec
+        store = Store(args.db or config.DB_PATH)
+        rep = asyncio.run(_rec.reconcile(store, apply=not args.dry_run,
+                                         force=args.force))
+        if args.dry_run and not rep["skipped"]:
+            print("(dry run — nothing was changed)")
+        print(_rec.format_report(rep))
+        return
 
     async def run():
         if args.code_cmd == "plan":
@@ -221,12 +230,31 @@ def cmd_code(args):
             if n_stale:
                 print(f"  stale 'running' rows reset to failed: {n_stale}")
         events.set_context(workload="code-tasks")
+        log = logging.getLogger("code-cmd")
         graph = build_code_graph(store, taskset, taskfile=tf)
-        final = await graph.run({})
+        try:
+            final = await graph.run({})
+        finally:
+            # Whatever happened — clean finish, node crash, Ctrl-C, SIGTERM —
+            # this process is about to stop owning these rows and leases. Left
+            # behind, 'running' rows make the dashboard lie and the next resume
+            # mistake them for failures, and lease rows throttle the fleet
+            # against a process that no longer exists.
+            import reconcile as _rec
+            leaked = store.running_code_tasks(taskfile=tf)
+            if leaked:
+                store.reset_stale_code_tasks(taskfile=tf,
+                                             reason=_rec.INTERRUPTED_REASON)
+                log.warning("marked %d unfinished task(s) as failed: %s",
+                            len(leaked), ", ".join(r["id"] for r in leaked))
+                events.emit("run.interrupted", taskfile=tf,
+                            tasks=[r["id"] for r in leaked])
+            freed = store.release_leases_for_pid(os.getpid())
+            if freed:
+                log.info("released %d driver lease(s)", freed)
         results = final.get("results", {})
         merged = sorted(k for k, v in results.items()
                         if k.startswith("publish_") and isinstance(v, dict) and v.get("merged"))
-        log = logging.getLogger("code-cmd")
         log.info("done — merged: %s", ", ".join(merged) or "none")
 
     try:
@@ -421,6 +449,15 @@ def main():
     cs_p.add_argument("--db", default=None, help="sqlite database path")
     cs_p.add_argument("--reset-stale", action="store_true",
                       help="mark stale 'running' tasks 'failed' (only when no run process is alive)")
+    crec = code_sub.add_parser(
+        "reconcile",
+        help="reap orphans a killed run left behind (stale rows, leases, worktrees)")
+    crec.add_argument("--dry-run", action="store_true",
+                      help="report what would be reaped, change nothing")
+    crec.add_argument("--force", action="store_true",
+                      help="reconcile even while a code-run process is alive")
+    crec.add_argument("--db", default=None, help="sqlite database path")
+    crec.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cb_p = code_sub.add_parser("bench", help="orchestration benchmark: full governed DAG per policy variant")
     cb_sub = cb_p.add_subparsers(dest="orch_bench_cmd", required=True)
     cbr = cb_sub.add_parser("run", help="run the variant matrix (orchbench.VARIANTS)")

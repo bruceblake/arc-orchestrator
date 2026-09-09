@@ -332,11 +332,21 @@ class Store:
     def upsert_code_task(self, taskfile, tid, title, model, reviewer, status,
                          branch=None, worktree=None, error=None, finished=False):
         with self.lock:
+            # model/reviewer MUST be updated on conflict: the escalate node
+            # re-upserts a task at a stronger tier, and dropping that here left
+            # the row (and therefore the next resume's starting tier, and the
+            # dashboard) showing the model the task no longer runs at. branch
+            # and worktree are COALESCEd because escalate re-upserts without
+            # them and must not erase the allocation it is still using.
             self.conn.execute(
                 "INSERT INTO code_tasks(id, taskfile, title, model, reviewer, status, "
                 "branch, worktree, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(taskfile, id) DO UPDATE SET status=excluded.status, "
-                "branch=excluded.branch, worktree=excluded.worktree, error=NULL",
+                "ON CONFLICT(taskfile, id) DO UPDATE SET "
+                "title=excluded.title, model=excluded.model, "
+                "reviewer=excluded.reviewer, status=excluded.status, "
+                "branch=COALESCE(excluded.branch, code_tasks.branch), "
+                "worktree=COALESCE(excluded.worktree, code_tasks.worktree), "
+                "error=NULL, finished_at=NULL",
                 (tid, taskfile, title, model, reviewer, status, branch, worktree, _now()),
             )
             if finished:
@@ -365,26 +375,80 @@ class Store:
             ]
         return {"tasks": tasks, "runs": runs}
 
-    def reset_stale_code_tasks(self, taskfile=None):
+    STALE_REASON = "reset-stale: owning run process died"
+
+    def reset_stale_code_tasks(self, taskfile=None, reason=None):
         """Mark 'running' code tasks 'failed' — for when the run process that
         owned them is known dead. With `taskfile`, only that file's rows are
         touched (safe at the start of a new run of this taskfile; concurrent
         runs of OTHER taskfiles keep their rows). Without it, every running
         row is reset — never call that blanket form while a run is alive:
-        concurrent code-run processes share this table."""
+        concurrent code-run processes share this table.
+
+        `reason` is written to the error column. It matters: code_tasks only
+        escalates a resumed task to a stronger model when the recorded reason
+        is a capability failure, so an infrastructure reason keeps the task on
+        its own tier instead of piling it onto the scarcest one.
+        """
+        reason = reason or self.STALE_REASON
         with self.lock:
             if taskfile is None:
                 cur = self.conn.execute(
-                    "UPDATE code_tasks SET status='failed', "
-                    "error='reset-stale: owning run process died', finished_at=? "
-                    "WHERE status='running'", (_now(),))
+                    "UPDATE code_tasks SET status='failed', error=?, finished_at=? "
+                    "WHERE status='running'", (reason, _now()))
             else:
                 cur = self.conn.execute(
-                    "UPDATE code_tasks SET status='failed', "
-                    "error='reset-stale: owning run process died', finished_at=? "
-                    "WHERE status='running' AND taskfile=?", (_now(), taskfile))
+                    "UPDATE code_tasks SET status='failed', error=?, finished_at=? "
+                    "WHERE status='running' AND taskfile=?",
+                    (reason, _now(), taskfile))
             self.conn.commit()
             return cur.rowcount
+
+    def running_code_tasks(self, taskfile=None):
+        """Rows still marked 'running', optionally scoped to one taskfile."""
+        sql = ("SELECT id, taskfile, title, model, reviewer, branch, worktree "
+               "FROM code_tasks WHERE status='running'")
+        args = []
+        if taskfile is not None:
+            sql += " AND taskfile=?"
+            args.append(taskfile)
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
+
+    def driver_lease_rows(self):
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(
+                "SELECT id, model, pid, task, acquired_at FROM driver_leases "
+                "ORDER BY id").fetchall()]
+
+    def release_leases_for_pid(self, pid):
+        """Drop every lease this process owns — the shutdown counterpart to
+        acquire_driver_lease, so a killed run does not pin a model at cap for
+        the full DRIVER_LEASE_TTL."""
+        with self.lock:
+            cur = self.conn.execute("DELETE FROM driver_leases WHERE pid=?", (pid,))
+            self.conn.commit()
+            return cur.rowcount
+
+    def reap_driver_leases(self, ttl):
+        """Delete lease rows whose owner is dead or whose TTL has expired.
+        Returns the number removed."""
+        now = time.time()
+        removed = 0
+        with self.lock:
+            for r in self.conn.execute(
+                    "SELECT id, pid, acquired_at FROM driver_leases").fetchall():
+                alive = True
+                try:
+                    os.kill(r["pid"], 0)
+                except OSError:
+                    alive = False
+                if alive and r["acquired_at"] > now - ttl:
+                    continue
+                self.conn.execute("DELETE FROM driver_leases WHERE id=?", (r["id"],))
+                removed += 1
+            self.conn.commit()
+        return removed
 
     def acquire_driver_lease(self, model, pid, task, cap, ttl):
         """Cross-process driver concurrency guard. Returns None and holds a

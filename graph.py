@@ -24,9 +24,13 @@ class Edge:
 
 
 class Graph:
-    def __init__(self, name, max_steps=500):
+    def __init__(self, name, max_steps=500, drain_timeout=1200):
         self.name = name
         self.max_steps = max_steps
+        # After a node fails, sibling nodes already running are allowed to
+        # finish (see _Execution) rather than being cancelled mid-flight. This
+        # bounds that wait so one wedged node cannot hang the whole run.
+        self.drain_timeout = drain_timeout
         self.nodes = {}
         self.edges = []
         self.starts = []
@@ -86,6 +90,7 @@ class _Execution:
         self.done = asyncio.Event()
         self.error = None
         self.firings = 0
+        self.drain_deadline = None
 
     def _sources_of(self, name):
         return {e.src for e in self.g.edges if e.dst == name}
@@ -95,6 +100,31 @@ class _Execution:
         ctx["results"] = dict(ctx.get("results", {}))
         self.queues[name].put_nowait((src, ctx))
         self.in_flight += 1
+
+    def _settle(self):
+        """One queued item finished or was dropped; wake run() once drained."""
+        self.in_flight -= 1
+        if self.in_flight <= 0:
+            self.done.set()
+
+    def _fail(self, exc, node_name):
+        """Record the first error and start the drain clock.
+
+        The graph stops SCHEDULING new work immediately, but nodes already
+        running keep going: in the code workload a sibling task may be minutes
+        into an implement/review it will successfully merge, and cancelling it
+        threw that away while leaving its worktree, DB row and driver lease
+        behind for someone to reap by hand.
+        """
+        if self.error is not None:
+            return
+        self.error = exc
+        self.drain_deadline = time.monotonic() + self.g.drain_timeout
+        remaining = max(0, self.in_flight - 1)
+        self.log.error("node '%s' failed: %s%s", node_name, exc,
+                       f" — draining {remaining} in-flight node(s)" if remaining else "")
+        events.emit("graph.draining", graph=self.g.name, node=node_name,
+                    in_flight=remaining, error=str(exc)[:300])
 
     def _merge(self, ctxs):
         base = dict(ctxs[0])
@@ -117,7 +147,17 @@ class _Execution:
         try:
             for s in self.g.starts:
                 self._put(s, "__start__", self.ctx)
-            await self.done.wait()
+            while not self.done.is_set():
+                try:
+                    await asyncio.wait_for(self.done.wait(), timeout=5)
+                except asyncio.TimeoutError:
+                    if self.drain_deadline and time.monotonic() > self.drain_deadline:
+                        self.log.error(
+                            "graph '%s': drain timed out, cancelling %d in-flight node(s)",
+                            self.g.name, self.in_flight)
+                        events.emit("graph.drain_timeout", graph=self.g.name,
+                                    in_flight=self.in_flight)
+                        break
         finally:
             for w in workers:
                 w.cancel()
@@ -131,9 +171,7 @@ class _Execution:
         while True:
             src, ctx = await q.get()
             if self.error is not None:
-                self.in_flight -= 1
-                if self.in_flight <= 0:
-                    self.done.set()
+                self._settle()  # graph is draining: drop queued work
                 continue
             t0 = time.monotonic()
             try:
@@ -142,7 +180,17 @@ class _Execution:
                     self.gather_pending[node.name].discard(src)
                     if self.gather_pending[node.name]:
                         self.log.debug("gather '%s' waiting for %s", node.name, sorted(self.gather_pending[node.name]))
+                        # A waiting gather is not "done", so it must not wake
+                        # run() — but if nothing else is in flight either, the
+                        # sources it waits on can never arrive. That used to
+                        # hang the process forever; fail loudly instead.
                         self.in_flight -= 1
+                        if self.in_flight <= 0:
+                            self._fail(GraphError(
+                                f"gather '{node.name}' still waiting for "
+                                f"{sorted(self.gather_pending[node.name])} with nothing "
+                                f"left in flight — unreachable sources"), node.name)
+                            self.done.set()
                         continue
                     ctx = self._merge(list(self.gathered[node.name].values()))
                     self.gathered[node.name] = {}
@@ -150,20 +198,17 @@ class _Execution:
                 events.emit("node_start", graph=self.g.name, node=node.name)
                 result = await node.fn(ctx)
             except Exception as exc:
-                self.in_flight -= 1
-                if self.error is None:
-                    self.error = exc
-                    self.log.error("node '%s' failed: %s", node.name, exc)
                 events.emit("node_error", graph=self.g.name, node=node.name,
                             seconds=round(time.monotonic() - t0, 3), error=str(exc)[:300])
-                self.done.set()
+                self._fail(exc, node.name)
+                self._settle()
                 continue
             self.firings += 1
             if self.firings > self.g.max_steps:
-                self.in_flight -= 1
-                if self.error is None:
-                    self.error = GraphError(f"graph '{self.g.name}' exceeded max_steps={self.g.max_steps}")
-                self.done.set()
+                self._fail(GraphError(
+                    f"graph '{self.g.name}' exceeded max_steps={self.g.max_steps}"),
+                    node.name)
+                self._settle()
                 continue
             runs = ctx.setdefault("runs", {})
             runs[node.name] = runs.get(node.name, 0) + 1
@@ -172,11 +217,10 @@ class _Execution:
             events.emit("node_end", graph=self.g.name, node=node.name, run=runs[node.name],
                         seconds=round(time.monotonic() - t0, 3))
             self.log.debug("node '%s' fired (run %d, firings=%d, in_flight=%d)", node.name, runs[node.name], self.firings, self.in_flight)
-            for e in self.g.edges:
-                if e.src != node.name:
-                    continue
-                if e.when is None or e.when(result, ctx):
-                    self._put(e.dst, node.name, ctx)
-            self.in_flight -= 1
-            if self.in_flight <= 0 and self.error is None:
-                self.done.set()
+            if self.error is None:  # draining: fire no further edges
+                for e in self.g.edges:
+                    if e.src != node.name:
+                        continue
+                    if e.when is None or e.when(result, ctx):
+                        self._put(e.dst, node.name, ctx)
+            self._settle()

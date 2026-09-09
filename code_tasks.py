@@ -178,6 +178,23 @@ def _reviewer_driver(t, policy):
     return _driver(token, "reviewer", policy)
 
 
+# Failure reasons that mean "this model could not do the task" and so justify
+# resuming one tier higher. Anything else (a killed run process, a cancelled
+# graph, a harness crash, a merge conflict) is infrastructure noise: the task
+# resumes at the SAME tier, because escalating on it wastes the scarcest models.
+_CAPABILITY_FAILURES = ("exhausted escalation", "exhausted fix rounds",
+                        "review rejected", "gate failed")
+
+
+def _is_capability_failure(error):
+    low = (error or "").lower()
+    if not low:
+        # Pre-existing rows written before failures carried a reason: treat an
+        # unexplained failure as a capability signal, matching the old behaviour.
+        return True
+    return any(m in low for m in _CAPABILITY_FAILURES)
+
+
 def build_code_graph(store, taskset, taskfile="", policy=None):
     repo = taskset["repo"]
     tasks = taskset["tasks"]
@@ -216,17 +233,25 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         return t["reviewer"]
 
     def start_model(tid):
-        """Model a (possibly resumed) run starts this task at."""
+        """Model a (possibly resumed) run starts this task at.
+
+        Only a genuine capability failure escalates. A row that says the model
+        exhausted its fix rounds is evidence the tier was too weak; a row the
+        stale-reset wrote because its run process was killed says nothing about
+        the model at all. Escalating the latter used to send every interrupted
+        task straight to Kimi-K3 — the scarcest, most stall-prone tier — so one
+        killed queue turned into four tasks piled on a cap of two.
+        """
         t = tasks[tid]
         r = prior.get(tid)
         if not r or not escalate_on:
             return t["model"]
-        if r["status"] == "failed":
+        if r["status"] == "failed" and _is_capability_failure(r.get("error")):
             idx = _tier_index(r.get("model") or t["model"])
             if idx is not None and idx + 1 < len(config.ESCALATION_PATH):
                 return config.ESCALATION_PATH[idx + 1]
         # conflict resumes at the same model — a merge conflict is not a
-        # model-capability signal.
+        # model-capability signal — and so does an interrupted run.
         return r.get("model") or t["model"]
 
     if prior:
@@ -234,8 +259,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                          if r["status"] == "merged" and tid in tasks)
         retried = sorted(tid for tid, r in prior.items()
                          if r["status"] != "merged" and tid in tasks)
+        # "Escalated" means higher than where this task LAST ran, not higher
+        # than the taskfile's original routing. Comparing against the taskfile
+        # reported every resume of an already-escalated task as a fresh
+        # escalation, which is exactly the signal an operator reads to decide
+        # whether the fleet is about to pile onto a scarce model.
+        def _baseline(tid):
+            r = prior.get(tid)
+            return (r.get("model") if r else None) or tasks[tid]["model"]
+
         higher = {tid: m for tid in retried
-                  if (m := start_model(tid)) != tasks[tid]["model"]}
+                  if (m := start_model(tid)) != _baseline(tid)}
         events.emit("run.resume", taskfile=taskfile, skipped_merged=skipped,
                     retried=retried, escalated_on_resume=higher)
 

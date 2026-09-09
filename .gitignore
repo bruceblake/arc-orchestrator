@@ -2,4 +2,5 @@
 *.db
 .venv/
 __pycache__/
-*.pyc
+*.pyclogs/*.lock
+logs/.run-queue.lock

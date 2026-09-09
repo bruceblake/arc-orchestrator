@@ -118,6 +118,11 @@ DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "300"))
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
 # first). Must exceed DRIVER_TIMEOUT + retry backoffs.
 DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "1800"))
+# A harness rejected at the ARC account cap never got a slot, so retrying it
+# on the crash schedule (2s, 4s, 8s) walks straight back into the same cap.
+# Capacity rejections back off on this longer, jittered ladder instead.
+DRIVER_CAPACITY_BACKOFF = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF", "45"))
+DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP", "300"))
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 
