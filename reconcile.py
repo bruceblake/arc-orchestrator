@@ -24,15 +24,15 @@ import gitstore
 INTERRUPTED_REASON = "interrupted: run process exited before the task finished"
 
 
-def live_run_pids():
-    """PIDs of `main.py code run` processes still alive on this machine.
+def live_runs():
+    """[{'pid', 'taskfile'}] for every `main.py code run` alive on this machine.
 
     Matches on real argv token ORDER, not a substring of the whole command
     line: a shell wrapper or this very process can easily contain the words
     "main.py", "code" and "run" scattered across unrelated arguments.
     """
     me = os.getpid()
-    pids = []
+    runs = []
     for entry in Path("/proc").iterdir():
         if not entry.name.isdigit() or int(entry.name) == me:
             continue
@@ -45,9 +45,15 @@ def live_run_pids():
             if Path(arg).name != "main.py":
                 continue
             if argv[i + 1:i + 3] == ["code", "run"]:
-                pids.append(int(entry.name))
+                rest = [a for a in argv[i + 3:] if not a.startswith("-")]
+                runs.append({"pid": int(entry.name),
+                             "taskfile": rest[0] if rest else None})
             break
-    return pids
+    return runs
+
+
+def live_run_pids():
+    return [r["pid"] for r in live_runs()]
 
 
 def _repos_from_rows(rows):

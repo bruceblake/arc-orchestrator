@@ -77,6 +77,22 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .err { color: var(--err); font-size: 12px; margin-top: 6px; }
 .okmsg { color: var(--ok); font-size: 12px; margin-top: 6px; }
 svg text { font-family: ui-monospace, monospace; }
+.health { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.mcap { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
+        border-radius: 6px; padding: 2px 8px; font-size: 11px; color: var(--dim); }
+.mcap b { color: var(--text); font-weight: normal; }
+.mcap.busy { border-color: var(--accent); } .mcap.busy b { color: var(--accent); }
+.mcap.atcap { border-color: var(--warn); } .mcap.atcap b { color: var(--warn); }
+.mcap.over { border-color: var(--err); } .mcap.over b { color: var(--err); }
+.gauge { width: 44px; height: 5px; border-radius: 3px; background: #21262d; overflow: hidden; }
+.gauge > i { display: block; height: 100%; background: var(--accent); }
+.mcap.atcap .gauge > i { background: var(--warn); }
+.mcap.over .gauge > i { background: var(--err); }
+.problems { margin-top: 8px; max-height: 160px; overflow: auto; }
+.problems div { padding: 2px 0; font-size: 11px; border-bottom: 1px solid var(--border); }
+.errbox { margin-top: 6px; border-left: 2px solid var(--err); padding: 3px 0 3px 8px;
+          color: var(--err); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
+.cardnote { margin-top: 5px; color: var(--err); font-size: 11px; }
 </style>
 </head>
 <body>
@@ -87,14 +103,20 @@ svg text { font-family: ui-monospace, monospace; }
     <a href="/phone.html">Phone</a>
   </nav>
   <h1>ARC · Projects</h1>
-  <span class="pill on">Projects</span>
-  <a class="pill" href="/usage.html">Usage &amp; Agents</a>
-  <a class="pill" href="/phone.html">Phone</a>
   <span style="flex:1"></span>
+  <span class="pill" id="health-pill" title="fleet concurrency — click for detail">fleet <b id="health-sum">—</b></span>
   <span class="pill">updated <b id="clock">-</b></span>
 </header>
 <main>
   <div id="view-list">
+    <div class="panel" id="health-panel">
+      <h2>Fleet <span class="hint" id="health-meta"></span>
+        <span style="flex:1"></span>
+        <button class="act" id="btn-problems">recent problems</button>
+      </h2>
+      <div class="health" id="health-models"></div>
+      <div class="problems" id="health-problems" style="display:none"></div>
+    </div>
     <div class="panel">
       <h2>Projects <span class="hint" id="proj-meta"></span>
         <span style="flex:1"></span>
@@ -115,6 +137,7 @@ svg text { font-family: ui-monospace, monospace; }
         <span style="flex:1"></span>
         <button class="act" id="btn-dry">Dry run</button>
         <button class="act primary" id="btn-run">▶ Run</button>
+        <button class="act danger" id="btn-stop" style="display:none">■ Stop</button>
       </h2>
       <div class="kv" id="d-meta"></div>
       <div style="margin-top:8px" id="d-git"></div>
@@ -194,7 +217,7 @@ const $ = s => document.querySelector(s);
 const COLORS = {"gpt-oss":"#3fb950","glm":"#58a6ff","kimi":"#bc8cff","deepseek":"#d29922","kimi-code":"#8b949e","harness":"#e3b341"};
 const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash"};
 const short = m => SHORT[m] || m || "—";
-let PROJECTS = [], CUR = null, listTimer = null, detailTimer = null, drawerFile = null;
+let PROJECTS = [], CUR = null, CUR_PID = null, listTimer = null, detailTimer = null, drawerFile = null;
 
 const fmtT = iso => { if (!iso) return "—"; const s = (Date.now() - new Date(iso).getTime())/1000;
   if (s < 60) return Math.round(s)+"s ago"; if (s < 3600) return Math.round(s/60)+"m ago";
@@ -257,7 +280,8 @@ function card(p, i) {
     </div>
     <div style="margin-top:5px">${(p.models || []).map(m => `<span class="tag">${short(m)}</span>`).join("")}
       ${(p.reviewers || []).map(m => `<span class="tag">review: ${short(m === "kimi" ? "Kimi-K3" : m === "glm" ? "GLM-5.3" : m)}</span>`).join("")}</div>
-    <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}</div>
+    ${(p.errors && p.errors.length) ? `<div class="cardnote" title="${esc(p.errors[0].error)}">⚠ ${esc(p.errors[0].id)}: ${esc(String(p.errors[0].error).slice(0, 90))}</div>` : ""}
+    <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}${p.run_pid ? ` · <span class="good">running (pid ${p.run_pid})</span>` : ""}</div>
   </div>`;
 }
 
@@ -289,6 +313,59 @@ async function loadProjects() {
     document.querySelectorAll("#projects .card").forEach(c => c.onclick = () => openDetail(PROJECTS[+c.dataset.i].file));
   } catch (e) {}
 }
+
+const AGO = ts => { if (!ts) return ""; const d = Date.now()/1000 - ts;
+  return d < 60 ? Math.round(d)+"s" : d < 3600 ? Math.round(d/60)+"m" : (d/3600).toFixed(1)+"h"; };
+
+const PROBLEM_LABEL = {
+  "driver.error": "harness error", "driver.stalled": "stalled (no output)",
+  "driver.timeout": "timed out", "driver.stale": "phantom agent pruned",
+  "driver.cancelled": "cancelled", "driver.cap_wait": "waiting for a slot",
+  "inflight.over_cap": "OVER account cap", "task.failed": "task failed",
+  "task.conflict": "merge conflict", "graph.draining": "run draining after a failure",
+  "run.interrupted": "run interrupted",
+};
+
+function renderHealth(h) {
+  const models = h.models || [];
+  const busy = models.reduce((n, m) => n + m.inflight, 0);
+  const over = models.filter(m => m.over_cap), at = models.filter(m => m.at_cap && !m.over_cap);
+  $("#health-sum").textContent = `${busy} agent${busy === 1 ? "" : "s"}`;
+  $("#health-pill").className = "pill" + (over.length ? " on" : "");
+  const runs = (h.runs || []).length;
+  $("#health-meta").textContent =
+    `(${busy} agent${busy === 1 ? "" : "s"} in flight · ${runs} run${runs === 1 ? "" : "s"}` +
+    `${over.length ? " · OVER CAP: " + over.map(m => m.pretty).join(", ") : ""}` +
+    `${!over.length && at.length ? " · at cap: " + at.map(m => m.pretty).join(", ") : ""})`;
+  $("#health-models").innerHTML = models.map(m => {
+    const cap = m.driver_cap || 0;
+    const pct = cap ? Math.min(100, 100 * m.inflight / cap) : 0;
+    const cls = m.over_cap ? "over" : m.at_cap ? "atcap" : m.inflight ? "busy" : "";
+    const age = m.inflight && m.oldest_s ? ` · oldest ${tick(m.oldest_s)}` : "";
+    return `<span class="mcap ${cls}" title="concurrent harness instances for ${esc(m.model)}${age}">
+      ${esc(m.pretty)} <b>${m.inflight}/${cap || "?"}</b>
+      <span class="gauge"><i style="width:${pct}%"></i></span></span>`;
+  }).join("") || '<span class="hint">no models reporting</span>';
+  const probs = (h.problems || []);
+  $("#btn-problems").textContent = `recent problems (${probs.length})`;
+  $("#health-problems").innerHTML = probs.length ? probs.map(e => {
+    const what = PROBLEM_LABEL[e.type] || e.type;
+    const who = [e.model && short(e.model), e.task].filter(Boolean).map(esc).join(" · ");
+    const detail = e.error || e.reason || e.note ||
+      (e.in_use != null ? `${e.in_use}/${e.cap} slots in use` : "") ||
+      (e.inflight != null ? `${e.inflight}/${e.limit} in flight` : "");
+    const cls = e.type === "driver.cap_wait" ? "warn" : "bad";
+    return `<div><span class="hint">${AGO(e.ts)} ago</span>
+      <span class="${cls}">${esc(what)}</span> ${who}
+      <span class="hint">${esc(String(detail).slice(0, 160))}</span></div>`;
+  }).join("") : '<div class="hint">nothing to report</div>';
+}
+
+async function loadHealth() {
+  try { renderHealth(await jget("/api/health")); } catch (e) {}
+}
+$("#btn-problems").onclick = () => { const el = $("#health-problems");
+  el.style.display = el.style.display === "none" ? "" : "none"; };
 
 async function loadGraphs() {
   try {
@@ -329,8 +406,8 @@ async function openDetail(file) {
   detailTimer = setInterval(refreshDetail, 5000);
 }
 $("#btn-back").onclick = () => { clearInterval(detailTimer); detailTimer = null; CUR = null;
-  $("#view-detail").style.display = "none"; $("#view-list").style.display = ""; loadProjects();
-  listTimer = setInterval(loadProjects, 5000); };
+  $("#view-detail").style.display = "none"; $("#view-list").style.display = ""; loadProjects(); loadHealth();
+  listTimer = setInterval(() => { loadProjects(); loadHealth(); }, 5000); };
 
 async function refreshDetail() {
   if (!CUR) return;
@@ -339,15 +416,20 @@ async function refreshDetail() {
   $("#clock").textContent = new Date().toLocaleTimeString();
   $("#d-title").textContent = d.title;
   const running = (d.rows||[]).some(r => r.status === "running");
+  CUR_PID = d.run_pid || null;
   $("#d-live").innerHTML = running ? '<span class="live">LIVE</span>' : "";
-  $("#d-meta").innerHTML = `<span>repo <b>${d.repo}</b></span><span>file <b>${d.file}</b></span>
-    <span><b>${(d.tasks||[]).length}</b> tasks</span><span><b>${(d.runs||[]).length}</b> harness runs</span>`;
+  $("#btn-stop").style.display = CUR_PID ? "" : "none";
+  $("#btn-stop").title = CUR_PID ? `stop run process ${CUR_PID}` : "";
+  $("#btn-run").disabled = !!CUR_PID;
+  $("#d-meta").innerHTML = `<span>repo <b>${esc(d.repo)}</b></span><span>file <b>${esc(d.file)}</b></span>
+    <span><b>${(d.tasks||[]).length}</b> tasks</span><span><b>${(d.runs||[]).length}</b> harness runs</span>
+    ${CUR_PID ? `<span>run pid <b>${CUR_PID}</b></span>` : ""}`;
   const g = d.git || {};
-  $("#d-git").innerHTML = g.error ? `<span class="hint">${g.error}</span>` : `<div class="kv">
-      <span>branch <b>${g.branch||"—"}</b></span><span>dirty files <b class="${(g.dirty||[]).length?"warn":""}">${(g.dirty||[]).length}</b></span>
+  $("#d-git").innerHTML = g.error ? `<span class="hint">${esc(g.error)}</span>` : `<div class="kv">
+      <span>branch <b>${esc(g.branch||"—")}</b></span><span>dirty files <b class="${(g.dirty||[]).length?"warn":""}">${(g.dirty||[]).length}</b></span>
       <span>worktrees <b>${(g.worktrees||[]).length}</b></span></div>
-    ${(g.log||[]).length? `<div class="hint" style="margin-top:5px">${g.log.map(l=>"&nbsp;&nbsp;"+l).join("<br>")}</div>` : ""}
-    ${(g.worktrees||[]).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.join("<br>")}</div>` : ""}`;
+    ${(g.log||[]).length? `<div class="hint" style="margin-top:5px">${g.log.map(l=>"&nbsp;&nbsp;"+esc(l)).join("<br>")}</div>` : ""}
+    ${(g.worktrees||[]).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.map(esc).join("<br>")}</div>` : ""}`;
   renderDag(d); renderFeed(d); renderTasks(d);
 }
 
@@ -387,22 +469,35 @@ function renderDag(d) {
 }
 
 function friendly(e) {
-  const m = short(e.model);
+  // Every interpolation here is escaped: these fields carry raw harness
+  // stderr and task ids straight out of the event log.
+  const m = esc(short(e.model)), task = esc(e.task || e.module || "");
+  const cut = (v, n) => esc(String(v == null ? "" : v).slice(0, n));
   switch (e.type) {
-    case "driver.start": return `${m} <b>${e.role}</b> started · ${e.task} (attempt ${e.attempt})`;
-    case "driver.done": return `${m} <b>${e.role}</b> finished · ${e.task} in ${e.seconds}s${e.tokens?` · ${e.tokens} tok`:""}`;
-    case "driver.error": return `<span class="bad">${m} error · ${e.task}: ${(e.error||"").slice(0,140)}</span>`;
-    case "worktree.alloc": return `worktree ready · <span class="hint">${e.branch||e.path||""}</span>`;
-    case "worktree.free": return `worktree released · <span class="hint">${e.branch||""}</span>`;
-    case "task.start": return `task started · ${e.task}`;
-    case "task.end": return `task ended · ${e.task} → ${e.status||""}`;
-    case "task.escalated": return `<span class="warn">⬆ ${e.task || e.module || ""} escalated ${short(e.from_model)} → ${short(e.to_model)}</span>`;
-    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${e.task || e.module || ""}${e.error ? ": " + String(e.error).slice(0, 120) : ""}</span>`;
-    case "task.merged": return `<span class="good">⬢ ${e.task || e.module || ""} merged</span>`;
+    case "driver.start": return `${m} <b>${esc(e.role)}</b> started · ${task} (attempt ${esc(e.attempt)})`;
+    case "driver.done": return `${m} <b>${esc(e.role)}</b> finished · ${task} in ${esc(e.seconds)}s${e.tokens?` · ${esc(e.tokens)} tok`:""}`;
+    case "driver.error": return `<span class="bad">${m} ${e.capacity ? "at capacity" : "error"} · ${task}: ${cut(e.error, 140)}</span>`;
+    case "driver.stalled": return `<span class="bad">${m} stalled (no output for ${esc(e.idle_s)}s) · ${task}</span>`;
+    case "driver.timeout": return `<span class="bad">${m} timed out · ${task}</span>`;
+    case "driver.cancelled": return `<span class="warn">${m} cancelled · ${task}</span>`;
+    case "driver.cap_wait": return `<span class="warn">⏳ ${m} waiting for a slot · ${esc(e.in_use)}/${esc(e.cap)} in use</span>`;
+    case "worktree.alloc": return `worktree ready · <span class="hint">${esc(e.branch||e.path||"")}</span>`;
+    case "worktree.free": return `worktree released · <span class="hint">${esc(e.branch||"")}</span>`;
+    case "task.start": return `task started · ${task}`;
+    case "task.end": return `task ended · ${task} → ${esc(e.status||"")}`;
+    case "task.escalated": return `<span class="warn">⬆ ${task} escalated ${esc(short(e.from_model))} → ${esc(short(e.to_model))}</span>`;
+    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason||e.error ? ": " + cut(e.reason||e.error, 120) : ""}</span>`;
+    case "task.failed": return `<span class="bad">✗ ${task} failed${e.reason ? ": " + cut(e.reason, 120) : ""}</span>`;
+    case "task.merged": return `<span class="good">⬢ ${task} merged</span>`;
+    case "task.pr_opened": return `<span class="good">⇪ PR opened · ${task} ${cut(e.url, 80)}</span>`;
+    case "task.pr_skipped": return `<span class="hint">PR skipped · ${task}: ${cut(e.reason, 100)}</span>`;
     case "run.resume": return `↻ resumed: skipped ${(e.skipped_merged || []).length} merged, retried ${(e.retried || []).length}`;
-    case "node_start": return `<span class="hint">node ${e.node} · ${e.task||""}</span>`;
-    case "node_end": return `<span class="hint">node ${e.node} done · ${e.task||""}</span>`;
-    default: return `<span class="hint">${e.type} ${e.task||""}</span>`;
+    case "run.interrupted": return `<span class="warn">↯ run interrupted — ${(e.tasks||[]).length} task(s) marked failed</span>`;
+    case "run.stopped": return `<span class="warn">■ run stopped by operator</span>`;
+    case "graph.draining": return `<span class="warn">⧗ draining ${esc(e.in_flight)} in-flight node(s) after a failure</span>`;
+    case "node_start": return `<span class="hint">node ${esc(e.node)} · ${task}</span>`;
+    case "node_end": return `<span class="hint">node ${esc(e.node)} done · ${task}</span>`;
+    default: return `<span class="hint">${esc(e.type)} ${task}</span>`;
   }
 }
 function renderFeed(d) {
@@ -423,16 +518,21 @@ function renderTasks(d) {
     const runs = runsByTask[t.id] || [];
     const secs = runs.length && runs[0].seconds ? tick(runs[0].seconds) : (row.finished_at ? "" : "—");
     const verdict = runs.length ? (runs[0].verdict || "") : "";
+    const loops = (row.attempts || 0) > 1 || (row.escalations || 0) > 0
+      ? ` <span class="tag" title="fix-loop attempts / escalations">x${row.attempts}${row.escalations ? " ⬆" + row.escalations : ""}</span>` : "";
     const tr = document.createElement("tr"); tr.className = "clickable";
-    tr.innerHTML = `<td>${t.id}</td><td class="hint">${t.title||""}</td><td>${short(t.model)}</td>
-      <td>${short(t.reviewer)}</td><td>${chip(st, "")}</td><td>${runs.length||"—"}</td>
-      <td>${secs||"—"}</td><td class="${verdict.includes("pass")?"good":verdict?"bad":""}">${(verdict||"—").slice(0,40)}</td>`;
+    tr.innerHTML = `<td>${esc(t.id)}</td><td class="hint">${esc(t.title||"")}</td><td>${esc(short(t.model))}</td>
+      <td>${esc(short(t.reviewer))}</td><td>${chip(st, "")}${loops}</td><td>${runs.length||"—"}</td>
+      <td>${secs||"—"}</td><td class="${verdict.includes("pass")?"good":verdict?"bad":""}">${esc((verdict||"—").slice(0,40))}</td>`;
     const sr = document.createElement("tr"); sr.className = "subrow"; sr.style.display = "none";
-    sr.innerHTML = `<td colspan="8">${runs.length ? runs.map(r =>
-      `<div style="padding:3px 0"><span class="tag">${r.role}</span> <span class="tag">${r.harness}</span>
-        attempt ${r.attempt} · exit ${r.exit_code} · ${r.seconds?tick(r.seconds):"?"} · ${r.verdict||""}
-        ${r.transcript? `<button class="act" data-t="${r.transcript.split("/").pop()}" data-m="${short(r.model)}" data-r="${r.role}" data-task="${t.id}">transcript</button>` : ""}</div>`).join("")
-      : '<span class="hint">no runs yet</span>'} <div class="hint" style="margin-top:4px">prompt: ${(t.prompt||"").slice(0,260)}…</div></td>`;
+    // The failure reason has always been in the database and was never shown:
+    // a task went red and the UI offered no way to find out why.
+    const why = row.error ? `<div class="errbox">${esc(row.error)}</div>` : "";
+    sr.innerHTML = `<td colspan="8">${why}${runs.length ? runs.map(r =>
+      `<div style="padding:3px 0"><span class="tag">${esc(r.role)}</span> <span class="tag">${esc(r.harness)}</span>
+        attempt ${r.attempt} · exit ${r.exit_code} · ${r.seconds?tick(r.seconds):"?"} · ${esc(r.verdict||"")}
+        ${r.transcript? `<button class="act" data-t="${esc(r.transcript.split("/").pop())}" data-m="${esc(short(r.model))}" data-r="${esc(r.role)}" data-task="${esc(t.id)}">transcript</button>` : ""}</div>`).join("")
+      : '<span class="hint">no runs yet</span>'} <div class="hint" style="margin-top:4px">prompt: ${esc((t.prompt||"").slice(0,260))}…</div></td>`;
     tr.onclick = () => sr.style.display = sr.style.display === "none" ? "" : "none";
     tb.appendChild(tr); tb.appendChild(sr);
   }
@@ -518,9 +618,18 @@ async function doRun(dry) {
 }
 $("#btn-run").onclick = () => doRun(false);
 $("#btn-dry").onclick = () => doRun(true);
+$("#btn-stop").onclick = async () => {
+  if (!CUR) return;
+  if (!confirm(`Stop the run for ${CUR}?\n\nIn-flight agents are cancelled, unfinished tasks are marked failed, and driver slots are released. Work already merged is kept.`)) return;
+  const {code, body} = await jpost("/api/projects/stop", {file: CUR});
+  alert(code === 200 ? `stop signal sent to pid ${(body.stopped||[]).join(", ")}\n${body.note||""}`
+                     : `not stopped: ${body.error}`);
+  refreshDetail(); loadHealth();
+};
 
-loadProjects(); loadGraphs();
-listTimer = setInterval(loadProjects, 5000);
+loadProjects(); loadGraphs(); loadHealth();
+listTimer = setInterval(() => { loadProjects(); loadHealth(); }, 5000);
+setInterval(loadHealth, 5000);   // keeps the header pill live on the detail view too
 </script>
 </body>
 </html>

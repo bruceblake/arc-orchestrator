@@ -139,6 +139,91 @@ class RetryLoop(unittest.TestCase):
                              config.DRIVER_CAPACITY_BACKOFF_CAP * 1.25)
 
 
+class ChildTermination(unittest.TestCase):
+    """A cancelled or timed-out attempt must not orphan the harness process.
+
+    An orphaned kimi/opencode keeps holding an ARC concurrency slot after the
+    orchestrator that spawned it is gone, which is what made a killed run make
+    the cap situation worse rather than better.
+    """
+
+    class SleeperDriver(Driver):
+        harness = "sleep"
+        model = "gpt-oss-120b"
+        role = "implementer"
+
+        def argv(self, prompt, session_id):
+            return ["sleep", "60"]
+
+    def test_cancelling_an_attempt_kills_the_child(self):
+        holder = {}
+
+        async def go():
+            drv = self.SleeperDriver()
+            orig = drv._pump
+
+            async def spy(proc, *a, **kw):
+                holder["proc"] = proc
+                return await orig(proc, *a, **kw)
+
+            drv._pump = spy
+            task = asyncio.create_task(
+                drv._once("p", Path("."), None, "t", 1))
+            for _ in range(100):          # wait for the child to exist
+                await asyncio.sleep(0.02)
+                if "proc" in holder:
+                    break
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        asyncio.run(go())
+        proc = holder.get("proc")
+        self.assertIsNotNone(proc, "child was never spawned")
+        self.assertIsNotNone(proc.returncode, "harness process was left running")
+
+    def test_cancellation_emits_a_terminal_event(self):
+        """Every driver.start needs a matching end event: the dashboard pairs
+        them to count in-flight agents against each model's cap, and an
+        unmatched start reads as a phantom agent for ~19 minutes."""
+        with capture_events() as ev, TempLeaseDB():
+            drv = FakeDriver(asyncio.CancelledError())
+
+            async def go():
+                with self.assertRaises(asyncio.CancelledError):
+                    await drv.run("p", Path("."), task_id="t1")
+
+            asyncio.run(go())
+        self.assertEqual(len(ev.of("driver.start")), 1)
+        self.assertEqual(len(ev.of("driver.cancelled")), 1)
+
+    def test_idle_timeout_kills_the_child(self):
+        orig_idle = config.DRIVER_IDLE_TIMEOUT
+        config.DRIVER_IDLE_TIMEOUT = 0.3
+        holder = {}
+        try:
+            async def go():
+                drv = self.SleeperDriver()
+                orig = drv._pump
+
+                async def spy(proc, *a, **kw):
+                    holder["proc"] = proc
+                    return await orig(proc, *a, **kw)
+
+                drv._pump = spy
+                with capture_events():
+                    with self.assertRaises(DriverError):
+                        await drv._once("p", Path("."), None, "t", 1)
+
+            asyncio.run(go())
+        finally:
+            config.DRIVER_IDLE_TIMEOUT = orig_idle
+        self.assertIsNotNone(holder["proc"].returncode,
+                             "stalled harness was left running")
+
+
 class CapacityClassification(unittest.TestCase):
     """Capacity rejections need a long backoff; crashes need a short one."""
 

@@ -86,6 +86,20 @@ def _lease_release(model, task_id):
     _lease_db().release_driver_lease(model, os.getpid(), task_id)
 
 
+async def _terminate(proc):
+    """Kill a harness process if it is still running; safe to call twice."""
+    if proc.returncode is not None:
+        return
+    try:
+        proc.kill()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), 10)
+    except asyncio.TimeoutError:
+        log.warning("harness pid %s did not exit after SIGKILL", proc.pid)
+
+
 def _dig(obj, texts, sid_holder):
     if isinstance(obj, dict):
         for k, v in obj.items():
@@ -173,6 +187,14 @@ class Driver:
             try:
                 result = await self._guarded_once(continuation or prompt, worktree,
                                                   sid, task_id, attempt)
+            except asyncio.CancelledError:
+                # Every driver.start needs a terminal event or the dashboard
+                # counts this attempt as in-flight (and against the model's
+                # cap) until its stale sweep fires ~19 minutes later.
+                events.emit("driver.cancelled", harness=self.harness,
+                            model=self.model, role=self.role, task=task_id,
+                            attempt=attempt)
+                raise
             except DriverError as exc:
                 if exc.session_id and not sid:
                     sid = exc.session_id
@@ -247,6 +269,21 @@ class Driver:
         # can tail a live agent mid-run; stderr drains concurrently so a big
         # stderr never deadlocks the child on a full pipe.
         err_task = asyncio.create_task(proc.stderr.read())
+        try:
+            return await self._pump(proc, err_task, argv, tpath, t0,
+                                    session_id, task_id, attempt)
+        finally:
+            # Never leave the harness running. Cancellation (a Stop from the
+            # dashboard, SIGTERM, a draining graph) unwinds through here while
+            # the child is mid-request, and an orphaned kimi/opencode keeps
+            # holding an ARC slot long after the orchestrator that spawned it
+            # is gone — which is what made a killed run make the cap WORSE.
+            await _terminate(proc)
+            err_task.cancel()
+
+    async def _pump(self, proc, err_task, argv, tpath, t0,
+                    session_id, task_id, attempt):
+        """Drain the harness's stdout into the transcript until it exits."""
         chunks = []
         last_chunk_t = time.monotonic()
         deadline = t0 + config.DRIVER_TIMEOUT
@@ -266,9 +303,7 @@ class Driver:
                     fh.write(chunk)
                     fh.flush()
         except asyncio.TimeoutError:
-            proc.kill()
-            await proc.wait()
-            err_task.cancel()
+            await _terminate(proc)
             partial = b"".join(chunks).decode(errors="replace")
             psid, _ = parse_transcript(partial)
             idle = round(time.monotonic() - last_chunk_t, 1)
@@ -287,8 +322,7 @@ class Driver:
                 session_id=psid or session_id)
         err = await err_task
         await proc.wait()
-        out = b"".join(chunks)
-        raw = out.decode(errors="replace")
+        raw = b"".join(chunks).decode(errors="replace")
         sid, text = parse_transcript(raw)
         toks, ptok, ctok = transcript_tokens(raw)
         if proc.returncode != 0:

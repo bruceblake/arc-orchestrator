@@ -13,7 +13,9 @@ Usage layers (why a model can appear under more than one source):
 import errno
 import json
 import logging
+import os
 import re
+import signal
 import socket
 import subprocess
 import time
@@ -353,7 +355,8 @@ def _collect_inflight(now):
         elif etype == "driver.start":
             driver_starts[(e.get("harness"), e.get("model"), e.get("role"),
                            e.get("task"), e.get("attempt"))] = e
-        elif etype in ("driver.done", "driver.error", "driver.stale"):
+        elif etype in ("driver.done", "driver.error", "driver.stale",
+                       "driver.cancelled"):
             key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
             if key in driver_starts:
                 del driver_starts[key]
@@ -597,7 +600,8 @@ def _usage(store=None, range_key=None):
     # Recent driver-level problems for the dashboard error panel (newest last).
     recent_driver = []
     _DRV_TYPES = ("driver.error", "driver.stalled", "driver.timeout", "driver.stale",
-                  "inflight.over_cap", "request.stale", "task.failed")
+                  "driver.cancelled", "inflight.over_cap", "request.stale",
+                  "task.failed")
     for line in reversed(ev_lines):
         if '"driver.' not in line and '"task.failed"' not in line and '"inflight.' not in line \
                 and '"request.stale"' not in line:
@@ -856,8 +860,18 @@ def _projects(store):
         s["seconds"] += row.get("seconds") or 0.0
         s["runs"] += 1
         s["tokens"] += _transcript_toks(row.get("transcript"))[0]
+    import reconcile
+    run_by_file = {}
+    for r in reconcile.live_runs():
+        if r.get("taskfile"):
+            run_by_file[Path(r["taskfile"]).name] = r["pid"]
     out = []
     tdir = Path(config.TASKS_DIR)
+    # Parse every task file first and collect ALL task ids, so the fix-loop
+    # stats (a full harness_runs read plus a full event-log walk) are computed
+    # once for the whole page instead of once per project file.
+    parsed = []
+    all_ids = []
     for f in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
         try:
             data = json.loads(f.read_text(encoding="utf-8", errors="replace"))
@@ -866,6 +880,11 @@ def _projects(store):
         proj = data.get("project") or {}
         tdefs = [t for t in (proj.get("tasks") or []) if isinstance(t, dict)]
         ids = [t.get("id") for t in tdefs if t.get("id")]
+        parsed.append((f, proj, tdefs, ids))
+        all_ids.extend(ids)
+    all_loop_stats = _task_loop_stats(store, sorted(set(all_ids)))
+    for f, proj, tdefs, ids in parsed:
+        idset = set(ids)
         rows = [r for r in rows_all if r.get("taskfile")
                 and (r["taskfile"] == str(f) or r["taskfile"].endswith("/" + f.name))]
         statuses = {}
@@ -880,7 +899,7 @@ def _projects(store):
                 if v and (last is None or v > last):
                     last = v
         nodes = []
-        loop_stats = _task_loop_stats(store, ids)
+        loop_stats = all_loop_stats
         for t in tdefs:
             tid = t.get("id")
             if not tid:
@@ -912,6 +931,8 @@ def _projects(store):
         live_tok = sum(n["live_tokens"] for n in nodes)
         live_sec = round(sum(n["live_seconds"] for n in nodes), 1)
         merged_n = sum(1 for n in nodes if n["status"] == "merged")
+        errors = [{"id": r["id"], "status": r["status"], "error": r["error"]}
+                  for r in rows if r.get("error") and r.get("id") in idset]
         try:
             mtime_iso = datetime.utcfromtimestamp(f.stat().st_mtime).isoformat() + "+00:00"
         except OSError:
@@ -926,6 +947,8 @@ def _projects(store):
                     "tokens": tok_total + live_tok, "seconds": round(sec_total + live_sec, 1),
                     "done_tokens": tok_total, "done_seconds": sec_total,
                     "live_tokens": live_tok, "live_seconds": live_sec,
+                    "errors": errors,
+                    "run_pid": run_by_file.get(f.name),
                     "active": statuses.get("running", 0) > 0 or any(i in live_tasks for i in ids),
                     "last_activity": last or mtime_iso})
     out.sort(key=lambda p: p["last_activity"] or "", reverse=True)
@@ -991,8 +1014,11 @@ def _project_detail(store, fname):
                 break
     events.reverse()
     repo_v = _valid_repo(proj.get("repo") or "")
+    import reconcile
+    run_pid = next((r["pid"] for r in reconcile.live_runs()
+                    if r.get("taskfile") and Path(r["taskfile"]).name == fname), None)
     return {"file": fname, "title": proj.get("title") or path.stem,
-            "repo": proj.get("repo"),
+            "repo": proj.get("repo"), "run_pid": run_pid,
             "tasks": tdefs, "rows": rows, "runs": runs, "events": events,
             "git": _git_block(repo_v)}, 200
 
@@ -1027,7 +1053,6 @@ def _prune_registry():
         alive = False
         if pid:
             try:
-                import os
                 os.kill(pid, 0)
                 alive = True
             except ProcessLookupError:
@@ -1149,6 +1174,112 @@ def _run_project(body):
     return {"pid": proc.pid, "log": log_name, "dry_run": dry_run}, 200
 
 
+_HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
+                    "driver.cap_wait", "inflight.over_cap", "task.failed",
+                    "task.conflict", "graph.draining", "run.interrupted")
+
+
+def _health(store):
+    """Small, cheap fleet-health payload for the Projects page.
+
+    The same facts live in /api/usage, but that response is ~34KB and is only
+    fetched by the Usage page — so the one screen an operator actually watches
+    showed nothing when the fleet was wedged at its concurrency cap.
+    """
+    now = time.time()
+    inflight, _kimi = _collect_inflight(now)
+    import reconcile
+
+    per_model = {}
+    for row in inflight:
+        model = row.get("model")
+        if not model:
+            continue
+        ent = per_model.setdefault(model, {
+            "model": model, "pretty": _pretty(model),
+            "family": config.MODEL_FAMILY.get(model, row.get("family") or "harness"),
+            "inflight": 0, "driver_cap": None, "oldest_s": 0.0})
+        ent["inflight"] += 1
+        ent["oldest_s"] = max(ent["oldest_s"], row.get("elapsed_s") or 0.0)
+    # Show every governed model, not only the busy ones: "Kimi-K3 0/2" is the
+    # reassurance that nothing is stuck, and costs one row.
+    for model in config.IMPLEMENTER_MODELS:
+        per_model.setdefault(model, {
+            "model": model, "pretty": _pretty(model),
+            "family": config.MODEL_FAMILY.get(model, "harness"),
+            "inflight": 0, "driver_cap": None, "oldest_s": 0.0})
+    for ent in per_model.values():
+        try:
+            ent["driver_cap"] = config.driver_limit(ent["model"])
+        except Exception:
+            ent["driver_cap"] = None
+        cap = ent["driver_cap"]
+        ent["at_cap"] = bool(cap and ent["inflight"] >= cap)
+        ent["over_cap"] = bool(cap and ent["inflight"] > cap)
+
+    problems = []
+    for line in reversed(_load_event_lines()):
+        if not any(t in line for t in ('"driver.', '"task.failed"', '"task.conflict"',
+                                       '"inflight.', '"graph.', '"run.interrupted"')):
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") not in _HEALTH_PROBLEMS:
+            continue
+        problems.append({k: e[k] for k in
+                         ("type", "ts", "model", "harness", "role", "task", "attempt",
+                          "error", "note", "reason", "family", "inflight", "limit",
+                          "in_use", "cap", "idle_s", "capacity", "taskfile")
+                         if k in e})
+        if len(problems) >= 25:
+            break
+
+    try:
+        leases = store.driver_lease_rows() if store else []
+    except Exception:
+        leases = []
+    return {"now": now, "models": sorted(per_model.values(),
+                                         key=lambda m: (-m["inflight"], m["model"])),
+            "agents": inflight, "runs": reconcile.live_runs(),
+            "leases": leases, "problems": problems}
+
+
+def _stop_project(body):
+    """SIGTERM every `code run` process owning this task file.
+
+    SIGTERM (not KILL) on purpose: the run installs a handler that cancels the
+    graph, kills its harness children, marks unfinished tasks failed and
+    releases its driver leases. A KILL would skip all of that and leave exactly
+    the orphans `code reconcile` exists to clean up.
+    """
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    fname = body.get("file") or ""
+    if not re.fullmatch(r"[\w.-]+\.json", fname):
+        return {"error": "bad file name"}, 400
+    path = Path(config.TASKS_DIR) / fname
+    import reconcile
+    targets = [r for r in reconcile.live_runs()
+               if r.get("taskfile") and Path(r["taskfile"]).name == fname]
+    if not targets:
+        _prune_registry()
+        return {"error": "no run process is active for this task file",
+                "stopped": []}, 409
+    stopped = []
+    for r in targets:
+        try:
+            os.kill(r["pid"], signal.SIGTERM)
+            stopped.append(r["pid"])
+        except OSError as exc:
+            log.warning("could not signal pid %s: %s", r["pid"], exc)
+    _launch_registry.pop(str(path), None)
+    _emit_event("run.stop_requested", taskfile=str(path), pids=stopped)
+    return {"stopped": stopped,
+            "note": "sent SIGTERM; the run settles its tasks and leases as it exits"}, 200
+
+
 def _graph_topology(g):
     return {
         "name": g.name,
@@ -1222,6 +1353,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/agents":
                 return self._json(_agents(Handler.store))
+            if u.path == "/api/health":
+                return self._json(_health(Handler.store))
             if u.path == "/api/transcript":
                 q = parse_qs(u.query)
                 tail = q.get("tail", ["200"])[0]
@@ -1294,6 +1427,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/projects/run":
                 obj, code = _run_project(body)
+                return self._json(obj, code)
+            if u.path == "/api/projects/stop":
+                obj, code = _stop_project(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
