@@ -561,6 +561,66 @@ def _usage(store=None, range_key=None):
             "totals": totals, "series": series}
 
 
+_fleet_cache = {"key": 0.0, "models": [], "totals": {}}  # refreshed at most every ~2s
+FLEET_CACHE_S = 2.0
+
+
+def _fleet(store):
+    """All-history code-fleet totals for /api/fleet.
+
+    Wraps _usage(store, "all") — no separate event walk — and merges its
+    per-source rows into one row per model (driver:<harness>, arc-pool and
+    kimi-code all feed the same fleet). account_cap/driver_cap come from
+    config and are None for families/models it does not know. The computed
+    aggregate is cached ~2s so rapid polling stays cheap.
+    """
+    now = time.time()
+    if _fleet_cache["key"] and now - _fleet_cache["key"] <= FLEET_CACHE_S:
+        return {"totals": _fleet_cache["totals"], "models": _fleet_cache["models"],
+                "ranges": RANGES, "ts": now}
+    usage = _usage(store, "all")
+    agg = {}
+    for m in usage["models"]:
+        row = agg.setdefault(m["model"], {
+            "model": m["model"], "pretty": m["pretty"],
+            "family": config.MODEL_FAMILY.get(m["model"], m["family"]),
+            "requests": 0, "ok": 0, "errors": 0, "tokens": 0,
+            "prompt_tokens": 0, "completion_tokens": 0,
+            "lat_ms": 0.0, "lat_n": 0, "last_ts": None})
+        for field in ("requests", "ok", "errors", "tokens",
+                      "prompt_tokens", "completion_tokens"):
+            row[field] += m.get(field) or 0
+        lat, ok = m.get("avg_latency_ms"), m.get("ok") or 0
+        if lat and ok:
+            row["lat_ms"] += lat * ok
+            row["lat_n"] += ok
+        if m.get("last_ts") and (row["last_ts"] is None or m["last_ts"] > row["last_ts"]):
+            row["last_ts"] = m["last_ts"]
+    models = []
+    for row in agg.values():
+        try:
+            account_cap = config.family_limit(row["family"])
+        except Exception:
+            account_cap = None
+        try:
+            driver_cap = config.driver_limit(row["model"])
+        except Exception:
+            driver_cap = None
+        models.append({"model": row["model"], "pretty": row["pretty"],
+                       "family": row["family"], "requests": row["requests"],
+                       "ok": row["ok"], "errors": row["errors"], "tokens": row["tokens"],
+                       "prompt_tokens": row["prompt_tokens"],
+                       "completion_tokens": row["completion_tokens"],
+                       "avg_latency_ms": round(row["lat_ms"] / row["lat_n"]) if row["lat_n"] else None,
+                       "last_ts": row["last_ts"], "account_cap": account_cap,
+                       "driver_cap": driver_cap})
+    models.sort(key=lambda m: -m["requests"])
+    totals = {f: usage["totals"][f] for f in
+              ("requests", "ok", "errors", "tokens", "prompt_tokens", "completion_tokens")}
+    _fleet_cache.update(key=now, models=models, totals=totals)
+    return {"totals": totals, "models": models, "ranges": RANGES, "ts": time.time()}
+
+
 def _task_slug(text):
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower())[:40].strip("-")
 
@@ -934,6 +994,8 @@ class Handler(BaseHTTPRequestHandler):
                 q = parse_qs(u.query)
                 range_key = q.get("range", ["1h"])[0]
                 return self._json(_usage(Handler.store, range_key))
+            if u.path == "/api/fleet":
+                return self._json(_fleet(Handler.store))
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
             if u.path == "/api/project":
