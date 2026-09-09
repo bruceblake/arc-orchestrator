@@ -585,6 +585,22 @@ def _projects(store):
         rows_all = store.code_tasks_all() if store else []
     except Exception:
         rows_all = []
+    # per-task tokens/seconds from driver.done events (historical, all sources)
+    ev_stats = {}  # base task id -> {"tokens","seconds","runs"}
+    for ln in _load_event_lines():
+        if '"driver.done"' not in ln:
+            continue
+        try:
+            e = json.loads(ln)
+        except ValueError:
+            continue
+        base, _x = _xkey(e.get("task"))
+        if not base:
+            continue
+        s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0})
+        s["tokens"] += e.get("tokens") or 0
+        s["seconds"] += e.get("seconds") or 0.0
+        s["runs"] += 1
     out = []
     tdir = Path(config.TASKS_DIR)
     for f in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
@@ -599,12 +615,32 @@ def _projects(store):
                 and (r["taskfile"] == str(f) or r["taskfile"].endswith("/" + f.name))]
         statuses = {}
         last = None
+        per_task = {}
         for r in rows:
             statuses[r["status"]] = statuses.get(r["status"], 0) + 1
+            if r.get("id") in ids:
+                per_task[r["id"]] = r.get("status") or "pending"
             for k in ("created_at", "finished_at"):
                 v = r.get(k)
                 if v and (last is None or v > last):
                     last = v
+        nodes = []
+        for t in tdefs:
+            tid = t.get("id")
+            if not tid:
+                continue
+            ev = ev_stats.get(tid, {})
+            nodes.append({"id": tid, "title": t.get("title") or tid,
+                          "model": t.get("model"), "reviewer": t.get("reviewer"),
+                          "status": per_task.get(tid, "pending"),
+                          "live": tid in live_tasks,
+                          "tokens": ev.get("tokens", 0),
+                          "seconds": round(ev.get("seconds", 0.0), 1)})
+        edges = [{"src": d, "dst": t["id"]} for t in tdefs if t.get("id")
+                 for d in (t.get("deps") or t.get("depends") or []) if d in ids]
+        tok_total = sum(n["tokens"] for n in nodes)
+        sec_total = round(sum(n["seconds"] for n in nodes), 1)
+        merged_n = sum(1 for n in nodes if n["status"] == "merged")
         try:
             mtime_iso = datetime.utcfromtimestamp(f.stat().st_mtime).isoformat() + "+00:00"
         except OSError:
@@ -614,6 +650,9 @@ def _projects(store):
                     "models": sorted({t.get("model") for t in tdefs if t.get("model")}),
                     "reviewers": sorted({t.get("reviewer") for t in tdefs if t.get("reviewer")}),
                     "statuses": statuses,
+                    "dag": {"nodes": nodes, "edges": edges},
+                    "progress": {"done": merged_n, "total": len(ids)},
+                    "tokens": tok_total, "seconds": sec_total,
                     "active": statuses.get("running", 0) > 0 or any(i in live_tasks for i in ids),
                     "last_activity": last or mtime_iso})
     out.sort(key=lambda p: p["last_activity"] or "", reverse=True)

@@ -58,6 +58,18 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .drawer header { position: static; }
 .drawer pre { flex: 1; overflow: auto; margin: 0; padding: 10px 12px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
 .subrow td { background: #0d1117; font-size: 11px; }
+.repohead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 14px 0 8px; }
+.repohead h3 { margin: 0; font-size: 13px; color: var(--purple); }
+.repohead .hint { font-size: 11px; }
+.repogrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+.pbar { display: flex; height: 6px; border-radius: 3px; background: #21262d; margin: 7px 0 3px; overflow: hidden; }
+.pbar > i { display: block; height: 100%; }
+.pbar > i.done { background: var(--ok); }
+.pbar > i.running { background: var(--accent); animation: pulse 1.4s infinite; }
+.pbar > i.failed { background: var(--err); }
+.stat { color: var(--dim); font-size: 11px; margin-right: 10px; }
+.stat b { color: var(--text); font-weight: normal; }
+.stat.tok { color: var(--warn); }
 .err { color: var(--err); font-size: 12px; margin-top: 6px; }
 .okmsg { color: var(--ok); font-size: 12px; margin-top: 6px; }
 svg text { font-family: ui-monospace, monospace; }
@@ -79,7 +91,7 @@ svg text { font-family: ui-monospace, monospace; }
         <span style="flex:1"></span>
         <button class="act primary" id="btn-new">+ New project</button>
       </h2>
-      <div class="grid projgrid" id="projects"></div>
+      <div id="projects"></div>
       <div class="empty" id="projects-empty" style="display:none">No task files in ~/tasks yet — create one with “+ New project”.</div>
     </div>
     <div class="panel">
@@ -184,6 +196,57 @@ async function jpost(u, body) { const r = await fetch(u, {method:"POST", headers
 
 function chip(status, n) { return `<span class="chip ${status}">${status} ${n}</span>`; }
 
+const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f85149", pending: "#484f58"};
+const fmtK = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n || 0);
+const esc = s => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+function miniDag(dag) {
+  const nodes = (dag && dag.nodes) || [], edges = (dag && dag.edges) || [];
+  if (!nodes.length) return "";
+  const lvl = {}; nodes.forEach(n => lvl[n.id] = 0);
+  let ch = true, guard = 0;
+  while (ch && guard++ < 50) { ch = false;
+    for (const e of edges) if (lvl[e.src] !== undefined && lvl[e.dst] < lvl[e.src] + 1) { lvl[e.dst] = lvl[e.src] + 1; ch = true; } }
+  const CW = 96, NW = 84, NH = 16, RH = 26, cols = {};
+  nodes.forEach(n => (cols[lvl[n.id]] = cols[lvl[n.id]] || []).push(n));
+  const pos = {}; Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => pos[n.id] = {x: 6 + (+l) * CW, y: 6 + i * RH}));
+  const H = Math.max(...Object.values(pos).map(p => p.y)) + NH + 6, W = 12 + Object.keys(cols).length * CW;
+  let s = "";
+  for (const e of edges) { const a = pos[e.src], b = pos[e.dst]; if (!a || !b) continue;
+    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + 9},${a.y + NH / 2} ${b.x - 9},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"/>`; }
+  for (const n of nodes) { const p = pos[n.id], c = STATUSC[n.status] || STATUSC.pending;
+    const pulse = (n.status === "running" || n.live) ? ' style="animation:boxpulse 1.4s infinite"' : "";
+    s += `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="4" fill="#0d1117" stroke="${c}"${pulse}/>` +
+         `<text x="${p.x + NW / 2}" y="${p.y + 11.5}" font-size="8.5" fill="#c9d1d9" text-anchor="middle">${esc(n.id.slice(0, 13))}</text>`; }
+  return `<svg viewBox="0 0 ${W} ${H}" style="display:block;width:100%;margin-top:4px" preserveAspectRatio="xMinYMid meet">${s}</svg>`;
+}
+
+const repoShort = r => !r ? "(no repo)" : r.split("/").filter(Boolean).slice(-2).join("/");
+function card(p, i) {
+  const chips = Object.entries(p.statuses || {}).map(([s, n]) => chip(s, n)).join("") || '<span class="hint">never run</span>';
+  const tot = (p.progress && p.progress.total) || p.n_tasks || 1;
+  const done = (p.progress && p.progress.done) || 0;
+  const running = (p.statuses && p.statuses.running) || 0;
+  const failed = ((p.statuses && (p.statuses.failed || 0)) + ((p.statuses && p.statuses.conflict) || 0));
+  const pct = n => (100 * n / tot).toFixed(1);
+  const bar = `<div class="pbar"><i class="done" style="width:${pct(done)}%"></i><i class="running" style="width:${pct(running)}%"></i><i class="failed" style="width:${pct(failed)}%"></i></div>`;
+  return `<div class="card" data-i="${i}">
+    <div><b>${esc(p.title)}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</div>
+    ${bar}
+    <div class="hint">${done}/${tot} merged${failed ? ` · <span class="bad">${failed} failed</span>` : ""}${running ? ` · ${running} running` : ""}</div>
+    ${miniDag(p.dag)}
+    <div style="margin-top:6px">${chips}</div>
+    <div style="margin-top:5px">
+      <span class="stat tok">⛁ <b>${fmtK(p.tokens)}</b> tok</span>
+      <span class="stat">⏱ <b>${tick(p.seconds)}</b> agent-time</span>
+      <span class="stat"><b>${p.n_tasks}</b> tasks</span>
+    </div>
+    <div style="margin-top:5px">${(p.models || []).map(m => `<span class="tag">${short(m)}</span>`).join("")}
+      ${(p.reviewers || []).map(m => `<span class="tag">review: ${short(m === "kimi" ? "Kimi-K3" : m === "glm" ? "GLM-5.3" : m)}</span>`).join("")}</div>
+    <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}</div>
+  </div>`;
+}
+
 async function loadProjects() {
   try {
     const d = await jget("/api/projects");
@@ -191,16 +254,24 @@ async function loadProjects() {
     $("#clock").textContent = new Date().toLocaleTimeString();
     $("#proj-meta").textContent = `(${PROJECTS.length})`;
     $("#projects-empty").style.display = PROJECTS.length ? "none" : "";
-    $("#projects").innerHTML = PROJECTS.map((p, i) => {
-      const chips = Object.entries(p.statuses||{}).map(([s,n]) => chip(s,n)).join("") || '<span class="hint">never run</span>';
-      return `<div class="card" data-i="${i}">
-        <div><b>${p.title}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</div>
-        <div class="hint" style="margin:4px 0">${p.repo || "no repo"} · ${p.n_tasks} task${p.n_tasks===1?"":"s"}</div>
-        <div>${chips}</div>
-        <div style="margin-top:5px">${p.models.map(m=>`<span class="tag">${short(m)}</span>`).join("")}
-          ${(p.reviewers||[]).map(m=>`<span class="tag">review: ${short(m)}</span>`).join("")}</div>
-        <div class="hint" style="margin-top:5px">${p.file} · ${fmtT(p.last_activity)}</div>
-      </div>`; }).join("");
+    const groups = {};
+    PROJECTS.forEach((p, i) => { const k = p.repo || ""; (groups[k] = groups[k] || []).push({p, i}); });
+    const ordered = Object.entries(groups).sort((a, b) =>
+      (b[1].some(x => x.p.active) - a[1].some(x => x.p.active)) ||
+      (b[1].reduce((s, x) => s + (x.p.tokens || 0), 0) - a[1].reduce((s, x) => s + (x.p.tokens || 0), 0)) ||
+      a[0].localeCompare(b[0]));
+    $("#projects").innerHTML = ordered.map(([repo, items]) => {
+      const live = items.filter(x => x.p.active).length;
+      const toks = items.reduce((s, x) => s + (x.p.tokens || 0), 0);
+      const tasksN = items.reduce((s, x) => s + (x.p.n_tasks || 0), 0);
+      return `<div class="repohead">
+          <h3>⌥ ${esc(repoShort(repo))}</h3>
+          <span class="hint">${esc(repo || "no repo")}</span>
+          ${live ? `<span class="live">LIVE ×${live}</span>` : ""}
+          <span class="hint">${items.length} project${items.length === 1 ? "" : "s"} · ${tasksN} tasks · ${fmtK(toks)} tok</span>
+        </div>
+        <div class="repogrid">${items.map(x => card(x.p, x.i)).join("")}</div>`;
+    }).join("");
     document.querySelectorAll("#projects .card").forEach(c => c.onclick = () => openDetail(PROJECTS[+c.dataset.i].file));
   } catch (e) {}
 }
