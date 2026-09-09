@@ -12,6 +12,10 @@
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.nav { display: flex; flex-basis: 100%; gap: 14px; align-items: center; padding: 2px 0 8px; }
+.nav a { color: var(--dim); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: .3px; white-space: nowrap; }
+.nav a:hover { color: var(--accent); }
+.nav a.on { color: var(--accent); text-decoration: underline; pointer-events: none; cursor: default; }
 header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 10; }
 header h1 { font-size: 15px; margin: 0; color: var(--accent); }
 .pill { padding: 2px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--dim); white-space: nowrap; text-decoration: none; cursor: pointer; background: none; font: inherit; }
@@ -77,6 +81,11 @@ svg text { font-family: ui-monospace, monospace; }
 </head>
 <body>
 <header>
+  <nav class="nav">
+    <a class="on" href="/">Projects</a>
+    <a href="/usage.html">Usage</a>
+    <a href="/phone.html">Phone</a>
+  </nav>
   <h1>ARC · Projects</h1>
   <span class="pill on">Projects</span>
   <a class="pill" href="/usage.html">Usage &amp; Agents</a>

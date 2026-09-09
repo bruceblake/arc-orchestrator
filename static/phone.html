@@ -20,6 +20,10 @@ body {
   border-bottom: 1px solid var(--border); max-width: 720px; margin: 0 auto;
   padding: 7px 10px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
 }
+.nav { display: flex; flex-basis: 100%; gap: 14px; align-items: center; padding: 2px 0 8px; }
+.nav a { color: var(--dim); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: .3px; white-space: nowrap; }
+.nav a:hover { color: var(--accent); }
+.nav a.on { color: var(--accent); text-decoration: underline; pointer-events: none; cursor: default; }
 .strip .s-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .strip .s-label { font-size: 9.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
 .strip b { font-weight: 700; font-size: 13px; }
@@ -78,6 +82,11 @@ main { padding: 8px; display: grid; gap: 8px; max-width: 720px; margin: 0 auto; 
 </head>
 <body>
 <header class="strip">
+  <nav class="nav">
+    <a href="/">Projects</a>
+    <a href="/usage.html">Usage</a>
+    <a class="on" href="/phone.html">Phone</a>
+  </nav>
   <div class="s-group"><span class="s-label">agents</span><b id="s-agents">0</b></div>
   <span id="s-chips"></span>
   <div class="s-group"><span class="s-label">tok/1h</span><b id="s-tok">–</b></div>
