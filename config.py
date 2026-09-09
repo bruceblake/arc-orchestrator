@@ -100,16 +100,21 @@ def family_limit(name):
     return FAMILIES[name].limit
 
 # --- multi-harness code workload -------------------------------------------
-# Kimi-K3 (kimi CLI) and GLM-5.3 (opencode) plan and review; gpt-oss-120b and
-# DeepSeek-V4-Flash (opencode) implement. ARC rejects over-limit requests per
-# model, so driver caps reserve headroom for interactive use of the account.
+# Implementation is tiered by task difficulty: gpt-oss-120b takes very basic
+# tasks, DeepSeek-V4-Flash takes medium ones, and GLM-5.3 / Kimi-K3 take the
+# hard tasks on top of their planning and reviewing duties. Every task is
+# reviewed by kimi or glm, never by the same harness that implemented it.
+# ARC rejects over-limit requests per model, so driver caps reserve headroom
+# for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
 TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "900"))
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 
-IMPLEMENTER_MODELS = {"gpt-oss-120b", "DeepSeek-V4-Flash"}
+IMPLEMENTER_MODELS = {"gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"}
+IMPLEMENT_TIERS = {"basic": ["gpt-oss-120b"], "medium": ["DeepSeek-V4-Flash"],
+                   "hard": ["GLM-5.3", "Kimi-K3"]}
 MODEL_FAMILY = {
     "gpt-oss-120b": "gpt-oss",
     "DeepSeek-V4-Flash": "deepseek",

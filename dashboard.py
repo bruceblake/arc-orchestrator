@@ -820,7 +820,8 @@ def _create_project(body):
             if isinstance(t.get(opt), str) and t[opt].strip():
                 entry[opt] = t[opt].strip()
         entry.setdefault("model", "DeepSeek-V4-Flash")
-        entry.setdefault("reviewer", "kimi")
+        if "reviewer" not in entry:
+            entry["reviewer"] = {"Kimi-K3": "glm", "GLM-5.3": "kimi"}.get(entry["model"], "kimi")
         deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
         if isinstance(deps_in, list):
             deps = [d for d in deps_in if isinstance(d, str)]

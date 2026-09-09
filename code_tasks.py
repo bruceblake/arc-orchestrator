@@ -40,6 +40,12 @@ def load_taskfile(path):
         reviewer = t.get("reviewer", "")
         if reviewer not in ("kimi", "glm"):
             raise ValueError(f"task {tid}: reviewer must be 'kimi' or 'glm', got {reviewer!r}")
+        impl_family = config.MODEL_FAMILY[model]
+        if impl_family in ("kimi", "glm") and reviewer == impl_family:
+            raise ValueError(
+                f"task {tid}: reviewer {reviewer!r} must not be the harness that "
+                f"implemented ({model}); use the other one"
+            )
         tasks[tid] = {
             "id": tid,
             "title": t.get("title", tid),
@@ -172,10 +178,12 @@ def build_code_graph(store, taskset, taskfile=""):
             if not feedback and gate and not gate.get("passed"):
                 feedback = f"verify gate failed, output:\n{gate.get('output', '')}"
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
-            res = await OpencodeDriver(t["model"], "implementer").run(
+            driver = (KimiDriver("implementer") if t["model"] == "Kimi-K3"
+                      else OpencodeDriver(t["model"], "implementer"))
+            res = await driver.run(
                 _impl_prompt(t, feedback), Path(results[f"alloc_{tid}"]["worktree"]),
                 task_id=f"{tid}-x{attempt}")
-            store.save_harness_run(tid, "opencode", t["model"], "implementer",
+            store.save_harness_run(tid, driver.harness, t["model"], "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
             return {"session_id": res.session_id}
 
@@ -268,7 +276,7 @@ def build_code_graph(store, taskset, taskfile=""):
 PLAN_SCHEMA_HINT = """\
 {"project": {"repo": "<abs path>", "title": "<short>",
  "tasks": [{"id": "<kebab-id>", "title": "...", "prompt": "<detailed spec>",
-            "model": "gpt-oss-120b" | "DeepSeek-V4-Flash",
+            "model": "gpt-oss-120b" | "DeepSeek-V4-Flash" | "GLM-5.3" | "Kimi-K3",
             "reviewer": "kimi" | "glm",
             "verify_cmd": "<shell cmd run in the worktree, empty ok>",
             "files_hint": ["path/..."], "deps": ["<id>", ...]}]}}"""
@@ -322,10 +330,17 @@ async def plan_tasks(goal, repo, out_path=None):
         "You are planning a small multi-task coding project for a fleet of AI "
         "implementers. Break this GOAL into 2-6 ordered tasks.\n\n"
         f"GOAL: {goal}\nTARGET REPO: {repo}\n\n"
-        "Rules: implementer models are ONLY gpt-oss-120b and DeepSeek-V4-Flash; "
-        "assign each a reviewer, alternating kimi/glm; tasks must be small "
-        "(<30 min for one agent), disjoint where possible, ordered via deps "
-        "when one needs another's output; give each a meaningful verify_cmd. "
+        "Rules: assign implementers by difficulty tier — gpt-oss-120b for very "
+        "basic/mechanical tasks, DeepSeek-V4-Flash for medium tasks, GLM-5.3 "
+        "or Kimi-K3 for hard tasks that need deep understanding or large "
+        "refactors; SPREAD work across all four models so independent tasks "
+        "run in parallel; every task needs a reviewer (kimi or glm), and a "
+        "task implemented by Kimi-K3 must be reviewed by glm while one "
+        "implemented by GLM-5.3 must be reviewed by kimi (never review your "
+        "own harness's work); tasks must be small (<30 min for one agent), "
+        "disjoint where possible so they can run concurrently, ordered via "
+        "deps only when one truly needs another's output; give each a "
+        "meaningful verify_cmd. "
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )

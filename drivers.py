@@ -1,9 +1,11 @@
 """Headless CLI drivers for the coding harnesses (kimi, opencode).
 
-Role map (hard rule): Kimi-K3 (kimi CLI) and GLM-5.3 (opencode) only plan and
-review; gpt-oss-120b and DeepSeek-V4-Flash (opencode) only implement. ARC
-rejects over-limit requests per model, so per-model semaphores cap concurrent
-harness instances below the account limits (config.driver_limit).
+Role map (hard rule): gpt-oss-120b handles very basic implementation,
+DeepSeek-V4-Flash medium implementation, and GLM-5.3 / Kimi-K3 (kimi CLI) the
+hard tasks plus all planning and reviewing. A task is always reviewed by the
+*other* of kimi/glm when a strong model implemented it. ARC rejects over-limit
+requests per model, so per-model semaphores cap concurrent harness instances
+below the account limits (config.driver_limit).
 """
 import asyncio
 import json
@@ -147,19 +149,38 @@ class Driver:
         # and a subprocess inherits the parent's $PWD — set it to the worktree
         # or edits land wherever the orchestrator was launched from.
         env = dict(os.environ, PWD=str(worktree))
+        TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
         proc = await asyncio.create_subprocess_exec(
             *argv, cwd=str(worktree), env=env,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
+        # Stream stdout to the transcript file as it arrives so the dashboard
+        # can tail a live agent mid-run; stderr drains concurrently so a big
+        # stderr never deadlocks the child on a full pipe.
+        err_task = asyncio.create_task(proc.stderr.read())
+        chunks = []
+        deadline = t0 + config.DRIVER_TIMEOUT
         try:
-            out, err = await asyncio.wait_for(proc.communicate(), config.DRIVER_TIMEOUT)
+            with open(tpath, "wb") as fh:
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise asyncio.TimeoutError
+                    chunk = await asyncio.wait_for(proc.stdout.read(65536), remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    fh.write(chunk)
+                    fh.flush()
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
+            err_task.cancel()
             raise DriverError(f"{argv[0]} timed out after {config.DRIVER_TIMEOUT}s")
-        TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
-        tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
-        tpath.write_bytes(out)
+        err = await err_task
+        await proc.wait()
+        out = b"".join(chunks)
         raw = out.decode(errors="replace")
         sid, text = parse_transcript(raw)
         toks, ptok, ctok = transcript_tokens(raw)
@@ -176,8 +197,8 @@ class KimiDriver(Driver):
     model = "Kimi-K3"
 
     def __init__(self, role):
-        if role not in ("planner", "reviewer"):
-            raise ValueError(f"KimiDriver role must be planner|reviewer, got {role!r}")
+        if role not in ("planner", "reviewer", "implementer"):
+            raise ValueError(f"KimiDriver role must be planner|reviewer|implementer, got {role!r}")
         self.role = role
 
     def argv(self, prompt, session_id):
@@ -191,11 +212,11 @@ class OpencodeDriver(Driver):
     harness = "opencode"
 
     def __init__(self, model, role):
-        if model in config.IMPLEMENTER_MODELS and role != "implementer":
+        if model in ("gpt-oss-120b", "DeepSeek-V4-Flash") and role != "implementer":
             raise ValueError(f"{model} may only implement, not {role!r}")
-        if model == "GLM-5.3" and role not in ("planner", "reviewer"):
-            raise ValueError(f"GLM-5.3 may only plan/review, not {role!r}")
-        if model not in config.IMPLEMENTER_MODELS | {"GLM-5.3"}:
+        if model == "GLM-5.3" and role not in ("planner", "reviewer", "implementer"):
+            raise ValueError(f"GLM-5.3 may only plan/review/implement, not {role!r}")
+        if model not in config.IMPLEMENTER_MODELS:
             raise ValueError(f"unmapped opencode model: {model!r}")
         self.model = model
         self.role = role
