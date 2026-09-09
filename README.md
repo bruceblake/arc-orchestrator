@@ -367,3 +367,13 @@ silently land wherever the orchestrator itself was launched from.
 JS-based tooling must do the same. Similarly, the kimi CLI's stream-json
 puts assistant text in `"content"` fields (opencode uses `"text"`), and
 `drivers.parse_transcript` accepts both.
+
+## Governance
+Multi-model orchestration is governed by [AGENTS.md](AGENTS.md).
+
+- [AGENTS.md](AGENTS.md) (governance + model roles)
+- [docs/orchestration-contract.md](docs/orchestration-contract.md) (Kimi-K3 orchestrator contract)
+- [docs/model-tiers.md](docs/model-tiers.md) (tier routing + cross-review matrix)
+- [docs/concurrency-limits.md](docs/concurrency-limits.md) (concurrency limits and overrides)
+- [docs/taskfile-schema.md](docs/taskfile-schema.md) (taskfile reference)
+- [docs/runbook.md](docs/runbook.md) (operator runbook)
