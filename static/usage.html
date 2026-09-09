@@ -3,340 +3,331 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ARC Usage &amp; Live Agents</title>
+<title>ARC · Usage</title>
 <style>
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
   --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
-  --err: #f85149; --run: #e3b341; --purple: #bc8cff;
+  --err: #f85149; --purple: #bc8cff;
 }
 * { box-sizing: border-box; }
-body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 10; }
-header h1 { font-size: 15px; margin: 0; color: var(--accent); }
-.pill { padding: 2px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--dim); white-space: nowrap; text-decoration: none; cursor: pointer; background: none; font: inherit; }
-.pill b { color: var(--text); }
-a.pill:hover, .pill.on { border-color: var(--accent); color: var(--accent); }
-main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
-.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
-.panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; display:flex; align-items:center; gap:8px; flex-wrap:wrap;}
-.grid { display: grid; gap: 10px; }
-.famgrid { grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+body { min-height: 100vh; }
+main { padding: 12px 14px; max-width: 1400px; margin: 0 auto; }
+
+/* sticky top toolbar */
+.toolbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg); }
+.toolbar h1 { font-size: 15px; margin: 0; color: var(--accent); white-space: nowrap; }
+.spacer { flex: 1; }
+.seg { padding: 8px 14px; min-height: 36px; border: 1px solid var(--border); background: none; color: var(--dim);
+  border-radius: 12px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.seg:hover { border-color: var(--accent); color: var(--accent); }
+.seg.on { border-color: var(--accent); color: var(--accent); background: #161b22; }
+.stat { color: var(--dim); font-size: 12px; white-space: nowrap; }
+.stat b { color: var(--text); font-weight: normal; }
+.badge { display: inline-block; padding: 2px 8px; min-height: 36px; line-height: 30px; border-radius: 12px;
+  border: 1px solid var(--warn); color: var(--warn); font-size: 11px; white-space: nowrap; }
+
+/* panels */
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+.panel h2 { font-size: 12px; margin: 0 0 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; }
+h2 .hl { color: var(--accent); }
+
+/* grand-total banner */
+.totrow { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.big { font-size: 28px; color: var(--accent); }
+.big small { font-size: 12px; color: var(--dim); }
+.tot-kv { color: var(--dim); font-size: 12px; }
+.tot-kv b { color: var(--text); font-weight: normal; }
+.tot-kv .ok { color: var(--ok); } .tot-kv .err { color: var(--err); }
+.splitbar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #21262d; margin: 10px 0 2px; }
+.splitbar i { display: block; height: 100%; }
+.splitbar .p { background: var(--accent); } .splitbar .c { background: var(--purple); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; margin-top: 4px; }
+.legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+
+/* model cards */
+.modelgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+.mcard { border: 1px solid var(--border); border-radius: 8px; background: #0d1117; padding: 10px 12px; }
+.mcard .mhead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+.mcard .mname { font-size: 14px; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
+.tag { display: inline-block; padding: 0 6px; border-radius: 8px; background: #21262d; color: var(--dim); font-size: 11px; white-space: nowrap; }
+.mtok { font-size: 22px; color: var(--text); }
+.mtok small { font-size: 12px; color: var(--dim); }
+.mrow { color: var(--dim); font-size: 12px; margin: 2px 0; }
+.mrow b { color: var(--text); font-weight: normal; }
+.mrow .ok { color: var(--ok); } .mrow .err { color: var(--err); }
+.sharebar { display: block; height: 6px; border-radius: 3px; background: #21262d; overflow: hidden; margin: 8px 0 3px; }
+.sharebar i { display: block; height: 100%; }
+.mcap { color: var(--dim); font-size: 11px; }
+
+/* family table */
 table { border-collapse: collapse; width: 100%; }
-th, td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
-th { color: var(--dim); font-weight: normal; font-size: 11px; white-space: nowrap; }
-tr.clickable { cursor: pointer; }
-tr.clickable:hover td { background: #1c2128; }
-.good { color: var(--ok); } .bad { color: var(--err); } .warn { color: var(--warn); }
-.tag { display: inline-block; padding: 0 6px; border-radius: 8px; background: #21262d; color: var(--dim); margin: 1px 2px; font-size: 11px; white-space: nowrap; }
-.hint { color: var(--dim); font-size: 11px; }
+th, td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; white-space: nowrap; }
+th { color: var(--dim); font-weight: normal; font-size: 11px; }
+td { font-size: 12px; }
+.r { text-align: right; }
+
 .empty { color: var(--dim); font-size: 12px; padding: 10px 0; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; }
-.bar { height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; margin: 6px 0 3px; }
-.bar i { display: block; height: 100%; }
-.famcard b { font-size: 20px; }
-canvas.chart { width: 100%; height: 170px; display: block; }
-.chartwrap { position: relative; }
-.tip { position: absolute; pointer-events: none; background: #010409; border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px; font-size: 11px; display: none; z-index: 20; white-space: pre; }
-.srcrow td { background: #0d1117; font-size: 11px; color: var(--dim); }
-.agentcard { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; background: #0d1117; cursor: pointer; }
-.agentcard:hover { border-color: var(--accent); }
-.agentgrid { grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); }
-.drawer { position: fixed; top: 0; right: 0; width: min(640px, 95vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform .15s ease; display: flex; flex-direction: column; }
-.drawer.open { transform: none; }
-.drawer header { position: static; }
-.drawer pre { flex: 1; overflow: auto; margin: 0; padding: 10px 12px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
-.badge { padding: 1px 7px; border-radius: 9px; font-size: 10px; border: 1px solid var(--border); }
-.badge.impl { color: var(--ok); border-color: var(--ok); }
-.badge.rev { color: var(--purple); border-color: var(--purple); }
-.badge.plan { color: var(--warn); border-color: var(--warn); }
-button.act { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; }
-button.act:hover { border-color: var(--accent); color: var(--accent); }
-.kv { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; }
-.kv b { color: var(--text); }
+
+@media (max-width: 640px) {
+  .toolbar { padding: 8px 10px; gap: 6px; }
+  .seg { padding: 8px 10px; font-size: 12px; }
+  main { padding: 10px; }
+  .modelgrid { grid-template-columns: 1fr; }
+  .tot-kv { display: block; }
+}
 </style>
 </head>
 <body>
-<header>
-  <h1>ARC · Usage &amp; Live Agents</h1>
-  <a class="pill" href="/">Projects</a>
-  <span class="pill on">Usage &amp; Agents</span>
-  <a class="pill" href="/phone.html">Phone</a>
-  <span style="flex:1"></span>
-  <span class="pill">updated <b id="clock">-</b></span>
-  <label class="pill"><input type="checkbox" id="showdry"> dry-run rows</label>
+<header class="toolbar">
+  <h1>ARC · Usage</h1>
+  <div id="ranges" style="display:flex;gap:4px">
+    <button class="seg" data-r="1h">1h</button>
+    <button class="seg" data-r="24h">24h</button>
+    <button class="seg" data-r="7d">7d</button>
+    <button class="seg" data-r="all">all</button>
+  </div>
+  <span class="spacer"></span>
+  <span class="stat" id="alltime-stat" title="all-history tokens (incl. prompt/completion)">all-time <b id="alltime">—</b></span>
+  <span class="stat">refresh <b id="count">5s</b></span>
+  <span class="stat">updated <b id="clock">—</b></span>
+  <span class="badge" id="stale" style="display:none">stale (retrying)</span>
 </header>
 <main>
-  <div class="panel">
-    <h2>What is being counted</h2>
-    <div class="kv">
-      <span><b>arc-pool</b> — raw API requests made directly by the orchestrator (carries tokens)</span>
-      <span><b>driver:&lt;harness&gt;</b> — whole agent task runs inside external CLIs (opencode/kimi); tokens come from run transcripts</span>
-      <span><b>kimi-code</b> — every API call of every kimi-code session on this box, including the interactive chat driving the orchestrator</span>
+  <section class="panel">
+    <h2>total · <span class="hl" id="range-label">1h</span></h2>
+    <div class="totrow">
+      <span class="big"><b id="total-tok">—</b> <small>tokens</small></span>
+      <span class="tot-kv">requests <b id="total-req">—</b></span>
+      <span class="tot-kv">ok <b class="ok" id="total-ok">—</b></span>
+      <span class="tot-kv">errors <b class="err" id="total-err">—</b></span>
     </div>
-  </div>
+    <div class="splitbar"><i class="p" id="split-prompt" style="width:0%"></i><i class="c" id="split-comp" style="width:0%"></i></div>
+    <div class="legend">
+      <span><span class="dot" style="background:var(--accent)"></span>prompt <b class="hl" id="total-pr">—</b></span>
+      <span><span class="dot" style="background:var(--purple)"></span>completion <b class="hl" id="total-co">—</b></span>
+    </div>
+  </section>
 
-  <div class="panel">
-    <h2>Live agents <span class="hint" id="agents-meta"></span></h2>
-    <div class="grid agentgrid" id="agents"></div>
-    <div class="empty" id="agents-empty" style="display:none">No agents running right now.</div>
-  </div>
+  <section class="panel">
+    <h2>Models</h2>
+    <div class="modelgrid" id="modelgrid"></div>
+    <div class="empty" id="models-empty" style="display:none">No model activity in this range.</div>
+  </section>
 
-  <div class="panel">
-    <h2>History
-      <span style="flex:1"></span>
-      <button class="pill rng on" data-r="1h">1H</button>
-      <button class="pill rng" data-r="24h">24H</button>
-      <button class="pill rng" data-r="7d">7D</button>
-      <button class="pill rng" data-r="all">ALL</button>
-    </h2>
-    <div class="chartwrap"><canvas class="chart" id="ch-req"></canvas><div class="tip" id="tip-req"></div></div>
-    <div class="hint" style="margin:4px 0 10px">requests / <span id="req-unit">minute</span> by family</div>
-    <div class="chartwrap"><canvas class="chart" id="ch-tok"></canvas><div class="tip" id="tip-tok"></div></div>
-    <div class="hint" style="margin:4px 0 0">tokens / <span id="tok-unit">minute</span> by family</div>
-    <div id="legend" style="margin-top:8px"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Last 30 days</h2>
-    <div class="chartwrap"><canvas class="chart" id="ch-day"></canvas><div class="tip" id="tip-day"></div></div>
-    <div class="hint" id="day-hint">stacked requests/day by family — click chart to toggle tokens</div>
-  </div>
-
-  <div class="panel">
-    <h2>Families &amp; concurrency limits</h2>
-    <div class="grid famgrid" id="families"></div>
-  </div>
-
-  <div class="panel">
-    <h2>Models <span class="hint">— grouped by real model; click a row for the counting-layer breakdown</span></h2>
-    <table id="models">
-      <thead><tr>
-        <th>model</th><th>api calls</th><th>task runs</th><th>tokens</th>
-        <th>prompt / completion</th><th>avg latency</th><th>last active</th>
-      </tr></thead>
-      <tbody></tbody>
+  <section class="panel">
+    <h2>Families</h2>
+    <table>
+      <thead><tr><th>family</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
+      <tbody id="fam-body"></tbody>
     </table>
-    <div class="empty" id="models-empty" style="display:none">No model activity recorded yet.</div>
-  </div>
+  </section>
 </main>
-
-<div class="drawer" id="drawer">
-  <header>
-    <h1 id="drawer-title">agent</h1>
-    <span class="pill hint" id="drawer-sub"></span>
-    <span style="flex:1"></span>
-    <button class="act" id="drawer-close">close ✕</button>
-  </header>
-  <pre id="drawer-body">loading…</pre>
-</div>
 
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
+const RANGES = ["1h", "24h", "7d", "all"];
+const AUTO = 5000;
 const COLORS = {"gpt-oss":"#3fb950","glm":"#58a6ff","kimi":"#bc8cff","deepseek":"#d29922","kimi-code":"#8b949e","harness":"#e3b341","unknown":"#484f58"};
-const SRCNOTE = {
-  "arc-pool": "raw API requests through the orchestrator pool (each entry = one model call)",
-  "kimi-code": "per-API-call usage of kimi-code sessions on this machine (includes interactive chat)",
-};
-const srcnote = s => s.startsWith("driver:") ? `whole agent task runs executed by ${s.split(":")[1]} sessions (each entry = one complete task run)` : (SRCNOTE[s] || s);
-let RANGE = "1h", SHOW_DRY = false, DAYMODE = "requests", USAGE = null, agentsTimer = null, drawerFile = null;
+const SRC = {"arc-pool":"pool","kimi-code":"kimi-code"};
+let RANGE = "1h", USAGE = null, FLEET = {caps:{}, totals:null}, nextAt = Date.now() + AUTO;
 
-const fmt = n => n == null ? "—" : n >= 1e6 ? (n/1e6).toFixed(2)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"k" : String(n);
+const fmt = n => n == null || isNaN(n) ? "—" : n >= 1e6 ? (n/1e6).toFixed(2)+"M" : n >= 1e3 ? (n/1e3).toFixed(1)+"k" : String(n);
+const ms = n => n == null ? "—" : n >= 1000 ? (n/1000).toFixed(1)+"s" : Math.round(n)+"ms";
 const ago = ts => { if (!ts) return "—"; const s = Math.max(0, (Date.now()/1000) - ts);
   if (s < 60) return Math.round(s)+"s ago"; if (s < 3600) return Math.round(s/60)+"m ago";
   if (s < 86400) return (s/3600).toFixed(1)+"h ago"; return (s/86400).toFixed(1)+"d ago"; };
-const tick = s => { s = Math.max(0, Math.round(s||0)); if (s < 60) return s+"s";
-  if (s < 3600) return Math.floor(s/60)+"m"+(s%60?s%60+"s":""); return Math.floor(s/3600)+"h"+Math.floor((s%3600)/60)+"m"; };
+const esc = s => String(s == null ? "" : s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+const srcLabel = s => SRC[s] || (s && s.startsWith("driver:") ? "driver:" + s.split(":")[1] : (s || ""));
 
-async function jget(url, opts) { const r = await fetch(url, {cache:"no-store", ...opts}); return r.json(); }
-
-function chart(cv, tip, series, key, unitS) {
-  const dpr = window.devicePixelRatio || 1;
-  const W = cv.clientWidth, H = cv.clientHeight;
-  cv.width = W*dpr; cv.height = H*dpr;
-  const ctx = cv.getContext("2d"); ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
-  const fams = Object.keys(series);
-  if (!fams.length) return;
-  const n = Math.max(...fams.map(f => series[f].length));
-  const t0 = Math.min(...fams.map(f => series[f][0].t)), bkt = unitS;
-  let max = 0;
-  for (const f of fams) for (const p of series[f]) max = Math.max(max, p[key]||0);
-  max = max || 1;
-  const pad = 4, iw = W - pad*2, ih = H - 20;
-  ctx.strokeStyle = "#21262d"; ctx.lineWidth = 1;
-  for (let g = 0; g <= 4; g++) { const y = pad + ih*g/4; ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
-  ctx.fillStyle = "#8b949e"; ctx.font = "10px ui-monospace, monospace"; ctx.textAlign = "left";
-  ctx.fillText(fmt(max), 4, 10);
-  fams.forEach((f, fi) => {
-    const pts = series[f]; if (!pts.length) return;
-    ctx.strokeStyle = COLORS[f] || COLORS.unknown; ctx.lineWidth = 1.5; ctx.beginPath();
-    pts.forEach((p, i) => {
-      const x = pad + iw*(i/(Math.max(n-1,1))), y = pad + ih - ih*((p[key]||0)/max);
-      i ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
-    });
-    ctx.stroke();
-  });
-  if (n > 2) {
-    ctx.textAlign = "center";
-    for (const f of [fams[0]]) {
-      const pts = series[f];
-      const times = [0, Math.floor(n/2), n-1];
-      for (const i of times) {
-        if (!pts[i]) continue;
-        const d = new Date(pts[i].t*1000);
-        const lab = bkt >= 86400 ? d.toLocaleDateString(undefined,{month:"short",day:"numeric"})
-          : d.toLocaleTimeString(undefined,{hour:"2-digit",minute:"2-digit"});
-        const x = pad + iw*(i/(Math.max(n-1,1)));
-        ctx.fillText(lab, Math.min(Math.max(x, 30), W-30), H-6);
-      }
-    }
-  }
-  cv.onmousemove = ev => {
-    const r = cv.getBoundingClientRect();
-    const x = ev.clientX - r.left;
-    let i = Math.round((x - pad)/iw*(n-1)); i = Math.max(0, Math.min(n-1, i));
-    const f0 = series[fams[0]]; if (!f0[i]) return;
-    const d = new Date(f0[i].t*1000);
-    let txt = d.toLocaleString()+"\n";
-    for (const f of fams) { const p = series[f] && series[f][i]; if (p) txt += `${f}: ${fmt(p[key]||0)}\n`; }
-    tip.style.display = "block"; tip.textContent = txt;
-    tip.style.left = Math.min(x+12, W-140)+"px"; tip.style.top = "8px";
-  };
-  cv.onmouseleave = () => tip.style.display = "none";
+async function jget(url) {
+  const r = await fetch(url, {cache:"no-store"});
+  if (!r.ok) return null;
+  return r.json();
 }
 
-function dayChart(usage) {
-  const cv = $("#ch-day"), tip = $("#tip-day");
-  const days = usage.daily || [];
-  const series = {};
-  const fams = new Set(); days.forEach(d => Object.keys(d.families||{}).forEach(f=>fams.add(f)));
-  fams.forEach(f => {
-    series[f] = days.map(d => ({ t: new Date(d.date+"T12:00:00").getTime()/1000,
-      requests: (d.families[f]||{}).requests||0, tokens: (d.families[f]||{}).tokens||0 }));
-  });
-  chart(cv, tip, series, DAYMODE, 86400);
-}
-$("#ch-day").addEventListener("click", () => {
-  DAYMODE = DAYMODE === "requests" ? "tokens" : "requests";
-  $("#day-hint").textContent = `stacked ${DAYMODE}/day by family — click chart to toggle ${DAYMODE === "requests" ? "tokens" : "requests"}`;
-  if (USAGE) dayChart(USAGE);
-});
-
-function renderUsage(u) {
-  USAGE = u;
-  $("#clock").textContent = new Date().toLocaleTimeString();
-  const unit = {60:"minute",300:"5 min",3600:"hour",86400:"day"}[u.bucket_secs] || u.bucket_secs+"s";
-  $("#req-unit").textContent = unit; $("#tok-unit").textContent = unit;
-  chart($("#ch-req"), $("#tip-req"), u.series||{}, "requests", u.bucket_secs);
-  chart($("#ch-tok"), $("#tip-tok"), u.series||{}, "tokens", u.bucket_secs);
-  dayChart(u);
-  $("#legend").innerHTML = Object.keys(u.series||{}).map(f =>
-    `<span class="tag"><span class="dot" style="background:${COLORS[f]||COLORS.unknown}"></span>${f}</span>`).join("");
-  $("#families").innerHTML = (u.families||[]).map(f => {
-    const c = COLORS[f.family]||COLORS.unknown;
-    const lim = f.limit || 0, pct = lim ? Math.min(100, Math.round(100*f.inflight/lim)) : 0;
-    return `<div class="panel famcard" style="margin:0">
-      <span class="dot" style="background:${c}"></span><b>${f.family}</b>
-      <div class="hint">${f.requests} requests · ${fmt(f.tokens)} tok · ${f.errors+f.failed_attempts} failed</div>
-      <div class="bar"><i style="width:${pct}%;background:${c}"></i></div>
-      <div class="hint">in-flight ${f.inflight} / limit ${lim ?? "—"}</div>
-    </div>`; }).join("") || '<div class="empty">none</div>';
-
-  // group model rows by real model
-  const groups = {};
-  for (const r of (u.models||[])) {
-    if (!SHOW_DRY && r.model === "dry-run") continue;
-    const g = groups[r.pretty] = groups[r.pretty] || {pretty:r.pretty, rows:[], fam:r.family,
-      api:0, runs:0, tok:0, prompt:0, comp:0, last:null, latMs:0, latN:0};
-    g.rows.push(r);
-    if (r.source === "kimi-code") g.api += r.requests;
-    else if (r.source === "arc-pool") g.api += r.requests;
-    if (r.source && r.source.startsWith("driver:")) g.runs += r.requests;
-    g.tok += r.tokens||0; g.prompt += r.prompt_tokens||0; g.comp += r.completion_tokens||0;
-    if (r.avg_latency_ms) { g.latMs += r.avg_latency_ms; g.latN++; }
-    if (r.last_ts && (!g.last || r.last_ts > g.last)) g.last = r.last_ts;
-  }
-  const tb = $("#models tbody");
-  tb.innerHTML = "";
-  const gs = Object.values(groups).sort((a,b)=>(b.tok||b.runs||b.api)-(a.tok||a.runs||a.api));
-  $("#models-empty").style.display = gs.length ? "none" : "";
-  for (const g of gs) {
-    const tr = document.createElement("tr"); tr.className = "clickable";
-    tr.innerHTML = `<td><span class="dot" style="background:${COLORS[g.fam]||COLORS.unknown}"></span><b>${g.pretty}</b> <span class="hint">${g.fam}</span></td>
-      <td>${fmt(g.api)}</td><td>${g.runs||"—"}</td><td>${fmt(g.tok)}</td>
-      <td class="hint">${fmt(g.prompt)} / ${fmt(g.comp)}</td>
-      <td>${g.latN ? Math.round(g.latMs/g.latN/1000)+"s" : "—"}</td><td>${ago(g.last)}</td>`;
-    const sr = document.createElement("tr"); sr.className = "srcrow"; sr.style.display = "none";
-    sr.innerHTML = `<td colspan="7">${g.rows.map(r =>
-      `<div><span class="tag">${r.source}</span> ${r.requests} calls · ${fmt(r.tokens)} tok · ${r.failed_attempts} failed — <em>${srcnote(r.source)}</em></div>`).join("")}</td>`;
-    tr.onclick = () => sr.style.display = sr.style.display === "none" ? "" : "none";
-    tb.appendChild(tr); tb.appendChild(sr);
-  }
+function capLookup(f) {
+  const caps = {};
+  const arr = f && (Array.isArray(f.models) ? f.models : (Array.isArray(f.by_model) ? f.by_model : []));
+  for (const m of arr) if (m && m.model) caps[m.model] = m;
+  return caps;
 }
 
-async function loadUsage() {
-  try { renderUsage(await jget("/api/usage?range="+RANGE)); } catch (e) {}
-}
-document.querySelectorAll(".rng").forEach(b => b.onclick = () => {
-  document.querySelectorAll(".rng").forEach(x => x.classList.remove("on"));
-  b.classList.add("on"); RANGE = b.dataset.r; loadUsage();
-});
-$("#showdry").onchange = ev => { SHOW_DRY = ev.target.checked; USAGE && renderUsage(USAGE); };
-
-const roleBadge = r => !r ? "" : r.includes("implement") ? '<span class="badge impl">implementer</span>'
-  : r.includes("review") ? '<span class="badge rev">reviewer</span>'
-  : r.includes("plan") ? '<span class="badge plan">planner</span>' : `<span class="badge">${r}</span>`;
-
-async function loadAgents() {
+async function fetchFleet() {
   try {
-    const d = await jget("/api/agents");
-    $("#agents-meta").textContent = `(${d.agents.length} live ${d.agents.length? "· click a card for the transcript":""})`;
-    const el = $("#agents");
-    $("#agents-empty").style.display = d.agents.length ? "none" : "";
-    el.innerHTML = d.agents.map((a, i) => `
-      <div class="agentcard" data-i="${i}">
-        <div><span class="dot" style="background:${COLORS[a.family]||COLORS.unknown}"></span><b>${a.pretty||a.model}</b>
-          ${roleBadge(a.role||"")} <span class="tag">${a.harness||a.source}</span></div>
-        <div class="hint">${a.task? "task: "+a.task : (a.purpose||"")} ${a.transcript? "· 📄 has transcript":""}</div>
-        <div class="hint">elapsed <b class="warn">${tick(a.elapsed_s)}</b></div>
-      </div>`).join("");
-    el.querySelectorAll(".agentcard").forEach(c => c.onclick = () => openDrawer(d.agents[+c.dataset.i]));
+    const f = await jget("/api/fleet");
+    if (f && f.totals) return {caps: capLookup(f), totals: f.totals, fromUsage:false};
   } catch (e) {}
-}
-
-function openDrawer(a) {
-  $("#drawer").classList.add("open");
-  $("#drawer-title").textContent = `${a.pretty||a.model} · ${a.role||a.purpose||a.source}`;
-  $("#drawer-sub").textContent = `${a.task||""} elapsed ${tick(a.elapsed_s)}`;
-  const body = $("#drawer-body");
-  if (!a.transcript) {
-    body.textContent = "No transcript file is associated with this agent.\n\nIt is either a raw pool request or a kimi-code session (live in the CLI).\n\nreq: " + a.req_id;
-    drawerFile = null; return;
-  }
-  drawerFile = a.transcript;
-  pollTranscript();
-}
-async function pollTranscript() {
-  if (!drawerFile) return;
   try {
-    const d = await jget("/api/transcript?file="+encodeURIComponent(drawerFile)+"&tail=120");
-    if (d.error) { $("#drawer-body").textContent = d.error; return; }
-    $("#drawer-body").textContent = d.lines.map(l => { try { const o = JSON.parse(l);
-      return o.type === "step_finish" ? "— step ("+((o.part&&o.part.tokens&&o.part.tokens.total)||"?")+" tok)"
-        : o.type === "text" ? (o.part&&o.part.text||"").slice(0,400)
-        : o.type === "tool_use" ? "🔧 "+((o.part&&o.part.tool)||"tool")
-        : o.type; } catch { return l.slice(0,300); } }).join("\n");
+    const u = await jget("/api/usage?range=all");
+    return {caps: {}, totals: u ? u.totals : null, fromUsage:true};
   } catch (e) {}
+  return {caps: {}, totals: null, fromUsage:false};
 }
-setInterval(() => { if (drawerFile && $("#drawer").classList.contains("open")) pollTranscript(); }, 3000);
-$("#drawer-close").onclick = () => { $("#drawer").classList.remove("open"); drawerFile = null; };
 
-loadUsage(); loadAgents();
-setInterval(loadUsage, 10000);
-setInterval(loadAgents, 3000);
-window.addEventListener("resize", () => USAGE && renderUsage(USAGE));
+function fillToolbar(fleet) {
+  $("#alltime").textContent = fleet.totals && fleet.totals.tokens != null ? fmt(fleet.totals.tokens) : "—";
+  $("#alltime-stat").title = "all-history tokens" + (fleet.totals && fleet.totals.prompt_tokens != null
+    ? " · " + fmt(fleet.totals.prompt_tokens) + " prompt / " + fmt(fleet.totals.completion_tokens) + " completion" : "");
+}
+
+function fillTotal(u) {
+  const t = u.totals || {};
+  $("#total-tok").textContent = fmt(t.tokens);
+  $("#total-req").textContent = t.requests;
+  $("#total-ok").textContent = t.ok;
+  $("#total-err").textContent = t.errors;
+  const p = t.prompt_tokens || 0, c = t.completion_tokens || 0, tot = p + c;
+  const pp = tot ? (p/tot)*100 : 0;
+  $("#split-prompt").style.width = pp + "%";
+  $("#split-comp").style.width = (tot ? 100 - pp : 0) + "%";
+  $("#total-pr").textContent = fmt(p);
+  $("#total-co").textContent = fmt(c);
+  $("#range-label").textContent = (u.range || RANGE).toUpperCase();
+}
+
+function mkey(m) { return (m.model||"") + "|" + (m.source||""); }
+
+function fillCard(card, m, caps, totalTok) {
+  const c = COLORS[m.family] || COLORS.unknown;
+  card.querySelector(".dot").style.background = c;
+  card.querySelector(".mname").textContent = m.pretty || m.model;
+  card.querySelector(".v-src").textContent = srcLabel(m.source);
+  card.querySelector(".fam-tag").textContent = m.family || "?";
+  card.querySelector(".v-tok").textContent = fmt(m.tokens);
+  card.querySelector(".v-req").textContent = fmt(m.requests);
+  card.querySelector(".v-ok").textContent = fmt(m.ok);
+  card.querySelector(".v-err").textContent = fmt(m.errors);
+  card.querySelector(".v-lat").textContent = ms(m.avg_latency_ms);
+  card.querySelector(".v-last").textContent = ago(m.last_ts);
+  const share = totalTok && m.tokens ? (m.tokens/totalTok)*100 : 0;
+  card.querySelector(".v-share").style.width = Math.min(100, share) + "%";
+  card.querySelector(".v-sharepct").textContent = totalTok && m.tokens ? share.toFixed(1) + "%" : "0%";
+  const cap = caps && caps[m.model];
+  const capEl = card.querySelector(".v-caps");
+  if (cap && (cap.account_cap != null || cap.driver_cap != null)) {
+    const a = cap.account_cap != null ? "a " + cap.account_cap : "";
+    const d = cap.driver_cap != null ? "d " + cap.driver_cap : "";
+    capEl.textContent = " · cap " + [a, d].filter(Boolean).join(" / ");
+  } else {
+    capEl.textContent = "";
+  }
+}
+
+function buildCard(m, caps, totalTok) {
+  const card = document.createElement("div");
+  card.className = "mcard";
+  card.dataset.mk = mkey(m);
+  card.innerHTML =
+    '<div class="mhead"><span class="dot"></span><b class="mname"></b>'
+    + '<span class="tag fam-tag"></span><span class="tag v-src"></span></div>'
+    + '<div class="mtok"><b class="v-tok">—</b> <small>tok</small></div>'
+    + '<div class="mrow">req <b class="v-req">—</b> · ok <b class="ok v-ok">—</b> · err <b class="err v-err">—</b></div>'
+    + '<div class="mrow">lat <b class="v-lat">—</b> · last <b class="v-last">—</b></div>'
+    + '<div class="sharebar"><i class="v-share" style="width:0%"></i></div>'
+    + '<div class="mcap">share <b class="v-sharepct">0%</b><span class="v-caps"></span></div>';
+  fillCard(card, m, caps, totalTok);
+  return card;
+}
+
+function updateModels(models, caps, totalTok) {
+  const grid = $("#modelgrid");
+  const seen = new Set();
+  for (const m of (models || [])) {
+    const k = mkey(m);
+    seen.add(k);
+    let card = grid.querySelector('[data-mk="' + k.replace(/"/g, '\\"') + '"]');
+    if (!card) { card = buildCard(m, caps, totalTok); grid.appendChild(card); }
+    else fillCard(card, m, caps, totalTok);
+  }
+  grid.querySelectorAll(".mcard").forEach(c => { c.style.display = seen.has(c.dataset.mk) ? "" : "none"; });
+  $("#models-empty").style.display = (models || []).length ? "none" : "";
+}
+
+function familyRow(f) {
+  const tr = document.createElement("tr");
+  tr.dataset.fam = f.family;
+  tr.innerHTML = '<td><span class="dot"></span><span class="f-name"></span></td>'
+    + '<td class="r f-cap"></td><td class="r f-req"></td><td class="r f-tok"></td><td class="r f-in"></td>';
+  return tr;
+}
+
+function updateFamilies(families) {
+  const tb = $("#fam-body");
+  const seen = new Set();
+  for (const f of (families || [])) {
+    seen.add(f.family);
+    let tr = tb.querySelector('[data-fam="' + f.family.replace(/"/g, '\\"') + '"]');
+    if (!tr) { tr = familyRow(f); tb.appendChild(tr); }
+    const c = COLORS[f.family] || COLORS.unknown;
+    tr.querySelector(".dot").style.background = c;
+    tr.querySelector(".f-name").textContent = f.family;
+    tr.querySelector(".f-cap").textContent = f.limit != null ? f.limit : "—";
+    tr.querySelector(".f-req").textContent = fmt(f.requests);
+    tr.querySelector(".f-tok").textContent = fmt(f.tokens);
+    tr.querySelector(".f-in").textContent = f.inflight;
+  }
+  tb.querySelectorAll("tr[data-fam]").forEach(tr => {
+    if (!seen.has(tr.dataset.fam)) tr.style.display = "none";
+    else tr.style.display = "";
+  });
+  let empty = tb.querySelector("tr.f-empty");
+  if (!(families || []).length) {
+    if (!empty) { empty = document.createElement("tr"); empty.className = "f-empty";
+      empty.innerHTML = '<td colspan="5" class="empty">none</td>'; tb.appendChild(empty); }
+  } else if (empty) { empty.remove(); }
+}
+
+function updateUI(u, fleet) {
+  USAGE = u; FLEET = fleet;
+  fillTotal(u);
+  fillToolbar(fleet);
+  updateModels(u.models, fleet.caps, u.totals.tokens);
+  updateFamilies(u.families);
+}
+
+async function load() {
+  try {
+    const u = await jget("/api/usage?range=" + RANGE);
+    if (!u) throw new Error("usage unavailable");
+    const fleet = await fetchFleet();
+    updateUI(u, fleet);
+    $("#stale").style.display = "none";
+    $("#clock").textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    $("#stale").style.display = "";
+  }
+}
+
+function applyRange(r) {
+  if (!RANGES.includes(r)) r = "1h";
+  RANGE = r;
+  location.hash = r;
+  document.querySelectorAll("#ranges .seg").forEach(b => b.classList.toggle("on", b.dataset.r === r));
+  load();
+}
+
+document.querySelectorAll("#ranges .seg").forEach(b => b.onclick = () => applyRange(b.dataset.r));
+window.addEventListener("hashchange", () => applyRange(location.hash.replace("#", "")));
+
+function refresh() {
+  load().finally(() => { nextAt = Date.now() + AUTO; });
+}
+setInterval(() => {
+  const left = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
+  $("#count").textContent = left + "s";
+  if (Date.now() >= nextAt) refresh();
+}, 1000);
+window.addEventListener("resize", () => { if (USAGE) updateUI(USAGE, FLEET); });
+
+const initRange = location.hash.replace("#", "");
+RANGE = RANGES.includes(initRange) ? initRange : "1h";
+document.querySelectorAll("#ranges .seg").forEach(b => b.classList.toggle("on", b.dataset.r === RANGE));
+load();
 </script>
 </body>
 </html>
