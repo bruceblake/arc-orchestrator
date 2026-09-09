@@ -3,6 +3,7 @@ import argparse
 import asyncio
 import logging
 import os
+import signal
 import sys
 import time
 from pathlib import Path
@@ -232,9 +233,33 @@ def cmd_code(args):
         events.set_context(workload="code-tasks")
         log = logging.getLogger("code-cmd")
         graph = build_code_graph(store, taskset, taskfile=tf)
+        # SIGTERM (the dashboard's Stop button, systemd, `kill <pid>`) and
+        # SIGINT must unwind through the cleanup below rather than killing the
+        # process outright: the default action skipped the finally block, so a
+        # stopped run left its rows 'running' and its leases held, and the
+        # cancellation never reached the drivers to kill their harness children.
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except (NotImplementedError, ValueError):
+                pass
+        graph_task = asyncio.create_task(graph.run({}))
+        stop_task = asyncio.create_task(stop.wait())
+        final = {}
         try:
-            final = await graph.run({})
+            done, _pending = await asyncio.wait(
+                {graph_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
+            if graph_task in done:
+                final = graph_task.result()
+            else:
+                log.warning("stop requested — cancelling in-flight tasks")
+                events.emit("run.stopped", taskfile=tf)
+                graph_task.cancel()
+                await asyncio.gather(graph_task, return_exceptions=True)
         finally:
+            stop_task.cancel()
             # Whatever happened — clean finish, node crash, Ctrl-C, SIGTERM —
             # this process is about to stop owning these rows and leases. Left
             # behind, 'running' rows make the dashboard lie and the next resume
