@@ -13,6 +13,10 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 body { min-height: 100vh; }
+.nav { display: flex; flex-basis: 100%; gap: 14px; align-items: center; padding: 2px 0 8px; }
+.nav a { color: var(--dim); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: .3px; white-space: nowrap; }
+.nav a:hover { color: var(--accent); }
+.nav a.on { color: var(--accent); text-decoration: underline; pointer-events: none; cursor: default; }
 main { padding: 12px 14px; max-width: 1400px; margin: 0 auto; }
 
 /* sticky top toolbar */
@@ -98,6 +102,11 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 </head>
 <body>
 <header class="toolbar">
+  <nav class="nav">
+    <a href="/">Projects</a>
+    <a class="on" href="/usage.html">Usage</a>
+    <a href="/phone.html">Phone</a>
+  </nav>
   <h1>ARC · Usage</h1>
   <div id="ranges" style="display:flex;gap:4px">
     <button class="seg" data-r="1h">1h</button>
