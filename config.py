@@ -108,21 +108,37 @@ def family_limit(name):
 # for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
 TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
-DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "900"))
+# Outer backstop only. DRIVER_IDLE_TIMEOUT below is the instrument that
+# actually detects a hung harness, and it is the precise one: it measures
+# silence. This wall clock exists for the pathological case where a harness
+# dribbles output forever without converging.
+#
+# It was 900s, which made it the BINDING limit on real work rather than a
+# backstop: a Kimi-K3 implement was killed at exactly 900s having written
+# 149KB with only 80s of idle — it was demonstrably still working, and each
+# such kill costs a full retry (MAX_RETRIES=4, so an hour per task).
+DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
 # A harness that stops producing stdout for this long has a hung API request
 # (observed: ARC holds rejected/queued requests open indefinitely); kill and
 # retry instead of waiting out the full DRIVER_TIMEOUT.
 DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "300"))
-# Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
-# orchestrator processes — a terminal queue and dashboard-launched runs cannot
-# stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
-# first). Must exceed DRIVER_TIMEOUT + retry backoffs.
-DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "1800"))
 # A harness rejected at the ARC account cap never got a slot, so retrying it
 # on the crash schedule (2s, 4s, 8s) walks straight back into the same cap.
 # Capacity rejections back off on this longer, jittered ladder instead.
 DRIVER_CAPACITY_BACKOFF = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF", "45"))
 DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP", "300"))
+# Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
+# orchestrator processes — a terminal queue and dashboard-launched runs cannot
+# stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
+# first). Must exceed DRIVER_TIMEOUT + retry backoffs.
+# DERIVED, not a free constant: a lease reaped while its driver is still
+# running lets another driver take the slot, and the model goes over its ARC
+# cap — the exact failure the leases exist to prevent. It must therefore
+# outlast the longest an attempt can legitimately hold one, which is
+# DRIVER_TIMEOUT plus the retry backoff before the next attempt. Pinning this
+# to a literal meant raising DRIVER_TIMEOUT silently broke the invariant.
+DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
+    DRIVER_TIMEOUT + DRIVER_CAPACITY_BACKOFF_CAP + 300)
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 
