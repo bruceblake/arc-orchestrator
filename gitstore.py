@@ -114,8 +114,16 @@ async def publish(wt, message, trailers=None):
 
 
 async def _dirty_paths(repo):
-    """Paths with uncommitted (tracked or untracked) changes in the repo."""
-    _, st, _ = await _git(["status", "--porcelain"], cwd=repo)
+    """Paths with uncommitted (tracked or untracked) changes in the repo.
+
+    `--untracked-files=all` matters: plain --porcelain collapses a wholly
+    untracked directory into one entry ("?? logs/"), so a branch adding
+    "logs/harness/x.jsonl" found nothing to stash and the merge then died on
+    "untracked working tree files would be overwritten by merge". In this repo
+    that was 26 reported paths versus 416 actual ones.
+    """
+    _, st, _ = await _git(["status", "--porcelain", "--untracked-files=all"],
+                          cwd=repo)
     out = set()
     for line in st.splitlines():
         if not line:
