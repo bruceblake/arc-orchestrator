@@ -199,6 +199,21 @@ def _rework_feedback(tid, results):
     send-it-back path was inert.
     """
     parts = []
+    pub = results.get(f"publish_{tid}") or {}
+    if pub.get("resolve"):
+        files = "\n".join(f"  - {f}" for f in pub.get("conflicts") or [])
+        parts.append(
+            f"This branch CONFLICTS with `{pub.get('base')}` and cannot be "
+            f"merged as it stands.\n\n"
+            f"A `git merge` is ALREADY IN PROGRESS in your worktree, with "
+            f"conflict markers (<<<<<<<, =======, >>>>>>>) written into these "
+            f"files:\n{files}\n\n"
+            f"Resolve every one of them by EDITING the files: keep your task's "
+            f"change AND the incoming change from the base branch — the base "
+            f"moved on for its own reasons and reverting it is not a fix. "
+            f"Remove every conflict marker. Do NOT run `git merge --abort`, "
+            f"`git checkout --ours/--theirs` wholesale, or `git commit`; the "
+            f"orchestrator commits for you once the verify gate passes.")
     pr = results.get(f"pr_review_{tid}")
     if pr and not pr.get("approved"):
         who = ", ".join(pr.get("reviewers") or []) or "the reviewers"
@@ -683,10 +698,18 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # reviewers — four scarce reviewer slots to land one task.
             resynced = False
             if prior_status == "conflict" and alloc_res is None:
-                ok, conflicts, note = await gitstore.sync_with_base(wt, base)
+                ok, conflicts, note = await gitstore.sync_with_base(
+                    wt, base, keep_conflicts=True)
                 resynced = ok
                 events.emit("task.resynced" if ok else "task.resync_failed",
                             task=tid, base=base, note=note, files=conflicts[:20])
+                if not ok and conflicts:
+                    # The merge is left in progress with its markers. Hand it to
+                    # an implementer to resolve by editing files; re-attaching
+                    # instead would spend two reviewers on a diff that cannot
+                    # merge, and then land back here unchanged.
+                    return {"published": False, "resolve": True,
+                            "conflicts": conflicts, "base": base}
             impl = results.get(f"implement_{tid}", {})
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             head = await gitstore.publish(
@@ -1005,8 +1028,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         g.edge(f"escalate_{tid}", f"implement_{tid}")
         # Conflict-repair fallthrough: only when the repair-mode publish ran
         # (no alloc in results yet) and could not merge the old branch.
+        # A conflict that needs a human-shaped fix goes to the implementer, NOT
+        # to alloc — alloc resets the branch and would discard the very work
+        # that conflicts. This edge must therefore exclude the resolve case.
+        g.edge(f"publish_{tid}", f"implement_{tid}",
+               when=lambda r, c: bool(r.get("resolve")))
         g.edge(f"publish_{tid}", f"alloc_{tid}",
                when=lambda r, c, i=tid: not r.get("published")
+               and not r.get("resolve")
                and f"alloc_{i}" not in c.get("results", {}))
         # in_review resumes at publish, which finds the already-open PR and
         # hands it straight to pr_review — restarting at alloc would discard a

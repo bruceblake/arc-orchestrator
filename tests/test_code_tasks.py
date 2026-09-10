@@ -798,3 +798,48 @@ class ResumingAConflictedTask(unittest.TestCase):
         # the branch and invalidate reviews already in progress.
         g = self._graph("in_review")
         self.assertIn("publish_t1", g.starts)
+
+
+class ResolvingARealMergeConflict(unittest.TestCase):
+    """A genuine textual conflict had nowhere to go.
+
+    sync_with_base could only report it, so the task re-attached to its PR,
+    spent two reviewers on a diff that could not merge, and landed back in
+    `conflict` unchanged. Editing files to reconcile two versions is exactly
+    what an implementer is for.
+    """
+
+    def _fires(self, dst, result):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        return any(e.dst == dst and (e.when is None or e.when(result, {}))
+                   for e in g.edges if e.src == "publish_t1")
+
+    RESOLVE = {"published": False, "resolve": True,
+               "conflicts": ["a.py"], "base": "development"}
+
+    def test_a_conflict_needing_resolution_goes_to_the_implementer(self):
+        self.assertTrue(self._fires("implement_t1", self.RESOLVE))
+
+    def test_it_must_not_go_to_alloc_which_would_reset_the_branch(self):
+        self.assertFalse(self._fires("alloc_t1", self.RESOLVE))
+
+    def test_an_ordinary_failed_publish_still_falls_through_to_alloc(self):
+        self.assertTrue(self._fires("alloc_t1", {"published": False,
+                                                 "reason": "no worktree"}))
+
+    def test_the_implementer_is_told_which_files_conflict(self):
+        fb = code_tasks._rework_feedback("t1", {"publish_t1": self.RESOLVE})
+        self.assertIn("a.py", fb)
+        self.assertIn("development", fb)
+
+    def test_it_is_told_to_keep_both_sides_and_not_abort(self):
+        fb = code_tasks._rework_feedback("t1", {"publish_t1": self.RESOLVE})
+        for phrase in ("keep your task's change AND the incoming change",
+                       "merge --abort", "Remove every conflict marker"):
+            self.assertIn(phrase, fb)
+
+    def test_a_normal_publish_contributes_no_conflict_feedback(self):
+        self.assertEqual(
+            code_tasks._rework_feedback("t1", {"publish_t1": {"published": True}}), "")

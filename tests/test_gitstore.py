@@ -355,6 +355,41 @@ class SyncingATaskBranchWithItsBase(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(conflicts, [])
 
+    def test_conflicts_can_be_left_in_place_for_an_agent_to_resolve(self):
+        wt = self._branch_with("shared.txt", "task rewrote this\n")
+        self._advance_main("shared.txt", "main rewrote this\n")
+        ok, conflicts, _ = asyncio.run(
+            gitstore.sync_with_base(wt, "main", keep_conflicts=True))
+        self.assertFalse(ok)
+        self.assertEqual(conflicts, ["shared.txt"])
+        self.assertIn("<<<<<<<", (wt / "shared.txt").read_text())
+        in_merge, unmerged = asyncio.run(gitstore.merge_in_progress(wt))
+        self.assertTrue(in_merge)
+        self.assertEqual(unmerged, ["shared.txt"])
+
+    def test_a_resolved_merge_reports_ready_to_commit(self):
+        wt = self._branch_with("shared.txt", "task rewrote this\n")
+        self._advance_main("shared.txt", "main rewrote this\n")
+        asyncio.run(gitstore.sync_with_base(wt, "main", keep_conflicts=True))
+        (wt / "shared.txt").write_text("both changes, reconciled\n")
+        subprocess.run(["git", "add", "shared.txt"], cwd=wt, check=True,
+                       capture_output=True)
+        ok, conflicts, note = asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertTrue(ok, note)
+        self.assertEqual(conflicts, [])
+
+    def test_an_unresolved_merge_is_not_mistaken_for_a_clean_one(self):
+        wt = self._branch_with("shared.txt", "task rewrote this\n")
+        self._advance_main("shared.txt", "main rewrote this\n")
+        asyncio.run(gitstore.sync_with_base(wt, "main", keep_conflicts=True))
+        ok, conflicts, _ = asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertFalse(ok)
+        self.assertEqual(conflicts, ["shared.txt"])
+
+    def test_a_clean_worktree_is_not_mid_merge(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        self.assertEqual(asyncio.run(gitstore.merge_in_progress(wt)), (False, []))
+
 
 class AdvancingTheLocalBaseBranch(unittest.TestCase):
     """`update-ref` on the CHECKED-OUT branch corrupts the working tree.

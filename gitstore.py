@@ -435,7 +435,26 @@ async def fast_forward_base(repo, base=None):
     return rc == 0, "updated" if rc == 0 else err.strip()[:160]
 
 
-async def sync_with_base(wt, base=None):
+async def merge_in_progress(wt):
+    """(True, unmerged_paths) when this worktree is mid-merge.
+
+    Distinguishes "the agent resolved every conflict and staged them" from
+    "there are still conflicts to fix", which are the same MERGE_HEAD state to
+    git but opposite outcomes for the pipeline.
+    """
+    wt = Path(wt)
+    if not (wt / ".git").exists():
+        return False, []
+    rc, out, _ = await _git(["rev-parse", "--verify", "MERGE_HEAD"],
+                            cwd=wt, check=False)
+    if rc != 0:
+        return False, []
+    _, un, _ = await _git(["diff", "--name-only", "--diff-filter=U"],
+                          cwd=wt, check=False)
+    return True, [ln.strip() for ln in un.splitlines() if ln.strip()]
+
+
+async def sync_with_base(wt, base=None, keep_conflicts=False):
     """Merge the current base into this task's branch, inside its worktree.
 
     Returns (ok, conflicts, note). A PR that conflicts with the base branch was
@@ -451,6 +470,14 @@ async def sync_with_base(wt, base=None):
     """
     base = base or config.BASE_BRANCH
     wt = Path(wt)
+    # A merge left in progress by a previous pass is not a new merge to start.
+    # If the agent resolved everything, say so and let publish's commit conclude
+    # it; if conflicts remain, report exactly those.
+    in_merge, unmerged = await merge_in_progress(wt)
+    if in_merge:
+        if unmerged:
+            return False, unmerged, f"{len(unmerged)} conflict(s) still unresolved"
+        return True, [], "merge already resolved — pending commit"
     await _git(["fetch", "origin", base], cwd=wt, check=False)
     rc, ref, _ = await _git(["rev-parse", "--verify", f"origin/{base}"],
                             cwd=wt, check=False)
@@ -463,6 +490,12 @@ async def sync_with_base(wt, base=None):
     rc2, out, _ = await _git(["diff", "--name-only", "--diff-filter=U"],
                              cwd=wt, check=False)
     conflicts = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if keep_conflicts and conflicts:
+        # Leave the merge in progress WITH its markers so an implementer can
+        # resolve it by editing files — the thing agents are actually good at.
+        # publish's `git add -A && git commit` then concludes the merge, and
+        # the verify gate catches any marker left behind (nothing compiles).
+        return False, conflicts, f"{len(conflicts)} conflicting file(s), left for resolution"
     await _git(["merge", "--abort"], cwd=wt, check=False)
     return False, conflicts, (f"{len(conflicts)} conflicting file(s)"
                               if conflicts else f"merge failed: {err.strip()[:200]}")
