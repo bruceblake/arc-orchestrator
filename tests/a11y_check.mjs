@@ -124,8 +124,13 @@ for (const file of process.argv.slice(2)) {
         const wrapped = labelBlocks.some(([a, b]) => start > a && start < b);
         named = !!wrapped || !!(id && labelFor.has(id));
       } else if (!named && !VOID.has(name)) {
-        const text = stripTags(elementInner(staticHtml, tagRe.lastIndex, name));
-        named = !!text;
+        const inner = elementInner(staticHtml, tagRe.lastIndex, name);
+        const text = stripTags(inner);
+        // An element whose only content is an <img alt="..."> still has an
+        // accessible name from that alt, even though tag-stripping leaves the
+        // inner text empty ("<a><img alt=Logo></a>" is named "Logo").
+        const imgAlt = inner.match(/<img\b[^>]*\balt\s*=\s*["']([^"']*)["']/i);
+        named = !!text || !!(imgAlt && imgAlt[1]);
       }
       if (!named) {
         add(`interactive ${snippet} with no accessible name (no text, aria-label or title)`);
