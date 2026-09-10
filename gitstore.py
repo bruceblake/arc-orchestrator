@@ -239,6 +239,48 @@ async def push_and_open_pr(repo, task_id, title, taskfile=""):
     return out.decode(errors="replace").strip(), "opened"
 
 
+async def github_status(repo):
+    """Best-effort GitHub-readiness probe; never raises or hangs.
+
+    Returns {'remote': <origin url or None>, 'gh_installed': bool,
+    'gh_authed': bool, 'ready': bool, 'reason': <short text or None>}.
+    Explains why push_and_open_pr skipped, e.g. for a pr_skipped event."""
+    import shutil
+    repo = Path(repo).resolve()
+    info = {"remote": None, "gh_installed": False,
+            "gh_authed": False, "ready": False, "reason": None}
+    rc, out, _ = await _git(["remote", "get-url", "origin"], cwd=repo, check=False)
+    if rc == 0 and out.strip():
+        info["remote"] = out.strip()
+    else:
+        info["reason"] = "no git remote configured"
+        return info
+    if not shutil.which("gh"):
+        info["reason"] = "gh CLI not installed"
+        return info
+    info["gh_installed"] = True
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "auth", "status", cwd=str(repo),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            await asyncio.wait_for(proc.communicate(), 60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            info["reason"] = "gh auth status timed out"
+            return info
+    except OSError as exc:
+        info["reason"] = f"gh auth status failed: {exc}"[:200]
+        return info
+    if proc.returncode != 0:
+        info["reason"] = "gh not authenticated"
+        return info
+    info["gh_authed"] = True
+    info["ready"] = True
+    return info
+
+
 async def cleanup(repo, task_id, delete_branch=True):
     repo = Path(repo).resolve()
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
