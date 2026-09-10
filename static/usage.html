@@ -79,6 +79,7 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 .capflag { font-size: 10px; padding: 1px 5px; border-radius: 4px; margin-left: 5px; }
 .capflag.over { background: var(--err); color: #fff; }
 .capflag.at { background: #d29922; color: #000; }
+.tblwrap { overflow-x: auto; }
 
 /* driver events / errors panel */
 #drv-events { max-height: 320px; overflow: auto; }
@@ -97,6 +98,11 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   main { padding: 10px; }
   .modelgrid { grid-template-columns: 1fr; }
   .tot-kv { display: block; }
+}
+@media (max-width: 700px) {
+  body { overflow-x: hidden; }
+  .modelgrid { grid-template-columns: 1fr; }
+  .nav a, .badge, .legend, .tag, .mcap, th, .evrow, .capflag { font-size: 12px; }
 }
 </style>
 </head>
@@ -145,10 +151,12 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 
   <section class="panel">
     <h2>Families <small style="color:var(--dim);font-weight:normal">kimi + kimi-code share one ARC account (combined)</small></h2>
-    <table>
-      <thead><tr><th>family</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
-      <tbody id="fam-body"></tbody>
-    </table>
+    <div class="tblwrap">
+      <table>
+        <thead><tr><th>family</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
+        <tbody id="fam-body"></tbody>
+      </table>
+    </div>
   </section>
 
   <section class="panel">
