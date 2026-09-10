@@ -29,11 +29,17 @@ globalThis.fetch = async () => ({ json: async () => ({}), status: 200 });
 globalThis.setInterval = () => 0; globalThis.setTimeout = () => 0; globalThis.clearInterval = () => 0;
 
 const src = fs.readFileSync(new URL("../static/index.html", import.meta.url), "utf8");
-// The page loads its shared helpers (esc, short, fmtK, ...) from common.js
-// before the inline script; do the same so they are defined here too.
-const common = fs.readFileSync(new URL("../static/common.js", import.meta.url), "utf8");
 const js = src.slice(src.indexOf("<script>") + 8, src.lastIndexOf("</script>"));
-const mod = new Function(common + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects};");
+// Pages now load shared helpers from <script src="/common.js">. Without
+// prepending those, the harness evaluates a page missing esc/short/tick and
+// reports a break that is its own — and, worse, would MISS a real break in
+// the shared file, which every page depends on.
+const externals = [...src.matchAll(/<script[^>]+src="([^"]+)"/g)]
+  .map(m => "static/" + m[1].replace(/^\//, ""))
+  .filter(f => fs.existsSync(f))
+  .map(f => fs.readFileSync(f, "utf8"))
+  .join("\n");
+const mod = new Function(externals + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects};");
 const api = mod();
 
 const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));

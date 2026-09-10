@@ -159,6 +159,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   </div>
 </header>
 <main>
+  <div class="panel err" id="stale-banner" style="display:none"></div>
   <div id="view-list">
     <div class="panel" id="health-panel">
       <h2>Fleet <span class="hint" id="health-meta"></span>
@@ -602,6 +603,17 @@ const PROBLEM_LABEL = {
   "run.interrupted": "run interrupted",
 };
 function renderHealth(h) {
+  // The fleet edits this server's own source. A running process keeps serving
+  // what it started with, so a merged route can 404 and take the whole page
+  // down with it — that is exactly how the console went blank.
+  const stale = h.stale_source || [];
+  const banner = $("#stale-banner");
+  if (banner) {
+    banner.style.display = stale.length ? "" : "none";
+    banner.innerHTML = stale.length
+      ? `⚠ the dashboard is running older code than the repo (${stale.map(esc).join(", ")} changed since it started) — run <code>./stop.sh &amp;&amp; ./start.sh</code> to pick it up`
+      : "";
+  }
   const models = h.models || [];
   const drivers = models.reduce((n, m) => n + m.drivers, 0);
   const account = models.reduce((n, m) => n + m.account, 0);
