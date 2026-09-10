@@ -14,6 +14,9 @@ import config
 
 
 class TimeoutInvariants(unittest.TestCase):
+    """Timeout invariants ensure lease, idle, and capacity backoff ordering prevents drivers from exceeding ARC caps.
+
+    If DRIVER_LEASE_TTL is not longer than DRIVER_TIMEOUT, a lease could be reclaimed while a driver is still running, allowing another driver to take the slot and cause the model to exceed its account cap. DRIVER_IDLE_TIMEOUT is deliberately the binding stall detector — a harness silent that long is waiting on a request that is not coming back, so it is killed rather than waited out — and DRIVER_TIMEOUT is the wall-clock backstop a step above it, never the stall detector itself."""
     def test_lease_outlasts_the_longest_an_attempt_can_hold_it(self):
         longest_hold = config.DRIVER_TIMEOUT + config.DRIVER_CAPACITY_BACKOFF_CAP
         self.assertGreater(
@@ -34,14 +37,34 @@ class TimeoutInvariants(unittest.TestCase):
 
 
 class RoutingInvariants(unittest.TestCase):
+    """Routing is loader-enforced, so a stale config silently misroutes tasks.
+
+    `code_tasks.load_taskfile` only checks that a model is in IMPLEMENTER_MODELS
+    and that its role/family pairing holds; it never checks that every tier in
+    the escalation path is routable or that a driver cap stays under its
+    account cap. A model in ESCALATION_PATH with no family entry or a zero
+    driver limit crashes plan-time at the first tier; a driver cap above the
+    family's account cap lets the fleet out-request what the account allows,
+    so ARC 400s mid-run and every attempt at that tier burns its fix budget.
+    """
+
     def test_every_escalation_tier_is_a_known_implementer(self):
         for model in config.ESCALATION_PATH:
-            self.assertIn(model, config.IMPLEMENTER_MODELS, model)
+            self.assertIn(
+                model, config.IMPLEMENTER_MODELS,
+                f"{model} is in ESCALATION_PATH but not a known implementer; "
+                "escalation would crash the run at the first tier")
 
     def test_every_implementer_has_a_family_and_a_driver_cap(self):
         for model in config.IMPLEMENTER_MODELS:
-            self.assertIn(model, config.MODEL_FAMILY, model)
-            self.assertGreater(config.driver_limit(model), 0, model)
+            self.assertIn(
+                model, config.MODEL_FAMILY,
+                f"{model} has no MODEL_FAMILY entry; it cannot be routed, "
+                "gated, or reviewed by family")
+            self.assertGreater(
+                config.driver_limit(model), 0,
+                f"{model} has a non-positive driver cap; it would never get "
+                "a harness slot and any task routed to it would stall")
 
     def test_escalation_path_runs_weakest_to_strongest(self):
         """Escalation only makes sense if later tiers are scarcer/stronger."""
@@ -53,8 +76,11 @@ class RoutingInvariants(unittest.TestCase):
     def test_driver_caps_leave_headroom_under_the_account_cap(self):
         """Driver caps must reserve room for interactive use of the account."""
         for model, family in config.MODEL_FAMILY.items():
-            self.assertLessEqual(config.driver_limit(model),
-                                 config.family_limit(family), model)
+            self.assertLessEqual(
+                config.driver_limit(model), config.family_limit(family),
+                f"{model} driver cap {config.driver_limit(model)} exceeds the "
+                f"{family} account cap {config.family_limit(family)}; the fleet "
+                "can out-request the account and ARC rejects over-limit mid-run")
 
 
 if __name__ == "__main__":
@@ -179,3 +205,83 @@ class KimiPlanMode(unittest.TestCase):
         self.assertFalse(config.kimi_plan_mode_on(),
                          "kimi default_plan_mode is true — fleet agents will "
                          "plan instead of edit")
+
+
+class PRReviewerCountInvariants(unittest.TestCase):
+    """The PR review gate needs independent readers, and every reviewer must be
+    a distinct review-capable family.
+
+    `code_tasks.pr_review` picks reviewers from families other than the
+    implementer's and all of them must approve before `pr_merge` runs. Fewer
+    than two reviewers means no independent second reading at all; more than
+    the number of review-capable families can never be satisfied, so the
+    review node waits on approvals that no model will ever grant.
+    """
+
+    def test_pr_reviewers_support_cross_review(self):
+        self.assertGreaterEqual(config.PR_REVIEWERS, 2,
+                                "fewer than two reviewers means no independent second read")
+
+    def test_pr_reviewers_do_not_exceed_review_capable_families(self):
+        review_capable = {config.MODEL_FAMILY[m]
+                          for m in config.IMPLEMENT_TIERS["hard"]
+                          if m in config.MODEL_FAMILY}
+        self.assertLessEqual(config.PR_REVIEWERS, len(review_capable),
+                             "not enough review-capable families to fill the reviewer pool")
+
+
+class PRRoundsInvariants(unittest.TestCase):
+    """The bounded fix and review loops must each get at least one pass.
+
+    `code_tasks.build_code_graph` keeps looping `implement` / `pr_review` only
+    while `runs <= MAX_FIX_ROUNDS` / `round_n <= PR_MAX_ROUNDS`. If either
+    bound were zero, a rejected change would skip straight to the fail node
+    with no chance to correct it, silently dropping work that a single fix pass
+    would have salvaged.
+    """
+
+    def test_pr_review_gets_at_least_one_round(self):
+        self.assertGreaterEqual(config.PR_MAX_ROUNDS, 1,
+                                "a zero round bound never lets a rejected change back in")
+
+    def test_fix_loop_gets_at_least_one_attempt(self):
+        self.assertGreaterEqual(config.MAX_FIX_ROUNDS, 1,
+                                "a zero fix budget fails a task with no chance to correct it")
+
+
+class BranchInvariants(unittest.TestCase):
+    """The fleet integrates on `development`; `main` is prod and never written
+    by the fleet.
+
+    `gitstore` opens the PR against BASE_BRANCH and `publish` merges there;
+    PROD_BRANCH is only reached through a manual promotion PR. If the two were
+    equal, every task would land directly on prod and skip the human gate.
+    """
+
+    def test_integration_branch_is_not_prod(self):
+        self.assertNotEqual(config.BASE_BRANCH, config.PROD_BRANCH,
+                            "a task would merge directly into prod, bypassing manual promotion")
+
+
+class HarnessContextBounds(unittest.TestCase):
+    """The harness context budgets are positive and within the provider window.
+
+    `OPENCODE_CONTEXT`/`KIMI_CONTEXT` set the driver's context window. A
+    zero or negative value breaks every request the harness makes; a value
+    beyond 131072 exceeds the provider's output window and gets clamped or
+    fails mid-run.
+    """
+
+    def test_opencode_context_is_positive_and_bounded(self):
+        self.assertGreater(config.OPENCODE_CONTEXT, 0,
+                           "a non-positive context window breaks every harness request")
+        self.assertLessEqual(config.OPENCODE_CONTEXT, 131072,
+                             "context beyond the provider window is clamped or fails")
+
+    def test_kimi_context_is_positive_and_bounded(self):
+        self.assertGreater(config.KIMI_CONTEXT, 0,
+                           "a non-positive context window breaks every harness request")
+        self.assertLessEqual(config.KIMI_CONTEXT, 131072,
+                             "context beyond the provider window is clamped or fails")
+
+
