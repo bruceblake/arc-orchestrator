@@ -478,9 +478,14 @@ class Driver:
                         pid=os.getpid())
         await gate.acquire()
         try:
+            # attempt MUST be here: the dashboard keys a wait on
+            # (task, model, attempt) and settles it with the matching
+            # driver.start. Without it a cap_wait keyed (task, model, None)
+            # is never settled by a start keyed (task, model, 1), and the
+            # queue view carries a phantom entry until it ages out.
             await _lease_acquire(self.model, task_id,
                                  {"harness": self.harness, "role": self.role,
-                                  "pid": os.getpid()})
+                                  "attempt": attempt, "pid": os.getpid()})
             try:
                 hgate = _harness_gate(self.harness)
                 if hgate.locked():
@@ -495,7 +500,8 @@ class Driver:
                     await _lease_acquire(
                         hkey, task_id,
                         {"harness": self.harness, "role": self.role,
-                         "pid": os.getpid(), "scope": "harness"},
+                         "attempt": attempt, "pid": os.getpid(),
+                         "scope": "harness"},
                         cap=config.harness_limit(self.harness),
                         report_as=self.model)
                     try:

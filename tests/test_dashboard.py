@@ -484,3 +484,18 @@ class LiveQueueView(unittest.TestCase):
             {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
              "acquired_at": time.time() - 5}]))
         self.assertEqual((q["totals"]["running"], q["totals"]["waiting"]), (1, 0))
+
+    def test_a_start_settles_a_cap_wait_from_the_same_attempt(self):
+        # cap_wait and driver.start must key identically, or the wait is never
+        # cleared and the panel shows a queue that has already been served.
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=30),
+                    self._ev("driver.cap_wait", "t1", "Kimi-K3", age=20,
+                             in_use=3, cap=3),
+                    self._ev("driver.start", "t1", "Kimi-K3", age=10))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_a_cap_wait_with_no_start_is_still_a_wait(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=30),
+                    self._ev("driver.cap_wait", "t1", "Kimi-K3", age=20,
+                             in_use=3, cap=3))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 1)
