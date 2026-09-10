@@ -188,6 +188,21 @@ def cmd_code(args):
     if args.code_cmd == "bench":
         cmd_code_bench(args)
         return
+    if args.code_cmd == "promote":
+        import gitstore
+        repo = Path(args.repo or config.ROOT).resolve()
+
+        async def go():
+            await gitstore.ensure_base_branch(repo)
+            n, url, note = await gitstore.open_promotion_pr(repo)
+            if url:
+                print(f"promotion PR: {url}\n  {note}")
+                print(f"\nReview and merge it yourself — the fleet never "
+                      f"touches {config.PROD_BRANCH}.")
+            else:
+                print(f"no promotion PR opened: {note}")
+        asyncio.run(go())
+        return
     if args.code_cmd == "reconcile":
         import reconcile as _rec
         store = Store(args.db or config.DB_PATH)
@@ -250,6 +265,8 @@ def cmd_code(args):
                 print(f"  stale 'running' rows reset to failed: {n_stale}")
         events.set_context(workload="code-tasks")
         log = logging.getLogger("code-cmd")
+        import gitstore as _gs
+        await _gs.ensure_base_branch(Path(args.repo or taskset["repo"]).resolve())
         if config.kimi_plan_mode_on():
             log.error(
                 "kimi is configured with default_plan_mode = true (%s).\n"
@@ -637,6 +654,11 @@ def main():
     cs_p.add_argument("--db", default=None, help="sqlite database path")
     cs_p.add_argument("--reset-stale", action="store_true",
                       help="mark stale 'running' tasks 'failed' (only when no run process is alive)")
+    cpr = code_sub.add_parser(
+        "promote",
+        help=f"open a {config.BASE_BRANCH} -> {config.PROD_BRANCH} PR for you to merge")
+    cpr.add_argument("--repo", default=None, help="repo path (default: this one)")
+    cpr.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     crec = code_sub.add_parser(
         "reconcile",
         help="reap orphans a killed run left behind (stale rows, leases, worktrees)")

@@ -5,6 +5,8 @@ The blessed clone (~/repos/<project>) keeps main clean; every task runs in
 the only git actor — harnesses only write files inside their worktree.
 """
 import asyncio
+import re
+import json
 import logging
 from pathlib import Path
 
@@ -326,3 +328,149 @@ async def cleanup(repo, task_id, delete_branch=True):
         await _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
     if delete_branch:
         await _git(["branch", "-d", f"task/{task_id}"], cwd=repo, check=False)
+
+
+# --- pull-request flow -------------------------------------------------------
+# The PR is the gate. A task branch is pushed and a pull request opened against
+# config.BASE_BRANCH; reviewers read the real PR diff; a merger merges it only
+# once every reviewer approves. Nothing is merged locally, so "send it back"
+# actually withholds the change instead of commenting on history.
+
+async def _gh(args, cwd, timeout=90):
+    """Run gh; returns (rc, stdout, stderr). Never raises."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "gh", *args, cwd=str(cwd),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+        return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except Exception:
+            pass
+        return 124, "", f"gh {' '.join(args[:3])} timed out after {timeout}s"
+    except OSError as exc:
+        return 127, "", str(exc)
+
+
+async def ensure_base_branch(repo, base=None, prod=None):
+    """Make sure the integration branch exists locally and on origin."""
+    repo = Path(repo).resolve()
+    base = base or config.BASE_BRANCH
+    prod = prod or config.PROD_BRANCH
+    rc, _, _ = await _git(["rev-parse", "--verify", base], cwd=repo, check=False)
+    if rc != 0:
+        await _git(["branch", base, prod], cwd=repo)
+    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
+    if remotes.strip():
+        await _git(["push", "-u", "origin", base], cwd=repo, check=False)
+    return base
+
+
+async def push_task_branch(repo, task_id):
+    """Push task/<id> to origin. Returns (ok, note)."""
+    repo = Path(repo).resolve()
+    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
+    if not remotes.strip():
+        return False, "no git remote configured"
+    try:
+        await _git(["push", "-u", "--force-with-lease", "origin",
+                    f"task/{task_id}"], cwd=repo)
+    except GitError as exc:
+        return False, f"push failed: {exc}"[:200]
+    return True, "pushed"
+
+
+async def open_pr(repo, task_id, title, body, base=None):
+    """Open (or find) the PR for task/<id>. Returns (number, url, note)."""
+    repo = Path(repo).resolve()
+    base = base or config.BASE_BRANCH
+    branch = f"task/{task_id}"
+    rc, out, _ = await _gh(["pr", "list", "--head", branch, "--state", "open",
+                            "--json", "number,url"], cwd=repo)
+    if rc == 0 and out.strip():
+        try:
+            existing = json.loads(out)
+        except ValueError:
+            existing = []
+        if existing:
+            return existing[0]["number"], existing[0]["url"], "already open"
+    rc, out, err = await _gh(
+        ["pr", "create", "--base", base, "--head", branch,
+         "--title", title, "--body", body], cwd=repo)
+    if rc != 0:
+        return None, None, f"gh pr create failed: {err.strip()[:200]}"
+    url = out.strip().splitlines()[-1] if out.strip() else ""
+    number = None
+    m = re.search(r"/pull/(\d+)", url)
+    if m:
+        number = int(m.group(1))
+    return number, url, "opened"
+
+
+async def pr_diff(repo, number, max_chars=60000):
+    """The PR's diff, for a reviewer to read. Bounded."""
+    rc, out, err = await _gh(["pr", "diff", str(number)], cwd=Path(repo).resolve())
+    if rc != 0:
+        return f"(could not read PR diff: {err.strip()[:200]})"
+    if len(out) > max_chars:
+        return out[:max_chars] + f"\n... [diff truncated at {max_chars} chars]"
+    return out or "(empty diff)"
+
+
+async def pr_state(repo, number):
+    """{state, mergeable, checks} for a PR, or {} when unknown."""
+    rc, out, _ = await _gh(["pr", "view", str(number), "--json",
+                            "state,mergeable,mergeStateStatus,isDraft"],
+                           cwd=Path(repo).resolve())
+    if rc != 0:
+        return {}
+    try:
+        return json.loads(out)
+    except ValueError:
+        return {}
+
+
+async def merge_pr(repo, number, method="squash"):
+    """Merge a PR. Returns (ok, note). Only ever called after approvals."""
+    rc, out, err = await _gh(
+        ["pr", "merge", str(number), f"--{method}", "--delete-branch"],
+        cwd=Path(repo).resolve(), timeout=120)
+    if rc != 0:
+        return False, f"gh pr merge failed: {err.strip()[:200]}"
+    return True, "merged"
+
+
+async def open_promotion_pr(repo, base=None, prod=None, title=None):
+    """Open a development -> main PR for a human to merge. Never merges it."""
+    repo = Path(repo).resolve()
+    base = base or config.BASE_BRANCH
+    prod = prod or config.PROD_BRANCH
+    await _git(["push", "origin", base], cwd=repo, check=False)
+    rc, ahead, _ = await _git(["rev-list", "--count", f"{prod}..{base}"],
+                              cwd=repo, check=False)
+    n = int(ahead.strip() or 0) if rc == 0 and ahead.strip().isdigit() else 0
+    if not n:
+        return None, None, f"{base} has nothing {prod} does not"
+    rc, out, _ = await _gh(["pr", "list", "--head", base, "--base", prod,
+                            "--state", "open", "--json", "number,url"], cwd=repo)
+    if rc == 0 and out.strip():
+        try:
+            ex = json.loads(out)
+        except ValueError:
+            ex = []
+        if ex:
+            return ex[0]["number"], ex[0]["url"], f"already open ({n} commits)"
+    rc, out, err = await _gh(
+        ["pr", "create", "--base", prod, "--head", base,
+         "--title", title or f"promote {base} -> {prod} ({n} commits)",
+         "--body", f"{n} commit(s) on `{base}` ready for `{prod}`.\n\n"
+                   "Every commit here already passed its own PR review."],
+        cwd=repo)
+    if rc != 0:
+        return None, None, f"gh pr create failed: {err.strip()[:200]}"
+    url = out.strip().splitlines()[-1] if out.strip() else ""
+    m = re.search(r"/pull/(\d+)", url)
+    return (int(m.group(1)) if m else None), url, f"opened ({n} commits)"

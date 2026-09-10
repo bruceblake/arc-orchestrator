@@ -91,6 +91,43 @@ Statuses recorded in `code_tasks`: `pending → running → merged |
 conflict | failed`. `conflict` = merge collision; `failed` = fix rounds
 exhausted on the final escalation tier.
 
+## The pull-request gate
+
+```
+alloc ─► implement ─► gate ─► review ─► publish ──► pr_review ──► pr_merge
+          ▲             │        │         │            │  (all approve)
+          │             │        │         │            │
+          └─────────────┴────────┴─────────┘            │
+             fix loop (gate/review reject)              │
+          ▲                                             │
+          └─────────────────────────────────────────────┘
+                    PR reviewers request changes
+```
+
+`publish` commits, pushes `task/<id>`, and opens a PR against
+`config.BASE_BRANCH` (`development`). **Nothing has merged at this point.**
+
+`pr_review` runs `config.PR_REVIEWERS` (2) reviewers in parallel on the real
+`gh pr diff`. They come from families other than the implementer's and from
+each other. Every one must approve. A rejection posts the issues as a PR
+comment and returns the task to `implement`, whose next commit updates the
+same PR; `config.PR_MAX_ROUNDS` (3) bounds that loop.
+
+`pr_merge` runs only after unanimous approval: `gh pr merge --squash
+--delete-branch`, then fast-forwards the local base branch and removes the
+worktree. A PR GitHub reports as `CONFLICTING` records status `conflict`
+rather than merging.
+
+Reviewers are instructed that a code change must ship tests that would fail
+without it (`config.REQUIRE_TESTS`), and to look for regressions in callers of
+the changed code. Documentation-only changes are exempt.
+
+**Branches.** `task/<id>` → `development` → (manual promotion PR) → `main`.
+The fleet never writes to `main`; `main.py code promote` opens the promotion
+PR for a human to merge.
+
+**Statuses** gain `in_review`: the PR is open and awaiting approvals.
+
 **Resume**: re-running `main.py code run` on the same taskfile resumes the
 project (`code_tasks.build_code_graph`) — it never starts a new one. Tasks at
 `merged` are skipped wholesale (their subgraph collapses to a stub publish

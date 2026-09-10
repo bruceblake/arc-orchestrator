@@ -168,6 +168,23 @@ DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
 # raises a capacity-classified DriverError, so the retry ladder backs off
 # instead of the run silently stalling.
 DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "1800"))
+# --- branch model + PR review ------------------------------------------------
+# Tasks branch from and pull-request INTO development. Nothing reaches main
+# except by a promotion PR a human merges, so the fleet can never touch prod.
+#
+# The pull request is the GATE, not a receipt: the branch is pushed, PR_REVIEWERS
+# reviewers read the actual PR diff, and a merger only merges once every one of
+# them approves. Before this, work was merged locally and the PR opened
+# afterwards — reviewers could object to nothing, because it had already landed.
+BASE_BRANCH = os.getenv("ARC_BASE_BRANCH", "development")
+PROD_BRANCH = os.getenv("ARC_PROD_BRANCH", "main")
+PR_REVIEWERS = int(os.getenv("ARC_PR_REVIEWERS", "2"))
+# How many times a PR may go back to the implementer before the task fails.
+PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "3"))
+# Every task must add or update tests. Reviewers are told to reject a code
+# change that ships none, and the gate reports it.
+REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
+
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 

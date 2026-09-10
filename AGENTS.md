@@ -25,7 +25,7 @@ builds software — and this repo itself — as a directed graph of small tasks:
 - **Every implementation is gated and cross-reviewed before merge**: a
   deterministic `verify_cmd` gate runs first, then a reviewer model from the
   *other* strong harness reviews the full diff, and only then does the
-  orchestrator (the only git actor) commit and merge to `main` under a
+  orchestrator (the only git actor) commit, push, and open a pull request against `development` under a
   process-wide lock.
 
 The code workload is the primary occupant of this repo, but the same
@@ -174,64 +174,52 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   build, or a targeted check — something whose exit code actually depends on
   the change being correct.
 
-### Rule 5 — All publishes commit + merge under a process lock; `main` stays green
+### Rule 5 — The pull request is the gate; nothing merges without approvals
 
-- `publish` (code_tasks.py:222) commits the worktree on `task/<tid>` with
-  message `task(<tid>): <title>` and trailers `Harness`, `Model`, `Reviewer`,
-  `Task-Id` (`gitstore.publish`).
-- Merges are serialized by the module-level `asyncio.Lock` `_merge_lock`
-  (code_tasks.py:23): `gitstore.merge_to_main` (`git merge --no-ff`) plus
-  `gitstore.cleanup` (worktree + branch removal) happen one at a time, so
-  concurrent task completions cannot interleave merges.
-- A task whose previous run ended in `conflict` first tries **repair** in
-  its publish node: if branch `task/<tid>` still has commits ahead of
-  `main` (the reviewed, gate-passing commit survived; `gitstore.branch_ahead`),
-  it merges that branch directly under the merge lock instead of re-running
-  implement+review. Only if repair fails does it fall back to a full
-  re-execution (alloc resets the branch to `main`). A fresh conflict is
-  recorded as status `conflict` with a distinct `task.conflict` event (not
-  lumped into `task.failed`).
-- `gitstore.merge_to_main` tolerates a **dirty blessed-repo working tree**
-  (the blessed repo is also the operator's working copy): files that the
-  merge would update and that have uncommitted local edits are path-scoped
-  `git stash push`'d before the merge and `git stash pop`'d after. If the
-  pop conflicts, the merge stays landed and the error tells the operator to
-  resolve the stash — no more "Your local changes ... would be overwritten"
-  aborts because someone was mid-edit.
-- **Publish hook** (`gitstore.push_and_open_pr`): after every successful
-  local merge the orchestrator **best-effort** pushes `task/<tid>` and
-  `main` to origin and opens a GitHub PR via `gh pr create` (base `main`,
-  head `task/<tid>`) — pushing `main` afterwards makes GitHub auto-mark the
-  PR merged. It never fails the task: it emits `task.pr_opened` `{url}` or
-  `task.pr_skipped` `{reason}` (reasons: no git remote configured / gh CLI
-  not installed / push failed / `gh pr create` failed). No remote is
-  configured on this repo today, so expect `pr_skipped` until an origin +
-  `gh auth login` exist.
-- Task status lifecycle (table `code_tasks` in `store.py`; `pending` is the
-  schema default): `running` at alloc → `merged` on success, `conflict` if the
-  merge raises `gitstore.GitError` (main is left untouched — that is how it
-  stays green), or `failed` when fix rounds are exhausted **on every
-  escalation tier** (Rule 4; a persistent harness outage ends the same way —
-  Rule 7). Watch statuses with `main.py code status`.
-- **Resume semantics** (`code_tasks.build_code_graph` + the `cmd_code run`
-  path): re-running `main.py code run <taskfile>` on a taskfile with existing
-  `code_tasks` rows is a **resume of the same project**, never a new one.
-  `merged` tasks are skipped entirely — their subgraph is replaced by a stub
-  publish node returning `merged`, so dependents treat them as satisfied and
-  no models/git are wasted. `failed` tasks resume **one tier higher** in
-  `ESCALATION_PATH` than the model recorded in their row, with a full fresh
-  fix budget (the old run proved that model insufficient); `conflict` tasks
-  resume at the **same** model (a merge conflict is not a capability signal)
-  and try repair first (above); `pending` tasks just run. At startup the run
-  also marks *this taskfile's* stale `running` rows `failed` (scoped to the
-  taskfile — safe to start a run while other projects are idle; the manual
-  `code status --reset-stale` escape hatch still exists), and prints a resume
-  plan (skipped/retried/escalated lists) plus a `run.resume` event
-  `{skipped_merged, retried, escalated_on_resume}`. **Retrying anything is
-  always "just re-run the same taskfile".**
-- Because merges are serialized and dependent allocs wait for
-  `publish_<dep>`, every task branches from a `main` that already contains
-  all of its dependencies (comment at code_tasks.py:157).
+**No task merges locally. Ever.** `publish` (code_tasks.py) commits the
+worktree on `task/<tid>` with message `task(<tid>): <title>` and trailers
+`Harness`, `Model`, `Reviewer`, `Task-Id`, pushes the branch, and opens a pull
+request against `config.BASE_BRANCH` (default `development`). At that moment
+nothing has landed.
+
+This replaced a flow that merged into `main` and opened the PR afterwards. A
+reviewer could then only object to work that had already shipped — "send it
+back" withheld nothing. Worse, `gh pr create` was run *after* pushing main, so
+GitHub saw no commits between the refs and the hook had **never once opened a
+PR** in the life of the repo.
+
+**The review loop** (`pr_review` -> `pr_merge` | `implement`):
+
+- `config.PR_REVIEWERS` (default 2) reviewers read the **real PR diff** via
+  `gh pr diff`, in parallel, each with its own prompt and no knowledge of the
+  others' verdicts.
+- Reviewers are chosen from families **other than the implementer's**, and
+  differ from each other, so two approvals mean two independent readings.
+- **Unanimous approval is required.** Any rejection posts the blocking issues
+  as a PR comment and sends the task back to `implement`; the next commit
+  updates the same PR and a new round begins.
+- The loop is bounded by `config.PR_MAX_ROUNDS` (default 3); exhausting it
+  fails the task rather than looping forever.
+- Reviewers are told that a code change **must** ship tests that would fail
+  without it (`config.REQUIRE_TESTS`), and to check for regressions in what
+  calls the changed code. Documentation-only changes are exempt.
+- Only `pr_merge` merges, via `gh pr merge --squash --delete-branch`, and only
+  after a unanimous `pr_review`. It then fast-forwards the local integration
+  branch to what GitHub merged and cleans up the worktree.
+
+**A dependent task waits for its dependency's PR to MERGE**, not merely to
+open (`pr_merge_<dep> -> alloc_<tid>`) — otherwise it would branch from a base
+that does not yet contain the code it depends on.
+
+**Branch model.** `task/<id>` branches from `development`; `development` is
+where the fleet integrates; `main` is prod and the fleet never writes to it.
+Promotion is manual: `main.py code promote` opens a `development -> main` PR
+for a human to merge.
+
+`gitstore._base_ref` always resolves to the **local** base branch. It once
+preferred `origin/<base>` whenever a remote existed, which meant the first
+skipped push would have every new task branch from a stale origin and revert
+merged work.
 
 ### Rule 6 — Concurrency caps are two-layer; know both before launching anything
 

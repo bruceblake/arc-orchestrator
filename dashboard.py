@@ -855,6 +855,8 @@ def _repo_problem(path, base="main"):
 
 
 _PHASE_WORD = {"alloc": "preparing worktree", "implement": "writing code",
+               "pr_review": "pull request under review",
+               "pr_merge": "merging the pull request",
                "gate": "running the verify gate", "review": "under review",
                "escalate": "escalating to a stronger model",
                "publish": "committing and merging", "fail": "giving up"}
@@ -993,6 +995,10 @@ def _project_phase(statuses, ids, run_pid):
     total = len(ids)
     if run_pid or statuses.get("running"):
         return "running"
+    # in_review: the PR is open and waiting on reviewers. Not "running" (no
+    # agent is burning a slot) and not "attention" (nothing is wrong yet).
+    if statuses.get("in_review"):
+        return "in_review"
     if statuses.get("failed") or statuses.get("conflict"):
         return "attention"
     if total and statuses.get("merged", 0) >= total:

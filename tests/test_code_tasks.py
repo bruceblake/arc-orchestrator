@@ -1,5 +1,6 @@
 """Taskfile validation, reviewer-verdict parsing, and resume/escalation planning."""
 import json
+import pathlib
 import tempfile
 import unittest
 from pathlib import Path
@@ -275,3 +276,69 @@ class OffPathModelsCanStillEscalate(unittest.TestCase):
         p = self.plan([{"id": "t1", "status": "failed", "model": top,
                         "error": "exhausted fix rounds"}])
         self.assertEqual(p["escalated_on_resume"], {})
+
+
+class PullRequestIsTheGate(unittest.TestCase):
+    """Nothing merges until every PR reviewer approves.
+
+    The old flow merged locally and opened the PR afterwards, so reviewers
+    could only object to work that had already landed — "send it back" could
+    not withhold anything. publish now pushes and opens the PR; pr_merge is
+    reachable only through a unanimous pr_review.
+    """
+
+    def graph(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            return code_tasks.build_code_graph(FakeStore(), ts, taskfile="tf.json")
+
+    def _edge(self, g, src, dst):
+        return next((e for e in g.edges if e.src == src and e.dst == dst), None)
+
+    def test_the_chain_ends_in_pr_merge_not_a_local_merge(self):
+        g = self.graph()
+        self.assertIn("pr_merge_t1", g.nodes)
+        self.assertIn("pr_review_t1", g.nodes)
+        self.assertIsNotNone(self._edge(g, "publish_t1", "pr_review_t1"))
+        self.assertIsNotNone(self._edge(g, "pr_review_t1", "pr_merge_t1"))
+
+    def test_merge_requires_approval(self):
+        g = self.graph()
+        e = self._edge(g, "pr_review_t1", "pr_merge_t1")
+        self.assertFalse(e.when({"approved": False}, {}), "merged without approval")
+        self.assertTrue(e.when({"approved": True}, {}))
+
+    def test_rejection_goes_back_to_the_implementer(self):
+        g = self.graph()
+        e = self._edge(g, "pr_review_t1", "implement_t1")
+        self.assertIsNotNone(e, "a rejected PR must return to the implementer")
+        self.assertTrue(e.when({"approved": False}, {"runs": {"pr_review_t1": 1}}))
+        self.assertFalse(e.when({"approved": True}, {"runs": {"pr_review_t1": 1}}))
+
+    def test_the_review_loop_is_bounded(self):
+        g = self.graph()
+        back = self._edge(g, "pr_review_t1", "implement_t1")
+        fail = self._edge(g, "pr_review_t1", "fail_t1")
+        over = {"runs": {"pr_review_t1": config.PR_MAX_ROUNDS}}
+        self.assertFalse(back.when({"approved": False}, over),
+                         "loops forever past PR_MAX_ROUNDS")
+        self.assertTrue(fail.when({"approved": False}, over))
+
+    def test_publish_that_never_opened_a_pr_does_not_reach_review(self):
+        g = self.graph()
+        e = self._edge(g, "publish_t1", "pr_review_t1")
+        self.assertFalse(e.when({"published": False, "reason": "push failed"}, {}))
+
+    def test_tasks_branch_from_the_integration_branch_not_prod(self):
+        self.assertNotEqual(config.BASE_BRANCH, config.PROD_BRANCH)
+        src = pathlib.Path("code_tasks.py").read_text()
+        self.assertIn("base = config.BASE_BRANCH", src)
+        self.assertNotIn('base = "main"', src)
+
+    def test_approval_parsing_fails_closed(self):
+        self.assertFalse(code_tasks._parse_approval("looks fine to me")["approve"])
+        self.assertTrue(code_tasks._parse_approval('{"approve": true}')["approve"])
+        v = code_tasks._parse_approval(
+            'first {"approve": true} then actually {"approve": false, "issues": ["x"]}')
+        self.assertFalse(v["approve"], "the last verdict is the reviewer's answer")
+        self.assertEqual(v["issues"], ["x"])

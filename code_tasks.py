@@ -174,6 +174,63 @@ def _parse_verdict(text):
     return {"pass": False, "issues": ["reviewer returned no parseable verdict"]}
 
 
+def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues):
+    """Prompt for a reviewer reading a real pull request.
+
+    Deliberately different from the pre-PR review: this reviewer can BLOCK the
+    change, so it is told what it owns, that tests are mandatory, and that
+    deferring to a colleague is not its job.
+    """
+    p = (
+        f"You are one of {n_reviewers} independent reviewers on a PULL REQUEST "
+        f"opened by another AI agent. Your approval is REQUIRED to merge — "
+        f"nothing has landed yet, and if you reject it, it goes back to the "
+        f"implementer.\n\n"
+        f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
+        f"This is review round {round_n}.\n"
+    )
+    if prior_issues:
+        p += ("\nIssues raised last round, which the implementer was asked to "
+              "fix — verify each is actually resolved:\n"
+              + "\n".join(f"- {i}" for i in prior_issues) + "\n")
+    p += f"\nTHE PULL REQUEST DIFF:\n\n{diff}\n\nReview for, in order:\n"
+    p += ("1. CORRECTNESS — does it do what the spec says, without bugs? Trace "
+          "the logic; do not assume it works because it looks plausible.\n"
+          "2. REGRESSIONS — could this break existing behaviour? Consider what "
+          "calls the changed functions.\n")
+    if config.REQUIRE_TESTS:
+        p += ("3. TESTS — a code change MUST come with tests that would FAIL "
+              "without it. Reject if there are none, if they only assert the "
+              "code runs, or if they miss the behaviour the spec describes. "
+              "Documentation-only changes are exempt.\n")
+    p += ("4. SCOPE — nothing unrelated to the spec.\n\n"
+          "Review independently: do not assume another reviewer checked "
+          "something. Be specific — name the file and line, say what is wrong "
+          "and what would fix it. Vague objections waste a whole round.\n\n"
+          "Reply with STRICT JSON only, no prose:\n"
+          '{"approve": true}  or  '
+          '{"approve": false, "issues": ["file.py:42 — problem and fix", ...]}')
+    return p
+
+
+def _parse_approval(text):
+    """Last balanced span carrying an "approve" key wins; fails closed."""
+    spans = []
+    for m in re.finditer(r"\{", text):
+        span = _balanced_span(text, m.start())
+        if span is not None:
+            spans.append(span)
+    for span in reversed(spans):
+        try:
+            obj = json.loads(span)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "approve" in obj:
+            return {"approve": bool(obj["approve"]),
+                    "issues": [str(i) for i in obj.get("issues", [])]}
+    return {"approve": False, "issues": ["reviewer returned no parseable verdict"]}
+
+
 def _driver(model, role, policy):
     """Implementer/reviewer driver. policy['harness'] maps model -> kimi|opencode
     (bench variants); default keeps the governed routing (Kimi-K3 -> kimi CLI)."""
@@ -324,9 +381,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         async def publish(ctx):
             return {"merged": True, "skipped": True, "head": None}
 
+        async def pr_merge(ctx):
+            return {"merged": True, "skipped": True}
+
         g.node(f"publish_{tid}", publish)
+        g.node(f"pr_merge_{tid}", pr_merge)
+        g.edge(f"publish_{tid}", f"pr_merge_{tid}")
         if t["deps"]:
-            g.edge(f"publish_{t['deps'][-1]}", f"publish_{tid}")
+            g.edge(f"pr_merge_{t['deps'][-1]}", f"publish_{tid}")
         else:
             g.start(f"publish_{tid}")
 
@@ -336,7 +398,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # publish_<dep> -> alloc_<tid> edge orders us after the dep's merge, so
         # main already contains every dep (dep branches are deleted at
         # cleanup, before any dependent allocs).
-        base = "main"
+        base = config.BASE_BRANCH
         model0 = start_model(tid)
         prior_status = (prior.get(tid) or {}).get("status")
 
@@ -492,53 +554,140 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             return {"from_model": src, "to_model": nxt, "n": esc_n(ctx) + 1}
 
         async def publish(ctx):
+            """Commit, push the branch, open the PR. Merges NOTHING locally.
+
+            The pull request is the gate: reviewers read this diff and their
+            approval is what merges it. This used to merge into main and open
+            the PR afterwards, so a reviewer could only object to work that
+            had already landed.
+            """
             results = ctx.get("results", {})
             alloc_res = results.get(f"alloc_{tid}")
             if alloc_res is None:
-                # conflict repair: the reviewed, gate-passing commit survived
-                # on task/<tid> — merge it directly instead of re-running
-                # implement+review. Falls through to a full re-execution (via
-                # the publish -> alloc edge below) only when repair fails.
-                if not await gitstore.branch_ahead(repo, tid, base):
-                    return {"merged": False, "repair": "no-branch"}
-                async with _merge_lock:
-                    try:
-                        await gitstore.merge_to_main(repo, tid)
-                        await gitstore.cleanup(repo, tid)
-                    except gitstore.GitError as exc:
-                        store.upsert_code_task(taskfile, tid, t["title"], model0,
-                                               reviewer_for(t, model0), "conflict",
-                                               error=str(exc)[:300], finished=True)
-                        events.emit("task.conflict", task=tid, reason=str(exc)[:200])
-                        return {"merged": False, "repair": str(exc)[:200]}
-                store.upsert_code_task(taskfile, tid, t["title"], model0,
-                                       reviewer_for(t, model0), "merged", finished=True)
-                events.emit("task.merged", task=tid, repaired=True)
-                emit_budget(ctx)
-                await _pr_hook(tid, t)
-                return {"merged": True, "repaired": True}
+                return {"published": False, "reason": "no worktree"}
             wt = Path(alloc_res["worktree"])
             impl = results.get(f"implement_{tid}", {})
+            model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             head = await gitstore.publish(
                 wt, f"task({tid}): {t['title']}",
-                {"Harness": impl.get("harness", "?"), "Model": cur_model(ctx),
-                 "Reviewer": reviewer_for(t, cur_model(ctx)), "Task-Id": tid})
-            async with _merge_lock:
+                {"Harness": impl.get("harness", "?"), "Model": model,
+                 "Reviewer": rev, "Task-Id": tid})
+            if head is None:
+                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                       "failed", error="implementer produced no changes",
+                                       finished=True)
+                events.emit("task.failed", task=tid, reason="no changes to publish")
+                return {"published": False, "reason": "no changes"}
+            ok, note = await gitstore.push_task_branch(repo, tid)
+            if not ok:
+                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                       "failed", error=f"push failed: {note}",
+                                       finished=True)
+                events.emit("task.failed", task=tid, reason=f"push failed: {note}")
+                return {"published": False, "reason": note}
+            body = (f"Task `{tid}` from `{Path(taskfile).name if taskfile else '?'}`\n\n"
+                    f"{t['prompt'][:1500]}\n\n---\n"
+                    f"Implemented by **{model}**, pre-review by **{rev}**.\n"
+                    f"Verify gate: `{t['verify_cmd'] or '(none)'}`\n\n"
+                    f"{config.PR_REVIEWERS} independent reviewers must approve "
+                    f"before this merges.")
+            number, url, note = await gitstore.open_pr(
+                repo, tid, f"task({tid}): {t['title']}", body, base)
+            if number is None:
+                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                       "failed", error=f"could not open PR: {note}",
+                                       finished=True)
+                events.emit("task.failed", task=tid, reason=f"pr: {note}")
+                return {"published": False, "reason": note}
+            store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                   "in_review", branch=f"task/{tid}")
+            events.emit("task.pr_opened", task=tid, url=url, number=number,
+                        head=head, note=note)
+            return {"published": True, "pr": number, "url": url, "head": head}
+
+        async def pr_review(ctx):
+            """N independent reviewers read the real PR diff. All must approve."""
+            pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
+            number = pub.get("pr")
+            if not number:
+                return {"approved": False, "issues": ["no pull request to review"]}
+            round_n = ctx.get("runs", {}).get(f"pr_review_{tid}", 0) + 1
+            prior_r = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
+            diff = await gitstore.pr_diff(repo, number)
+            # Reviewers differ from the implementer's family AND from each
+            # other, so two approvals mean two genuinely separate readings.
+            impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
+            pool = [m for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash")
+                    if config.MODEL_FAMILY.get(m) != impl_fam]
+            chosen = pool[:max(1, config.PR_REVIEWERS)]
+
+            async def one(model):
+                drv = _driver(model, "reviewer", pol)
                 try:
-                    await gitstore.merge_to_main(repo, tid)
-                    await gitstore.cleanup(repo, tid)
-                except gitstore.GitError as exc:
-                    store.upsert_code_task(taskfile, tid, t["title"], cur_model(ctx),
-                                           reviewer_for(t, cur_model(ctx)), "conflict",
-                                           error=str(exc)[:300], finished=True)
-                    events.emit("task.conflict", task=tid, reason=str(exc)[:200])
-                    return {"merged": False, "head": head}
-            store.upsert_code_task(taskfile, tid, t["title"], cur_model(ctx),
-                                   reviewer_for(t, cur_model(ctx)), "merged", finished=True)
-            events.emit("task.merged", task=tid, head=head)
-            emit_budget(ctx)
-            await _pr_hook(tid, t)
-            return {"merged": True, "head": head}
+                    res = await drv.run(
+                        _pr_review_prompt(t, diff, len(chosen), round_n,
+                                          prior_r.get("issues") or []),
+                        Path(ctx["results"][f"alloc_{tid}"]["worktree"]),
+                        task_id=f"{tid}-pr{round_n}")
+                except DriverError as exc:
+                    return model, {"approve": False,
+                                   "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
+                verdict = _parse_approval(res.text)
+                store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
+                                       round_n, res.exit_code, res.transcript_path,
+                                       res.seconds, verdict=json.dumps(verdict)[:500])
+                return model, verdict
+
+            outcomes = await asyncio.gather(*[one(m) for m in chosen])
+            issues, approvals = [], []
+            for model, v in outcomes:
+                if v["approve"]:
+                    approvals.append(model)
+                else:
+                    issues.extend(f"[{model}] {i}" for i in v["issues"])
+            approved = len(approvals) == len(chosen)
+            events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
+                        approved=approved, approvals=approvals,
+                        reviewers=chosen, n_issues=len(issues))
+            if not approved:
+                await gitstore._gh(
+                    ["pr", "comment", str(number), "--body",
+                     "**Changes requested** (round %d)\n\n%s" % (
+                         round_n, "\n".join(f"- {i}" for i in issues[:20]))],
+                    cwd=repo)
+            return {"approved": approved, "issues": issues,
+                    "approvals": approvals, "pr": number, "round": round_n}
+
+        async def pr_merge(ctx):
+            """Merge the PR — reached only once every reviewer approved."""
+            rv = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
+            number = rv.get("pr")
+            model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
+            state = await gitstore.pr_state(repo, number)
+            if state.get("mergeable") == "CONFLICTING":
+                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                       "conflict",
+                                       error=f"PR #{number} conflicts with {base}",
+                                       finished=True)
+                events.emit("task.conflict", task=tid, pr=number,
+                            reason="PR conflicts with the base branch")
+                return {"merged": False, "reason": "conflict"}
+            ok, note = await gitstore.merge_pr(repo, number)
+            if not ok:
+                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                       "conflict", error=note, finished=True)
+                events.emit("task.conflict", task=tid, pr=number, reason=note)
+                return {"merged": False, "reason": note}
+            # Fast-forward the local integration branch to what GitHub merged.
+            await gitstore._git(["fetch", "origin", base], cwd=repo, check=False)
+            await gitstore._git(["update-ref", f"refs/heads/{base}",
+                                 f"origin/{base}"], cwd=repo, check=False)
+            await gitstore.cleanup(repo, tid)
+            store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                   "merged", finished=True)
+            events.emit("task.merged", task=tid, pr=number,
+                        approvals=rv.get("approvals"))
+            return {"merged": True, "pr": number}
 
         async def fail(ctx):
             reason = ctx.get("results", {}).get(f"gate_{tid}", {})
@@ -554,13 +703,32 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         chain = {"alloc": alloc, "implement": implement, "gate": gate,
                  "review": review, "escalate": escalate, "publish": publish,
-                 "fail": fail}
+                 "pr_review": pr_review, "pr_merge": pr_merge, "fail": fail}
         for suffix, fn in chain.items():
             g.node(f"{suffix}_{tid}", fn)
         g.edge(f"alloc_{tid}", f"implement_{tid}")
         g.edge(f"implement_{tid}", f"gate_{tid}")
         g.edge(f"gate_{tid}", f"review_{tid}", when=lambda r, c: r["passed"])
         g.edge(f"review_{tid}", f"publish_{tid}", when=lambda r, c: r["pass"])
+
+        # --- the pull request IS the gate -----------------------------------
+        # publish pushes the branch and opens the PR; nothing has merged yet.
+        # config.PR_REVIEWERS reviewers read the real PR diff. Unanimous
+        # approval merges it; anything else sends it back to the implementer,
+        # whose next commit updates the same PR.
+        def pr_rounds(c):
+            return c.get("runs", {}).get(f"pr_review_{tid}", 0)
+
+        g.edge(f"publish_{tid}", f"pr_review_{tid}",
+               when=lambda r, c: bool(r.get("published")))
+        g.edge(f"pr_review_{tid}", f"pr_merge_{tid}",
+               when=lambda r, c: bool(r.get("approved")))
+        g.edge(f"pr_review_{tid}", f"implement_{tid}",
+               when=lambda r, c: not r.get("approved")
+               and pr_rounds(c) < config.PR_MAX_ROUNDS)
+        g.edge(f"pr_review_{tid}", f"fail_{tid}",
+               when=lambda r, c: not r.get("approved")
+               and pr_rounds(c) >= config.PR_MAX_ROUNDS)
         for src in ("gate", "review"):
             key = "passed" if src == "gate" else "pass"
             g.edge(f"{src}_{tid}", f"implement_{tid}",
@@ -575,11 +743,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # Conflict-repair fallthrough: only when the repair-mode publish ran
         # (no alloc in results yet) and could not merge the old branch.
         g.edge(f"publish_{tid}", f"alloc_{tid}",
-               when=lambda r, c, i=tid: not r.get("merged")
+               when=lambda r, c, i=tid: not r.get("published")
                and f"alloc_{i}" not in c.get("results", {}))
         first = "publish" if prior_status == "conflict" else "alloc"
         if t["deps"]:
-            g.edge(f"publish_{t['deps'][-1]}", f"{first}_{tid}")
+            # Wait for the dep's PR to MERGE into the base branch, not just to
+            # open — otherwise a dependent branches from a base that lacks the
+            # code it depends on.
+            g.edge(f"pr_merge_{t['deps'][-1]}", f"{first}_{tid}")
         else:
             g.start(f"{first}_{tid}")
 
@@ -750,6 +921,19 @@ async def plan_tasks(goal, repo, out_path=None):
         "paths, function names, acceptance criteria.\n"
         "- Small tasks (<30 min each). Prefer one more parallel small task "
         "over one big serial one.\n"
+        "- SIZE IS A CORRECTNESS CONCERN, not just speed. A task that has to "
+        "emit a long response is the most likely to fail: the API terminates "
+        "long-running requests, and tasks asked for whole-file rewrites fail "
+        "33% of their requests against an 8% baseline. Never write a prompt "
+        "that implies rewriting a large file — name the function or the lines "
+        "to change.\n"
+        "- EVERY task that changes code must also add or update TESTS. Say so "
+        "in the prompt and require it in verify_cmd. Two independent reviewers "
+        "read the pull request afterwards and are instructed to REJECT a code "
+        "change that ships no test which would fail without it. A task with no "
+        "tests will simply loop and then fail.\n"
+        "- Keep each task's tests in their own file where possible, so two "
+        "parallel tasks do not both edit one test file and conflict.\n"
         "- verify_cmd: a deterministic shell check run in the task's "
         "worktree (tests, build, node --check, grep). Leave empty only for "
         "purely cosmetic tasks. A failing gate bounces the task back to the "
@@ -759,6 +943,21 @@ async def plan_tasks(goal, repo, out_path=None):
         "it the FIRST clause of every gate that touches code: "
         "'./check.sh && grep -q ...'. A task that edits the orchestrator "
         "itself must not be able to merge a change that breaks it.\n\n"
+        "WHAT HAPPENS TO YOUR PLAN (design for it):\n"
+        "- Each task gets its own git worktree on branch task/<id>, branched "
+        f"from `{config.BASE_BRANCH}`.\n"
+        "- implement -> verify gate -> one cross-family review -> commit, "
+        "push, and OPEN A PULL REQUEST. Nothing is merged locally.\n"
+        f"- {config.PR_REVIEWERS} further independent reviewers then read the "
+        "real PR diff. ALL must approve or the task goes back to the "
+        "implementer with their issues, up to "
+        f"{config.PR_MAX_ROUNDS} rounds, then it fails.\n"
+        f"- Only then is the PR merged into `{config.BASE_BRANCH}`. A task "
+        "with deps starts only after its dependency's PR has MERGED.\n"
+        "- So: a task that is vague, untestable, or too large does not merely "
+        "run slowly — it gets rejected repeatedly and fails. Write each task "
+        "so a reviewer who sees only the diff and the prompt can tell whether "
+        "it is correct.\n\n"
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )

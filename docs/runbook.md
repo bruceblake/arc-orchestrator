@@ -455,6 +455,35 @@ not growing the context, which is why implement prompts tell the agent to grep
 before reading, read line ranges rather than whole files, and not re-read what
 it has already seen.
 
+### The pull-request flow
+
+Every task now ends in a pull request, and the PR is what merges it.
+
+```
+task/<id>  ──push──►  PR into development  ──2 approvals──►  merged
+                              │
+                              └── rejected → back to the implementer,
+                                  same PR, new commits, new round (max 3)
+```
+
+- Watch it: `gh pr list`, or the project detail view, which links each task's
+  PR. A task sitting at status `in_review` is waiting on reviewers.
+- Reviewers post their blocking issues as a PR comment, so the reasoning is on
+  the PR itself, not only in the event log.
+- **Nothing reaches `main`.** When `development` is where you want it:
+
+```bash
+.venv/bin/python main.py code promote
+```
+
+That opens a `development → main` PR and stops. You merge it.
+
+**Setup on a fresh box:** `gh auth login`, then
+`git remote add origin <url>`, then run anything — `ensure_base_branch`
+creates `development` if it is missing. Without a remote, `publish` fails the
+task with `push failed: no git remote configured` rather than pretending to
+merge.
+
 ### Reaping orphans (`code reconcile`)
 
 A run that died before it could clean up leaves three kinds of orphan, all of

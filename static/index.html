@@ -120,6 +120,8 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .phasehead { display: flex; align-items: baseline; gap: 10px; margin: 14px 0 6px; }
 .phasehead h3 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
 .phasehead.running h3 { color: var(--accent); }
+.phasehead.in_review h3 { color: var(--purple); }
+.chip.in_review { color: var(--purple); border-color: var(--purple); }
 .phasehead.attention h3 { color: var(--err); }
 .phasehead.done h3 { color: var(--ok); }
 .phasehead.new h3 { color: var(--dim); }
@@ -519,6 +521,7 @@ function renderProjects() {
   // finished work buried the two projects that were actually running.
   const PHASES = [
     ["running",   "running now"],
+    ["in_review", "pull requests awaiting review"],
     ["attention", "needs attention"],
     ["new",       "never run"],
     ["done",      "done"],
