@@ -590,9 +590,22 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             """
             results = ctx.get("results", {})
             alloc_res = results.get(f"alloc_{tid}")
-            if alloc_res is None:
-                return {"published": False, "reason": "no worktree"}
-            wt = Path(alloc_res["worktree"])
+            if alloc_res is not None:
+                wt = Path(alloc_res["worktree"])
+            else:
+                # publish is the START node: this is a resume of a task that
+                # already has a branch (conflict repair, or in_review with a PR
+                # open). It used to bail out with "no worktree" here, which fired
+                # the fallthrough edge into alloc — and alloc RESETS task/<id> to
+                # base, so every such resume silently threw away the very work it
+                # was resuming and re-implemented from scratch. Re-attach to the
+                # existing worktree instead; only fall through when there really
+                # is not one.
+                wt = await gitstore.existing_worktree(repo, tid)
+                if wt is None:
+                    return {"published": False, "reason": "no worktree"}
+                events.emit("task.resumed", task=tid, worktree=str(wt),
+                            prior_status=prior_status)
             impl = results.get(f"implement_{tid}", {})
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             head = await gitstore.publish(

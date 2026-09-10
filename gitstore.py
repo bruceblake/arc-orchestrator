@@ -87,6 +87,29 @@ async def _base_ref(repo, base="main"):
     return base
 
 
+def worktree_for(repo, task_id):
+    """Where alloc() puts this task's worktree, whether or not it exists yet."""
+    return Path(config.WORKTREE_ROOT) / Path(repo).resolve().name / task_id
+
+
+async def existing_worktree(repo, task_id):
+    """The task's worktree if it is on disk AND git still tracks it, else None.
+
+    Resuming a task whose PR is already open must reuse the branch that PR was
+    opened from. A bare directory check is not enough: `git worktree remove`
+    leaves nothing behind, but a killed run can leave a directory git no longer
+    lists, and committing in one of those fails in a confusing way later.
+    """
+    wt = worktree_for(repo, task_id)
+    if not (wt / ".git").exists():
+        return None
+    rc, out, _ = await _git(["worktree", "list", "--porcelain"],
+                            cwd=Path(repo).resolve(), check=False)
+    if rc != 0 or str(wt) not in out:
+        return None
+    return wt
+
+
 async def alloc(repo, task_id, base="main"):
     """Create (or recreate, on retry) the task worktree; returns its Path.
 
@@ -98,9 +121,23 @@ async def alloc(repo, task_id, base="main"):
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
     branch = f"task/{task_id}"
     await _ensure_identity(repo)
+    base_ref = await _base_ref(repo, base)
+    # Resetting task/<id> to base DISCARDS whatever is on it. That is correct
+    # for a retry of rejected work, and catastrophic for a branch whose PR is
+    # open and reviewed — which is what happened when a resume fell through to
+    # alloc: four reviewed PR branches were reset to base in one run, and only
+    # survived because origin had not been force-pushed over yet. It stays
+    # silent no longer.
+    rc, ahead, _ = await _git(["rev-list", "--count", f"{base_ref}..{branch}"],
+                              cwd=repo, check=False)
+    n = int(ahead.strip()) if rc == 0 and ahead.strip().isdigit() else 0
+    if n:
+        events.emit("task.branch_reset", task=task_id, branch=branch,
+                    commits_discarded=n, base=base_ref)
+        log.warning("alloc %s: resetting %s to %s discards %d commit(s)",
+                    task_id, branch, base_ref, n)
     if wt.exists():
         await _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
-    base_ref = await _base_ref(repo, base)
     await _git(["worktree", "add", "--force", "-B", branch, str(wt), base_ref],
                cwd=repo)
     return wt
