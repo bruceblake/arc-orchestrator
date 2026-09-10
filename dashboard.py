@@ -1581,6 +1581,38 @@ def _archive_project(body):
     return {"file": fname, "archived": archived}, 200
 
 
+def _retry_task(body):
+    """Reset ONE task of a task file to 'pending' so the next `code run`
+    re-executes it; every other task keeps its recorded status."""
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    fname = body.get("file") or ""
+    if not re.fullmatch(r"[\w.-]+\.json", fname):
+        return {"error": "bad file name"}, 400
+    tid = body.get("task") or ""
+    path = Path(config.TASKS_DIR) / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    # rows may be keyed by the resolved path or a bare name — match the way
+    # _project_detail does, then re-upsert under the row's own key so the
+    # ON CONFLICT(taskfile, id) hits the existing row.
+    row = next((r for r in Handler.store.code_tasks_all()
+                if r.get("taskfile")
+                and (r["taskfile"] == str(path)
+                     or r["taskfile"].endswith("/" + fname))
+                and r.get("id") == tid), None)
+    if row is None:
+        return {"error": "task id not found"}, 404
+    import reconcile
+    if any(r.get("taskfile") and Path(r["taskfile"]).name == fname
+           for r in reconcile.live_runs()):
+        return {"error": "this project is running — stop it before retrying"}, 409
+    Handler.store.upsert_code_task(row["taskfile"], tid, row["title"],
+                                   row["model"], row["reviewer"], "pending")
+    _emit_event("task.reset", taskfile=str(path), task=tid)
+    return {"file": fname, "task": tid, "status": "pending"}, 200
+
+
 def _stop_project(body):
     """SIGTERM every `code run` process owning this task file.
 
@@ -1770,6 +1802,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/projects/archive":
                 obj, code = _archive_project(body)
+                return self._json(obj, code)
+            if u.path == "/api/projects/retry-task":
+                obj, code = _retry_task(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
