@@ -499,3 +499,44 @@ class LiveQueueView(unittest.TestCase):
                     self._ev("driver.cap_wait", "t1", "Kimi-K3", age=20,
                              in_use=3, cap=3))
         self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 1)
+
+
+class SeekingIntoTheEventLog(unittest.TestCase):
+    """Finding where a time window starts, without walking the whole log.
+
+    The dashboard only counts TODAY's merges and failures, but its client
+    walked the event log from line 0 on every page load — the entire history
+    the fleet has ever emitted, which rotates only at 100MB.
+    """
+
+    def _lines(self, *ts):
+        return [json.dumps({"ts": t, "type": "x"}) for t in ts]
+
+    def test_it_finds_the_first_event_at_the_cutoff(self):
+        lines = self._lines(1, 2, 3, 4, 5)
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 3), 2)
+
+    def test_an_exact_match_is_included_not_skipped(self):
+        lines = self._lines(10, 20, 30)
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 20), 1)
+
+    def test_a_cutoff_before_everything_returns_the_start(self):
+        self.assertEqual(dashboard._first_event_at_or_after(self._lines(5, 6), 1), 0)
+
+    def test_a_cutoff_after_everything_returns_the_end(self):
+        lines = self._lines(5, 6)
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 99), len(lines))
+
+    def test_an_empty_log_is_not_an_error(self):
+        self.assertEqual(dashboard._first_event_at_or_after([], 5), 0)
+
+    def test_malformed_and_ts_less_lines_are_stepped_over(self):
+        # A bisect cannot do this, which is why the scan is linear.
+        lines = [json.dumps({"ts": 1, "type": "x"}), "{not json",
+                 json.dumps({"type": "no-ts"}),
+                 json.dumps({"ts": 9, "type": "x"})]
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 9), 3)
+
+    def test_it_seeks_rather_than_scanning_from_zero(self):
+        lines = self._lines(*range(1, 501))
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 480), 479)

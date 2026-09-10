@@ -997,7 +997,10 @@ async function initEvents() {
   try {
     let after = 0, chunks = 0;
     while (chunks++ < 60) {
-      const d = await jget("/api/events?after=" + after);
+      // Seed from today rather than line 0: the counters below only care
+      // about today, and the log holds every event the fleet has ever emitted.
+      const d = await jget("/api/events?after=" + after
+                           + (after === 0 ? "&since=" + Math.floor(EV_DAY) : ""));
       const evs = d.events || [];
       evs.forEach(countEv);
       if (!evs.length || d.next === after) { after = d.next; break; }

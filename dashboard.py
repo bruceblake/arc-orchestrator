@@ -848,6 +848,31 @@ def _harness_of(model):
     return "kimi" if model == "Kimi-K3" else "opencode"
 
 
+def _first_event_at_or_after(lines, ts):
+    """Index of the first event whose ts >= `ts`, or len(lines) if none.
+
+    Scans BACKWARD from the end rather than binary-searching: the log is
+    append-ordered but individual lines can be malformed or missing a ts, which
+    a bisect cannot step over. Callers want a recent cutoff, so the walk is
+    short in practice and the answer is exact.
+    """
+    i = len(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        line = lines[idx]
+        if '"ts"' not in line:
+            continue
+        try:
+            t = json.loads(line).get("ts")
+        except (ValueError, TypeError):
+            continue
+        if t is None:
+            continue
+        if t < ts:
+            return i
+        i = idx
+    return i
+
+
 def _queue(store):
     """Who is holding a model slot right now, and who is queued behind them.
 
@@ -2248,6 +2273,15 @@ class Handler(BaseHTTPRequestHandler):
                 lines = _load_event_lines()
                 reset = after > len(lines)
                 start = 0 if reset else after
+                # A cold client asking for "today" used to walk the whole log
+                # from line 0 — every page load downloaded the entire history
+                # (677KB and climbing, rotating only at 100MB) to count a
+                # handful of today's merges. `since` seeds the cursor instead.
+                if start == 0 and q.get("since"):
+                    try:
+                        start = _first_event_at_or_after(lines, float(q["since"][0]))
+                    except (TypeError, ValueError):
+                        pass
                 chunk = lines[start:start + MAX_EVENTS_PER_RESPONSE]
                 events = []
                 for line in chunk:
@@ -2255,7 +2289,8 @@ class Handler(BaseHTTPRequestHandler):
                         events.append(json.loads(line))
                     except Exception:
                         pass
-                return self._json({"events": events, "next": start + len(chunk), "reset": reset})
+                return self._json({"events": events, "next": start + len(chunk),
+                                   "reset": reset, "total": len(lines)})
             if u.path == "/api/graphs":
                 return self._json(_build_graph_topologies())
             if u.path == "/api/code":
