@@ -40,6 +40,17 @@ main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
 .dots { display: inline-flex; gap: 2px; flex: none; align-items: center; }
 .dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
 .dot.live { animation: pulse 1.3s infinite; }
+.prows { display: flex; flex-direction: column; gap: 4px; }
+.prows .prow { margin: 0; }
+.pwrap.open > .prow { border-color: var(--accent); }
+.chev { color: var(--dim); flex: none; transition: transform .12s ease; font-size: 10px; }
+.pwrap.open .chev { transform: rotate(90deg); color: var(--accent); }
+.pdetail { border: 1px solid var(--border); border-radius: 8px; background: #0d1117; padding: 10px 12px; margin-top: 4px; }
+#projects #view-detail { margin: 2px 0 6px 18px; }
+input.fsel { width: 210px; }
+.topohead { display: flex; align-items: baseline; gap: 10px; margin: 12px 0 6px; }
+.topohead h3 { margin: 0; font-size: 12px; color: var(--purple); }
+svg g.node.topo { cursor: default; }
 table { border-collapse: collapse; width: 100%; }
 th, td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 th { color: var(--dim); font-weight: normal; font-size: 11px; white-space: nowrap; }
@@ -171,11 +182,15 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   <span class="pill" id="stale" style="display:none">stale (retrying…)</span>
   <span class="pill">updated <b id="clock">-</b></span>
   <div class="fbar">
-    <select class="fsel" id="f-proj" title="project filter"><option value="">All projects</option></select>
     <select class="fsel" id="f-repo" title="repo filter" style="display:none"><option value="">All repos</option></select>
+    <select class="fsel" id="f-status" title="status filter">
+      <option value="">All statuses</option>
+      <option value="running">has running</option>
+      <option value="failed">has failed</option>
+      <option value="merged">all merged</option>
+    </select>
     <select class="fsel" id="f-model" title="agent model filter"><option value="">All models</option></select>
-    <button class="pill on" id="d-compact" title="one line per project">compact</button>
-    <button class="pill" id="d-comfort" title="full cards">comfort</button>
+    <input class="fsel" id="f-q" type="search" placeholder="search title / taskfile…" title="search project titles and task files">
     <span class="hint" id="f-hint"></span>
   </div>
 </header>
@@ -217,6 +232,10 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       </h2>
       <div id="projects"></div>
       <div class="empty" id="projects-empty" style="display:none">No task files in ~/tasks yet — create one with “+ New project”.</div>
+    </div>
+    <div class="panel" id="topo-panel">
+      <h2>Orchestrator graphs <span class="hint" id="topo-meta"></span></h2>
+      <div id="topo"></div>
     </div>
   </div>
 
@@ -308,7 +327,7 @@ const $ = s => document.querySelector(s);
 let SHOW_ARCHIVED = false, PHASE_FILT = "", OPEN_PHASES = {};
 let PROJECTS = [], AGENTS = [], RECENT = [], FLEET = null;
 let CUR = null, CUR_DATA = null, CUR_PID = null, detailTimer = null, drawerFile = null;
-let FILT = {p: "", r: "", m: ""}, DENSE = true;
+let FILT = {r: "", s: "", m: "", q: ""}, EXPANDED = "";
 // Glyph cue that survives greyscale (colour alone must not carry status).
 const STATUSG = {merged: " ✓", done: " ✓", running: " …", failed: " ✗", conflict: " !", pending: " ○"};
 
@@ -332,43 +351,42 @@ function markFail(name, failed) {
 // ---- filters (persisted in the URL hash) ----
 function loadHash() {
   const h = new URLSearchParams(location.hash.slice(1));
-  FILT.p = h.get("p") || ""; FILT.r = h.get("r") || ""; FILT.m = h.get("m") || "";
-  DENSE = h.get("d") !== "comfort";
+  FILT.r = h.get("r") || ""; FILT.s = h.get("s") || ""; FILT.m = h.get("m") || ""; FILT.q = h.get("q") || "";
+  EXPANDED = h.get("x") || "";
 }
 function saveHash() {
   const h = new URLSearchParams();
-  if (FILT.p) h.set("p", FILT.p);
   if (FILT.r) h.set("r", FILT.r);
+  if (FILT.s) h.set("s", FILT.s);
   if (FILT.m) h.set("m", FILT.m);
-  if (!DENSE) h.set("d", "comfort");
+  if (FILT.q) h.set("q", FILT.q);
+  if (EXPANDED) h.set("x", EXPANDED);
   history.replaceState(null, "", h.toString() ? "#" + h.toString() : location.pathname);
 }
 function syncFilterControls() {
-  $("#f-proj").value = FILT.p; $("#f-repo").value = FILT.r; $("#f-model").value = FILT.m;
-  $("#d-compact").className = "pill" + (DENSE ? " on" : "");
-  $("#d-comfort").className = "pill" + (DENSE ? "" : " on");
+  $("#f-repo").value = FILT.r; $("#f-status").value = FILT.s; $("#f-model").value = FILT.m;
+  if ($("#f-q").value !== FILT.q) $("#f-q").value = FILT.q;
 }
-$("#f-proj").onchange = e => { FILT.p = e.target.value; saveHash(); renderProjects(); };
 $("#f-repo").onchange = e => { FILT.r = e.target.value; saveHash(); renderProjects(); };
-$("#f-model").onchange = e => { FILT.m = e.target.value; saveHash(); renderAgents(); };
-$("#d-compact").onclick = () => { DENSE = true; saveHash(); syncFilterControls(); renderProjects(); };
-$("#d-comfort").onclick = () => { DENSE = false; saveHash(); syncFilterControls(); renderProjects(); };
+$("#f-status").onchange = e => { FILT.s = e.target.value; saveHash(); renderProjects(); };
+$("#f-model").onchange = e => { FILT.m = e.target.value; saveHash(); renderProjects(); renderAgents(); };
+$("#f-q").oninput = e => { FILT.q = e.target.value; saveHash(); renderProjects(); };
+const FOUR_MODELS = ["gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"];
 function rebuildFilterOptions() {
-  const files = PROJECTS.map(p => [p.file, p.title]);
-  setOptions("#f-proj", [["", "All projects"], ...files], FILT.p);
   const repos = [...new Set(PROJECTS.map(p => p.repo || ""))].sort();
   $("#f-repo").style.display = repos.length > 1 ? "" : "none";
   setOptions("#f-repo", [["", "All repos"], ...repos.map(r => [r, repoShort(r)])], FILT.r);
   const models = new Set(AGENTS.filter(a => a.task && a.model).map(a => a.model));
   (FLEET ? FLEET.models || [] : []).forEach(m => models.add(m.model));
-  setOptions("#f-model", [["", "All models"], ...[...models].sort().map(m => [m, short(m)])], FILT.m);
+  const list = [...FOUR_MODELS, ...[...models].filter(m => !FOUR_MODELS.includes(m)).sort()];
+  setOptions("#f-model", [["", "All models"], ...list.map(m => [m, short(m)])], FILT.m);
 }
 function setOptions(sel, pairs, keep) {
   const el = $(sel), cur = el.value;
   el.innerHTML = pairs.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
   el.value = [...el.options].some(o => o.value === keep) ? keep : "";
   if (el.value !== keep && keep) { // selected filter value disappeared — drop it
-    if (sel === "#f-proj") FILT.p = ""; if (sel === "#f-repo") FILT.r = ""; if (sel === "#f-model") FILT.m = "";
+    if (sel === "#f-repo") FILT.r = ""; if (sel === "#f-model") FILT.m = "";
     saveHash();
   } else if (cur !== el.value) { /* normalized */ }
 }
@@ -379,6 +397,7 @@ const revShort = r => r === "kimi" ? "Kimi K3" : r === "glm" ? "GLM 5.3" : short
 function taskDag(dag, opts) {
   opts = opts || {};
   const mini = opts.size !== "full";
+  const topo = !!opts.topo; // static workload topology: no per-run state
   const nodes = (dag && dag.nodes) || [], edges = (dag && dag.edges) || [];
   if (!nodes.length) return "";
   const lvl = {}; nodes.forEach(n => lvl[n.id] = 0);
@@ -396,25 +415,31 @@ function taskDag(dag, opts) {
   const H = Math.max(...Object.values(pos).map(p => p.y)) + NH + PAD;
   let s = "";
   for (const e of edges) { const a = pos[e.src], b = pos[e.dst]; if (!a || !b || e.src === e.dst) continue;
-    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"/>`; }
-  for (const n of nodes) { const p = pos[n.id], c = STATUSC[n.status] || STATUSC.pending;
-    const run = n.status === "running" || n.live;
+    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"${e.conditional ? ' stroke-dasharray="4 3"' : ""}/>`; }
+  for (const n of nodes) { const p = pos[n.id], c = topo ? ((dag.starts || []).includes(n.id) ? "#58a6ff" : n.gather ? "#bc8cff" : "#8b949e") : (STATUSC[n.status] || STATUSC.pending);
+    const run = !topo && (n.status === "running" || n.live);
     const att = n.attempts || 0, escn = n.escalations || 0;
-    const ttip = [n.title || n.id,
+    const ttip = topo ? [n.id, n.gather ? "gather — joins parallel branches" : (dag.starts || []).includes(n.id) ? "start" : ""].filter(Boolean).join("\n")
+      : [n.title || n.id,
       `status: ${n.status}${n.live ? " (live)" : ""}`,
       `impl: ${short(n.model)} · review: ${revShort(n.reviewer)}`,
       n.verify_cmd ? `verify: ${n.verify_cmd}` : ""].filter(Boolean).join("\n");
-    s += `<g class="node" data-t="${esc(n.id)}" data-f="${esc(opts.file || "")}" role="button" tabindex="0" aria-label="${esc(`task ${n.id}: ${n.status}${n.live ? " (live)" : ""}`)}">` +
+    s += topo
+      ? `<g class="node topo"><title>${esc(ttip)}</title>` +
+        `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="7" fill="#0d1117" stroke="${c}" stroke-width="1.6"/>` +
+        `<text x="${p.x + 10}" y="${p.y + 20}" font-size="11" fill="#c9d1d9">${esc(n.id.slice(0, 26))}</text>` +
+        `<text x="${p.x + 10}" y="${p.y + 35}" font-size="9" fill="#8b949e">${(dag.starts || []).includes(n.id) ? "start" : n.gather ? "gather" : ""}</text>`
+      : `<g class="node" data-t="${esc(n.id)}" data-f="${esc(opts.file || "")}" role="button" tabindex="0" aria-label="${esc(`task ${n.id}: ${n.status}${n.live ? " (live)" : ""}`)}">` +
          `<title>${esc(ttip)}</title>` +
          `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="${mini ? 5 : 7}" fill="#0d1117" stroke="${c}" stroke-width="1.6" class="${run ? "run" : ""}"/>` +
          `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 12.5 : 17)}" font-size="${mini ? 9 : 11}" fill="#c9d1d9">${esc(n.id.slice(0, mini ? 19 : 26))}${mini ? (STATUSG[n.status] || "") : ""}</text>` +
          `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 24.5 : 33)}" font-size="${mini ? 7.5 : 9}" fill="#8b949e">${esc(short(n.model))} → ${esc(revShort(n.reviewer))}${att > 1 ? ` · x${att}` : ""}${escn ? ` ⬆${escn}` : ""}</text>`;
-    if (!mini)
+    if (!topo && !mini)
       s += `<text x="${p.x + 10}" y="${p.y + 45}" font-size="9" fill="${c}">${esc(n.status)}${n.live ? " · live" : ""}</text>`;
-    if (att > 1 || escn > 0)
+    if (!topo && (att > 1 || escn > 0))
       s += `<path d="M${p.x + NW - 4},${p.y} C${p.x + NW - 4},${p.y - 12} ${p.x + 4},${p.y - 12} ${p.x + 4},${p.y}" stroke="#d29922" stroke-dasharray="3 2" fill="none"/>` +
            `<text x="${p.x + NW / 2}" y="${p.y - 4}" font-size="${mini ? 7 : 8.5}" fill="#d29922" text-anchor="middle">x${att}${escn ? " ⬆" + escn : ""}</text>`;
-    if (n.last_verdict && n.last_verdict.pass === false && n.status !== "merged")
+    if (!topo && n.last_verdict && n.last_verdict.pass === false && n.status !== "merged")
       s += `<circle cx="${p.x + NW - 5}" cy="${p.y + 5}" r="3" fill="#f85149"/>`;
     s += `</g>`; }
   const wide = W > 1400;
@@ -428,18 +453,25 @@ function bindDagClicks(sel, runsCache) {
 }
 
 // ---- projects list ----
-function prow(p, i) {
+function card(p, i) {
   const nodes = (p.dag && p.dag.nodes) || [];
   const dots = nodes.map(n => `<i class="dot ${n.live || n.status === "running" ? "live" : ""}" style="background:${STATUSC[n.status] || STATUSC.pending}" title="${esc(n.id)} · ${esc(n.status)}${n.live ? " (live)" : ""}${esc(n.title && n.title !== n.id ? " · " + n.title : "")}"></i>`).join("");
   const tot = (p.progress && p.progress.total) || p.n_tasks || 1;
   const done = (p.progress && p.progress.done) || 0;
   const failed = ((p.statuses && p.statuses.failed) || 0) + ((p.statuses && p.statuses.conflict) || 0);
-  return `<div class="prow" data-i="${i}" role="button" tabindex="0" aria-label="open project ${esc(p.title)}">
-    <span class="dots">${dots}</span>
-    <span class="pt"><b>${esc(p.title)}</b> ${liveBadge(p)}</span>
-    <span class="pc">${done}/${tot}${failed ? ` · <span class="bad">${failed}✗</span>` : ""}</span>
-    <span class="pc" style="color:var(--warn)">⛁ ${fmtK(p.tokens)}</span>
-    <span class="pc">${fmtT(p.last_activity)}</span>
+  const open = EXPANDED === p.file;
+  return `<div class="pwrap${open ? " open" : ""}" data-file="${esc(p.file)}">
+    <div class="prow" data-i="${i}" role="button" tabindex="0" aria-expanded="${open}" aria-label="open project ${esc(p.title)}">
+      <span class="chev">▶</span>
+      <span class="pc" title="${esc(p.repo || "")}">${esc(repoShort(p.repo))}</span>
+      <span class="pt"><b>${esc(p.title)}</b> ${liveBadge(p)}${p.archived ? ' <span class="chip pending" title="archived — hidden from the active list">archived</span>' : ""}</span>
+      <span class="dots">${dots}</span>
+      <span class="pc">${done}/${tot}${failed ? ` · <span class="bad">${failed}✗</span>` : ""}</span>
+      <span class="pc" style="color:var(--warn)">⛁ ${fmtK(p.tokens)}</span>
+      <span class="pc">${fmtT(p.last_activity)}</span>
+      <span><button class="act seg" data-arch="${esc(p.file)}" data-on="${p.archived ? 1 : 0}">${p.archived ? "restore" : "archive"}</button></span>
+    </div>
+    ${(p.errors && p.errors.length) ? `<div class="cardnote" title="${esc(p.errors[0].error)}">⚠ ${esc(p.errors[0].id)}: ${esc(String(p.errors[0].error).slice(0, 90))}</div>` : ""}
   </div>`;
 }
 // "Is this actually progressing?" had no answer on the page: a task that had
@@ -592,50 +624,34 @@ $("#gh-promote").onclick = async () => {
   pollGithub();
 };
 
-function card(p, i) {
-  const chips = Object.entries(p.statuses || {}).map(([s, n]) => chip(s, n)).join("") || '<span class="hint">never run</span>';
-  const tot = (p.progress && p.progress.total) || p.n_tasks || 1;
-  const done = (p.progress && p.progress.done) || 0;
-  const running = (p.statuses && p.statuses.running) || 0;
-  const failed = ((p.statuses && (p.statuses.failed || 0)) + ((p.statuses && p.statuses.conflict) || 0));
-  const pct = n => (100 * n / tot).toFixed(1);
-  const bar = `<div class="pbar"><i class="done" style="width:${pct(done)}%"></i><i class="running" style="width:${pct(running)}%"></i><i class="failed" style="width:${pct(failed)}%"></i></div>`;
-  return `<div class="card ${p.archived ? "archived" : ""}" data-i="${i}" role="button" tabindex="0" aria-label="open project ${esc(p.title)}">
-    <div><b>${esc(p.title)}</b> ${liveBadge(p)}${p.archived ? ' <span class="chip pending" title="archived — hidden from the active list">archived</span>' : ""}</div>
-    ${bar}
-    ${progressLines(p.task_progress)}
-    <div class="hint">${done}/${tot} merged${failed ? ` · <span class="bad">${failed} failed</span>` : ""}${running ? ` · ${running} running` : ""}</div>
-    ${taskDag(p.dag, {size: "mini", file: p.file})}
-    <div style="margin-top:6px">${chips}</div>
-    <div style="margin-top:5px">
-      <span class="stat tok">⛁ <b>${fmtK(p.tokens)}</b> tok</span>
-      <span class="stat">⏱ <b>${tick(p.seconds)}</b> agent-time</span>
-      <span class="stat"><b>${p.n_tasks}</b> tasks</span>
-    </div>
-    <div style="margin-top:5px">${(p.models || []).map(m => `<span class="tag">${short(m)}</span>`).join("")}
-      ${(p.reviewers || []).map(m => `<span class="tag">review: ${revShort(m)}</span>`).join("")}</div>
-    ${(p.errors && p.errors.length) ? `<div class="cardnote" title="${esc(p.errors[0].error)}">⚠ ${esc(p.errors[0].id)}: ${esc(String(p.errors[0].error).slice(0, 90))}</div>` : ""}
-    <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}</div>
-    <div class="cardact">
-      <button class="act seg" data-arch="${esc(p.file)}" data-on="${p.archived ? 1 : 0}">${p.archived ? "restore" : "archive"}</button>
-    </div>
-  </div>`;
+
+// The filters answer operator questions: which repo, which model, what
+// happened, and free text over titles/task files. Everything composes.
+function projectMatches(p) {
+  if (FILT.r && (p.repo || "") !== FILT.r) return false;
+  if (FILT.m && !(p.models || []).includes(FILT.m)) return false;
+  const q = FILT.q.trim().toLowerCase();
+  if (q && !((p.title || "").toLowerCase().includes(q) || (p.file || "").toLowerCase().includes(q))) return false;
+  const st = p.statuses || {};
+  if (FILT.s === "running") return (st.running || 0) > 0 || !!p.run_pid;
+  if (FILT.s === "failed") return ((st.failed || 0) + (st.conflict || 0)) > 0;
+  if (FILT.s === "merged") {
+    const tot = (p.progress && p.progress.total) || p.n_tasks || 0;
+    return tot > 0 && ((p.progress && p.progress.done) || 0) === tot;
+  }
+  return true;
 }
 function visibleProjects() {
-  return PROJECTS.map((p, i) => ({p, i})).filter(x =>
-    (!FILT.p || x.p.file === FILT.p) && (!FILT.r || (x.p.repo || "") === FILT.r));
+  return PROJECTS.filter(p => SHOW_ARCHIVED ? p.archived : (!p.archived || p.phase === "attention"))
+                 .filter(p => !PHASE_FILT || p.phase === PHASE_FILT)
+                 .filter(projectMatches);
 }
 function renderProjects() {
   rebuildFilterOptions(); syncFilterControls();
   const vis = visibleProjects();
   $("#proj-meta").textContent = `(${vis.length}${vis.length !== PROJECTS.length ? " of " + PROJECTS.length : ""})`;
+  $("#f-hint").textContent = PROJECTS.length ? `${vis.length} of ${PROJECTS.length} projects` : "";
   $("#projects-empty").style.display = PROJECTS.length ? "none" : "";
-  const groups = {};
-  vis.forEach(x => { const k = x.p.repo || ""; (groups[k] = groups[k] || []).push(x); });
-  const ordered = Object.entries(groups).sort((a, b) =>
-    (b[1].some(x => x.p.active) - a[1].some(x => x.p.active)) ||
-    (b[1].reduce((s, x) => s + (x.p.tokens || 0), 0) - a[1].reduce((s, x) => s + (x.p.tokens || 0), 0)) ||
-    a[0].localeCompare(b[0]));
   // Grouped by PHASE, not by repo. The operator's question is "what needs
   // me?", and eighteen cards sorted by repo answered a question nobody asked:
   // finished work buried the two projects that were actually running.
@@ -646,8 +662,6 @@ function renderProjects() {
     ["new",       "never run"],
     ["done",      "done"],
   ];
-  const visible = PROJECTS.filter(p => SHOW_ARCHIVED ? p.archived : (!p.archived || p.phase === "attention"))
-                          .filter(p => !PHASE_FILT || p.phase === PHASE_FILT);
   const counts = {};
   PROJECTS.filter(p => !p.archived || p.phase === "attention").forEach(p => counts[p.phase] = (counts[p.phase] || 0) + 1);
   $("#phase-filter").innerHTML = PHASES.filter(([k]) => counts[k])
@@ -655,20 +669,33 @@ function renderProjects() {
     .join("") + (PHASE_FILT ? '<button class="act seg" data-ph="">all</button>' : "");
 
   const byPhase = {};
-  visible.forEach(p => (byPhase[p.phase] = byPhase[p.phase] || []).push(p));
+  vis.forEach(p => (byPhase[p.phase] = byPhase[p.phase] || []).push(p));
+
+  // The detail panel renders inline UNDER its project row. Park it at the
+  // end of <main> before the innerHTML wipe so it is never destroyed, then
+  // re-attach it under the expanded row (if that row is visible). Unconditional
+  // appendChild: a no-op when already parked, a rescue when under a row.
+  const det = $("#view-detail");
+  document.querySelector("main").appendChild(det);
+
   $("#projects").innerHTML = PHASES.map(([key, label]) => {
     const items = byPhase[key] || [];
     if (!items.length) return "";
     // `done` collapses by default: it is the largest group and the least
     // actionable, which is exactly what was causing the clutter.
-    const collapsed = key === "done" && !PHASE_FILT && !SHOW_ARCHIVED && !OPEN_PHASES.done;
+    const collapsed = key === "done" && !PHASE_FILT && !SHOW_ARCHIVED && !OPEN_PHASES.done
+      && !(EXPANDED && (byPhase.done || []).some(p => p.file === EXPANDED));
     return `<div class="phasehead ${key}">
         <h3>${label}</h3><span class="hint">${items.length}</span>
         ${key === "done" ? `<button class="act seg" data-toggle="done">${collapsed ? "show" : "hide"}</button>
           <button class="act seg" data-archive-all="1">archive all done</button>` : ""}
       </div>
-      ${collapsed ? "" : `<div class="repogrid">${items.map(p => card(p, PROJECTS.indexOf(p))).join("")}</div>`}`;
+      ${collapsed ? "" : `<div class="prows">${items.map(p => card(p, PROJECTS.indexOf(p))).join("")}</div>`}`;
   }).join("") || `<div class="empty">${SHOW_ARCHIVED ? "Nothing archived." : "No projects match this filter."}</div>`;
+
+  const wrap = EXPANDED && $("#projects").querySelector(`.pwrap[data-file="${CSS.escape(EXPANDED)}"]`);
+  if (wrap) { det.style.display = ""; wrap.after(det); }
+  else det.style.display = "none";
 
   document.querySelectorAll("#phase-filter [data-ph]").forEach(b =>
     b.onclick = () => { PHASE_FILT = b.dataset.ph; renderProjects(); });
@@ -689,7 +716,6 @@ function renderProjects() {
       else if (body.warning) alert(body.warning);
       pollProjects();
     });
-  bindDagClicks("#projects");
 }
 async function pollProjects() {
   try {
@@ -699,6 +725,10 @@ async function pollProjects() {
     markFail("projects", false);
   } catch (e) { markFail("projects", true); }
   renderProjects();
+  // Re-open the inline detail panel if the URL hash asks for it and it is
+  // not open yet (page load with x=…, or the project just appeared).
+  if (EXPANDED && EXPANDED !== CUR &&
+      $("#projects").querySelector(`.pwrap[data-file="${CSS.escape(EXPANDED)}"]`)) openDetail(EXPANDED);
 }
 
 // ---- agents panel ----
@@ -898,23 +928,51 @@ async function pollEvents() {
 }
 
 // ---- orchestration graph topologies (static /api/graphs) ----
+// Same taskDag renderer as the project DAGs, in topo mode: static workload
+// shapes with no per-run state. Dashed edge = conditional (when= gate).
+let TOPOS = null;
+async function pollTopos() {
+  try {
+    TOPOS = await jget("/api/graphs");
+    markFail("graphs", false);
+  } catch (e) { markFail("graphs", true); return; }
+  renderTopos();
+}
+function renderTopos() {
+  const tops = Object.values(TOPOS || {}).filter(t => t && Array.isArray(t.nodes));
+  if (!tops.length) { $("#topo").innerHTML = '<div class="empty">no graphs available</div>'; return; }
+  $("#topo-meta").textContent = `${tops.length} workload graphs · dashed = conditional edge`;
+  $("#topo").innerHTML = tops.map(t => {
+    const g = {
+      starts: t.starts || [],
+      nodes: (t.nodes || []).map(n => ({id: n.name, gather: !!n.gather})),
+      edges: (t.edges || []).map(e => ({src: e.src, dst: e.dst, conditional: !!e.conditional})),
+    };
+    return `<div class="topohead"><h3>${esc(t.name || "graph")}</h3><span class="hint">${g.nodes.length} nodes · ${g.edges.length} edges</span></div>
+      <div style="overflow-x:auto">${taskDag(g, {size: "full", topo: true})}</div>`;
+  }).join("");
+}
 
 // ---- project detail view ----
+// The detail panel renders inline under its project row (the list stays
+// visible); EXPANDED (URL hash x=) tracks which row owns it.
 async function openDetail(file) {
-  $("#view-list").style.display = "none";
-  $("#view-detail").style.display = "";
+  EXPANDED = file; saveHash();
+  renderProjects();
+  if (!$("#projects").querySelector(`.pwrap[data-file="${CSS.escape(file)}"]`)) return;
   CUR = file;
   await refreshDetail();
   if (detailTimer) clearInterval(detailTimer);
   detailTimer = setInterval(refreshDetail, 5000);
 }
-$("#btn-back").onclick = () => {
+function closeDetail() {
   if (detailTimer) { clearInterval(detailTimer); detailTimer = null; }
+  EXPANDED = ""; saveHash();
   CUR = null; CUR_DATA = null;
-  $("#view-detail").style.display = "none";
-  $("#view-list").style.display = "";
+  renderProjects();
   pollProjects(); pollHealth();
-};
+}
+$("#btn-back").onclick = closeDetail;
 
 async function refreshDetail() {
   if (!CUR) return;
@@ -1271,7 +1329,7 @@ document.addEventListener("keydown", e => {
 $("#projects").onclick = ev => {
   const el = ev.target.closest("[data-i]");
   const p = el && PROJECTS[+el.dataset.i];
-  if (p && p.file) openDetail(p.file);
+  if (p && p.file) { if (EXPANDED === p.file) closeDetail(); else openDetail(p.file); }
 };
 
 // ---- boot: staggered polls so nothing fires all at once ----
@@ -1284,7 +1342,7 @@ setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
 setTimeout(() => setInterval(pollEvents, 8000), 1200);
 setInterval(pollProjects, 5000);
 setInterval(pollGithub, 20000);
-setInterval( 30000);
+setTimeout(() => { pollTopos(); setInterval(pollTopos, 30000); }, 2000);
 </script>
 </body>
 </html>
