@@ -1363,6 +1363,94 @@ def _agents(store):
 _TRANSCRIPT_RE = re.compile(r"^[\w.-]+\.jsonl$")
 
 
+_gh_cache = {"key": 0.0, "data": None}
+GH_CACHE_S = 20.0
+
+
+def _github(store, repo=None):
+    """Open and recent pull requests, plus the review trail we recorded.
+
+    GitHub shows 0 reviews on these PRs — a bot cannot formally approve a pull
+    request opened by its own account, so reviewer verdicts land as comments.
+    The authoritative record of who approved is our own task.pr_reviewed
+    events, so both are returned and the console shows them together.
+    """
+    now = time.time()
+    if _gh_cache["data"] is not None and now - _gh_cache["key"] < GH_CACHE_S:
+        return _gh_cache["data"]
+    repo = repo or Path(config.ROOT)
+    out = {"now": now, "ready": False, "reason": None, "prs": [],
+           "base": config.BASE_BRANCH, "prod": config.PROD_BRANCH}
+
+    def gh(*args, timeout=25):
+        try:
+            r = subprocess.run(["gh", "-R", "", *args] if False else ["gh", *args],
+                               cwd=str(repo), capture_output=True, text=True,
+                               timeout=timeout)
+            return r.stdout if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    def git(*args):
+        try:
+            r = subprocess.run(["git", "-C", str(repo), *args],
+                               capture_output=True, text=True, timeout=5)
+            return r.stdout if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    remote = git("remote", "get-url", "origin").strip()
+    if not remote:
+        out["reason"] = "no git remote configured"
+        _gh_cache.update(key=now, data=out)
+        return out
+    out["ready"] = True
+    out["remote"] = remote
+    out["repo_url"] = re.sub(r"\.git$", "", remote.replace("git@github.com:",
+                                                            "https://github.com/"))
+    raw = gh("pr", "list", "--state", "all", "--limit", "20", "--json",
+             "number,title,state,headRefName,baseRefName,additions,deletions,"
+             "createdAt,updatedAt,url,isDraft,mergedAt")
+    try:
+        prs = json.loads(raw) if raw.strip() else []
+    except ValueError:
+        prs = []
+
+    # our own verdicts, keyed by PR number
+    verdicts = {}
+    for line in _load_event_lines():
+        if '"task.pr_reviewed"' not in line and '"task.pr_opened"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        n = e.get("pr") or e.get("number")
+        if not n:
+            continue
+        v = verdicts.setdefault(n, {"task": e.get("task"), "rounds": []})
+        if e.get("type") == "task.pr_reviewed":
+            v["rounds"].append({
+                "round": e.get("round"), "approved": e.get("approved"),
+                "approvals": e.get("approvals") or [],
+                "reviewers": e.get("reviewers") or [],
+                "issues": e.get("n_issues") or 0, "ts": _ts(e.get("ts"))})
+
+    ahead = git("rev-list", "--count",
+                f"{config.PROD_BRANCH}..{config.BASE_BRANCH}").strip()
+    out["unpromoted"] = int(ahead) if ahead.isdigit() else 0
+    for pr in prs:
+        n = pr.get("number")
+        v = verdicts.get(n, {})
+        pr["task"] = v.get("task")
+        pr["rounds"] = v.get("rounds", [])
+        pr["approvals"] = (v["rounds"][-1]["approvals"] if v.get("rounds") else [])
+        pr["reviewers"] = (v["rounds"][-1]["reviewers"] if v.get("rounds") else [])
+        out["prs"].append(pr)
+    _gh_cache.update(key=now, data=out)
+    return out
+
+
 def _task_deliverable(repo, task_id, want_patch=False):
     """What a finished task actually changed, from its commit.
 
@@ -1937,6 +2025,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/agents":
                 return self._json(_agents(Handler.store))
+            if u.path == "/api/github":
+                return self._json(_github(Handler.store))
             if u.path == "/api/health":
                 return self._json(_health(Handler.store))
             if u.path == "/api/metrics":
@@ -2046,6 +2136,20 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)
                 return self._json(obj, code)
+            if u.path == "/api/promote":
+                import gitstore
+
+                async def go():
+                    await gitstore.ensure_base_branch(Path(config.ROOT))
+                    return await gitstore.open_promotion_pr(Path(config.ROOT))
+                try:
+                    n, url, note = asyncio.run(go())
+                except Exception as exc:
+                    return self._json({"error": str(exc)}, 500)
+                _gh_cache["key"] = 0.0            # force a refresh
+                _emit_event("promotion.opened" if url else "promotion.skipped",
+                            number=n, url=url, note=note)
+                return self._json({"number": n, "url": url, "note": note})
             if u.path == "/api/projects/archive":
                 obj, code = _archive_project(body)
                 return self._json(obj, code)

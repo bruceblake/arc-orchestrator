@@ -650,10 +650,30 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
                         reviewers=chosen, n_issues=len(issues))
+            # Post each verdict AS A GITHUB REVIEW, not just internally. The
+            # approvals existed only in our event log, so a PR merged by two
+            # AI reviewers showed "0 reviews" on GitHub — the trail was
+            # invisible exactly where a human would look for it.
+            for model, v in outcomes:
+                body = (f"**{model}** (round {round_n}) — "
+                        + ("approved." if v["approve"] else "changes requested:\n\n"
+                           + "\n".join(f"- {i}" for i in v["issues"][:20])))
+                # A bot cannot formally approve its own repo's PR, so an
+                # approval is posted as a comment and a rejection uses
+                # --request-changes where permitted; both fall back to a plain
+                # comment so the verdict is never lost.
+                rc, _, _ = await gitstore._gh(
+                    ["pr", "review", str(number),
+                     "--approve" if v["approve"] else "--request-changes",
+                     "--body", body], cwd=repo)
+                if rc != 0:
+                    await gitstore._gh(["pr", "comment", str(number),
+                                        "--body", body], cwd=repo)
             if not approved:
                 await gitstore._gh(
                     ["pr", "comment", str(number), "--body",
-                     "**Changes requested** (round %d)\n\n%s" % (
+                     "**Changes requested** (round %d) — returning to the "
+                     "implementer.\n\n%s" % (
                          round_n, "\n".join(f"- {i}" for i in issues[:20]))],
                     cwd=repo)
             return {"approved": approved, "issues": issues,
