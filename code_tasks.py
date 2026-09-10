@@ -570,13 +570,38 @@ def _balanced_span(text, start):
     return None
 
 
+def _plan_is_substantive(obj):
+    """Reject a plan whose tasks are placeholders.
+
+    Planners sometimes emit an abbreviated copy first — same schema, but with
+    task prompts literally "...". Taking the first schema match would accept
+    that decoy and hand the fleet unrunnable work, which is a far worse
+    failure than a loud one.
+    """
+    tasks = (obj.get("project") or {}).get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return False
+    for t in tasks:
+        if not isinstance(t, dict) or not t.get("id"):
+            return False
+        if len(str(t.get("prompt") or "").strip()) < 40:
+            return False
+    return True
+
+
 def _extract_plan_json(text):
-    """First balanced JSON span that parses as a plan dict; None if absent.
+    """Best balanced JSON span that parses as a real plan; None if absent.
 
     Planners echo the JSON more than once (fenced copy + bare copy) or append
     prose, so a greedy regex over-spans and nested fragments under-match —
     accept only a balanced span carrying the project/tasks schema.
+
+    The LAST substantive span wins, matching _parse_verdict: what a model says
+    last is its answer, and an earlier copy is often an abbreviated sketch.
+    A substantive span is preferred over a placeholder one at any position.
     """
+    fallback = None
+    best = None
     for m in re.finditer(r"\{", text):
         span = _balanced_span(text, m.start())
         if span is None:
@@ -585,9 +610,58 @@ def _extract_plan_json(text):
             obj = json.loads(span)
         except ValueError:
             continue
-        if isinstance(obj.get("project"), dict) and "tasks" in obj["project"]:
+        if not (isinstance(obj.get("project"), dict) and "tasks" in obj["project"]):
+            continue
+        if _plan_is_substantive(obj):
+            best = span
+        elif fallback is None:
+            fallback = span
+    return best or fallback
+
+
+def _transcript_assistant_messages(path):
+    """Assistant message texts from a harness transcript, oldest first."""
+    out = []
+    try:
+        raw = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return out
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("role") != "assistant":
+            continue
+        content = obj.get("content")
+        if isinstance(content, str) and content.strip():
+            out.append(content)
+        elif isinstance(content, list):  # opencode-style content parts
+            text = "".join(c.get("text", "") for c in content
+                           if isinstance(c, dict))
+            if text.strip():
+                out.append(text)
+    return out
+
+
+def _plan_json_from_run(res):
+    """The plan JSON from a finished planner run, or None.
+
+    Reads the TRANSCRIPT rather than DriverResult.text. drivers.parse_transcript
+    caps that text at the last 3000 characters — harmless for reviewer verdicts,
+    which are small and scanned backwards, but fatal for a plan: real ones run
+    6.5-11.5KB, so the opening `{"project":` is always cut off and no balanced
+    span can ever match. The planner would complete normally, exit 0, and have
+    its work thrown away with "produced no usable JSON".
+    """
+    for msg in reversed(_transcript_assistant_messages(res.transcript_path)):
+        span = _extract_plan_json(msg)
+        if span is not None:
             return span
-    return None
+    return _extract_plan_json(res.text or "")
 
 
 async def plan_tasks(goal, repo, out_path=None):
@@ -636,7 +710,7 @@ async def plan_tasks(goal, repo, out_path=None):
         + PLAN_SCHEMA_HINT
     )
     res = await KimiDriver("planner").run(prompt, Path(repo), task_id="plan")
-    raw = _extract_plan_json(res.text)
+    raw = _plan_json_from_run(res)
     if raw is None:
         raise RuntimeError(f"planner produced no usable JSON; transcript: {res.transcript_path}")
     json.loads(raw)  # validate

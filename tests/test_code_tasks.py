@@ -184,3 +184,67 @@ class ImplementPromptDiscipline(unittest.TestCase):
             {"id": "t", "title": "T", "prompt": "x", "files_hint": [],
              "model": "", "reviewer": ""}, "- missing the null check")
         self.assertIn("missing the null check", p)
+
+
+class PlanExtraction(unittest.TestCase):
+    """The planner's output must survive the trip back from the harness.
+
+    DriverResult.text is capped at the last 3000 characters by
+    drivers.parse_transcript. That is harmless for reviewer verdicts (small,
+    and scanned backwards) but fatal for a plan: real ones run 6.5-11.5KB, so
+    the opening {"project": is always cut off and no balanced span can match.
+    The planner completed normally, exited 0, and had its work thrown away
+    with "produced no usable JSON" — twice, unnoticed, for hours.
+    """
+
+    PLAN = {"project": {"repo": "/tmp", "title": "T", "tasks": [
+        {"id": "a", "title": "A", "prompt": "x" * 200, "model": "gpt-oss-120b",
+         "reviewer": "kimi"}]}}
+    DECOY = {"project": {"repo": "/tmp", "title": "T", "tasks": [
+        {"id": "a", "title": "A", "prompt": "...", "model": "gpt-oss-120b",
+         "reviewer": "kimi"}]}}
+
+    def _run(self, transcript_lines, text=""):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "t.jsonl"
+            p.write_text("\n".join(json.dumps(l) for l in transcript_lines))
+            res = type("R", (), {"transcript_path": str(p), "text": text})()
+            return code_tasks._plan_json_from_run(res)
+
+    def test_recovers_a_plan_too_large_for_the_truncated_text(self):
+        big = json.dumps(self.PLAN)
+        self.assertGreater(len(big), 200)
+        span = self._run([{"role": "assistant", "content": big}],
+                         text=big[-50:])   # what parse_transcript would leave
+        self.assertIsNotNone(span, "plan lost to truncation")
+        self.assertEqual(json.loads(span)["project"]["tasks"][0]["id"], "a")
+
+    def test_prefers_the_substantive_plan_over_a_placeholder_copy(self):
+        """Planners emit an abbreviated sketch first; accepting it would hand
+        the fleet tasks whose prompts are literally '...'."""
+        span = self._run([
+            {"role": "assistant", "content": json.dumps(self.DECOY)
+             + "\n\nand the full version:\n" + json.dumps(self.PLAN)},
+        ])
+        self.assertEqual(len(json.loads(span)["project"]["tasks"][0]["prompt"]), 200)
+
+    def test_last_assistant_message_wins(self):
+        first = dict(self.PLAN)
+        second = json.loads(json.dumps(self.PLAN))
+        second["project"]["tasks"][0]["id"] = "later"
+        span = self._run([{"role": "assistant", "content": json.dumps(first)},
+                          {"role": "tool", "content": "noise"},
+                          {"role": "assistant", "content": json.dumps(second)}])
+        self.assertEqual(json.loads(span)["project"]["tasks"][0]["id"], "later")
+
+    def test_returns_none_when_there_is_genuinely_no_plan(self):
+        self.assertIsNone(self._run([{"role": "assistant", "content": "sorry"}]))
+
+    def test_falls_back_to_the_text_when_the_transcript_is_unreadable(self):
+        res = type("R", (), {"transcript_path": "/nonexistent/x.jsonl",
+                             "text": json.dumps(self.PLAN)})()
+        self.assertIsNotNone(code_tasks._plan_json_from_run(res))
+
+    def test_placeholder_plans_are_rejected_as_unsubstantive(self):
+        self.assertFalse(code_tasks._plan_is_substantive(self.DECOY))
+        self.assertTrue(code_tasks._plan_is_substantive(self.PLAN))

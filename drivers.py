@@ -68,20 +68,37 @@ def _lease_db():
 
 async def _lease_acquire(model, task_id, emit_ctx):
     """Wait until this model is below its cross-process cap (store holds the
-    lease). Emits driver.cap_wait roughly once a minute while waiting."""
+    lease). Emits driver.cap_wait roughly once a minute while waiting.
+
+    Bounded by config.DRIVER_LEASE_WAIT. This used to be `while True:`, and it
+    runs BEFORE _once starts the attempt's clock — so a task queued behind a
+    saturated model waited forever with neither DRIVER_TIMEOUT nor
+    DRIVER_IDLE_TIMEOUT able to rescue it, and the run just sat there.
+    """
     waits = 0
+    deadline = time.monotonic() + config.DRIVER_LEASE_WAIT
     while True:
         in_use = _lease_db().acquire_driver_lease(
             model, os.getpid(), task_id,
             config.driver_limit(model), config.DRIVER_LEASE_TTL)
         if in_use is None:
             return
+        if time.monotonic() >= deadline:
+            events.emit("driver.cap_timeout", model=model, task=task_id,
+                        in_use=in_use, cap=config.driver_limit(model),
+                        waited_s=round(config.DRIVER_LEASE_WAIT), **emit_ctx)
+            # Worded to match Driver.is_capacity_error, so the retry ladder
+            # uses the long capacity backoff rather than the crash schedule.
+            raise DriverError(
+                f"{model} concurrent session limit: no driver slot after "
+                f"{config.DRIVER_LEASE_WAIT:.0f}s ({in_use}/"
+                f"{config.driver_limit(model)} in use)")
         if waits % 3 == 0:
             events.emit("driver.cap_wait", model=model, task=task_id,
                         in_use=in_use, cap=config.driver_limit(model),
                         **emit_ctx)
         waits += 1
-        await asyncio.sleep(20)
+        await asyncio.sleep(min(20, max(1, deadline - time.monotonic())))
 
 
 def _lease_release(model, task_id):

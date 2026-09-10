@@ -162,6 +162,12 @@ DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP",
 # to a literal meant raising DRIVER_TIMEOUT silently broke the invariant.
 DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
     DRIVER_TIMEOUT + DRIVER_CAPACITY_BACKOFF_CAP + 300)
+# How long a driver may wait for a per-model lease before giving up. Without a
+# bound this wait was `while True:` — a task could queue behind a saturated
+# model forever, before its own timeout clock had even started. Exceeding it
+# raises a capacity-classified DriverError, so the retry ladder backs off
+# instead of the run silently stalling.
+DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "1800"))
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 

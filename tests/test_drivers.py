@@ -449,3 +449,47 @@ class FleetContextConfig(unittest.TestCase):
         argv = drivers.OpencodeDriver("GLM-5.3", "reviewer").argv("p", None)
         self.assertIn("ARC/GLM-5.3", argv,
                       "a renamed key is rejected by ARC as 'Model not found'")
+
+
+class LeaseWaitIsBounded(unittest.TestCase):
+    """Waiting for a driver slot must not be unbounded.
+
+    _lease_acquire runs BEFORE _once starts the attempt's clock, so a task
+    queued behind a saturated model was rescued by neither DRIVER_TIMEOUT nor
+    DRIVER_IDLE_TIMEOUT — the run simply sat there. It was `while True:`.
+    """
+
+    def test_gives_up_after_the_configured_wait(self):
+        with TempLeaseDB() as store:
+            cap = config.driver_limit("Kimi-K3")
+            for i in range(cap):          # saturate the model
+                store.acquire_driver_lease("Kimi-K3", os.getpid(), f"other{i}",
+                                           cap, config.DRIVER_LEASE_TTL)
+            orig_wait, orig_sleep = config.DRIVER_LEASE_WAIT, drivers.asyncio.sleep
+            config.DRIVER_LEASE_WAIT = 0.2
+
+            async def fast_sleep(d):
+                pass
+
+            drivers.asyncio.sleep = fast_sleep
+            try:
+                with capture_events() as ev:
+                    async def go():
+                        with self.assertRaises(DriverError) as cm:
+                            await drivers._lease_acquire("Kimi-K3", "mine", {})
+                        return cm.exception
+                    exc = asyncio.run(go())
+            finally:
+                config.DRIVER_LEASE_WAIT = orig_wait
+                drivers.asyncio.sleep = orig_sleep
+            self.assertTrue(drivers.Driver.is_capacity_error(str(exc)),
+                            "must use the long capacity backoff, not the crash ladder")
+            self.assertTrue(ev.of("driver.cap_timeout"), "give-up must be observable")
+
+    def test_acquires_immediately_when_a_slot_is_free(self):
+        with TempLeaseDB() as store:
+            async def go():
+                await drivers._lease_acquire("Kimi-K3", "mine", {})
+            with capture_events():
+                asyncio.run(go())
+            self.assertEqual(len(store.driver_lease_rows()), 1)
