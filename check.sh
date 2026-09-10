@@ -60,6 +60,20 @@ for p in sorted(pathlib.Path("static").glob("*.html")):
 sys.exit(bad)
 PYEOF
     rm -rf "$tmp"
+    # Parsing is not running: render the real page against live API payloads.
+    if [ -f tests/render_check.mjs ] && curl -s -m 2 -o /dev/null "http://localhost:8787/api/health"; then
+        d=$(mktemp -d)
+        curl -s -m 5 "http://localhost:8787/api/health"   > "$d/h.json"
+        curl -s -m 5 "http://localhost:8787/api/projects" > "$d/p.json"
+        f=$(curl -s -m 5 "http://localhost:8787/api/projects" | "$PY" -c "import json,sys;ps=json.load(sys.stdin)['projects'];print(ps[0]['file'] if ps else '')" 2>/dev/null)
+        curl -s -m 5 "http://localhost:8787/api/project?file=$f" > "$d/d.json"
+        if ! node tests/render_check.mjs "$d/h.json" "$d/p.json" "$d/d.json" 2>&1 | tail -12; then
+            echo "FAIL: the dashboard JS throws on real data"; rc=1
+        fi
+        rm -rf "$d"
+    else
+        echo "(dashboard not running — skipping the live render check)"
+    fi
 else
     echo "(node not installed — skipping JavaScript checks)"
 fi
