@@ -8,7 +8,7 @@
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
   --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
-  --err: #f85149; --run: #e3b341; --purple: #bc8cff;
+  --err: #f85149; --run: #e3b341; --purple: #bc8cff; --conflict: #f0883e;
 }
 * { box-sizing: border-box; }
 body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
@@ -16,11 +16,16 @@ body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-
 .nav a { color: var(--dim); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: .3px; white-space: nowrap; }
 .nav a:hover { color: var(--accent); }
 .nav a.on { color: var(--accent); text-decoration: underline; pointer-events: none; cursor: default; }
-header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 10; }
+header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 16px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 10; }
 header h1 { font-size: 15px; margin: 0; color: var(--accent); }
 .pill { padding: 2px 10px; border: 1px solid var(--border); border-radius: 12px; color: var(--dim); white-space: nowrap; text-decoration: none; cursor: pointer; background: none; font: inherit; }
 .pill b { color: var(--text); }
 a.pill:hover, .pill.on { border-color: var(--accent); color: var(--accent); }
+#stale { border-color: var(--warn); color: var(--warn); animation: pulse 1.4s infinite; }
+.fbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex-basis: 100%; padding-top: 6px; }
+.fsel { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 2px 4px; font: inherit; font-size: 11px; max-width: 220px; }
+.fsel:hover { border-color: var(--accent); }
+.achip { display: inline-block; padding: 0 7px; border: 1px solid var(--accent); color: var(--accent); border-radius: 10px; font-size: 10px; margin-right: 3px; }
 main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
 .panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -28,6 +33,13 @@ main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
 .projgrid { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
 .card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #0d1117; cursor: pointer; }
 .card:hover { border-color: var(--accent); }
+.prow { display: flex; gap: 10px; align-items: center; padding: 4px 8px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; background: #0d1117; cursor: pointer; }
+.prow:hover { border-color: var(--accent); }
+.prow .pt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.prow .pc { color: var(--dim); font-size: 11px; white-space: nowrap; }
+.dots { display: inline-flex; gap: 2px; flex: none; align-items: center; }
+.dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
+.dot.live { animation: pulse 1.3s infinite; }
 table { border-collapse: collapse; width: 100%; }
 th, td { padding: 4px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
 th { color: var(--dim); font-weight: normal; font-size: 11px; white-space: nowrap; }
@@ -48,7 +60,8 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .chip { display: inline-block; padding: 0 6px; border-radius: 7px; font-size: 10px; margin-right: 3px; border: 1px solid; }
 .chip.merged, .chip.done { color: var(--ok); border-color: var(--ok); }
 .chip.running { color: var(--accent); border-color: var(--accent); }
-.chip.failed, .chip.conflict { color: var(--err); border-color: var(--err); }
+.chip.failed { color: var(--err); border-color: var(--err); }
+.chip.conflict { color: var(--conflict); border-color: var(--conflict); }
 .chip.pending { color: var(--dim); border-color: var(--border); }
 .modal { position: fixed; inset: 0; background: rgba(1,4,9,.7); z-index: 60; display: none; align-items: flex-start; justify-content: center; padding-top: 8vh; }
 .modal.open { display: flex; }
@@ -77,6 +90,9 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .err { color: var(--err); font-size: 12px; margin-top: 6px; }
 .okmsg { color: var(--ok); font-size: 12px; margin-top: 6px; }
 svg text { font-family: ui-monospace, monospace; }
+svg g.node { cursor: pointer; }
+svg g.node:hover rect { stroke-width: 2.4; }
+svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .health { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 .mcap { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--border);
         border-radius: 6px; padding: 2px 8px; font-size: 11px; color: var(--dim); }
@@ -94,10 +110,12 @@ svg text { font-family: ui-monospace, monospace; }
           color: var(--err); font-size: 11px; white-space: pre-wrap; word-break: break-word; }
 .cardnote { margin-top: 5px; color: var(--err); font-size: 11px; }
 .agentrow { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
-            padding: 3px 0; font-size: 11px; border-bottom: 1px solid var(--border); }
+            padding: 3px 4px; font-size: 11px; border-bottom: 1px solid var(--border); }
 .agentrow.stuck { color: var(--warn); }
 .agentrow .who { color: var(--text); }
 .agentrow .quiet { color: var(--warn); }
+.agentrow.has-t { cursor: pointer; }
+.agentrow.has-t:hover { background: #1c2128; }
 </style>
 </head>
 <body>
@@ -108,9 +126,22 @@ svg text { font-family: ui-monospace, monospace; }
     <a href="/phone.html">Phone</a>
   </nav>
   <h1>ARC · Projects</h1>
+  <span class="pill" id="tot-tokens" title="fleet tokens (all time)">⛁ <b>—</b></span>
+  <span class="pill" id="tot-split" title="prompt / completion tokens">↑— ↓—</span>
+  <span class="pill" id="tot-today" title="merged / failed / conflicts today">✓0 ✗0</span>
+  <span id="agent-chips" title="agents running right now"></span>
   <span style="flex:1"></span>
-  <span class="pill" id="health-pill" title="fleet concurrency — click for detail">fleet <b id="health-sum">—</b></span>
+  <span class="pill" id="health-pill" title="fleet concurrency">fleet <b id="health-sum">—</b></span>
+  <span class="pill" id="stale" style="display:none">stale (retrying…)</span>
   <span class="pill">updated <b id="clock">-</b></span>
+  <div class="fbar">
+    <select class="fsel" id="f-proj" title="project filter"><option value="">All projects</option></select>
+    <select class="fsel" id="f-repo" title="repo filter" style="display:none"><option value="">All repos</option></select>
+    <select class="fsel" id="f-model" title="agent model filter"><option value="">All models</option></select>
+    <button class="pill on" id="d-compact" title="one line per project">compact</button>
+    <button class="pill" id="d-comfort" title="full cards">comfort</button>
+    <span class="hint" id="f-hint"></span>
+  </div>
 </header>
 <main>
   <div id="view-list">
@@ -120,8 +151,12 @@ svg text { font-family: ui-monospace, monospace; }
         <button class="act" id="btn-problems">recent problems</button>
       </h2>
       <div class="health" id="health-models"></div>
-      <div id="health-agents"></div>
       <div class="problems" id="health-problems" style="display:none"></div>
+    </div>
+    <div class="panel" id="agents-panel">
+      <h2>Agents <span class="hint" id="agents-meta"></span></h2>
+      <div id="agents"></div>
+      <div class="empty" id="agents-empty" style="display:none">No agents running right now.</div>
     </div>
     <div class="panel">
       <h2>Projects <span class="hint" id="proj-meta"></span>
@@ -220,51 +255,146 @@ svg text { font-family: ui-monospace, monospace; }
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
-const COLORS = {"gpt-oss":"#3fb950","glm":"#58a6ff","kimi":"#bc8cff","deepseek":"#d29922","kimi-code":"#8b949e","harness":"#e3b341"};
 const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash"};
 const short = m => SHORT[m] || m || "—";
-let PROJECTS = [], CUR = null, CUR_PID = null, listTimer = null, detailTimer = null, drawerFile = null;
+let PROJECTS = [], AGENTS = [], FLEET = null;
+let CUR = null, CUR_DATA = null, CUR_PID = null, detailTimer = null, drawerFile = null;
+let FILT = {p: "", r: "", m: ""}, DENSE = true;
+const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f0883e", pending: "#484f58"};
 
 const fmtT = iso => { if (!iso) return "—"; const s = (Date.now() - new Date(iso).getTime())/1000;
   if (s < 60) return Math.round(s)+"s ago"; if (s < 3600) return Math.round(s/60)+"m ago";
   if (s < 86400) return (s/3600).toFixed(1)+"h ago"; return (s/86400).toFixed(1)+"d ago"; };
 const tick = s => { s = Math.round(s||0); if (s < 60) return s+"s"; if (s < 3600) return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; };
-async function jget(u) { const r = await fetch(u, {cache:"no-store"}); return r.json(); }
-async function jpost(u, body) { const r = await fetch(u, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)}); return {code: r.status, body: await r.json()}; }
-
-function chip(status, n) { return `<span class="chip ${status}">${status} ${n}</span>`; }
-
-const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f0883e", pending: "#484f58"};
 const fmtK = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n || 0);
 const esc = s => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const AGO = ts => { if (!ts) return ""; const d = Date.now()/1000 - ts;
+  return d < 60 ? Math.round(d)+"s" : d < 3600 ? Math.round(d/60)+"m" : (d/3600).toFixed(1)+"h"; };
+async function jget(u) { const r = await fetch(u, {cache:"no-store"}); return r.json(); }
+async function jpost(u, body) { const r = await fetch(u, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)}); return {code: r.status, body: await r.json()}; }
+function chip(status, n) { return `<span class="chip ${status}">${status} ${n}</span>`; }
+const repoShort = r => !r ? "(no repo)" : r.split("/").filter(Boolean).slice(-2).join("/");
 
-function miniDag(dag) {
+// Reliability: a failing poll flips the stale badge but never blanks the UI.
+const FAILS = new Set();
+function markFail(name, failed) {
+  if (failed) FAILS.add(name); else FAILS.delete(name);
+  $("#stale").style.display = FAILS.size ? "" : "none";
+}
+
+// ---- filters (persisted in the URL hash) ----
+function loadHash() {
+  const h = new URLSearchParams(location.hash.slice(1));
+  FILT.p = h.get("p") || ""; FILT.r = h.get("r") || ""; FILT.m = h.get("m") || "";
+  DENSE = h.get("d") !== "comfort";
+}
+function saveHash() {
+  const h = new URLSearchParams();
+  if (FILT.p) h.set("p", FILT.p);
+  if (FILT.r) h.set("r", FILT.r);
+  if (FILT.m) h.set("m", FILT.m);
+  if (!DENSE) h.set("d", "comfort");
+  history.replaceState(null, "", h.toString() ? "#" + h.toString() : location.pathname);
+}
+function syncFilterControls() {
+  $("#f-proj").value = FILT.p; $("#f-repo").value = FILT.r; $("#f-model").value = FILT.m;
+  $("#d-compact").className = "pill" + (DENSE ? " on" : "");
+  $("#d-comfort").className = "pill" + (DENSE ? "" : " on");
+}
+$("#f-proj").onchange = e => { FILT.p = e.target.value; saveHash(); renderProjects(); };
+$("#f-repo").onchange = e => { FILT.r = e.target.value; saveHash(); renderProjects(); };
+$("#f-model").onchange = e => { FILT.m = e.target.value; saveHash(); renderAgents(); };
+$("#d-compact").onclick = () => { DENSE = true; saveHash(); syncFilterControls(); renderProjects(); };
+$("#d-comfort").onclick = () => { DENSE = false; saveHash(); syncFilterControls(); renderProjects(); };
+function rebuildFilterOptions() {
+  const files = PROJECTS.map(p => [p.file, p.title]);
+  setOptions("#f-proj", [["", "All projects"], ...files], FILT.p);
+  const repos = [...new Set(PROJECTS.map(p => p.repo || ""))].sort();
+  $("#f-repo").style.display = repos.length > 1 ? "" : "none";
+  setOptions("#f-repo", [["", "All repos"], ...repos.map(r => [r, repoShort(r)])], FILT.r);
+  const models = new Set(AGENTS.filter(a => a.task && a.model).map(a => a.model));
+  (FLEET ? FLEET.models || [] : []).forEach(m => models.add(m.model));
+  setOptions("#f-model", [["", "All models"], ...[...models].sort().map(m => [m, short(m)])], FILT.m);
+}
+function setOptions(sel, pairs, keep) {
+  const el = $(sel), cur = el.value;
+  el.innerHTML = pairs.map(([v, l]) => `<option value="${esc(v)}">${esc(l)}</option>`).join("");
+  el.value = [...el.options].some(o => o.value === keep) ? keep : "";
+  if (el.value !== keep && keep) { // selected filter value disappeared — drop it
+    if (sel === "#f-proj") FILT.p = ""; if (sel === "#f-repo") FILT.r = ""; if (sel === "#f-model") FILT.m = "";
+    saveHash();
+  } else if (cur !== el.value) { /* normalized */ }
+}
+
+const revShort = r => r === "kimi" ? "Kimi K3" : r === "glm" ? "GLM 5.3" : short(r);
+
+// ---- task DAG renderer: layered left→right, status colors, hover, click-to-transcript ----
+function taskDag(dag, opts) {
+  opts = opts || {};
+  const mini = opts.size !== "full";
   const nodes = (dag && dag.nodes) || [], edges = (dag && dag.edges) || [];
   if (!nodes.length) return "";
   const lvl = {}; nodes.forEach(n => lvl[n.id] = 0);
   let ch = true, guard = 0;
   while (ch && guard++ < 50) { ch = false;
-    for (const e of edges) if (e.src !== e.dst && lvl[e.src] !== undefined && lvl[e.dst] < lvl[e.src] + 1) { lvl[e.dst] = lvl[e.src] + 1; ch = true; } }
-  const CW = 96, NW = 84, NH = 16, RH = 26, cols = {};
+    for (const e of edges) if (e.src !== e.dst && lvl[e.src] !== undefined && lvl[e.dst] !== undefined && lvl[e.dst] < lvl[e.src] + 1) { lvl[e.dst] = lvl[e.src] + 1; ch = true; } }
+  const NW = mini ? 132 : 200, NH = mini ? 30 : 48, GX = mini ? 46 : 60,
+        GY = mini ? 12 : 26, PAD = mini ? 6 : 14;
+  const cols = {};
   nodes.forEach(n => (cols[lvl[n.id]] = cols[lvl[n.id]] || []).push(n));
-  const pos = {}; Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => pos[n.id] = {x: 6 + (+l) * CW, y: 16 + i * RH}));
-  const H = Math.max(...Object.values(pos).map(p => p.y)) + NH + 6, W = 12 + Object.keys(cols).length * CW;
+  const pos = {};
+  Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => pos[n.id] = {x: PAD + (+l) * (NW + GX), y: PAD + 12 + i * (NH + GY)}));
+  const ncols = Object.keys(cols).length;
+  const W = PAD * 2 + ncols * NW + Math.max(0, ncols - 1) * GX;
+  const H = Math.max(...Object.values(pos).map(p => p.y)) + NH + PAD;
   let s = "";
   for (const e of edges) { const a = pos[e.src], b = pos[e.dst]; if (!a || !b || e.src === e.dst) continue;
-    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + 9},${a.y + NH / 2} ${b.x - 9},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"/>`; }
+    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"/>`; }
   for (const n of nodes) { const p = pos[n.id], c = STATUSC[n.status] || STATUSC.pending;
-    const pulse = (n.status === "running" || n.live) ? ' style="animation:boxpulse 1.4s infinite"' : "";
-    s += `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="4" fill="#0d1117" stroke="${c}"${pulse}/>` +
-         `<text x="${p.x + NW / 2}" y="${p.y + 11.5}" font-size="8.5" fill="#c9d1d9" text-anchor="middle">${esc(n.id.slice(0, 13))}</text>`;
-    if ((n.attempts || 0) > 1 || (n.escalations || 0) > 0)
+    const run = n.status === "running" || n.live;
+    const att = n.attempts || 0, escn = n.escalations || 0;
+    const ttip = [n.title || n.id,
+      `status: ${n.status}${n.live ? " (live)" : ""}`,
+      `impl: ${short(n.model)} · review: ${revShort(n.reviewer)}`,
+      n.verify_cmd ? `verify: ${n.verify_cmd}` : ""].filter(Boolean).join("\n");
+    s += `<g class="node" data-t="${esc(n.id)}" data-f="${esc(opts.file || "")}">` +
+         `<title>${esc(ttip)}</title>` +
+         `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="${mini ? 5 : 7}" fill="#0d1117" stroke="${c}" stroke-width="1.6" class="${run ? "run" : ""}"/>` +
+         `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 12.5 : 17)}" font-size="${mini ? 9 : 11}" fill="#c9d1d9">${esc(n.id.slice(0, mini ? 19 : 26))}${n.status === "merged" ? " ✓" : ""}</text>` +
+         `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 24.5 : 33)}" font-size="${mini ? 7.5 : 9}" fill="#8b949e">${esc(short(n.model))} → ${esc(revShort(n.reviewer))}${att > 1 ? ` · x${att}` : ""}${escn ? ` ⬆${escn}` : ""}</text>`;
+    if (!mini)
+      s += `<text x="${p.x + 10}" y="${p.y + 45}" font-size="9" fill="${c}">${esc(n.status)}${n.live ? " · live" : ""}</text>`;
+    if (att > 1 || escn > 0)
       s += `<path d="M${p.x + NW - 4},${p.y} C${p.x + NW - 4},${p.y - 12} ${p.x + 4},${p.y - 12} ${p.x + 4},${p.y}" stroke="#d29922" stroke-dasharray="3 2" fill="none"/>` +
-           `<text x="${p.x + NW / 2}" y="${p.y - 4}" font-size="7.5" fill="#d29922" text-anchor="middle">x${n.attempts || 0}${n.escalations ? "⬆" + n.escalations : ""}</text>`;
+           `<text x="${p.x + NW / 2}" y="${p.y - 4}" font-size="${mini ? 7 : 8.5}" fill="#d29922" text-anchor="middle">x${att}${escn ? " ⬆" + escn : ""}</text>`;
     if (n.last_verdict && n.last_verdict.pass === false && n.status !== "merged")
-      s += `<circle cx="${p.x + NW - 4}" cy="${p.y + 4}" r="3" fill="#f85149"/>`; }
-  return `<svg viewBox="0 0 ${W} ${H}" style="display:block;width:100%;margin-top:4px" preserveAspectRatio="xMinYMid meet">${s}</svg>`;
+      s += `<circle cx="${p.x + NW - 5}" cy="${p.y + 5}" r="3" fill="#f85149"/>`;
+    s += `</g>`; }
+  const wide = W > 1400;
+  return `<svg viewBox="0 0 ${W} ${H}" style="display:block;${wide ? `width:${W}px;max-width:none` : "width:100%"}" preserveAspectRatio="xMinYMid meet">${s}</svg>`;
+}
+function bindDagClicks(sel, runsCache) {
+  document.querySelectorAll(sel + " g.node").forEach(g => g.onclick = ev => {
+    ev.stopPropagation();
+    openTaskTranscript(g.dataset.f, g.dataset.t, runsCache || null);
+  });
 }
 
-const repoShort = r => !r ? "(no repo)" : r.split("/").filter(Boolean).slice(-2).join("/");
+// ---- projects list ----
+function prow(p, i) {
+  const nodes = (p.dag && p.dag.nodes) || [];
+  const dots = nodes.map(n => `<i class="dot ${n.live || n.status === "running" ? "live" : ""}" style="background:${STATUSC[n.status] || STATUSC.pending}" title="${esc(n.id)} · ${esc(n.status)}${n.live ? " (live)" : ""}${esc(n.title && n.title !== n.id ? " · " + n.title : "")}"></i>`).join("");
+  const tot = (p.progress && p.progress.total) || p.n_tasks || 1;
+  const done = (p.progress && p.progress.done) || 0;
+  const failed = ((p.statuses && p.statuses.failed) || 0) + ((p.statuses && p.statuses.conflict) || 0);
+  return `<div class="prow" data-i="${i}">
+    <span class="dots">${dots}</span>
+    <span class="pt"><b>${esc(p.title)}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</span>
+    <span class="pc">${done}/${tot}${failed ? ` · <span class="bad">${failed}✗</span>` : ""}</span>
+    <span class="pc" style="color:var(--warn)">⛁ ${fmtK(p.tokens)}</span>
+    <span class="pc">${fmtT(p.last_activity)}</span>
+  </div>`;
+}
 function card(p, i) {
   const chips = Object.entries(p.statuses || {}).map(([s, n]) => chip(s, n)).join("") || '<span class="hint">never run</span>';
   const tot = (p.progress && p.progress.total) || p.n_tasks || 1;
@@ -277,7 +407,7 @@ function card(p, i) {
     <div><b>${esc(p.title)}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</div>
     ${bar}
     <div class="hint">${done}/${tot} merged${failed ? ` · <span class="bad">${failed} failed</span>` : ""}${running ? ` · ${running} running` : ""}</div>
-    ${miniDag(p.dag)}
+    ${taskDag(p.dag, {size: "mini", file: p.file})}
     <div style="margin-top:6px">${chips}</div>
     <div style="margin-top:5px">
       <span class="stat tok">⛁ <b>${fmtK(p.tokens)}</b> tok</span>
@@ -285,44 +415,93 @@ function card(p, i) {
       <span class="stat"><b>${p.n_tasks}</b> tasks</span>
     </div>
     <div style="margin-top:5px">${(p.models || []).map(m => `<span class="tag">${short(m)}</span>`).join("")}
-      ${(p.reviewers || []).map(m => `<span class="tag">review: ${short(m === "kimi" ? "Kimi-K3" : m === "glm" ? "GLM-5.3" : m)}</span>`).join("")}</div>
+      ${(p.reviewers || []).map(m => `<span class="tag">review: ${revShort(m)}</span>`).join("")}</div>
     ${(p.errors && p.errors.length) ? `<div class="cardnote" title="${esc(p.errors[0].error)}">⚠ ${esc(p.errors[0].id)}: ${esc(String(p.errors[0].error).slice(0, 90))}</div>` : ""}
     <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}${p.run_pid ? ` · <span class="good">running (pid ${p.run_pid})</span>` : ""}</div>
   </div>`;
 }
-
-async function loadProjects() {
+function visibleProjects() {
+  return PROJECTS.map((p, i) => ({p, i})).filter(x =>
+    (!FILT.p || x.p.file === FILT.p) && (!FILT.r || (x.p.repo || "") === FILT.r));
+}
+function renderProjects() {
+  rebuildFilterOptions(); syncFilterControls();
+  const vis = visibleProjects();
+  $("#proj-meta").textContent = `(${vis.length}${vis.length !== PROJECTS.length ? " of " + PROJECTS.length : ""})`;
+  $("#projects-empty").style.display = PROJECTS.length ? "none" : "";
+  const groups = {};
+  vis.forEach(x => { const k = x.p.repo || ""; (groups[k] = groups[k] || []).push(x); });
+  const ordered = Object.entries(groups).sort((a, b) =>
+    (b[1].some(x => x.p.active) - a[1].some(x => x.p.active)) ||
+    (b[1].reduce((s, x) => s + (x.p.tokens || 0), 0) - a[1].reduce((s, x) => s + (x.p.tokens || 0), 0)) ||
+    a[0].localeCompare(b[0]));
+  $("#projects").innerHTML = ordered.map(([repo, items]) => {
+    const live = items.filter(x => x.p.active).length;
+    const toks = items.reduce((s, x) => s + (x.p.tokens || 0), 0);
+    const tasksN = items.reduce((s, x) => s + (x.p.n_tasks || 0), 0);
+    return `<div class="repohead">
+        <h3>⌥ ${esc(repoShort(repo))}</h3>
+        <span class="hint">${esc(repo || "no repo")}</span>
+        ${live ? `<span class="live">LIVE ×${live}</span>` : ""}
+        <span class="hint">${items.length} project${items.length === 1 ? "" : "s"} · ${tasksN} tasks · ${fmtK(toks)} tok</span>
+      </div>
+      ${DENSE ? items.map(x => prow(x.p, x.i)).join("")
+              : `<div class="repogrid">${items.map(x => card(x.p, x.i)).join("")}</div>`}`;
+  }).join("");
+  document.querySelectorAll("#projects .prow, #projects .card").forEach(c =>
+    c.onclick = () => openDetail(PROJECTS[+c.dataset.i].file));
+  bindDagClicks("#projects");
+}
+async function pollProjects() {
   try {
     const d = await jget("/api/projects");
     PROJECTS = d.projects || [];
     $("#clock").textContent = new Date().toLocaleTimeString();
-    $("#proj-meta").textContent = `(${PROJECTS.length})`;
-    $("#projects-empty").style.display = PROJECTS.length ? "none" : "";
-    const groups = {};
-    PROJECTS.forEach((p, i) => { const k = p.repo || ""; (groups[k] = groups[k] || []).push({p, i}); });
-    const ordered = Object.entries(groups).sort((a, b) =>
-      (b[1].some(x => x.p.active) - a[1].some(x => x.p.active)) ||
-      (b[1].reduce((s, x) => s + (x.p.tokens || 0), 0) - a[1].reduce((s, x) => s + (x.p.tokens || 0), 0)) ||
-      a[0].localeCompare(b[0]));
-    $("#projects").innerHTML = ordered.map(([repo, items]) => {
-      const live = items.filter(x => x.p.active).length;
-      const toks = items.reduce((s, x) => s + (x.p.tokens || 0), 0);
-      const tasksN = items.reduce((s, x) => s + (x.p.n_tasks || 0), 0);
-      return `<div class="repohead">
-          <h3>⌥ ${esc(repoShort(repo))}</h3>
-          <span class="hint">${esc(repo || "no repo")}</span>
-          ${live ? `<span class="live">LIVE ×${live}</span>` : ""}
-          <span class="hint">${items.length} project${items.length === 1 ? "" : "s"} · ${tasksN} tasks · ${fmtK(toks)} tok</span>
-        </div>
-        <div class="repogrid">${items.map(x => card(x.p, x.i)).join("")}</div>`;
-    }).join("");
-    document.querySelectorAll("#projects .card").forEach(c => c.onclick = () => openDetail(PROJECTS[+c.dataset.i].file));
-  } catch (e) {}
+    markFail("projects", false);
+  } catch (e) { markFail("projects", true); }
+  renderProjects();
 }
 
-const AGO = ts => { if (!ts) return ""; const d = Date.now()/1000 - ts;
-  return d < 60 ? Math.round(d)+"s" : d < 3600 ? Math.round(d/60)+"m" : (d/3600).toFixed(1)+"h"; };
+// ---- agents panel ----
+const attemptOf = t => { const m = /-(\d+)\.jsonl$/.exec(t || ""); return m ? m[1] : null; };
+async function pollAgents() {
+  try {
+    const d = await jget("/api/agents");
+    AGENTS = (d.agents || []).filter(a => a.task);
+    markFail("agents", false);
+  } catch (e) { markFail("agents", true); }
+  renderAgentChips(); renderAgents();
+}
+function renderAgentChips() {
+  const by = {};
+  AGENTS.forEach(a => { const k = a.pretty || short(a.model); by[k] = (by[k] || 0) + 1; });
+  $("#agent-chips").innerHTML = Object.entries(by).sort((a, b) => b[1] - a[1])
+    .map(([k, n]) => `<span class="achip">${esc(k)} x${n}</span>`).join("");
+}
+function renderAgents() {
+  const rows = FILT.m ? AGENTS.filter(a => a.model === FILT.m || a.pretty === FILT.m) : AGENTS;
+  $("#agents-meta").textContent = `(${rows.length} running${FILT.m ? " of " + AGENTS.length : ""} — click for live transcript)`;
+  $("#agents-empty").style.display = rows.length ? "none" : "";
+  $("#agents").innerHTML = rows.map(a => {
+    const att = attemptOf(a.transcript);
+    const quiet = a.idle_s != null && a.stuck
+      ? `<span class="quiet">quiet ${tick(a.idle_s)}${a.state ? ` · ${esc(a.state)}` : ""}${(a.cpu_delta_s != null && a.cpu_delta_s < 0.5) ? " · no CPU" : ""}</span>`
+      : (a.idle_s != null ? `<span class="hint">quiet ${tick(a.idle_s)}</span>` : "");
+    return `<div class="agentrow ${a.stuck ? "stuck" : ""} ${a.transcript ? "has-t" : ""}" data-t="${esc(a.transcript || "")}" data-m="${esc(a.pretty || short(a.model))}" data-r="${esc(a.role || "")}" data-task="${esc(a.task || "")}">
+      <span class="who">${esc(a.pretty || short(a.model))} ${esc(a.role || "")}</span>
+      <span>${esc(a.task)}</span>
+      ${att ? `<span class="hint">attempt ${att}</span>` : ""}
+      <span class="hint" data-el="${a.started || 0}">${a.started ? tick(Date.now() / 1000 - a.started) : ""}</span>
+      ${a.bytes ? `<span class="hint">${fmtK(a.bytes)}B out</span>` : ""}
+      ${quiet}</div>`;
+  }).join("");
+  document.querySelectorAll("#agents .agentrow.has-t").forEach(el => el.onclick = () => {
+    if (el.dataset.t) openTranscript(el.dataset.t, `${el.dataset.m} ${el.dataset.r}`, el.dataset.task);
+  });
+  rebuildFilterOptions();
+}
 
+// ---- fleet health (caps + problems) ----
 const PROBLEM_LABEL = {
   "driver.error": "harness error", "driver.stalled": "stalled (no output)",
   "driver.timeout": "timed out", "driver.stale": "phantom agent pruned",
@@ -331,12 +510,8 @@ const PROBLEM_LABEL = {
   "task.conflict": "merge conflict", "graph.draining": "run draining after a failure",
   "run.interrupted": "run interrupted",
 };
-
 function renderHealth(h) {
   const models = h.models || [];
-  // Two caps per model: fleet drivers against driver_cap, and everything on
-  // the ARC account (drivers + your own interactive kimi sessions) against
-  // account_cap. Only the first is something the fleet controls.
   const drivers = models.reduce((n, m) => n + m.drivers, 0);
   const account = models.reduce((n, m) => n + m.account, 0);
   const over = models.filter(m => m.over_cap), at = models.filter(m => m.at_cap && !m.over_cap);
@@ -361,21 +536,6 @@ function renderHealth(h) {
       ${esc(m.pretty)} <b>${m.drivers}/${cap || "?"}</b>${extra ? `<span class="hint">${extra}</span>` : ""}
       <span class="gauge"><i style="width:${pct}%"></i></span></span>`;
   }).join("") || '<span class="hint">no models reporting</span>';
-  // Live agents: elapsed, bytes produced, and how long since the harness last
-  // said anything. "quiet for Ns" is the difference between a working agent
-  // and one whose API request the server never answered.
-  const agents = (h.agents || []).filter(a => a.task);
-  $("#health-agents").innerHTML = agents.length ? agents.map(a => {
-    const quiet = a.idle_s != null && a.stuck
-      ? `<span class="quiet">quiet ${tick(a.idle_s)}${a.state ? ` · ${esc(a.state)}` : ""}${(a.cpu_delta_s != null && a.cpu_delta_s < 0.5) ? " · no CPU" : ""}</span>`
-      : (a.idle_s != null ? `<span class="hint">quiet ${tick(a.idle_s)}</span>` : "");
-    return `<div class="agentrow ${a.stuck ? "stuck" : ""}">
-      <span class="who">${esc(a.pretty)} ${esc(a.role || "")}</span>
-      <span>${esc(a.task)}</span>
-      <span class="hint">${tick(a.elapsed_s)}</span>
-      ${a.bytes ? `<span class="hint">${fmtK(a.bytes)}B out</span>` : ""}
-      ${quiet}</div>`;
-  }).join("") : "";
   const probs = (h.problems || []);
   $("#btn-problems").textContent = `recent problems (${probs.length})`;
   $("#health-problems").innerHTML = probs.length ? probs.map(e => {
@@ -395,19 +555,67 @@ function renderHealth(h) {
       <span class="hint">${esc(String(detail).slice(0, 160))}</span></div>`;
   }).join("") : '<div class="hint">nothing to report</div>';
 }
-
-async function loadHealth() {
-  try { renderHealth(await jget("/api/health")); } catch (e) {}
+async function pollHealth() {
+  try { renderHealth(await jget("/api/health")); markFail("health", false); }
+  catch (e) { markFail("health", true); }
 }
 $("#btn-problems").onclick = () => { const el = $("#health-problems");
   el.style.display = el.style.display === "none" ? "" : "none"; };
 
-async function loadGraphs() {
+// ---- header totals from /api/fleet ----
+async function pollFleet() {
   try {
-    const g = await jget("/api/graphs");
-    $("#graphs").innerHTML = Object.entries(g).map(([name, gr]) => renderGraph(name, gr)).join("");
-  } catch (e) { $("#graphs").textContent = "graphs unavailable"; }
+    FLEET = await jget("/api/fleet");
+    const t = FLEET.totals || {};
+    $("#tot-tokens").innerHTML = `⛁ <b>${fmtK(t.tokens)}</b>`;
+    $("#tot-tokens").title = `${fmtK(t.requests)} requests · ${fmtK(t.ok)} ok · ${fmtK(t.errors)} errors`;
+    $("#tot-split").innerHTML = `↑<b>${fmtK(t.prompt_tokens)}</b> ↓<b>${fmtK(t.completion_tokens)}</b>`;
+    markFail("fleet", false);
+  } catch (e) { markFail("fleet", true); }
 }
+
+// ---- today's merged/failed via the incremental /api/events cursor ----
+const dayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
+let EV_NEXT = 0, EV_DAY = dayStart(), TODAY = {merged: 0, failed: 0, conflict: 0};
+function countEv(e) {
+  if (!e.ts || e.ts < EV_DAY) return;
+  if (e.type === "task.merged") TODAY.merged++;
+  else if (e.type === "task.failed") TODAY.failed++;
+  else if (e.type === "task.conflict") TODAY.conflict++;
+}
+function renderToday() {
+  $("#tot-today").innerHTML = `✓<b>${TODAY.merged}</b> ✗<b>${TODAY.failed}</b>${TODAY.conflict ? ` ⚠<b>${TODAY.conflict}</b>` : ""}`;
+  $("#tot-today").title = `today: ${TODAY.merged} merged · ${TODAY.failed} failed · ${TODAY.conflict} conflicts`;
+}
+async function initEvents() {
+  try {
+    let after = 0, chunks = 0;
+    while (chunks++ < 60) {
+      const d = await jget("/api/events?after=" + after);
+      const evs = d.events || [];
+      evs.forEach(countEv);
+      if (!evs.length || d.next === after) { after = d.next; break; }
+      after = d.next;
+    }
+    EV_NEXT = after;
+    markFail("events", false);
+  } catch (e) { markFail("events", true); }
+  renderToday();
+}
+async function pollEvents() {
+  try {
+    const today = dayStart();
+    if (today > EV_DAY) { EV_DAY = today; TODAY = {merged: 0, failed: 0, conflict: 0}; EV_NEXT = 0; }
+    const d = await jget("/api/events?after=" + EV_NEXT);
+    if (d.reset) { TODAY = {merged: 0, failed: 0, conflict: 0}; EV_NEXT = 0; }
+    (d.events || []).forEach(countEv);
+    EV_NEXT = d.next;
+    markFail("events", false);
+    renderToday();
+  } catch (e) { markFail("events", true); }
+}
+
+// ---- orchestration graph topologies (static /api/graphs) ----
 function renderGraph(name, g) {
   const lvl = {}; g.starts.forEach(s => lvl[s] = 0);
   let changed = true, guard = 0;
@@ -420,87 +628,82 @@ function renderGraph(name, g) {
   const edges = g.edges.map(e => { const a = pos[e.src], b = pos[e.dst]; if (!a||!b) return "";
     return `<path d="M${a.x+120},${a.y+11} C${a.x+150},${a.y+11} ${b.x-30},${b.y+11} ${b.x},${b.y+11}" stroke="${e.conditional?"#d29922":"#30363d"}" fill="none" ${e.conditional?'stroke-dasharray="4"':''}/>`; }).join("");
   const boxes = g.nodes.map(n => { const p = pos[n.name];
-    return `<rect x="${p.x}" y="${p.y}" width="120" height="22" rx="5" fill="#0d1117" stroke="${n.gather?"#bc8cff":"#58a6ff"}"/><text x="${p.x+60}" y="${p.y+15}" font-size="10" fill="#c9d1d9" text-anchor="middle">${n.name.slice(0,20)}</text>`; }).join("");
-  return `<div class="hint" style="margin:8px 0 2px"><b style="color:var(--accent)">${name}</b> · ${g.nodes.length} nodes · ${g.edges.length} edges · dashed gold = conditional</div>
+    return `<rect x="${p.x}" y="${p.y}" width="120" height="22" rx="5" fill="#0d1117" stroke="${n.gather?"#bc8cff":"#58a6ff"}"/><text x="${p.x+60}" y="${p.y+15}" font-size="10" fill="#c9d1d9" text-anchor="middle">${esc(n.name.slice(0,20))}</text>`; }).join("");
+  return `<div class="hint" style="margin:8px 0 2px"><b style="color:var(--accent)">${esc(name)}</b> · ${g.nodes.length} nodes · ${g.edges.length} edges · dashed gold = conditional</div>
     <svg width="${W}" height="${H}" style="max-width:100%">${edges}${boxes}</svg>`;
 }
-
-function statusOf(rows, id) {
-  const r = (rows||[]).filter(r => r.id === id || r.id === id.replace(/-x\d+$/,""));
-  if (!r.length) return {status: "pending", attempts: 0, seconds: null, verdict: null};
-  const s = r[0].status;
-  return {status: s === "merged" ? "merged" : s, attempts: r.length, row: r[0]};
+async function pollGraphs() {
+  try {
+    const g = await jget("/api/graphs");
+    $("#graphs").innerHTML = Object.entries(g).map(([name, gr]) => renderGraph(name, gr)).join("");
+    markFail("graphs", false);
+  } catch (e) {
+    markFail("graphs", true);
+    if ($("#graphs").textContent === "loading…") $("#graphs").textContent = "graphs unavailable";
+  }
 }
 
+// ---- project detail view ----
 async function openDetail(file) {
-  clearInterval(listTimer); listTimer = null;
   $("#view-list").style.display = "none";
   $("#view-detail").style.display = "";
   CUR = file;
   await refreshDetail();
+  if (detailTimer) clearInterval(detailTimer);
   detailTimer = setInterval(refreshDetail, 5000);
 }
-$("#btn-back").onclick = () => { clearInterval(detailTimer); detailTimer = null; CUR = null;
-  $("#view-detail").style.display = "none"; $("#view-list").style.display = ""; loadProjects(); loadHealth();
-  listTimer = setInterval(() => { loadProjects(); loadHealth(); }, 5000); };
+$("#btn-back").onclick = () => {
+  if (detailTimer) { clearInterval(detailTimer); detailTimer = null; }
+  CUR = null; CUR_DATA = null;
+  $("#view-detail").style.display = "none";
+  $("#view-list").style.display = "";
+  pollProjects(); pollHealth();
+};
 
 async function refreshDetail() {
   if (!CUR) return;
-  const d = await jget("/api/project?file=" + encodeURIComponent(CUR));
+  let d;
+  try { d = await jget("/api/project?file=" + encodeURIComponent(CUR)); markFail("detail", false); }
+  catch (e) { markFail("detail", true); return; }
   if (d.error) { $("#d-title").textContent = "error: " + d.error; return; }
+  CUR_DATA = d;
   $("#clock").textContent = new Date().toLocaleTimeString();
   $("#d-title").textContent = d.title;
-  const running = (d.rows||[]).some(r => r.status === "running");
+  const running = (d.rows || []).some(r => r.status === "running");
   CUR_PID = d.run_pid || null;
   $("#d-live").innerHTML = running ? '<span class="live">LIVE</span>' : "";
   $("#btn-stop").style.display = CUR_PID ? "" : "none";
   $("#btn-stop").title = CUR_PID ? `stop run process ${CUR_PID}` : "";
   $("#btn-run").disabled = !!CUR_PID;
   $("#d-meta").innerHTML = `<span>repo <b>${esc(d.repo)}</b></span><span>file <b>${esc(d.file)}</b></span>
-    <span><b>${(d.tasks||[]).length}</b> tasks</span><span><b>${(d.runs||[]).length}</b> harness runs</span>
+    <span><b>${(d.tasks || []).length}</b> tasks</span><span><b>${(d.runs || []).length}</b> harness runs</span>
     ${CUR_PID ? `<span>run pid <b>${CUR_PID}</b></span>` : ""}`;
   const g = d.git || {};
   $("#d-git").innerHTML = g.error ? `<span class="hint">${esc(g.error)}</span>` : `<div class="kv">
-      <span>branch <b>${esc(g.branch||"—")}</b></span><span>dirty files <b class="${(g.dirty||[]).length?"warn":""}">${(g.dirty||[]).length}</b></span>
-      <span>worktrees <b>${(g.worktrees||[]).length}</b></span></div>
-    ${(g.log||[]).length? `<div class="hint" style="margin-top:5px">${g.log.map(l=>"&nbsp;&nbsp;"+esc(l)).join("<br>")}</div>` : ""}
-    ${(g.worktrees||[]).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.map(esc).join("<br>")}</div>` : ""}`;
+      <span>branch <b>${esc(g.branch || "—")}</b></span><span>dirty files <b class="${(g.dirty || []).length ? "warn" : ""}">${(g.dirty || []).length}</b></span>
+      <span>worktrees <b>${(g.worktrees || []).length}</b></span></div>
+    ${(g.log || []).length ? `<div class="hint" style="margin-top:5px">${g.log.map(l => "&nbsp;&nbsp;" + esc(l)).join("<br>")}</div>` : ""}
+    ${(g.worktrees || []).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.map(esc).join("<br>")}</div>` : ""}`;
   renderDag(d); renderFeed(d); renderTasks(d);
 }
 
-function layerLayout(tasks) {
-  const ids = tasks.map(t => t.id);
-  const lvl = {}; ids.forEach(id => lvl[id] = 0);
-  let ch = true, guard = 0;
-  while (ch && guard++ < 50) { ch = false;
-    for (const t of tasks) for (const dep of (t.deps||t.depends||[]))
-      if (lvl[dep] !== undefined && lvl[t.id] < lvl[dep]+1) { lvl[t.id] = lvl[dep]+1; ch = true; } }
-  return lvl;
-}
 function renderDag(d) {
   const tasks = d.tasks || [];
-  const rowsById = {}; (d.rows||[]).forEach(r => rowsById[r.id] = r);
-  const lvl = layerLayout(tasks);
-  const cols2 = {}; tasks.forEach(t => { const l = lvl[t.id]; (cols2[l] = cols2[l] || []).push(t); });
-  const pos = {}; Object.entries(cols2).forEach(([l, ts]) => ts.forEach((t, i) => pos[t.id] = {x: 16 + (+l)*240, y: 14 + i*74}));
-  const W = 16 + (Object.keys(cols2).length||1)*240 + 210, H = Math.max(...Object.values(pos).map(p=>p.y), 60) + 84;
-  const STATUSC = {merged:"#3fb950", done:"#3fb950", running:"#58a6ff", failed:"#f85149", conflict:"#f0883e", pending:"#484f58"};
-  let edges = "", boxes = "";
-  for (const t of tasks) for (const dep of (t.deps||t.depends||[])) { const a = pos[dep], b = pos[t.id]; if (!a||!b) continue;
-    edges += `<path d="M${a.x+200},${a.y+24} C${a.x+230},${a.y+24} ${b.x-30},${b.y+24} ${b.x},${b.y+24}" stroke="#30363d" fill="none"/>`; }
-  for (const t of tasks) { const p = pos[t.id]; const row = rowsById[t.id] || {}; const st = row.status || "pending";
-    const att = row.attempts || 0, escn = row.escalations || 0;
-    const c = STATUSC[st] || STATUSC.pending;
-    const anim = st === "running" ? ' style="animation:boxpulse 1.2s infinite"' : "";
-    boxes += `<rect x="${p.x}" y="${p.y}" width="200" height="48" rx="7" fill="#0d1117" stroke="${c}" stroke-width="1.6"${anim}/>
-      <text x="${p.x+10}" y="${p.y+18}" font-size="11" fill="#c9d1d9">${t.id.slice(0,26)}${st === "merged" ? " ✓" : ""}</text>
-      <text x="${p.x+10}" y="${p.y+34}" font-size="9" fill="#8b949e">${short(t.model)} → review ${short(t.reviewer)}${att > 1 ? ` · x${att}` : ""}</text>
-      <text x="${p.x+10}" y="${p.y+45}" font-size="9" fill="${c}">${st}</text>`;
-    if (att > 1 || escn > 0)
-      boxes += `<path d="M${p.x+196},${p.y} C${p.x+196},${p.y-14} ${p.x+4},${p.y-14} ${p.x+4},${p.y}" stroke="#d29922" stroke-dasharray="4 3" fill="none"/>` +
-               `<text x="${p.x+100}" y="${p.y-4}" font-size="8.5" fill="#d29922" text-anchor="middle">x${att} loops${escn ? " · " + escn + "⬆" : ""}</text>`; }
-  $("#d-dagmeta").textContent = `(left → right = dependency order; colored border = status)`;
-  $("#dag").innerHTML = tasks.length ? `<svg width="${W}" height="${H}" style="max-width:none">${edges}${boxes}</svg>` : '<div class="empty">no tasks in this file</div>';
+  if (!tasks.length) { $("#dag").innerHTML = '<div class="empty">no tasks in this file</div>'; return; }
+  const rowsById = {}; (d.rows || []).forEach(r => rowsById[r.id] = r);
+  const nodes = tasks.map(t => {
+    const row = rowsById[t.id] || {};
+    return {id: t.id, title: t.title || t.id, model: t.model, reviewer: t.reviewer,
+            status: row.status || "pending", live: row.status === "running",
+            attempts: row.attempts || 0, escalations: row.escalations || 0,
+            last_verdict: row.last_verdict || null, verify_cmd: t.verify_cmd || ""};
+  });
+  const edges = [];
+  for (const t of tasks) for (const dep of (t.deps || t.depends || []))
+    if (rowsById[dep] !== undefined || tasks.some(x => x.id === dep)) edges.push({src: dep, dst: t.id});
+  $("#d-dagmeta").textContent = "(left → right = dependency order; colored border = status; hover = title + verify; click = transcript)";
+  $("#dag").innerHTML = taskDag({nodes, edges}, {size: "full", file: CUR});
+  bindDagClicks("#dag", d.runs || []);
 }
 
 function friendly(e) {
@@ -510,24 +713,24 @@ function friendly(e) {
   const cut = (v, n) => esc(String(v == null ? "" : v).slice(0, n));
   switch (e.type) {
     case "driver.start": return `${m} <b>${esc(e.role)}</b> started · ${task} (attempt ${esc(e.attempt)})`;
-    case "driver.done": return `${m} <b>${esc(e.role)}</b> finished · ${task} in ${esc(e.seconds)}s${e.tokens?` · ${esc(e.tokens)} tok`:""}`;
+    case "driver.done": return `${m} <b>${esc(e.role)}</b> finished · ${task} in ${esc(e.seconds)}s${e.tokens ? ` · ${esc(e.tokens)} tok` : ""}`;
     case "driver.error": return `<span class="bad">${m} ${e.capacity ? "at capacity" : "error"} · ${task}: ${cut(e.error, 140)}</span>`;
     case "driver.stalled": return `<span class="bad">${m} stalled (no output for ${esc(e.idle_s)}s) · ${task}</span>`;
     case "driver.timeout": return `<span class="bad">${m} timed out · ${task}</span>`;
     case "driver.cancelled": return `<span class="warn">${m} cancelled · ${task}</span>`;
     case "driver.cap_wait": return `<span class="warn">⏳ ${m} waiting for a slot · ${esc(e.in_use)}/${esc(e.cap)} in use</span>`;
-    case "worktree.alloc": return `worktree ready · <span class="hint">${esc(e.branch||e.path||"")}</span>`;
-    case "worktree.free": return `worktree released · <span class="hint">${esc(e.branch||"")}</span>`;
+    case "worktree.alloc": return `worktree ready · <span class="hint">${esc(e.branch || e.path || "")}</span>`;
+    case "worktree.free": return `worktree released · <span class="hint">${esc(e.branch || "")}</span>`;
     case "task.start": return `task started · ${task}`;
-    case "task.end": return `task ended · ${task} → ${esc(e.status||"")}`;
+    case "task.end": return `task ended · ${task} → ${esc(e.status || "")}`;
     case "task.escalated": return `<span class="warn">⬆ ${task} escalated ${esc(short(e.from_model))} → ${esc(short(e.to_model))}</span>`;
-    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason||e.error ? ": " + cut(e.reason||e.error, 120) : ""}</span>`;
+    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason || e.error ? ": " + cut(e.reason || e.error, 120) : ""}</span>`;
     case "task.failed": return `<span class="bad">✗ ${task} failed${e.reason ? ": " + cut(e.reason, 120) : ""}</span>`;
     case "task.merged": return `<span class="good">⬢ ${task} merged</span>`;
     case "task.pr_opened": return `<span class="good">⇪ PR opened · ${task} ${cut(e.url, 80)}</span>`;
     case "task.pr_skipped": return `<span class="hint">PR skipped · ${task}: ${cut(e.reason, 100)}</span>`;
     case "run.resume": return `↻ resumed: skipped ${(e.skipped_merged || []).length} merged, retried ${(e.retried || []).length}`;
-    case "run.interrupted": return `<span class="warn">↯ run interrupted — ${(e.tasks||[]).length} task(s) marked failed</span>`;
+    case "run.interrupted": return `<span class="warn">↯ run interrupted — ${(e.tasks || []).length} task(s) marked failed</span>`;
     case "run.stopped": return `<span class="warn">■ run stopped by operator</span>`;
     case "graph.draining": return `<span class="warn">⧗ draining ${esc(e.in_flight)} in-flight node(s) after a failure</span>`;
     case "node_start": return `<span class="hint">node ${esc(e.node)} · ${task}</span>`;
@@ -536,18 +739,18 @@ function friendly(e) {
   }
 }
 function renderFeed(d) {
-  const evs = (d.events||[]).slice(-30).reverse();
+  const evs = (d.events || []).slice(-30).reverse();
   $("#feed").innerHTML = evs.length ? evs.map(e => {
-    const t = e.ts ? new Date(e.ts*1000).toLocaleTimeString() : "";
+    const t = e.ts ? new Date(e.ts * 1000).toLocaleTimeString() : "";
     return `<div style="padding:3px 0;border-bottom:1px solid var(--border)"><span class="hint">${t}</span> ${friendly(e)}</div>`;
   }).join("") : '<div class="empty">No events recorded for this project yet.</div>';
 }
 
 function renderTasks(d) {
   const tb = $("#tasks tbody"); tb.innerHTML = "";
-  const rowsById = {}; (d.rows||[]).forEach(r => rowsById[r.id] = r);
-  const runsByTask = {}; (d.runs||[]).forEach(r => (runsByTask[r.task_id] = runsByTask[r.task_id] || []).push(r));
-  for (const t of (d.tasks||[])) {
+  const rowsById = {}; (d.rows || []).forEach(r => rowsById[r.id] = r);
+  const runsByTask = {}; (d.runs || []).forEach(r => (runsByTask[r.task_id] = runsByTask[r.task_id] || []).push(r));
+  for (const t of (d.tasks || [])) {
     const row = rowsById[t.id] || {};
     const st = row.status || "pending";
     const runs = runsByTask[t.id] || [];
@@ -556,18 +759,16 @@ function renderTasks(d) {
     const loops = (row.attempts || 0) > 1 || (row.escalations || 0) > 0
       ? ` <span class="tag" title="fix-loop attempts / escalations">x${row.attempts}${row.escalations ? " ⬆" + row.escalations : ""}</span>` : "";
     const tr = document.createElement("tr"); tr.className = "clickable";
-    tr.innerHTML = `<td>${esc(t.id)}</td><td class="hint">${esc(t.title||"")}</td><td>${esc(short(t.model))}</td>
-      <td>${esc(short(t.reviewer))}</td><td>${chip(st, "")}${loops}</td><td>${runs.length||"—"}</td>
-      <td>${secs||"—"}</td><td class="${verdict.includes("pass")?"good":verdict?"bad":""}">${esc((verdict||"—").slice(0,40))}</td>`;
+    tr.innerHTML = `<td>${esc(t.id)}</td><td class="hint">${esc(t.title || "")}</td><td>${esc(short(t.model))}</td>
+      <td>${esc(revShort(t.reviewer))}</td><td>${chip(st, "")}${loops}</td><td>${runs.length || "—"}</td>
+      <td>${secs || "—"}</td><td class="${verdict.includes("pass") ? "good" : verdict ? "bad" : ""}">${esc((verdict || "—").slice(0, 40))}</td>`;
     const sr = document.createElement("tr"); sr.className = "subrow"; sr.style.display = "none";
-    // The failure reason has always been in the database and was never shown:
-    // a task went red and the UI offered no way to find out why.
     const why = row.error ? `<div class="errbox">${esc(row.error)}</div>` : "";
-    sr.innerHTML = `<td colspan="8">${why}${runs.length ? runs.map(r =>
+    sr.innerHTML = `<td colspan="8">${why}${t.verify_cmd ? `<div class="hint" style="margin:4px 0">verify: <b>${esc(t.verify_cmd)}</b></div>` : ""}${runs.length ? runs.map(r =>
       `<div style="padding:3px 0"><span class="tag">${esc(r.role)}</span> <span class="tag">${esc(r.harness)}</span>
-        attempt ${r.attempt} · exit ${r.exit_code} · ${r.seconds?tick(r.seconds):"?"} · ${esc(r.verdict||"")}
-        ${r.transcript? `<button class="act" data-t="${esc(r.transcript.split("/").pop())}" data-m="${esc(short(r.model))}" data-r="${esc(r.role)}" data-task="${esc(t.id)}">transcript</button>` : ""}</div>`).join("")
-      : '<span class="hint">no runs yet</span>'} <div class="hint" style="margin-top:4px">prompt: ${esc((t.prompt||"").slice(0,260))}…</div></td>`;
+        attempt ${r.attempt} · exit ${r.exit_code} · ${r.seconds ? tick(r.seconds) : "?"} · ${esc(r.verdict || "")}
+        ${r.transcript ? `<button class="act" data-t="${esc(String(r.transcript).split("/").pop())}" data-m="${esc(short(r.model))}" data-r="${esc(r.role)}" data-task="${esc(t.id)}">transcript</button>` : ""}</div>`).join("")
+      : '<span class="hint">no runs yet</span>'} <div class="hint" style="margin-top:4px">prompt: ${esc((t.prompt || "").slice(0, 260))}…</div></td>`;
     tr.onclick = () => sr.style.display = sr.style.display === "none" ? "" : "none";
     tb.appendChild(tr); tb.appendChild(sr);
   }
@@ -575,26 +776,67 @@ function renderTasks(d) {
     openTranscript(b.dataset.t, `${b.dataset.m} ${b.dataset.r}`, b.dataset.task); });
 }
 
+// ---- transcript drawer ----
 function openTranscript(file, title, sub) {
   $("#drawer").classList.add("open");
   $("#drawer-title").textContent = title;
   $("#drawer-sub").textContent = sub;
+  $("#drawer-body").textContent = "loading…";
   drawerFile = file;
   pollTranscript();
 }
+async function openTaskTranscript(file, taskId, cachedRuns) {
+  let runs = cachedRuns;
+  if (!runs) {
+    $("#drawer").classList.add("open");
+    $("#drawer-title").textContent = taskId;
+    $("#drawer-sub").textContent = "looking up runs…";
+    $("#drawer-body").textContent = "loading…";
+    drawerFile = null;
+    try { const d = await jget("/api/project?file=" + encodeURIComponent(file)); runs = d.runs || []; }
+    catch (e) { runs = []; }
+  }
+  const mine = runs.filter(r => r.task_id === taskId || String(r.task_id || "").indexOf(taskId + "-x") === 0);
+  const withT = mine.filter(r => r.transcript);
+  const last = withT[0]; // /api/project runs come newest-first (harness_runs_for, ORDER BY id DESC)
+  if (last) openTranscript(String(last.transcript).split("/").pop(),
+    `${short(last.model)} ${last.role || ""}`, `${taskId} · attempt ${last.attempt}`);
+  else {
+    $("#drawer").classList.add("open");
+    $("#drawer-title").textContent = taskId;
+    $("#drawer-sub").textContent = "no transcript";
+    $("#drawer-body").textContent = `No harness transcript recorded yet for ${taskId}.`;
+    drawerFile = null;
+  }
+}
 async function pollTranscript() {
   if (!drawerFile) return;
-  const d = await jget("/api/transcript?file=" + encodeURIComponent(drawerFile) + "&tail=120");
-  if (d.error) { $("#drawer-body").textContent = d.error; return; }
+  const pre = $("#drawer-body");
+  const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;
+  let d;
+  try { d = await jget("/api/transcript?file=" + encodeURIComponent(drawerFile) + "&tail=200"); }
+  catch (e) { return; } // keep last good content; next tick retries
+  if (d.error) { pre.textContent = d.error; return; }
   $("#drawer-sub").textContent = $("#drawer-sub").textContent.split(" · ")[0] + ` · ${d.total_lines} lines`;
-  $("#drawer-body").textContent = d.lines.map(l => { try { const o = JSON.parse(l);
-    return o.type === "step_finish" ? "— step (" + ((o.part&&o.part.tokens&&o.part.tokens.total)||"?") + " tok)"
-      : o.type === "text" ? (o.part&&o.part.text||"").slice(0,400)
-      : o.type === "tool_use" ? "🔧 " + ((o.part&&o.part.tool)||"tool")
-      : o.type; } catch { return l.slice(0,300); } }).join("\n");
+  pre.textContent = d.lines.map(l => { try { const o = JSON.parse(l);
+    return o.type === "step_finish" ? "— step (" + ((o.part && o.part.tokens && o.part.tokens.total) || "?") + " tok)"
+      : o.type === "text" ? (o.part && o.part.text || "").slice(0, 400)
+      : o.type === "tool_use" ? "🔧 " + ((o.part && o.part.tool) || "tool")
+      : o.type; } catch { return l.slice(0, 300); } }).join("\n");
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
+function closeDrawer() { $("#drawer").classList.remove("open"); drawerFile = null; }
+$("#drawer-close").onclick = closeDrawer;
+document.addEventListener("keydown", e => {
+  if (e.key === "Escape") { closeDrawer(); $("#modal").classList.remove("open"); }
+});
 setInterval(() => { if (drawerFile && $("#drawer").classList.contains("open")) pollTranscript(); }, 3000);
-$("#drawer-close").onclick = () => { $("#drawer").classList.remove("open"); drawerFile = null; };
+setInterval(() => { // live elapsed ticking for agent rows
+  const now = Date.now() / 1000;
+  document.querySelectorAll("[data-el]").forEach(el => {
+    const st = +el.dataset.el; if (st) el.textContent = tick(now - st);
+  });
+}, 1000);
 
 // ---- new project modal ----
 const modal = $("#modal");
@@ -611,24 +853,31 @@ const planRepo = repoSel("#p-repo", "#p-repo-custom"), jsonRepo = repoSel("#j-re
 $("#p-repo").onchange = e => $("#p-repo-custom").style.display = e.target.value === "__custom" ? "" : "none";
 $("#j-repo").onchange = e => $("#j-repo-custom").style.display = e.target.value === "__custom" ? "" : "none";
 
-$("#p-go").onclick = async () => {
+async function doPlan(overwrite) {
   const goal = $("#p-goal").value.trim(), repo = planRepo();
   const msg = $("#p-msg"); msg.className = "";
   if (!goal || !repo) { msg.className = "err"; msg.textContent = "repo and goal are required"; return; }
   msg.textContent = "asking Kimi-K3 to draft the task file… (this takes a minute)";
-  const {code, body} = await jpost("/api/projects/create", {goal, repo});
+  const body0 = {goal, repo};
+  if (overwrite) body0.overwrite = true;
+  const {code, body} = await jpost("/api/projects/create", body0);
+  if (code === 409 && body.exists && !overwrite) {
+    if (confirm(body.error + "\n\nReplan and overwrite it?")) return doPlan(true);
+    msg.className = "err"; msg.textContent = body.error; return;
+  }
   if (code !== 200) { msg.className = "err"; msg.textContent = body.error || "failed"; return; }
   msg.className = "okmsg";
   msg.textContent = `planning started (pid ${body.pid}, log ${body.log}) — waiting for ${body.taskfile}…`;
   const expect = body.taskfile, t0 = Date.now();
   const poll = setInterval(async () => {
-    await loadProjects();
+    await pollProjects();
     if (PROJECTS.some(p => p.file === expect)) { clearInterval(poll);
       msg.textContent = "task file ready — opening it."; setTimeout(() => { modal.classList.remove("open"); openDetail(expect); }, 600); }
     else if (Date.now() - t0 > 240000) { clearInterval(poll);
       msg.className = "err"; msg.textContent = `still planning… see logs/${body.log} — close this and check back.`; }
   }, 5000);
-};
+}
+$("#p-go").onclick = () => doPlan(false);
 
 $("#j-go").onclick = async () => {
   const title = $("#j-title").value.trim(), repo = jsonRepo(), msg = $("#j-msg"); msg.className = "";
@@ -638,7 +887,7 @@ $("#j-go").onclick = async () => {
   const {code, body} = await jpost("/api/projects/create", {title, repo, tasks});
   if (code !== 200) { msg.className = "err"; msg.textContent = body.error || "failed"; return; }
   msg.className = "okmsg"; msg.textContent = `created ${body.file} (${body.n_tasks} tasks).`;
-  await loadProjects();
+  await pollProjects();
   setTimeout(() => { modal.classList.remove("open"); openDetail(body.file); }, 500);
 };
 
@@ -657,14 +906,22 @@ $("#btn-stop").onclick = async () => {
   if (!CUR) return;
   if (!confirm(`Stop the run for ${CUR}?\n\nIn-flight agents are cancelled, unfinished tasks are marked failed, and driver slots are released. Work already merged is kept.`)) return;
   const {code, body} = await jpost("/api/projects/stop", {file: CUR});
-  alert(code === 200 ? `stop signal sent to pid ${(body.stopped||[]).join(", ")}\n${body.note||""}`
+  alert(code === 200 ? `stop signal sent to pid ${(body.stopped || []).join(", ")}\n${body.note || ""}`
                      : `not stopped: ${body.error}`);
-  refreshDetail(); loadHealth();
+  refreshDetail(); pollHealth();
 };
 
-loadProjects(); loadGraphs(); loadHealth();
-listTimer = setInterval(() => { loadProjects(); loadHealth(); }, 5000);
-setInterval(loadHealth, 5000);   // keeps the header pill live on the detail view too
+// ---- boot: staggered polls so nothing fires all at once ----
+loadHash(); syncFilterControls();
+pollProjects();
+pollGraphs();
+initEvents();
+setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
+setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
+setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
+setTimeout(() => setInterval(pollEvents, 8000), 1200);
+setInterval(pollProjects, 5000);
+setInterval(pollGraphs, 30000);
 </script>
 </body>
 </html>
