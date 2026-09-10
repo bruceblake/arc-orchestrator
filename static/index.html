@@ -856,9 +856,11 @@ function renderTasks(d) {
     const verdict = runs.length ? (runs[0].verdict || "") : "";
     const loops = (row.attempts || 0) > 1 || (row.escalations || 0) > 0
       ? ` <span class="tag" title="fix-loop attempts / escalations">x${row.attempts}${row.escalations ? " ⬆" + row.escalations : ""}</span>` : "";
+    const retryBtn = (st === "failed" || st === "conflict")
+      ? ` <button class="act seg" data-retry="${esc(t.id)}" title="re-run this task">retry</button>` : "";
     const tr = document.createElement("tr"); tr.className = "clickable";
     tr.innerHTML = `<td>${esc(t.id)}</td><td class="hint">${esc(t.title || "")}</td><td>${esc(short(t.model))}</td>
-      <td>${esc(revShort(t.reviewer))}</td><td>${chip(st, "")}${loops}</td><td>${runs.length || "—"}</td>
+      <td>${esc(revShort(t.reviewer))}</td><td>${chip(st, "")}${loops}${retryBtn}</td><td>${runs.length || "—"}</td>
       <td>${secs || "—"}</td><td class="${verdict.includes("pass") ? "good" : verdict ? "bad" : ""}">${esc((verdict || "—").slice(0, 40))}</td>`;
     const sr = document.createElement("tr"); sr.className = "subrow"; sr.style.display = "none";
     const why = row.error ? `<div class="errbox">${esc(row.error)}</div>` : "";
@@ -872,6 +874,11 @@ function renderTasks(d) {
   }
   tb.querySelectorAll("button[data-t]").forEach(b => b.onclick = ev => { ev.stopPropagation();
     openTranscript(b.dataset.t, `${b.dataset.m} ${b.dataset.r}`, b.dataset.task); });
+  tb.querySelectorAll("button[data-retry]").forEach(b => b.onclick = async ev => { ev.stopPropagation();
+    const {code, body} = await jpost("/api/projects/retry-task", {file: CUR, task: b.dataset.retry});
+    if (code !== 200) alert(`retry failed: ${body.error || "unknown error"}`);
+    refreshDetail();
+  });
 }
 
 // ---- transcript drawer ----
