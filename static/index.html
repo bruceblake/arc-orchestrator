@@ -121,6 +121,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .qpip { width: 7px; height: 7px; border-radius: 2px; background: var(--err); opacity: .75; }
 .qpip.rev { background: var(--purple); opacity: 1; }
 .slot-q { font-size: 11px; color: var(--dim); margin-top: 4px; }
+.prrow.stranded { border-left: 2px solid var(--err); padding-left: 6px; }
 .slot.harness { background: #12171e; }
 .tagh { font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
         color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0 4px; }
@@ -602,9 +603,10 @@ function renderGithub() {
     return;
   }
   const open = (d.prs || []).filter(p => p.state === "OPEN");
-  $("#gh-meta").textContent =
-    `(${open.length} open · ${d.base} → ${d.prod}` +
-    `${d.unpromoted ? ` · ${d.unpromoted} commit${d.unpromoted === 1 ? "" : "s"} unpromoted` : " · in sync"})`;
+  $("#gh-meta").innerHTML =
+    `(${open.length} open · ${esc(d.base)} → ${esc(d.prod)}` +
+    `${d.unpromoted ? ` · ${d.unpromoted} commit${d.unpromoted === 1 ? "" : "s"} unpromoted` : " · in sync"})` +
+    (d.stranded ? ` <span class="bad">· ${d.stranded} stranded</span>` : "");
   const repo = $("#gh-repo");
   if (repo && d.repo_url) repo.href = d.repo_url;
   $("#gh-prs").innerHTML = (d.prs || []).slice(0, 10).map(p => {
@@ -616,13 +618,19 @@ function renderGithub() {
         ? `<span class="good">✓ ${(last.approvals || []).map(esc).join(" + ")}</span>`
         : `<span class="bad">✗ changes requested${last.issues ? ` · ${last.issues} issue${last.issues === 1 ? "" : "s"}` : ""}</span>`;
     const roundNote = rounds.length > 1 ? `<span class="tag">round ${rounds.length}</span>` : "";
-    return `<div class="prrow">
+    // A PR nobody is working on looks identical to a healthy open one. Seven
+    // were stranded at once here — branch pushed, PR open, no process ever
+    // coming back — and nothing in the UI said so.
+    const stranded = p.stranded
+      ? '<span class="bad" title="This PR is open but no run is working on it — re-run its project to pick it back up.">⚠ stranded</span>'
+      : "";
+    return `<div class="prrow${p.stranded ? " stranded" : ""}">
       <a class="num" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)}</a>
       <span class="prstate ${esc(p.state)}">${esc(p.state.toLowerCase())}</span>
       <span class="ttl">${esc(p.title)}</span>
       <span class="hint">${esc(p.headRefName)} → ${esc(p.baseRefName)}</span>
       <span class="hint">+${esc(p.additions)}/-${esc(p.deletions)}</span>
-      ${roundNote}${verdict}
+      ${roundNote}${stranded}${verdict}
     </div>`;
   }).join("") || '<div class="empty">No pull requests yet.</div>';
 }

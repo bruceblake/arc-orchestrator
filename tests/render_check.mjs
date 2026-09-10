@@ -39,7 +39,9 @@ const externals = [...src.matchAll(/<script[^>]+src="([^"]+)"/g)]
   .filter(f => fs.existsSync(f))
   .map(f => fs.readFileSync(f, "utf8"))
   .join("\n");
-const mod = new Function(externals + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects, renderSlots};");
+// setGH: GH is module-scoped inside this evaluated function, so the harness
+// needs a closure to assign it — a global would not reach it.
+const mod = new Function(externals + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects, renderSlots, renderGithub, setGH: v => { GH = v; }};");
 const api = mod();
 
 const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -85,6 +87,27 @@ for (const e of feedProbe) {
   }
 }
 console.log("feed event types rendered:", feedProbe.length);
+
+// A stranded PR — open with no run working on it — must be visibly different
+// from a healthy one. Seven were stranded at once and the UI showed them as
+// ordinary open pull requests.
+api.setGH({ready: true, base: "development", prod: "main", unpromoted: 2,
+  stranded: 1,
+  prs: [
+    {number: 7, state: "OPEN", title: "t", url: "u", headRefName: "task/a",
+     baseRefName: "development", additions: 1, deletions: 0, rounds: [], stranded: true},
+    {number: 8, state: "OPEN", title: "t", url: "u", headRefName: "task/b",
+     baseRefName: "development", additions: 1, deletions: 0, rounds: [], stranded: false},
+  ]});
+api.renderGithub();
+const gh = document.querySelector("#gh-prs").innerHTML;
+if ((gh.match(/prrow stranded/g) || []).length !== 1) {
+  console.error("render_check: FAIL — stranded PRs are not marked"); process.exit(1);
+}
+if (!document.querySelector("#gh-meta").innerHTML.includes("1 stranded")) {
+  console.error("render_check: FAIL — the stranded count is not in the header"); process.exit(1);
+}
+console.log("github rows rendered:", (gh.match(/class="prrow/g) || []).length);
 
 // Model slots. Driven by a synthetic BUSY payload rather than the live one:
 // the fleet is usually idle when check.sh runs, and an all-zeros payload would

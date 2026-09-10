@@ -540,3 +540,58 @@ class SeekingIntoTheEventLog(unittest.TestCase):
     def test_it_seeks_rather_than_scanning_from_zero(self):
         lines = self._lines(*range(1, 501))
         self.assertEqual(dashboard._first_event_at_or_after(lines, 480), 479)
+
+
+class StrandedPullRequests(unittest.TestCase):
+    """A PR nobody is working on looks identical to a healthy open one.
+
+    This is the failure that cost this repo the most: publish opened the PR,
+    pr_review never ran, the run ended, and the branch sat on GitHub with no
+    process ever coming back for it. Seven at once, and the UI showed seven
+    ordinary open pull requests. The detector is deliberately conservative —
+    calling a live PR abandoned is worse than staying quiet.
+    """
+
+    LIVE = "/t/live.json"
+    IDLE = "/t/idle.json"
+
+    def _owner(self, status="in_review", taskfile=None):
+        return {"t1": {"id": "t1", "status": status,
+                       "taskfile": taskfile or self.IDLE}}
+
+    def _pr(self, **kw):
+        base = {"state": "OPEN", "number": 1, "task": "t1"}
+        base.update(kw)
+        return base
+
+    def test_an_open_pr_with_no_run_is_stranded(self):
+        self.assertTrue(dashboard._pr_is_stranded(
+            self._pr(), self._owner(), {self.LIVE}))
+
+    def test_a_pr_whose_project_is_running_is_not(self):
+        self.assertFalse(dashboard._pr_is_stranded(
+            self._pr(), self._owner(taskfile=self.LIVE), {self.LIVE}))
+
+    def test_a_closed_or_merged_pr_is_never_stranded(self):
+        for state in ("MERGED", "CLOSED"):
+            self.assertFalse(dashboard._pr_is_stranded(
+                self._pr(state=state), self._owner(), {self.LIVE}))
+
+    def test_a_finished_task_is_not_stranded(self):
+        for status in ("merged", "failed"):
+            self.assertFalse(dashboard._pr_is_stranded(
+                self._pr(), self._owner(status=status), {self.LIVE}))
+
+    def test_nothing_is_reported_when_the_run_list_is_unreadable(self):
+        # live=None means we could not tell. Report nothing, not everything.
+        self.assertFalse(dashboard._pr_is_stranded(self._pr(), self._owner(), None))
+
+    def test_a_pr_the_fleet_does_not_own_is_left_alone(self):
+        # Probably a human's branch; calling their PR abandoned is worse than
+        # saying nothing.
+        self.assertFalse(dashboard._pr_is_stranded(
+            self._pr(task=None, headRefName="feature/mine"), self._owner(), set()))
+
+    def test_the_task_is_recovered_from_the_branch_name(self):
+        pr = self._pr(task=None, headRefName="task/t1")
+        self.assertTrue(dashboard._pr_is_stranded(pr, self._owner(), set()))

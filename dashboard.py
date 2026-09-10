@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import socket
+import sqlite3
 import subprocess
 import time
 from datetime import datetime
@@ -1624,6 +1625,19 @@ def _github(store, repo=None):
     ahead = git("rev-list", "--count",
                 f"{config.PROD_BRANCH}..{config.BASE_BRANCH}").strip()
     out["unpromoted"] = int(ahead) if ahead.isdigit() else 0
+    # A PR nobody is working on is the failure mode that cost this repo the
+    # most: publish opened it, pr_review never ran, the run ended, and the
+    # branch sat on GitHub with no process coming back for it. Seven at once,
+    # and nothing in the UI said so — each looked like a healthy open PR.
+    import reconcile  # imported per-function here, as elsewhere in this module
+    try:
+        live = {r.get("taskfile") for r in reconcile.live_runs()}
+    except OSError:
+        live = None  # cannot read the process table: report nothing, not everything
+    try:
+        owner = {r["id"]: r for r in (store.code_tasks_all() if store else [])}
+    except (AttributeError, sqlite3.Error):
+        owner = {}
     for pr in prs:
         n = pr.get("number")
         v = verdicts.get(n, {})
@@ -1631,9 +1645,37 @@ def _github(store, repo=None):
         pr["rounds"] = v.get("rounds", [])
         pr["approvals"] = (v["rounds"][-1]["approvals"] if v.get("rounds") else [])
         pr["reviewers"] = (v["rounds"][-1]["reviewers"] if v.get("rounds") else [])
+        pr["stranded"] = _pr_is_stranded(pr, owner, live)
         out["prs"].append(pr)
+    out["stranded"] = sum(1 for p in out["prs"] if p.get("stranded"))
     _gh_cache.update(key=now, data=out)
     return out
+
+
+def _pr_is_stranded(pr, owner, live):
+    """True when this PR is open and no run is working on it.
+
+    Deliberately conservative — an unclear answer is NOT a warning:
+      - only OPEN pull requests count
+      - `live` is None when the run list could not be read at all, and then
+        nothing is reported rather than everything
+      - a task whose taskfile has a live run is being worked on right now
+      - a task the DB does not know is skipped: it may be a human's branch,
+        and calling someone's own PR abandoned is worse than staying quiet
+    """
+    if (pr.get("state") or "").upper() != "OPEN" or live is None:
+        return False
+    task = pr.get("task")
+    if not task:
+        head = pr.get("headRefName") or ""
+        task = head[5:] if head.startswith("task/") else None
+    row = owner.get(task) if task else None
+    if row is None:
+        return False
+    if row.get("status") in ("merged", "failed"):
+        return False
+    taskfile = row.get("taskfile")
+    return not (taskfile and taskfile in live)
 
 
 def _task_deliverable(repo, task_id, want_patch=False):
