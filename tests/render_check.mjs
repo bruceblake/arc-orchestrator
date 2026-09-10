@@ -60,6 +60,29 @@ api.renderDag(d); api.renderFeed(d);
 console.log("dag svg:", document.querySelector("#dag").innerHTML.slice(0, 40) + "...");
 console.log("feed entries:", (document.querySelector("#feed").innerHTML.match(/border-bottom/g) || []).length);
 
+// Every event type the fleet emits must render as something a human reads,
+// not fall through to the raw type name. The three biggest signals in the PR
+// flow (gate result, review verdict, PR verdict) all did exactly that.
+const feedProbe = [
+  {type: "task.gate", task: "t1", passed: false, tail: "3 tests failed"},
+  {type: "task.gate", task: "t1", passed: true},
+  {type: "task.reviewed", task: "t1", passed: false, reviewer: "kimi", n_issues: 2},
+  {type: "task.pr_reviewed", task: "t1", pr: 9, approved: false, n_issues: 4, round: 1},
+  {type: "task.pr_reviewed", task: "t1", pr: 6, approved: true, approvals: ["Kimi-K3", "GLM-5.3"]},
+  {type: "task.resumed", task: "t1", prior_status: "in_review"},
+  {type: "task.pr_reattached", task: "t1", pr: 5},
+  {type: "task.branch_reset", task: "t1", branch: "task/t1", commits_discarded: 3},
+  {type: "driver.slot_wait", task: "t1", model: "GLM-5.3", scope: "harness"},
+];
+for (const e of feedProbe) {
+  const out = api.friendly(e);
+  if (out.includes(e.type)) {
+    console.error(`render_check: FAIL — ${e.type} renders as its raw type name`);
+    process.exit(1);
+  }
+}
+console.log("feed event types rendered:", feedProbe.length);
+
 // Model slots. Driven by a synthetic BUSY payload rather than the live one:
 // the fleet is usually idle when check.sh runs, and an all-zeros payload would
 // exercise none of the queue rendering this panel exists for.

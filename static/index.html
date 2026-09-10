@@ -1114,6 +1114,22 @@ function friendly(e) {
       const a = e.implement_attempts || 0, x = e.escalations || 0, k = e.total_tokens || 0;
       return `<span class="hint">⛁ ${task} cost ${a} attempt${a === 1 ? "" : "s"}, ${x} escalation${x === 1 ? "" : "s"}, ${tick(e.total_driver_seconds)}, ${k >= 1000 ? Math.round(k / 1000) + "k" : k} tok</span>`;
     }
+    case "task.gate": return e.passed
+      ? `<span class="good">✓ verify gate passed · ${task}</span>`
+      : `<span class="bad">✗ verify gate failed · ${task}${e.tail ? `: ${cut(e.tail, 160)}` : ""}</span>`;
+    case "task.reviewed": return e.passed
+      ? `<span class="good">✓ review passed · ${task} <span class="hint">by ${esc(e.reviewer)}</span></span>`
+      : `<span class="warn">↩ review sent it back · ${task}${e.n_issues ? ` (${esc(e.n_issues)} issue${e.n_issues === 1 ? "" : "s"})` : ""} <span class="hint">by ${esc(e.reviewer)}</span></span>`;
+    case "task.pr_reviewed": {
+      const who = (e.approvals || []).map(short).map(esc).join(" + ");
+      return e.approved
+        ? `<span class="good">✓ PR #${esc(e.pr)} approved · ${task} <span class="hint">by ${who}</span></span>`
+        : `<span class="warn">↩ PR #${esc(e.pr)} sent back · ${task} — ${esc(e.n_issues)} issue${e.n_issues === 1 ? "" : "s"} (round ${esc(e.round)})</span>`;
+    }
+    case "task.resumed": return `<span class="hint">↻ resumed ${task} <span class="hint">(was ${esc(e.prior_status || "?")})</span></span>`;
+    case "task.pr_reattached": return `<span class="hint">↻ reattached to PR #${esc(e.pr)} · ${task}</span>`;
+    case "task.branch_reset": return `<span class="bad">⚠ ${task}: reset ${esc(e.branch)} — ${esc(e.commits_discarded)} commit(s) discarded</span>`;
+    case "driver.slot_wait": return `<span class="warn">⏳ ${m} queued · ${task} <span class="hint">(${esc(e.scope)} pool full)</span></span>`;
     case "task.pr_opened": return `<span class="good">⇪ PR opened · ${task} ${cut(e.url, 80)}</span>`;
     case "task.pr_skipped": return `<span class="hint">PR skipped · ${task}: ${cut(e.reason, 100)}</span>`;
     case "run.resume": return `↻ resumed: skipped ${(e.skipped_merged || []).length} merged, retried ${(e.retried || []).length}`;
