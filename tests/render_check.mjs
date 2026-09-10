@@ -106,8 +106,8 @@ const gh = document.querySelector("#gh-prs").innerHTML;
 if ((gh.match(/prrow stranded/g) || []).length !== 1) {
   console.error("render_check: FAIL — stranded PRs are not marked"); process.exit(1);
 }
-if (!document.querySelector("#gh-meta").innerHTML.includes("1 stranded")) {
-  console.error("render_check: FAIL — the stranded count is not in the header"); process.exit(1);
+if (!document.querySelector("#gh-meta").innerHTML.includes("1 with no run")) {
+  console.error("render_check: FAIL — the no-run count is not in the header"); process.exit(1);
 }
 if (!gh.includes("why it was sent back")) {
   console.error("render_check: FAIL — review issues are not shown"); process.exit(1);

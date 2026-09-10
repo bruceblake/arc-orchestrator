@@ -1659,7 +1659,15 @@ def _github(store, repo=None):
 
 
 def _pr_is_stranded(pr, owner, live):
-    """True when this PR is open and no run is working on it.
+    """True when this PR is open and no run is CURRENTLY working on it.
+
+    Note what this does and does not claim. It is true both for a PR that was
+    genuinely orphaned (its run died mid-flight) and for one whose project is
+    simply queued behind others — the fleet keeps no durable queue state, so
+    from here those are indistinguishable. The UI therefore says "no run",
+    which is exactly true of both, rather than "abandoned", which would be
+    alarming and often wrong. The operator action is the same either way:
+    re-run its project.
 
     Deliberately conservative — an unclear answer is NOT a warning:
       - only OPEN pull requests count

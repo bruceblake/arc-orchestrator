@@ -121,7 +121,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .qpip { width: 7px; height: 7px; border-radius: 2px; background: var(--err); opacity: .75; }
 .qpip.rev { background: var(--purple); opacity: 1; }
 .slot-q { font-size: 11px; color: var(--dim); margin-top: 4px; }
-.prrow.stranded { border-left: 2px solid var(--err); padding-left: 6px; }
+.prrow.stranded { border-left: 2px solid var(--warn); padding-left: 6px; }
 .prissues { flex-basis: 100%; margin-top: 4px; font-size: 11px; }
 .prissues summary { cursor: pointer; color: var(--dim); }
 .prissues div { color: var(--text); padding: 4px 0 4px 10px;
@@ -611,7 +611,7 @@ function renderGithub() {
   $("#gh-meta").innerHTML =
     `(${open.length} open · ${esc(d.base)} → ${esc(d.prod)}` +
     `${d.unpromoted ? ` · ${d.unpromoted} commit${d.unpromoted === 1 ? "" : "s"} unpromoted` : " · in sync"})` +
-    (d.stranded ? ` <span class="bad">· ${d.stranded} stranded</span>` : "");
+    (d.stranded ? ` <span class="warn">· ${d.stranded} with no run</span>` : "");
   const repo = $("#gh-repo");
   if (repo && d.repo_url) repo.href = d.repo_url;
   $("#gh-prs").innerHTML = (d.prs || []).slice(0, 10).map(p => {
@@ -635,7 +635,7 @@ function renderGithub() {
     // were stranded at once here — branch pushed, PR open, no process ever
     // coming back — and nothing in the UI said so.
     const stranded = p.stranded
-      ? '<span class="bad" title="This PR is open but no run is working on it — re-run its project to pick it back up.">⚠ stranded</span>'
+      ? '<span class="warn" title="No run is currently working on this PR — either its project is queued behind others, or its run ended before the review finished. Re-run the project to pick it back up.">◌ no run</span>'
       : "";
     return `<div class="prrow${p.stranded ? " stranded" : ""}">
       <a class="num" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)}</a>
