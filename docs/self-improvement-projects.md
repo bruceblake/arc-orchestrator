@@ -52,3 +52,5 @@ dashboard's **+ New project** (JSON tab) to write tasks directly. Either way,
 `--dry-run` it and check the resolved routing before spending tokens.
 
 Schema reference: [taskfile-schema.md](taskfile-schema.md).
+
+<!-- PR flow verification 2026-09-10T16:11:26Z -->
