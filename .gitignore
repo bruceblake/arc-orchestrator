@@ -6,6 +6,7 @@ __pycache__/
 logs/.run-queue.lock
 logs/events.jsonl.prefilter-bak
 logs/*.pre-check-bak
+logs/gates/
 
 # Subagent investigation reports (regenerated on demand)
 PLANNER_DIAGNOSIS.md
