@@ -353,3 +353,44 @@ class DescribeReportsTheRealBase(unittest.TestCase):
         out = code_tasks.describe(ts)
         self.assertIn(f"base={config.BASE_BRANCH}", out)
         self.assertNotIn("base=main", out) if config.BASE_BRANCH != "main" else None
+
+
+class ReviewerSelectionIsLoadAware(unittest.TestCase):
+    """Reviewers are picked by contention, not a fixed order.
+
+    A fixed order sent every PR review to Kimi and GLM — the two scarcest
+    models — while DeepSeek sat idle. With nine runs in flight that produced
+    260 cap_wait events in an hour and three tasks giving up after waiting the
+    full 30-minute lease timeout for a slot another model could have served
+    immediately.
+    """
+
+    def _pick(self, usage, impl_family=None, n=2):
+        pool = [m for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash")
+                if config.MODEL_FAMILY.get(m) != impl_family]
+        pool.sort(key=lambda m: (usage.get(m, 0) / max(1, config.driver_limit(m)),
+                                 usage.get(m, 0)))
+        return pool[:n]
+
+    def test_the_idle_model_is_preferred_over_saturated_ones(self):
+        picked = self._pick({"Kimi-K3": 3, "GLM-5.3": 4, "DeepSeek-V4-Flash": 0})
+        self.assertEqual(picked[0], "DeepSeek-V4-Flash")
+
+    def test_saturation_is_relative_to_each_cap_not_absolute(self):
+        """4 GLM of 4 is full; 4 DeepSeek of 5 is not."""
+        picked = self._pick({"GLM-5.3": 4, "DeepSeek-V4-Flash": 4, "Kimi-K3": 3})
+        self.assertEqual(picked[0], "DeepSeek-V4-Flash")
+
+    def test_the_implementers_family_is_never_chosen(self):
+        for fam in ("kimi", "glm", "deepseek"):
+            picked = self._pick({}, impl_family=fam, n=2)
+            for m in picked:
+                self.assertNotEqual(config.MODEL_FAMILY[m], fam)
+
+    def test_enough_reviewers_remain_after_excluding_the_implementer(self):
+        """PR_REVIEWERS must be satisfiable from the remaining families."""
+        for fam in ("kimi", "glm", "deepseek"):
+            picked = self._pick({}, impl_family=fam, n=config.PR_REVIEWERS)
+            self.assertEqual(len(picked), config.PR_REVIEWERS,
+                             f"cannot fill {config.PR_REVIEWERS} reviewers when "
+                             f"the implementer is {fam}")

@@ -620,6 +620,16 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
             pool = [m for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash")
                     if config.MODEL_FAMILY.get(m) != impl_fam]
+            # Pick the LEAST CONTENDED eligible models, not a fixed order.
+            # The fixed order sent every review to Kimi and GLM while DeepSeek
+            # sat idle, so tasks waited 30 minutes for a slot another model
+            # could have served at once (260 cap_wait events in one hour).
+            try:
+                usage = store.lease_usage()
+            except Exception:
+                usage = {}
+            pool.sort(key=lambda m: (usage.get(m, 0) / max(1, config.driver_limit(m)),
+                                     usage.get(m, 0)))
             chosen = pool[:max(1, config.PR_REVIEWERS)]
 
             async def one(model):
