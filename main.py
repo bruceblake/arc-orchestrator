@@ -247,6 +247,16 @@ def cmd_code(args):
                 print(f"  stale 'running' rows reset to failed: {n_stale}")
         events.set_context(workload="code-tasks")
         log = logging.getLogger("code-cmd")
+        if config.kimi_plan_mode_on():
+            log.error(
+                "kimi is configured with default_plan_mode = true (%s).\n"
+                "Headless agents will research and propose instead of editing: "
+                "leaving plan mode needs ExitPlanMode approved, and no one is "
+                "there to approve it. Set default_plan_mode = false, or pass "
+                "--force to run anyway.", config.KIMI_CONFIG)
+            events.emit("run.refused", taskfile=tf, reason="kimi default_plan_mode is true")
+            if not args.force:
+                sys.exit(1)
         graph = build_code_graph(store, taskset, taskfile=tf)
         # SIGTERM (the dashboard's Stop button, systemd, `kill <pid>`) and
         # SIGINT must unwind through the cleanup below rather than killing the

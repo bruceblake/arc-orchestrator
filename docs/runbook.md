@@ -191,6 +191,41 @@ work never leaks into a retry — and merges are stash-tolerant (see
 "Task conflict"). Never hand-write a reduced task file to retry a subset;
 that was the old workaround, it is no longer needed.
 
+### Agents produce output but change no files (plan mode)
+
+The single most damaging misconfiguration found so far, and it looks exactly
+like a stall from the outside: the agent runs for minutes, writes 100KB+ of
+transcript, and leaves the worktree completely clean.
+
+**Cause.** `~/.kimi-code/config.toml` with:
+
+```toml
+default_plan_mode = true
+```
+
+Plan mode makes an agent research and propose rather than edit. Leaving it
+requires approving `ExitPlanMode` — and a headless `kimi -p` run has nobody to
+approve anything. Measured on this box: **182 of 206 sessions entered plan
+mode; only 44 ever left.** Most fleet agents were researching, writing plan
+files, and changing nothing.
+
+**Fix.** `default_plan_mode = false`. There is no CLI override (`--plan`
+enables it; there is no `--no-plan`) and no config-path env var — kimi ships as
+a compiled binary — so this is a global setting. Interactive plan mode is
+still available on demand with `kimi --plan`.
+
+`main.py code run` now refuses to start when it detects plan mode is on,
+naming the config file (`--force` overrides), and `tests/test_config.py` fails
+if this box is ever reconfigured back.
+
+**How to spot it** without reading config: the implementer transcript shows
+`ExitPlanMode` among the tool calls, or the worktree has zero dirty files
+after a long run:
+
+```bash
+git -C ~/worktrees/<repo>/<task> status --porcelain | wc -l
+```
+
 ### A harness went quiet (`driver.stalled`)
 
 **Read this before shortening `ARC_DRIVER_IDLE_TIMEOUT`.** Silence is not a

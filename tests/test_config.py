@@ -135,3 +135,47 @@ class IdleTimeoutClearsTheLatencyTail(unittest.TestCase):
         self.assertGreaterEqual(
             config.DRIVER_TIMEOUT, config.DRIVER_IDLE_TIMEOUT * 4,
             "the wall clock must not become the binding limit again")
+
+
+class KimiPlanMode(unittest.TestCase):
+    """Plan mode silently disables the fleet: agents propose instead of edit.
+
+    Leaving plan mode requires approving ExitPlanMode, and a headless run has
+    nobody to approve it. Before this was found, 182 of 206 sessions entered
+    plan mode and only 44 left — most agents wrote long transcripts and
+    changed no files at all.
+    """
+
+    def _probe(self, body):
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            f = pathlib.Path(d) / "config.toml"
+            f.write_text(body)
+            orig = config.KIMI_CONFIG
+            config.KIMI_CONFIG = f
+            try:
+                return config.kimi_plan_mode_on()
+            finally:
+                config.KIMI_CONFIG = orig
+
+    def test_detects_plan_mode_on(self):
+        self.assertTrue(self._probe('default_plan_mode = true\n'))
+
+    def test_detects_plan_mode_off(self):
+        self.assertFalse(self._probe('default_plan_mode = false\n'))
+
+    def test_ignores_a_commented_out_setting(self):
+        self.assertFalse(self._probe('# default_plan_mode = true\n'))
+
+    def test_missing_config_is_not_treated_as_plan_mode(self):
+        orig = config.KIMI_CONFIG
+        config.KIMI_CONFIG = pathlib.Path("/nonexistent/config.toml")
+        try:
+            self.assertFalse(config.kimi_plan_mode_on())
+        finally:
+            config.KIMI_CONFIG = orig
+
+    def test_this_box_is_configured_to_let_agents_edit(self):
+        self.assertFalse(config.kimi_plan_mode_on(),
+                         "kimi default_plan_mode is true — fleet agents will "
+                         "plan instead of edit")

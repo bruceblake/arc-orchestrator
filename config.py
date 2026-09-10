@@ -236,6 +236,26 @@ def harness_model(model, harness):
     return alias
 
 
+def kimi_plan_mode_on():
+    """True when kimi-code would start fleet agents in PLAN mode.
+
+    Plan mode makes an agent research and propose instead of edit, and leaving
+    it requires approving ExitPlanMode — which nothing does in a headless run.
+    Measured on this box before it was found: 182 of 206 sessions entered plan
+    mode and only 44 ever left, so most agents produced long transcripts and
+    changed no files. This is a global kimi setting, not ours, so the run
+    checks it rather than assuming.
+    """
+    try:
+        for line in KIMI_CONFIG.read_text(encoding="utf-8").splitlines():
+            line = line.split("#", 1)[0].strip()
+            if line.startswith("default_plan_mode"):
+                return line.split("=", 1)[1].strip().lower() == "true"
+    except (OSError, IndexError):
+        pass
+    return False
+
+
 IMPLEMENTER_MODELS = {"gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"}
 IMPLEMENT_TIERS = {"basic": ["gpt-oss-120b"], "medium": ["DeepSeek-V4-Flash"],
                    "hard": ["GLM-5.3", "Kimi-K3"]}
