@@ -4,6 +4,7 @@ These numbers govern operator decisions — whether the fleet looks wedged,
 whether to throttle — so over-counting is not a cosmetic bug.
 """
 import json
+import pathlib
 import tempfile
 import time
 import unittest
@@ -291,3 +292,41 @@ class ProjectArchive(unittest.TestCase):
         self.store.set_project_archived("/tasks/b.json", True)
         self.store.set_project_archived("/tasks/a.json", False)
         self.assertEqual(list(self.store.archived_projects()), ["/tasks/b.json"])
+
+
+class ProjectPayloadShape(unittest.TestCase):
+    """The keys the console reads must keep meaning what it thinks they mean.
+
+    `progress` has always been {done, total} and the compact project row
+    renders `p.progress.done`. Adding a per-task progress map under the SAME
+    key silently replaced it — Python keeps the last duplicate in a dict
+    literal — so every row rendered "undefined/N". Nothing failed: the tests
+    did not assert on payload shape and the render gate does not check values.
+    """
+
+    REQUIRED = {
+        "file": str, "title": str, "n_tasks": int, "phase": str,
+        "archived": bool, "progress": dict, "task_progress": dict,
+        "statuses": dict, "dag": dict, "tokens": int, "seconds": float,
+    }
+
+    def test_no_duplicate_keys_in_the_project_dict_literal(self):
+        """A duplicated key in a dict literal is legal Python and silently
+        drops the earlier value — exactly how this broke."""
+        import ast
+        src = pathlib.Path("dashboard.py").read_text()
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Dict):
+                continue
+            names = [k.value for k in node.keys
+                     if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            dupes = {n for n in names if names.count(n) > 1}
+            self.assertFalse(dupes,
+                             f"dict literal at line {node.lineno} repeats {dupes}")
+
+    def test_progress_and_task_progress_are_different_things(self):
+        self.assertIn("progress", self.REQUIRED)
+        self.assertIn("task_progress", self.REQUIRED)
+        src = pathlib.Path("dashboard.py").read_text()
+        self.assertIn('"progress": {"done"', src,
+                      "progress must stay the {done,total} rollup")

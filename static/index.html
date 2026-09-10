@@ -411,7 +411,7 @@ function prow(p, i) {
   const failed = ((p.statuses && p.statuses.failed) || 0) + ((p.statuses && p.statuses.conflict) || 0);
   return `<div class="prow" data-i="${i}" role="button" tabindex="0" aria-label="open project ${esc(p.title)}">
     <span class="dots">${dots}</span>
-    <span class="pt"><b>${esc(p.title)}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</span>
+    <span class="pt"><b>${esc(p.title)}</b> ${liveBadge(p)}</span>
     <span class="pc">${done}/${tot}${failed ? ` · <span class="bad">${failed}✗</span>` : ""}</span>
     <span class="pc" style="color:var(--warn)">⛁ ${fmtK(p.tokens)}</span>
     <span class="pc">${fmtT(p.last_activity)}</span>
@@ -438,6 +438,23 @@ function progressLines(progress) {
   }).join("");
 }
 
+// One honest status instead of two overlapping ones.
+//
+// `active` means the DATABASE says a task is running (or an agent is in
+// flight); `run_pid` means an OS PROCESS owns this task file. They answer
+// different questions, and showing both as separate badges — "LIVE" plus
+// "running (pid 28336)" — said the same thing twice when they agreed and
+// explained nothing when they did not.
+//
+// Their DISAGREEMENT is the useful signal: rows marked running with no
+// process are leftovers from a killed run, which is the single most common
+// wrong state this fleet gets into. That now says so, and says what to do.
+function liveBadge(p) {
+  if (p.run_pid) return `<span class="live" title="process ${esc(p.run_pid)} is running this project">LIVE</span>`;
+  if (p.active) return `<span class="chip failed" title="marked running in the database, but no process owns this task file — a run was killed. Run: main.py code reconcile">stale</span>`;
+  return "";
+}
+
 function card(p, i) {
   const chips = Object.entries(p.statuses || {}).map(([s, n]) => chip(s, n)).join("") || '<span class="hint">never run</span>';
   const tot = (p.progress && p.progress.total) || p.n_tasks || 1;
@@ -447,9 +464,9 @@ function card(p, i) {
   const pct = n => (100 * n / tot).toFixed(1);
   const bar = `<div class="pbar"><i class="done" style="width:${pct(done)}%"></i><i class="running" style="width:${pct(running)}%"></i><i class="failed" style="width:${pct(failed)}%"></i></div>`;
   return `<div class="card ${p.archived ? "archived" : ""}" data-i="${i}" role="button" tabindex="0" aria-label="open project ${esc(p.title)}">
-    <div><b>${esc(p.title)}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</div>
+    <div><b>${esc(p.title)}</b> ${liveBadge(p)}</div>
     ${bar}
-    ${progressLines(p.progress)}
+    ${progressLines(p.task_progress)}
     <div class="hint">${done}/${tot} merged${failed ? ` · <span class="bad">${failed} failed</span>` : ""}${running ? ` · ${running} running` : ""}</div>
     ${taskDag(p.dag, {size: "mini", file: p.file})}
     <div style="margin-top:6px">${chips}</div>
@@ -461,7 +478,7 @@ function card(p, i) {
     <div style="margin-top:5px">${(p.models || []).map(m => `<span class="tag">${short(m)}</span>`).join("")}
       ${(p.reviewers || []).map(m => `<span class="tag">review: ${revShort(m)}</span>`).join("")}</div>
     ${(p.errors && p.errors.length) ? `<div class="cardnote" title="${esc(p.errors[0].error)}">⚠ ${esc(p.errors[0].id)}: ${esc(String(p.errors[0].error).slice(0, 90))}</div>` : ""}
-    <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}${p.run_pid ? ` · <span class="good">running (pid ${p.run_pid})</span>` : ""}</div>
+    <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}</div>
     <div class="cardact">
       <button class="act seg" data-arch="${esc(p.file)}" data-on="${p.archived ? 1 : 0}">${p.archived ? "restore" : "archive"}</button>
     </div>
@@ -812,7 +829,7 @@ async function refreshDetail() {
     ${(g.log || []).length ? `<div class="hint" style="margin-top:5px">${g.log.map(l => "&nbsp;&nbsp;" + esc(l)).join("<br>")}</div>` : ""}
     ${(g.worktrees || []).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.map(esc).join("<br>")}</div>` : ""}`;
   const pm = $("#d-progress");
-  if (pm) pm.innerHTML = progressLines(d.progress);
+  if (pm) pm.innerHTML = progressLines(d.task_progress);
   renderDag(d); renderFeed(d); renderTasks(d);
 }
 

@@ -490,8 +490,12 @@ def _collect_inflight(now, store=None):
     return rows, kimi
 
 
-def _usage(store=None, range_key=None):
-    """Usage aggregates for /api/usage. Default (no range) keeps the historical shape."""
+def _usage(store=None, range_key=None, include_series=False):
+    """Usage aggregates for /api/usage. Default (no range) keeps the historical shape.
+
+    `series` (the per-family time buckets, ~90% of the payload) is opt-in via
+    include_series=True — nothing in static/*.html draws it except phone.html,
+    which requests ?series=1."""
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
 
@@ -694,18 +698,20 @@ def _usage(store=None, range_key=None):
     recent_driver.reverse()
 
     start, bucket, n = _series_window(range_key, now, min((p[0] for p in pts), default=None))
-    series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
-              for f in config.FAMILY_ORDER}
-    for ts, family, req, tok, _tr in pts:
-        if not ts or ts < start:
-            continue
-        idx = int((ts - start) // bucket)
-        if idx >= n:
-            continue
-        pts_list = series.setdefault(family, [{"t": start + i * bucket, "requests": 0,
-                                               "tokens": 0} for i in range(n)])
-        pts_list[idx]["requests"] += req
-        pts_list[idx]["tokens"] += tok
+    series = None
+    if include_series:
+        series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
+                  for f in config.FAMILY_ORDER}
+        for ts, family, req, tok, _tr in pts:
+            if not ts or ts < start:
+                continue
+            idx = int((ts - start) // bucket)
+            if idx >= n:
+                continue
+            pts_list = series.setdefault(family, [{"t": start + i * bucket, "requests": 0,
+                                                   "tokens": 0} for i in range(n)])
+            pts_list[idx]["requests"] += req
+            pts_list[idx]["tokens"] += tok
 
     day0 = int(now // 86400)
     daily = []
@@ -741,10 +747,13 @@ def _usage(store=None, range_key=None):
     families = [by_family[f] for f in config.FAMILY_ORDER]
     families += [v for k, v in sorted(by_family.items()) if k not in config.FAMILY_ORDER]
 
-    return {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
-            "models": models, "families": families, "inflight": inflight,
-            "recent_driver_events": recent_driver,
-            "totals": totals, "series": series}
+    res = {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
+           "models": models, "families": families, "inflight": inflight,
+           "recent_driver_events": recent_driver,
+           "totals": totals}
+    if include_series:
+        res["series"] = series
+    return res
 
 
 _fleet_cache = {"key": 0.0, "models": [], "totals": {}}  # refreshed at most every ~2s
@@ -849,6 +858,46 @@ _PHASE_WORD = {"alloc": "preparing worktree", "implement": "writing code",
                "gate": "running the verify gate", "review": "under review",
                "escalate": "escalating to a stronger model",
                "publish": "committing and merging", "fail": "giving up"}
+
+
+_kimi_task_tokens_cache = {"key": 0.0, "map": {}}
+
+
+def _kimi_tokens_by_task():
+    """{task-id: tokens} from kimi-code wire logs, cached ~30s.
+
+    kimi's stream-json transcript carries NO usage, so every kimi task showed
+    "0 tok" — indistinguishable from a task that had done nothing. The wire
+    logs DO record it, and their directories are named wd_<task-id>_<hash>, so
+    it can be attributed properly instead of shown as a dash. One task
+    measured 688,407 tokens while the console reported zero.
+    """
+    now = time.time()
+    if now - _kimi_task_tokens_cache["key"] < 30:
+        return _kimi_task_tokens_cache["map"]
+    out = {}
+    root = Path.home() / ".kimi-code" / "sessions"
+    try:
+        paths = list(root.glob("*/*/agents/*/wire.jsonl")) if root.is_dir() else []
+    except OSError:
+        paths = []
+    for path in paths:
+        tid = _session_task(path)
+        if not tid:
+            continue
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        key = (st.st_size, st.st_mtime_ns)
+        ent = _kimi_cache.get(str(path))
+        if ent is None or ent["key"] != key:
+            ent = {"key": key, "agg": _parse_kimi_wire(path)}
+            _kimi_cache[str(path)] = ent
+        ft = ent["agg"]["file_totals"]
+        out[tid] = out.get(tid, 0) + (ft["prompt"] or 0) + (ft["completion"] or 0)
+    _kimi_task_tokens_cache.update(key=now, map=out)
+    return out
 
 
 def _task_progress(ids):
@@ -1071,6 +1120,7 @@ def _projects(store):
         parsed.append((f, proj, tdefs, ids))
         all_ids.extend(ids)
     all_loop_stats = _task_loop_stats(store, sorted(set(all_ids)))
+    kimi_tok = _kimi_tokens_by_task()
     for f, proj, tdefs, ids in parsed:
         idset = set(ids)
         rows = [r for r in rows_all if r.get("taskfile")
@@ -1104,7 +1154,10 @@ def _projects(store):
                     "model": t.get("model"), "reviewer": t.get("reviewer"),
                     "status": per_task.get(tid, "pending"),
                     "live": tid in live_tasks,
-                    "tokens": ev.get("tokens", 0),
+                    # kimi transcripts carry no usage; its wire logs do.
+                    "tokens": max(ev.get("tokens", 0), kimi_tok.get(tid, 0)),
+                    "tokens_source": ("kimi-wire" if kimi_tok.get(tid, 0) > ev.get("tokens", 0)
+                                      else "transcript"),
                     "seconds": round(ev.get("seconds", 0.0), 1),
                     "live_tokens": lv.get("tokens", 0),
                     "live_seconds": round(lv.get("seconds", 0.0), 1),
@@ -1146,9 +1199,10 @@ def _projects(store):
                     "archived_at": archived.get(str(f)),
                     "phase": _project_phase(statuses, ids,
                                             run_by_file.get(f.name)),
-                    "progress": (_task_progress(ids)
-                                 if (statuses.get("running")
-                                     or run_by_file.get(f.name)) else {}),
+                    # NOT "progress": that key already means {done, total}.
+                    "task_progress": (_task_progress(ids)
+                                      if (statuses.get("running")
+                                          or run_by_file.get(f.name)) else {}),
                     "run_pid": run_by_file.get(f.name),
                     "active": statuses.get("running", 0) > 0 or any(i in live_tasks for i in ids),
                     "last_activity": last or mtime_iso})
@@ -1227,7 +1281,7 @@ def _project_detail(store, fname):
                     if r.get("taskfile") and Path(r["taskfile"]).name == fname), None)
     return {"file": fname, "title": proj.get("title") or path.stem,
             "repo": proj.get("repo"), "run_pid": run_pid,
-            "progress": _task_progress(ids),
+            "task_progress": _task_progress(ids),
             "tasks": tdefs, "rows": rows, "runs": runs, "events": events,
             "git": _git_block(repo_v, gh)}, 200
 
@@ -1792,7 +1846,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/usage":
                 q = parse_qs(u.query)
                 range_key = q.get("range", ["1h"])[0]
-                return self._json(_usage(Handler.store, range_key))
+                include_series = q.get("series", ["0"])[0] == "1"
+                return self._json(_usage(Handler.store, range_key, include_series))
             if u.path == "/api/fleet":
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/projects":
