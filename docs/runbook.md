@@ -588,7 +588,7 @@ ps aux | grep -E 'kimi|opencode'
 ```
 
 The orchestrator reaps a hung driver itself: `drivers.py` kills the child
-after `DRIVER_TIMEOUT` (default **900s**) and reports a `driver.error`. A
+after `DRIVER_TIMEOUT` (default **2700s**) and reports a `driver.error`. A
 `driver.error` counts against `MAX_RETRIES` (default 4) before the task fails.
 If a `kimi`/`opencode` process is still alive past that, it is either running
 a fresh attempt, retrying with backoff, or genuinely orphaned — kill it with

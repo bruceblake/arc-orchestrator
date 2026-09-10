@@ -78,7 +78,7 @@ has fewer live rows than `config.driver_limit(model)`. Over cap, the task
 **waits**, polling every 20 s and emitting `driver.cap_wait {model, task,
 in_use, cap}` about once a minute — that event is the fleet's "concurrency
 limit reached" warning. Rows are reaped when older than
-`config.DRIVER_LEASE_TTL` (default 1800 s, `ARC_DRIVER_LEASE_TTL`) or owned by
+`config.DRIVER_LEASE_TTL` (default 3300 s, `ARC_DRIVER_LEASE_TTL`) or owned by
 a dead pid, so a killed run frees its slots within seconds and a crashed one
 within the TTL. All of this is in addition to — never instead of — the
 semaphore: the semaphore is the fast in-process path, the lease is the
@@ -225,7 +225,7 @@ are overridable from `.env`.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `DRIVER_TIMEOUT` | 900 s | Per-harness-subprocess runtime cap. `drivers.Driver._once` sets `deadline = t0 + config.DRIVER_TIMEOUT`; if the child is still producing output past it, it is killed and the run raises `DriverError` (`drivers.py:166-180`). |
+| `DRIVER_TIMEOUT` | 2700 s | Per-harness-subprocess runtime cap. `drivers.Driver._once` sets `deadline = t0 + config.DRIVER_TIMEOUT`; if the child is still producing output past it, it is killed and the run raises `DriverError` (`drivers.py:166-180`). |
 | `GATE_TIMEOUT` | 180 s | Cap on the deterministic verify gate. `code_tasks.gate` runs `verify_cmd` via `asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)`; on timeout it kills the child and returns `passed=False` (`code_tasks.py:199-203`). |
 | `MAX_FIX_ROUNDS` | 3 | Bounded (re)implement↔review fix loop per task. `code_tasks.py` re-fires `implement_<tid>` after a failed gate/review while `runs["implement_<tid>"] <= config.MAX_FIX_ROUNDS`, else it fires `fail_<tid>` (`code_tasks.py:253-265`). |
 | `MAX_RETRIES` | 4 | Per-firing retry budget in `drivers.Driver.run`: an attempt that raises `DriverError` retries (exponential backoff `2^attempt`, capped at 30 s) until `attempt > config.MAX_RETRIES`, then re-raises and fails the task (`drivers.py:126-136`). |
