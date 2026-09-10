@@ -121,7 +121,9 @@ class ResumePlanning(unittest.TestCase):
     def test_capability_failure_escalates_one_tier(self):
         p = self.plan([{"id": "t1", "status": "failed", "model": "gpt-oss-120b",
                         "error": "exhausted fix rounds"}])
-        self.assertEqual(p["escalated_on_resume"], {"t1": "DeepSeek-V4-Flash"})
+        self.assertEqual(p["escalated_on_resume"],
+                         {"t1": config.ESCALATION_PATH[0]},
+                         "gpt-oss-120b is off the path, so it escalates into it")
 
     def test_killed_run_resumes_at_the_same_tier(self):
         """The regression that put four tasks on Kimi-K3 at once."""
@@ -248,3 +250,28 @@ class PlanExtraction(unittest.TestCase):
     def test_placeholder_plans_are_rejected_as_unsubstantive(self):
         self.assertFalse(code_tasks._plan_is_substantive(self.DECOY))
         self.assertTrue(code_tasks._plan_is_substantive(self.PLAN))
+
+
+class OffPathModelsCanStillEscalate(unittest.TestCase):
+    """A model routed explicitly but absent from ESCALATION_PATH must still
+    be able to escalate — otherwise removing a tier from the path silently
+    strands every task that names it."""
+
+    def plan(self, prior):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))   # BASIC uses gpt-oss-120b
+        with capture_events() as ev:
+            code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
+        return ev.first("run.resume") or {}
+
+    def test_a_model_off_the_path_escalates_into_the_entry_tier(self):
+        self.assertNotIn("gpt-oss-120b", config.ESCALATION_PATH)
+        p = self.plan([{"id": "t1", "status": "failed", "model": "gpt-oss-120b",
+                        "error": "exhausted fix rounds"}])
+        self.assertEqual(p["escalated_on_resume"],
+                         {"t1": config.ESCALATION_PATH[0]})
+
+    def test_the_top_tier_still_does_not_escalate(self):
+        top = config.ESCALATION_PATH[-1]
+        p = self.plan([{"id": "t1", "status": "failed", "model": top,
+                        "error": "exhausted fix rounds"}])
+        self.assertEqual(p["escalated_on_resume"], {})

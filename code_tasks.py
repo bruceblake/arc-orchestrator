@@ -238,6 +238,21 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         except ValueError:
             return None
 
+    def _next_tier(model):
+        """The next stronger model for `model`, or None at the top.
+
+        A model that is not ON the escalation path (a taskfile may still route
+        explicitly to gpt-oss-120b for mechanical work) counts as below the
+        entry tier, so it escalates INTO the path rather than being stuck
+        unable to escalate at all.
+        """
+        idx = _tier_index(model)
+        if idx is None:
+            return config.ESCALATION_PATH[0] if config.ESCALATION_PATH else None
+        if idx + 1 < len(config.ESCALATION_PATH):
+            return config.ESCALATION_PATH[idx + 1]
+        return None
+
     def reviewer_for(t, model):
         """Cross-review preserved under escalation: a strong model's work is
         reviewed by the other strong harness; basic/medium keep the taskfile
@@ -264,9 +279,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         if not r or not escalate_on:
             return t["model"]
         if r["status"] == "failed" and _is_capability_failure(r.get("error")):
-            idx = _tier_index(r.get("model") or t["model"])
-            if idx is not None and idx + 1 < len(config.ESCALATION_PATH):
-                return config.ESCALATION_PATH[idx + 1]
+            nxt = _next_tier(r.get("model") or t["model"])
+            if nxt:
+                return nxt
         # conflict resumes at the same model — a merge conflict is not a
         # model-capability signal — and so does an interrupted run.
         return r.get("model") or t["model"]
@@ -341,8 +356,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         def can_escalate(ctx):
             if not escalate_on or esc_n(ctx) >= config.MAX_ESCALATIONS:
                 return False
-            idx = _tier_index(cur_model(ctx))
-            return idx is not None and idx + 1 < len(config.ESCALATION_PATH)
+            return _next_tier(cur_model(ctx)) is not None
 
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
@@ -434,7 +448,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         async def escalate(ctx):
             src = cur_model(ctx)
-            nxt = config.ESCALATION_PATH[_tier_index(src) + 1]
+            nxt = _next_tier(src)
             rev = reviewer_for(t, nxt)
             store.upsert_code_task(taskfile, tid, t["title"], nxt, rev, "running")
             events.emit("task.escalated", task=tid, from_model=src, to_model=nxt,

@@ -176,9 +176,22 @@ MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 # failing; it only fails when the last tier exhausts. gpt-oss-120b may
 # legitimately exhaust immediately on a task planned too optimistically, so the
 # path still reaches a strong model within a couple of escalations.
+# DeepSeek-V4-Flash is the ENTRY tier, not gpt-oss-120b. Measured over 103
+# implement runs across 31 tasks:
+#
+#            gate pass   end-to-end   implement runs/task   escalated
+#   gpt-oss     59.1%       25.0%            5.5              36%
+#   DeepSeek    71.0%       51.6%            1.7               0%
+#
+# gpt-oss time is cheap (cap 8) but its REVIEWS are not: gpt-oss-started tasks
+# were 35% of tasks and consumed 54.7% of all reviewer runs, every one of them
+# executed by GLM-5.3 or Kimi-K3 — the two capped models that are the fleet's
+# actual scarce resource. Cheap retries paid for with expensive reviews is a
+# bad trade. gpt-oss stays available for explicitly-routed mechanical work
+# (docs, one-line edits); it is just no longer where every task starts.
 ESCALATION_PATH = [m.strip() for m in os.getenv(
     "ARC_ESCALATION_PATH",
-    "gpt-oss-120b,DeepSeek-V4-Flash,GLM-5.3,Kimi-K3").split(",") if m.strip()]
+    "DeepSeek-V4-Flash,GLM-5.3,Kimi-K3").split(",") if m.strip()]
 MAX_ESCALATIONS = int(os.getenv("ARC_MAX_ESCALATIONS",
                                 str(max(0, len(ESCALATION_PATH) - 1))))
 

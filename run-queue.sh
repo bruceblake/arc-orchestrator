@@ -28,6 +28,24 @@ if ! flock -n 9; then
     exit 1
 fi
 
+# How many task files may be in flight at once. Was effectively 1: this queue
+# ran them strictly one after another after a 09-09 incident where four
+# started together and the dashboard reported kimi at 9/3.
+#
+# That reading was wrong. driver.start was emitted BEFORE a driver acquired
+# its semaphore and lease, so queued drivers were counted as running. With
+# that fixed, the measured data says the caps were never the constraint:
+# ZERO driver.cap_wait events in 6047, and queue time totalling 1.2% of 33
+# driver-hours. What the serialization actually bought was a fleet running at
+# 2.13 concurrent drivers against 21 slots, with exactly ONE driver live 58%
+# of the time.
+#
+# The real guard against over-subscription is the per-model lease in
+# store.driver_leases, which is enforced across processes and was not what
+# failed. This bounds task-file concurrency instead, so one wedged file cannot
+# monopolise the fleet.
+MAX_PARALLEL="${ARC_QUEUE_PARALLEL:-3}"
+
 say() { printf '=== %s %s ===\n' "$(date '+%H:%M:%S')" "$*" | tee -a "$LOG"; }
 
 # A queue killed mid-flight leaves 'running' rows, driver leases and worktrees
@@ -36,6 +54,8 @@ $PY main.py code reconcile >>"$LOG" 2>&1
 
 trap 'say "QUEUE INTERRUPTED"; exit 130' INT TERM
 
+FAILFILE=$(mktemp)
+trap 'rm -f "$FAILFILE"' EXIT
 failed=0
 for stem in "${QUEUE[@]}"; do
     tf="$TASKS_DIR/$stem.json"
@@ -60,16 +80,38 @@ PYEOF
     done
     [ "$waited" -eq 1 ] && say "RESUME $stem (the other run finished)"
 
+    # Hold at MAX_PARALLEL task files in flight; start the next as one frees.
+    while [ "$(jobs -rp | wc -l)" -ge "$MAX_PARALLEL" ]; do
+        wait -n 2>/dev/null || true
+    done
+
     say "START $stem"
-    $PY main.py code run "$tf" >>"$LOG" 2>&1
-    rc=$?                       # captured BEFORE any other command runs
-    if [ "$rc" -eq 0 ]; then
-        say "END $stem rc=0"
-    else
-        failed=$((failed + 1))
-        say "END $stem rc=$rc (FAILED)"
-    fi
+    (
+        $PY main.py code run "$tf" >>"$LOG" 2>&1
+        rc=$?                   # captured BEFORE any other command runs
+        if [ "$rc" -eq 0 ]; then
+            say "END $stem rc=0"
+        else
+            say "END $stem rc=$rc (FAILED)"
+            # Failures are recorded in a file, not a shell variable: each run
+            # is a background subshell, so a variable it increments dies with
+            # it, and `wait -n || ...` swallows the status it would have
+            # reported. The queue would then always claim success.
+            echo "$stem rc=$rc" >> "$FAILFILE"
+        fi
+    ) &
 done
 
-say "QUEUE COMPLETE — ${#QUEUE[@]} task file(s), $failed failed"
+# Drain: every remaining task file must finish before the queue reports.
+while [ "$(jobs -rp | wc -l)" -gt 0 ]; do
+    wait -n 2>/dev/null || true
+done
+failed=$(wc -l < "$FAILFILE" 2>/dev/null || echo 0)
+
+if [ "$failed" -gt 0 ]; then
+    say "QUEUE COMPLETE — ${#QUEUE[@]} task file(s), $failed failed:"
+    sed 's/^/    /' "$FAILFILE" | tee -a "$LOG"
+else
+    say "QUEUE COMPLETE — ${#QUEUE[@]} task file(s), all succeeded"
+fi
 exit $(( failed > 0 ? 1 : 0 ))

@@ -382,7 +382,12 @@ class Driver:
         continuation = None
         while True:
             attempt += 1
-            events.emit("driver.start", harness=self.harness, model=self.model,
+            # driver.queued, not driver.start: this attempt has not got a slot
+            # yet. Emitting "start" here counted every QUEUED driver as
+            # in-flight, which is how the dashboard once reported kimi at 9/3
+            # and triggered a fleet-wide serialization that was never needed.
+            # driver.start is emitted by _guarded_once once both slots are held.
+            events.emit("driver.queued", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
                         resume=bool(sid))
             try:
@@ -451,6 +456,11 @@ class Driver:
             await _lease_acquire(self.model, task_id,
                                  {"harness": self.harness, "role": self.role})
             try:
+                # Both slots held: this driver is genuinely occupying capacity
+                # now, so this is the event in-flight accounting must pair with.
+                events.emit("driver.start", harness=self.harness,
+                            model=self.model, role=self.role, task=task_id,
+                            attempt=attempt)
                 return await self._once(prompt, worktree, sid, task_id, attempt)
             finally:
                 _lease_release(self.model, task_id)

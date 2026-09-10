@@ -415,7 +415,7 @@ def _collect_inflight(now, store=None):
             driver_progress[(e.get("harness"), e.get("model"), e.get("role"),
                              e.get("task"), e.get("attempt"))] = e
         elif etype in ("driver.done", "driver.error", "driver.stale",
-                       "driver.cancelled"):
+                       "driver.cancelled", "driver.cap_timeout"):
             key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
             if key in driver_starts:
                 del driver_starts[key]

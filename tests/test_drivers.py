@@ -493,3 +493,61 @@ class LeaseWaitIsBounded(unittest.TestCase):
             with capture_events():
                 asyncio.run(go())
             self.assertEqual(len(store.driver_lease_rows()), 1)
+
+
+class InflightIsCountedOnlyWhenHoldingASlot(unittest.TestCase):
+    """driver.start must mean "occupying capacity", not "wants capacity".
+
+    It used to be emitted before the semaphore and lease were acquired, so
+    every QUEUED driver was counted as in-flight. That is how the dashboard
+    reported kimi at 9/3 and triggered a fleet-wide serialization that the
+    measured data later showed was never needed (zero real cap waits).
+    """
+
+    def test_queued_comes_first_then_start_once_the_slot_is_held(self):
+        with TempLeaseDB(), capture_events() as ev:
+            drv = FakeDriver(DriverError("boom"))
+            drivers._semaphores.pop(drv.model, None)
+
+            async def fast_sleep(d):
+                pass
+
+            orig = drivers.asyncio.sleep
+            drivers.asyncio.sleep = fast_sleep
+            try:
+                async def go():
+                    with self.assertRaises(DriverError):
+                        await drv.run("p", Path("."), task_id="t1")
+                asyncio.run(go())
+            finally:
+                drivers.asyncio.sleep = orig
+        order = [t for t, _ in ev.seen if t in ("driver.queued", "driver.start")]
+        self.assertTrue(order, "no lifecycle events emitted")
+        self.assertEqual(order[0], "driver.queued")
+        self.assertEqual(len(ev.of("driver.queued")), len(ev.of("driver.start")),
+                         "every queued attempt that got a slot must pair up")
+
+    def test_an_attempt_that_never_gets_a_slot_emits_no_start(self):
+        """A driver that times out waiting must not look like it ran."""
+        with TempLeaseDB() as store, capture_events() as ev:
+            cap = config.driver_limit("Kimi-K3")
+            for i in range(cap):
+                store.acquire_driver_lease("Kimi-K3", os.getpid(), f"o{i}",
+                                           cap, config.DRIVER_LEASE_TTL)
+            orig_wait, orig_sleep = config.DRIVER_LEASE_WAIT, drivers.asyncio.sleep
+            config.DRIVER_LEASE_WAIT = 0.2
+
+            async def fast_sleep(d):
+                pass
+
+            drivers.asyncio.sleep = fast_sleep
+            try:
+                async def go():
+                    with self.assertRaises(DriverError):
+                        await drivers._lease_acquire("Kimi-K3", "mine", {})
+                asyncio.run(go())
+            finally:
+                config.DRIVER_LEASE_WAIT = orig_wait
+                drivers.asyncio.sleep = orig_sleep
+        self.assertEqual(ev.of("driver.start"), [],
+                         "a driver that never got a slot must not emit start")
