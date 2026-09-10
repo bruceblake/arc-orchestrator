@@ -265,21 +265,21 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <option>/home/proxyie/repos/multi-harness-sandbox</option>
         <option value="__custom">custom path…</option>
       </select>
-      <input id="p-repo-custom" placeholder="/home/proxyie/…" style="display:none">
+      <input id="p-repo-custom" placeholder="/home/proxyie/…" style="display:none" aria-label="repo path">
       <label class="hint">goal</label>
       <textarea id="p-goal" rows="3" placeholder="e.g. Add a settings menu with volume sliders to the minecraft clone"></textarea>
       <button class="act primary" id="p-go">Plan project</button>
       <div id="p-msg"></div>
     </div>
     <div id="tab-json" style="display:none">
-      <label class="hint">title</label><input id="j-title" placeholder="my feature">
+      <label class="hint" for="j-title">title</label><input id="j-title" placeholder="my feature">
       <label class="hint">repo</label>
       <select id="j-repo">
         <option>/home/proxyie/minecraft-web</option>
         <option>/home/proxyie/repos/multi-harness-sandbox</option>
         <option value="__custom">custom path…</option>
       </select>
-      <input id="j-repo-custom" placeholder="/home/proxyie/…" style="display:none">
+      <input id="j-repo-custom" placeholder="/home/proxyie/…" style="display:none" aria-label="repo path">
       <label class="hint">tasks JSON</label>
       <textarea id="j-tasks" rows="9">[
   {"id": "first-task", "title": "short title", "prompt": "what to build, in detail"}

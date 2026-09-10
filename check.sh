@@ -87,6 +87,15 @@ if command -v node >/dev/null 2>&1; then
         echo "FAIL: a page calls a function that is never defined"; rc=1
     fi
 
+    # Editing a page can ship a control that is unusable to a keyboard or
+    # screen-reader user while every syntax/ID check still passes: a clickable
+    # div with no role="button", a control with no accessible name, an <img>
+    # with no alt, an <input> with no label, or a page that never draws a
+    # focus outline. The scanner is the gate for those.
+    if ! node tests/a11y_check.mjs static/*.html; then
+        echo "FAIL: a page is missing an accessibility requirement"; rc=1
+    fi
+
     # Every $("#id") the script reaches for must exist in the markup.
     "$PY" - <<'PYEOF' || rc=1
 import re, pathlib, sys
