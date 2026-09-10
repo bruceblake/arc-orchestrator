@@ -197,6 +197,9 @@ def cmd_code(args):
             print("(dry run — nothing was changed)")
         print(_rec.format_report(rep))
         return
+    if args.code_cmd == "list":
+        cmd_code_list(args)
+        return
 
     async def run():
         if args.code_cmd == "plan":
@@ -311,6 +314,74 @@ def cmd_code(args):
         asyncio.run(run())
     except KeyboardInterrupt:
         pass
+
+
+def cmd_code_list(args):
+    import json
+    from datetime import datetime, timezone
+
+    from store import Store
+
+    store = Store(args.db or config.DB_PATH)
+    try:
+        rows_all = store.code_tasks_all()
+    except Exception:
+        rows_all = []
+    tdir = Path(config.TASKS_DIR)
+    entries = []
+    for f in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
+        entry = {"file": f.name, "n_tasks": 0, "merged": 0,
+                 "statuses": {}, "last_activity": None}
+        try:
+            data = json.loads(f.read_text(encoding="utf-8", errors="replace"))
+        except Exception:
+            entry["error"] = "parse error"
+            entries.append(entry)
+            continue
+        proj = data.get("project") or {}
+        ids = [t.get("id") for t in (proj.get("tasks") or [])
+               if isinstance(t, dict) and t.get("id")]
+        idset = set(ids)
+        entry["n_tasks"] = len(ids)
+        statuses = {}
+        last = None
+        for r in rows_all:
+            if not (r.get("taskfile")
+                    and (r["taskfile"] == str(f) or r["taskfile"].endswith("/" + f.name))):
+                continue
+            if r.get("id") not in idset:
+                continue
+            st = r.get("status") or "pending"
+            statuses[st] = statuses.get(st, 0) + 1
+            for k in ("created_at", "finished_at"):
+                v = r.get(k)
+                if v and (last is None or v > last):
+                    last = v
+        entry["statuses"] = statuses
+        entry["merged"] = statuses.get("merged", 0)
+        if last is None:
+            try:
+                last = datetime.fromtimestamp(
+                    f.stat().st_mtime, tz=timezone.utc).isoformat()
+            except OSError:
+                last = None
+        entry["last_activity"] = last
+        entries.append(entry)
+
+    entries.sort(key=lambda p: p["last_activity"] or "", reverse=True)
+
+    if args.json:
+        print(json.dumps(entries, indent=2, default=str))
+        return
+
+    for p in entries:
+        if p.get("error"):
+            print(f"{p['file']:24}  error: {p['error']}")
+            continue
+        summary = " ".join(f"{k}={v}" for k, v in sorted(p["statuses"].items()))
+        print(f"{p['file']:24}  {p['n_tasks']} tasks  "
+              f"{p['merged']}/{p['n_tasks']} merged  "
+              f"{summary}  {p['last_activity'] or ''}")
 
 
 def cmd_code_bench(args):
@@ -510,6 +581,11 @@ def main():
                       help="reconcile even while a code-run process is alive")
     crec.add_argument("--db", default=None, help="sqlite database path")
     crec.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    cl_p = code_sub.add_parser("list", help="list every task file in the tasks dir")
+    cl_p.add_argument("--json", action="store_true",
+                      help="emit the same data as JSON instead of a table")
+    cl_p.add_argument("--db", default=None, help="sqlite database path")
+    cl_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cb_p = code_sub.add_parser("bench", help="orchestration benchmark: full governed DAG per policy variant")
     cb_sub = cb_p.add_subparsers(dest="orch_bench_cmd", required=True)
     cbr = cb_sub.add_parser("run", help="run the variant matrix (orchbench.VARIANTS)")
