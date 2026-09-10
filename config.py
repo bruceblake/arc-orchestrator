@@ -197,6 +197,14 @@ REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false"
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 
+# --- GitHub operations agents (gh_ops.py) ------------------------------------
+# Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
+# governed code pipeline: no worktree, no gate, no publish. Only Kimi-K3 and
+# GLM-5.3 may hold the gh roles (driver validation enforces it), every command
+# previews by default, and --apply-labels/--create/--post are the only writes.
+GH_MODEL = os.getenv("ARC_GH_MODEL", "Kimi-K3")
+GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "60"))
+
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of
 # failing; it only fails when the last tier exhausts. gpt-oss-120b may

@@ -700,9 +700,12 @@ class KimiDriver(Driver):
     model = "Kimi-K3"
 
     def __init__(self, role, bench=False):
-        if not bench and role not in ("planner", "reviewer", "pr_reviewer", "implementer"):
-            raise ValueError("KimiDriver role must be "
-                             f"planner|reviewer|pr_reviewer|implementer, got {role!r}")
+        if not bench and role not in ("planner", "reviewer", "pr_reviewer",
+                                      "implementer", "issue-triager",
+                                      "issue-maker", "pr-reviewer"):
+            raise ValueError("KimiDriver role must be planner|reviewer|"
+                             "pr_reviewer|implementer|issue-triager|"
+                             f"issue-maker|pr-reviewer, got {role!r}")
         self.role = role
 
     def argv(self, prompt, session_id):
@@ -732,9 +735,11 @@ class OpencodeDriver(Driver):
                 raise ValueError(
                     f"{model} may only implement or review a PR, not {role!r}")
             if model == "GLM-5.3" and role not in ("planner", "reviewer",
-                                                   "pr_reviewer", "implementer"):
+                                                   "pr_reviewer", "implementer",
+                                                   "issue-triager", "issue-maker",
+                                                   "pr-reviewer"):
                 raise ValueError(
-                    f"GLM-5.3 may only plan/review/implement, not {role!r}")
+                    f"GLM-5.3 may only plan/review/implement/gh-ops, not {role!r}")
             if model not in config.IMPLEMENTER_MODELS:
                 raise ValueError(f"unmapped opencode model: {model!r}")
         self.model = model

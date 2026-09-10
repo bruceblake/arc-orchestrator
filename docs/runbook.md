@@ -121,6 +121,35 @@ cd /home/proxyie/arc-orchestrator
 - `--json` emits the same data as JSON for scripting (e.g. feeding a status
   check into another tool); `--db` points it at a non-default database.
 
+### 2.5 GitHub ops (gh CLI agents)
+
+Three standalone agents in `gh_ops.py` — outside the governed pipeline (no
+worktree, gate, or publish). Only Kimi-K3 or GLM-5.3 may hold them;
+`--model Kimi-K3|GLM-5.3` overrides `ARC_GH_MODEL` (default Kimi-K3).
+Everything **previews by default**: `--apply-labels`, `--create`, and
+`--post` are the only flags that write to GitHub.
+
+```bash
+.venv/bin/python main.py gh triage <repo> [--apply-labels]   # classify open issues
+.venv/bin/python main.py gh issue "<desc>" <repo> [--create] # draft/file an issue
+.venv/bin/python main.py gh pr-review <repo> <N> [--post]    # review a PR
+```
+
+`<repo>` is `owner/name` or a local checkout path.
+
+**Prerequisite: `gh auth login`.** Every gh-touching command checks
+`gh auth status` first and exits telling you to `run: gh auth login` when it
+is unauthenticated. Without auth, anything needing GitHub data (the issue
+list, the PR diff) cannot run — unauthenticated gh limits you to local/preview
+behavior: only issue drafting and printing (`gh issue` without `--create`)
+still works.
+
+`gh triage` prints a classification table (kind, size, tier, routed model)
+for every open issue and writes `~/tasks/<repo>-issues.json`; treat that
+taskfile like a planner draft — fill in honest `verify_cmd`s, point
+`project.repo` at a local checkout, and `code run <file> --dry-run` before
+executing (§2.2).
+
 ## 3. Dashboard map
 
 Open `http://localhost:8787/` (or the LAN/Tailscale URL `start.sh` prints).
