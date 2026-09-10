@@ -359,17 +359,24 @@ integration base).
 
 ```
 implement → gate ─fail→ implement (fix round, ≤3)
-                └─budget out→ escalate tier up (fresh 3-round budget)
-                              gpt-oss → DeepSeek → GLM → Kimi → fail
+                └─budget out→ escalate tier up (fresh 3-round budget,
+                    ≤ MAX_ESCALATIONS=2 per run)
+                    path (config.ESCALATION_PATH): DeepSeek → GLM → Kimi → fail
+                    gpt-oss is off-path: its first hop lands on DeepSeek
 ```
 
 The saga/circuit-breaker analog, already wired by `code_tasks.build_code_graph`
 (Rule 4): bounded local retry, then escalate along `config.ESCALATION_PATH`
-with the failure as feedback, cross-review flipping as the implementer's
-family changes; compensation = reallocating the worktree **resets the task
-branch to base**, so a rejected attempt never leaks into a retry. Resume
-escalates only on capability failures — an interrupted run restarts at the
-same tier.
+(default DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3) with the failure as feedback,
+cross-review flipping as the implementer's family changes; compensation =
+reallocating the worktree **resets the task branch to base**, so a rejected
+attempt never leaks into a retry. gpt-oss-120b is deliberately **off** the
+path — a gpt-oss-planned task hops into it at DeepSeek-V4-Flash, and with
+`MAX_ESCALATIONS` = 2 (one less than the path length) that tops out at
+GLM-5.3 within a single run; it reaches Kimi-K3 only via the resume path
+(re-running a capability-failed row resumes one tier up). Resume escalates
+only on capability failures — an interrupted run restarts at the same
+tier.
 
 - **When:** automatic for every task; nothing to design. Know it when
   estimating latency: worst case per task is fix_rounds × tiers.
