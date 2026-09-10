@@ -399,8 +399,7 @@ document.querySelectorAll("#ranges .seg").forEach(b => b.onclick = () => applyRa
 window.addEventListener("hashchange", () => applyRange(location.hash.replace("#", "")));
 
 function refresh() {
-  nextAt = Date.now() + AUTO;
-  load();
+  load().finally(() => { nextAt = Date.now() + AUTO; });
 }
 let tickTimer = null;
 if (!document.hidden) tickTimer = setInterval(() => {
@@ -412,6 +411,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden) {
     clearInterval(tickTimer);
   } else {
+    nextAt = Date.now() + AUTO;
     refresh();
     tickTimer = setInterval(() => {
       const left = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));

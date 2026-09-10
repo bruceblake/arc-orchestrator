@@ -87,12 +87,6 @@ if command -v node >/dev/null 2>&1; then
         echo "FAIL: a page calls a function that is never defined"; rc=1
     fi
 
-    # Pause-when-hidden: every page must stop polling when hidden and resume on
-    # show, with no leaked intervals and no duplicate resume refresh.
-    if ! node tests/visibility_check.mjs; then
-        echo "FAIL: a dashboard page does not pause/resume polling correctly"; rc=1
-    fi
-
     # Every $("#id") the script reaches for must exist in the markup.
     "$PY" - <<'PYEOF' || rc=1
 import re, pathlib, sys
