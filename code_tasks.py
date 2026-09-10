@@ -16,7 +16,7 @@ from pathlib import Path
 import config
 import events
 import gitstore
-from drivers import DriverError, KimiDriver, OpencodeDriver
+from drivers import DriverError, KimiDriver, OpencodeDriver, transcript_tokens
 from graph import Graph
 
 log = logging.getLogger("code-tasks")
@@ -358,6 +358,32 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return False
             return _next_tier(cur_model(ctx)) is not None
 
+        def emit_budget(ctx):
+            """One task.budget event tying the whole retry/escalation cost of
+            this task together; seconds come from its harness_runs rows and
+            tokens from parsing those runs' transcripts (derived, not stored)."""
+            try:
+                rows = store.harness_runs_prefix(tid)
+            except Exception:
+                rows = []
+            toks = 0
+            for r in rows:
+                if not r.get("transcript"):
+                    continue
+                try:
+                    raw = Path(r["transcript"]).read_text(encoding="utf-8",
+                                                          errors="replace")
+                except OSError:
+                    continue
+                toks += transcript_tokens(raw)[0]
+            events.emit("task.budget", task=tid, model=cur_model(ctx),
+                        implement_attempts=ctx.get("runs", {}).get(
+                            f"implement_{tid}", 0),
+                        escalations=esc_n(ctx),
+                        total_driver_seconds=round(
+                            sum(r.get("seconds") or 0.0 for r in rows), 1),
+                        total_tokens=toks)
+
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
             store.upsert_code_task(taskfile, tid, t["title"], model0,
@@ -478,6 +504,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 store.upsert_code_task(taskfile, tid, t["title"], model0,
                                        reviewer_for(t, model0), "merged", finished=True)
                 events.emit("task.merged", task=tid, repaired=True)
+                emit_budget(ctx)
                 await _pr_hook(tid, t)
                 return {"merged": True, "repaired": True}
             wt = Path(alloc_res["worktree"])
@@ -499,6 +526,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.upsert_code_task(taskfile, tid, t["title"], cur_model(ctx),
                                    reviewer_for(t, cur_model(ctx)), "merged", finished=True)
             events.emit("task.merged", task=tid, head=head)
+            emit_budget(ctx)
             await _pr_hook(tid, t)
             return {"merged": True, "head": head}
 
@@ -511,6 +539,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    finished=True)
             events.emit("task.failed", task=tid,
                         reason=f"exhausted escalation up to {last}")
+            emit_budget(ctx)
             return {"failed": True, "gate": reason}
 
         chain = {"alloc": alloc, "implement": implement, "gate": gate,

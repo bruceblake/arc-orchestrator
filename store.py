@@ -519,7 +519,7 @@ class Store:
                 dict(r)
                 for r in self.conn.execute(
                     "SELECT task_id, harness, model, role, attempt, exit_code, "
-                    "seconds, verdict FROM harness_runs WHERE task_id LIKE ? "
+                    "transcript, seconds, verdict FROM harness_runs WHERE task_id LIKE ? "
                     "ORDER BY id", (task_id_prefix + "%",),
                 ).fetchall()
             ]
