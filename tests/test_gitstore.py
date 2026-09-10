@@ -354,3 +354,76 @@ class SyncingATaskBranchWithItsBase(unittest.TestCase):
         ok, conflicts, _ = asyncio.run(gitstore.sync_with_base(wt, "main"))
         self.assertTrue(ok)
         self.assertEqual(conflicts, [])
+
+
+class AdvancingTheLocalBaseBranch(unittest.TestCase):
+    """`update-ref` on the CHECKED-OUT branch corrupts the working tree.
+
+    It moves the branch pointer without touching the index or working tree, so
+    every file in the repo then reads as massively modified or deleted. That
+    was invisible while the operator's checkout was always `main` and the base
+    was always `development` — and becomes a foot-gun the moment anyone works
+    ON the integration branch, which the branch model actively encourages.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.remote = Path(self.dir) / "remote.git"
+        self.repo = Path(self.dir) / "repo"
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "development",
+                        str(self.remote)], check=True, capture_output=True)
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(self.repo)],
+                       check=True, capture_output=True)
+        self._git("config", "user.email", "t@t"); self._git("config", "user.name", "t")
+        self._git("checkout", "-qB", "development")
+        (self.repo / "f.txt").write_text("one\n")
+        self._git("add", "-A"); self._git("commit", "-qm", "init")
+        self._git("push", "-q", "-u", "origin", "development")
+        # someone else advances origin/development
+        self.other = Path(self.dir) / "other"
+        subprocess.run(["git", "clone", "-q", str(self.remote), str(self.other)],
+                       check=True, capture_output=True)
+        self._git("config", "user.email", "o@o", cwd=self.other)
+        self._git("config", "user.name", "o", cwd=self.other)
+        (self.other / "f.txt").write_text("one\ntwo\n")
+        self._git("add", "-A", cwd=self.other)
+        self._git("commit", "-qm", "advance", cwd=self.other)
+        self._git("push", "-q", "origin", "development", cwd=self.other)
+
+    def _git(self, *a, cwd=None):
+        return subprocess.run(["git", *a], cwd=cwd or self.repo, check=True,
+                              capture_output=True, text=True)
+
+    def _dirty(self):
+        return subprocess.run(["git", "status", "--porcelain"], cwd=self.repo,
+                              capture_output=True, text=True).stdout.strip()
+
+    def test_it_advances_the_base_when_that_base_is_checked_out(self):
+        ok, note = asyncio.run(gitstore.fast_forward_base(self.repo, "development"))
+        self.assertTrue(ok, note)
+        self.assertEqual((self.repo / "f.txt").read_text(), "one\ntwo\n")
+
+    def test_the_working_tree_stays_clean(self):
+        # The whole point: update-ref would leave every file looking modified.
+        asyncio.run(gitstore.fast_forward_base(self.repo, "development"))
+        self.assertEqual(self._dirty(), "")
+
+    def test_it_advances_a_base_that_is_not_checked_out(self):
+        self._git("checkout", "-qb", "side")
+        ok, _ = asyncio.run(gitstore.fast_forward_base(self.repo, "development"))
+        self.assertTrue(ok)
+        head = subprocess.run(["git", "rev-parse", "development"], cwd=self.repo,
+                              capture_output=True, text=True).stdout.strip()
+        origin = subprocess.run(["git", "rev-parse", "origin/development"],
+                                cwd=self.repo, capture_output=True,
+                                text=True).stdout.strip()
+        self.assertEqual(head, origin)
+
+    def test_it_refuses_rather_than_clobbering_local_commits(self):
+        (self.repo / "mine.txt").write_text("local work\n")
+        self._git("add", "-A"); self._git("commit", "-qm", "local only")
+        ok, note = asyncio.run(gitstore.fast_forward_base(self.repo, "development"))
+        self.assertFalse(ok)
+        self.assertIn("fast-forward", note.lower())
+        self.assertTrue((self.repo / "mine.txt").exists())

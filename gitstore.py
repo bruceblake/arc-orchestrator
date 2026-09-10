@@ -409,6 +409,32 @@ async def ensure_base_branch(repo, base=None, prod=None):
     return base
 
 
+async def fast_forward_base(repo, base=None):
+    """Move the local base branch to what origin has. Returns (ok, note).
+
+    `git update-ref refs/heads/<base>` is only safe while <base> is NOT the
+    checked-out branch: it moves the pointer without touching the index or
+    working tree, so doing it to the current branch makes every file in the
+    repo appear massively modified or deleted. That was fine while the
+    operator's checkout was always `main` and the base was always
+    `development`, and it becomes a foot-gun the moment anyone works ON the
+    integration branch — which the branch model actively encourages.
+    """
+    repo = Path(repo).resolve()
+    base = base or config.BASE_BRANCH
+    await _git(["fetch", "origin", base], cwd=repo, check=False)
+    rc, cur, _ = await _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, check=False)
+    if rc == 0 and cur.strip() == base:
+        rc, _, err = await _git(["merge", "--ff-only", f"origin/{base}"],
+                                cwd=repo, check=False)
+        if rc == 0:
+            return True, "fast-forwarded the checked-out base"
+        return False, f"base is checked out and not fast-forwardable: {err.strip()[:160]}"
+    rc, _, err = await _git(["update-ref", f"refs/heads/{base}", f"origin/{base}"],
+                            cwd=repo, check=False)
+    return rc == 0, "updated" if rc == 0 else err.strip()[:160]
+
+
 async def sync_with_base(wt, base=None):
     """Merge the current base into this task's branch, inside its worktree.
 

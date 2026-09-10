@@ -906,9 +906,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.conflict", task=tid, pr=number, reason=note)
                 return {"merged": False, "reason": note}
             # Fast-forward the local integration branch to what GitHub merged.
-            await gitstore._git(["fetch", "origin", base], cwd=repo, check=False)
-            await gitstore._git(["update-ref", f"refs/heads/{base}",
-                                 f"origin/{base}"], cwd=repo, check=False)
+            ok_ff, ff_note = await gitstore.fast_forward_base(repo, base)
+            if not ok_ff:
+                events.emit("task.base_not_advanced", task=tid, base=base,
+                            reason=ff_note)
             await gitstore.cleanup(repo, tid)
             store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                    "merged", finished=True)
