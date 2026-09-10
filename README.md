@@ -416,10 +416,12 @@ already contains each dep's merge.
 ```bash
 .venv/bin/python main.py code run tasks.json [--dry-run] [--repo PATH] [-v]
 .venv/bin/python main.py code plan "one-sentence goal" /path/to/repo
+.venv/bin/python main.py code list [--json] [--db PATH]
 .venv/bin/python main.py code status [--reset-stale]
 .venv/bin/python main.py code reconcile [--dry-run] [--force]
 .venv/bin/python main.py code bench run [--variants LIST|all] [--plan] [--stamp S]
 .venv/bin/python main.py code bench report [--stamp S]
+.venv/bin/python main.py doctor
 ```
 
 - `code run --dry-run` prints the resolved DAG (implement/review pairing,
@@ -428,6 +430,12 @@ already contains each dep's merge.
   entries and writes the file to `~/tasks/`, ready for `code run`.
 - `code status` dumps the `code_tasks` and `harness_runs` tables: per-task
   status, and per-firing harness/model/role/attempt/seconds/verdict rows.
+- `code list` shows one row per task file in `~/tasks/` with per-project
+  merge progress (declared vs. `merged` tasks, status counts, last activity);
+  `--json` emits the same data for scripts. `main.py doctor` runs the
+  pre-flight checks (kimi plan mode off, API key, harness binaries,
+  worktree/tasks dirs, timeout invariants, stale `running` rows) and exits
+  non-zero on any failure.
   `code reconcile` reaps everything a killed run left behind — stale
   `running` rows, driver leases held by dead processes, and orphaned
   worktrees. It refuses to run while a `code run` is alive, and never deletes
