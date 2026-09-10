@@ -263,3 +263,50 @@ class DrainingStillLandsFinishedWork(unittest.TestCase):
 
     def test_without_the_flag_the_open_pr_is_orphaned(self):
         self.assertEqual(self._run(on_drain=False), ["publish"])
+
+
+class ANodeThatRetriesItself(unittest.TestCase):
+    """A self-edge must terminate on a counter carried through the context.
+
+    pr_review retries itself when a round reaches no verdict (every reviewer
+    crashed), bounded by a count it reads back out of its OWN previous result.
+    If the graph did not carry that result forward to the retry, the counter
+    would reset every time and the node would loop until max_steps.
+    """
+
+    def _run(self, limit, always_inconclusive=True):
+        g = Graph("retry", max_steps=50)
+        runs = []
+
+        async def review(ctx):
+            prior = ctx.get("results", {}).get("review", {})
+            n = prior.get("n", 0) + 1
+            runs.append(n)
+            return {"inconclusive": always_inconclusive, "n": n}
+
+        async def merge(ctx):
+            runs.append("merged")
+            return {}
+
+        g.node("review", review)
+        g.node("merge", merge)
+        g.edge("review", "review",
+               when=lambda r, c: r["inconclusive"] and r["n"] < limit)
+        g.edge("review", "merge", when=lambda r, c: not r["inconclusive"])
+        g.start("review")
+        run(g)
+        return runs
+
+    def test_it_stops_at_the_limit(self):
+        self.assertEqual(self._run(3), [1, 2, 3])
+
+    def test_the_counter_survives_each_retry(self):
+        # The bug this guards: a context that did not carry the previous result
+        # forward would produce [1, 1, 1, ...] and never reach the limit.
+        self.assertEqual(self._run(5), [1, 2, 3, 4, 5])
+
+    def test_a_conclusive_first_round_never_retries(self):
+        self.assertEqual(self._run(3, always_inconclusive=False), [1, "merged"])
+
+    def test_it_cannot_run_away_to_max_steps(self):
+        self.assertLess(len(self._run(3)), 50)
