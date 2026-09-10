@@ -86,7 +86,8 @@ its first worktree.
 - **`--no-wait`** turns the gate into a pre-flight check: instead of
   waiting, `code run` exits with code **2** when the chain is not ready
   (and 0 when it is) — the signal a queue wrapper uses to requeue. It
-  reads no rows and is safe to run while another process owns the file.
+  writes no rows — the check is read-only — and is safe to run while
+  another process owns the upstream run.
 - `code status` reports every taskfile in `~/tasks` that declares `after`
   under a `chains` key: `{taskfile, after, ready, waiting, failed}`.
 

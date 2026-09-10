@@ -237,8 +237,9 @@ def cmd_code(args):
         # --no-wait: a read-only pre-flight of the chain gate. Instead of
         # sitting in chain_wait until the upstream projects merge, fail fast
         # with exit code 2 — the signal a queue/CI wrapper uses to requeue.
-        # Placed before the live-run guard on purpose: it touches no rows,
-        # so it is safe to run even while another process owns this file.
+        # Placed before the live-run guard on purpose: it mutates no rows
+        # (the check only reads the deps' code_tasks rows), so it is safe
+        # to run even while another process owns this file.
         if args.no_wait and taskset.get("after"):
             st = chain_status(store, taskset["after"])
             if not st["ok"]:
