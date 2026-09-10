@@ -99,21 +99,36 @@ for (const file of process.argv.slice(2)) {
     const clickable =
       /\sonclick\s*=/.test(attrs) || /(\s|^)data-[\w-]+\s*=/.test(attrs);
 
-    if ((name === "button" || name === "a" || hasRole) || clickable) {
+    // Interactive controls: text-named ones (<button>/<a>/role="button" and
+    // any clickable element) plus the form controls <textarea> and <select>,
+    // which the original scanner never looked at.
+    const interactive =
+      name === "button" || name === "a" || name === "textarea" ||
+      name === "select" || hasRole || clickable;
+
+    if (interactive) {
       // Check 1 — a clickable control that is not a button/link and has no
       // role="button" is not announced as actionable to assistive tech.
       if (clickable && name !== "button" && name !== "a" && !hasRole) {
         add(`clickable ${snippet} without role="button" or button/link semantics`);
       }
-      // Check 2 — an interactive control must have an accessible name, from
-      // its text content, an aria-label or a title.
-      if (!VOID.has(name)) {
-        const aria = getAttr(attrs, "aria-label");
-        const title = getAttr(attrs, "title");
+      // Check 2 — an interactive control must have an accessible name. For
+      // text-named controls that is its text content, an aria-label or a
+      // title; for <textarea>/<select> it is an associated <label>, an
+      // aria-label or a title (a placeholder or option text is not a name).
+      const id = getAttr(attrs, "id");
+      const aria = getAttr(attrs, "aria-label");
+      const title = getAttr(attrs, "title");
+      let named = !!(aria || title);
+      if (!named && (name === "textarea" || name === "select")) {
+        const wrapped = labelBlocks.some(([a, b]) => start > a && start < b);
+        named = !!wrapped || !!(id && labelFor.has(id));
+      } else if (!named && !VOID.has(name)) {
         const text = stripTags(elementInner(staticHtml, tagRe.lastIndex, name));
-        if (!aria && !title && !text) {
-          add(`interactive ${snippet} with no accessible name (no text, aria-label or title)`);
-        }
+        named = !!text;
+      }
+      if (!named) {
+        add(`interactive ${snippet} with no accessible name (no text, aria-label or title)`);
       }
     }
 
@@ -122,8 +137,9 @@ for (const file of process.argv.slice(2)) {
       add(`${snippet} without an alt attribute`);
     }
 
-    // Check 4 — an input needs an associated <label> or an aria-label.
-    if (name === "input") {
+    // Check 4 — a form control (input/textarea/select) needs an associated
+    // <label> or an aria-label.
+    if (name === "input" || name === "textarea" || name === "select") {
       const type = getAttr(attrs, "type");
       const id = getAttr(attrs, "id");
       if (type !== "hidden" && !getAttr(attrs, "aria-label")) {
