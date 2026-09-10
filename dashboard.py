@@ -1406,6 +1406,79 @@ def _health(store):
             "leases": leases, "problems": problems}
 
 
+def _metrics(store):
+    """Per-model success/cost rollup + code-task outcome counts."""
+    models = {}
+
+    def ent_for(model):
+        return models.setdefault(model, {
+            "model": model, "pretty": _pretty(model), "runs": 0, "ok": 0,
+            "failed": 0, "avg_seconds": 0.0, "total_tokens": 0,
+            "avg_tokens_per_run": 0.0, "stall_count": 0,
+            "termination_count": 0})
+
+    try:
+        rows = store.harness_runs_all() if store else []
+    except Exception:
+        rows = []
+    secs = {}
+    for row in rows:
+        model = row.get("model")
+        if not model:
+            continue
+        ent = ent_for(model)
+        ent["runs"] += 1
+        try:
+            code = int(row.get("exit_code"))
+        except (TypeError, ValueError):
+            code = None
+        if code == 0:
+            ent["ok"] += 1
+        else:
+            ent["failed"] += 1
+        secs.setdefault(model, []).append(row.get("seconds") or 0.0)
+        tok, _p, _c = _transcript_toks(row.get("transcript"))
+        ent["total_tokens"] += tok or 0
+    for model, ent in models.items():
+        ss = secs.get(model) or []
+        ent["avg_seconds"] = round(sum(ss) / len(ss), 3) if ss else 0.0
+        if ent["runs"]:
+            ent["avg_tokens_per_run"] = round(ent["total_tokens"] / ent["runs"], 1)
+    for line in _load_event_lines():
+        if '"driver.stalled"' not in line and '"driver.timeout"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        et = e.get("type")
+        if et not in ("driver.stalled", "driver.timeout"):
+            continue
+        model = e.get("model")
+        if not model:
+            continue
+        ent = ent_for(model)
+        if et == "driver.stalled":
+            ent["stall_count"] += 1
+        else:
+            ent["termination_count"] += 1
+
+    tasks = {"total": 0, "merged": 0, "failed": 0, "conflict": 0, "merge_rate": 0.0}
+    try:
+        trows = store.code_tasks_all() if store else []
+    except Exception:
+        trows = []
+    for row in trows:
+        tasks["total"] += 1
+        if row.get("status") in ("merged", "failed", "conflict"):
+            tasks[row["status"]] += 1
+    if tasks["total"]:
+        tasks["merge_rate"] = round(tasks["merged"] / tasks["total"], 4)
+
+    return {"now": time.time(), "models": sorted(
+        models.values(), key=lambda m: (-m["runs"], m["model"])), "tasks": tasks}
+
+
 def _stop_project(body):
     """SIGTERM every `code run` process owning this task file.
 
@@ -1515,6 +1588,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_agents(Handler.store))
             if u.path == "/api/health":
                 return self._json(_health(Handler.store))
+            if u.path == "/api/metrics":
+                return self._json(_metrics(Handler.store))
             if u.path == "/api/transcript":
                 q = parse_qs(u.query)
                 tail = q.get("tail", ["200"])[0]
