@@ -12,8 +12,34 @@
 # implementer with the failing output as feedback.
 set -uo pipefail
 cd "$(dirname "$0")" || exit 1
-PY="${PY:-.venv/bin/python}"
-[ -x "$PY" ] || PY=python3
+# Find an interpreter that actually has the dependencies.
+#
+# This runs inside a task's git WORKTREE, and a worktree has no .venv — it is
+# gitignored, so `git worktree add` never creates one. The old fallback to
+# bare `python3` picked an interpreter without dotenv/openai, so every module
+# import failed and EVERY gate beginning with ./check.sh failed no matter what
+# the agent wrote. Two documentation tasks escalated all the way to Kimi-K3
+# and died that way, never once reaching review.
+#
+# git-common-dir points at the main checkout's .git from any worktree, so its
+# parent is where the real virtualenv lives.
+PY="${PY:-}"
+if [ -z "$PY" ] || [ ! -x "$PY" ]; then
+    PY=".venv/bin/python"
+fi
+if [ ! -x "$PY" ]; then
+    MAIN_WT=$(dirname "$(git rev-parse --git-common-dir 2>/dev/null || echo .)")
+    [ -x "$MAIN_WT/.venv/bin/python" ] && PY="$MAIN_WT/.venv/bin/python"
+fi
+if [ ! -x "$PY" ]; then
+    PY=$(command -v python3 || echo python3)
+fi
+if ! "$PY" -c "import dotenv" >/dev/null 2>&1; then
+    echo "FAIL: $PY cannot import the project dependencies (no virtualenv found)."
+    echo "      Set PY=/path/to/.venv/bin/python, or create one in the main checkout."
+    exit 1
+fi
+echo "interpreter: $PY"
 rc=0
 
 step() { printf '\n--- %s ---\n' "$1"; }
@@ -25,7 +51,13 @@ fi
 
 step "imports"
 for m in config store graph events drivers gitstore code_tasks reconcile dashboard; do
-    "$PY" -c "import $m" 2>&1 | tail -3 || { echo "FAIL: import $m"; rc=1; }
+    # No pipe here: `cmd | tail || rc=1` tests TAIL's status, which is always
+    # 0, so import failures were reported and then silently forgiven.
+    if ! out=$("$PY" -c "import $m" 2>&1); then
+        echo "FAIL: import $m"
+        echo "$out" | tail -3
+        rc=1
+    fi
 done
 
 step "unit tests"
