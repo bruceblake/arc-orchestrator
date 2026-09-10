@@ -17,7 +17,7 @@ import config
 import events
 import gitstore
 from drivers import DriverError, KimiDriver, OpencodeDriver, transcript_tokens
-from graph import Graph
+from graph import Graph, GraphError
 
 log = logging.getLogger("code-tasks")
 
@@ -457,6 +457,22 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         model0 = start_model(tid)
         prior_status = (prior.get(tid) or {}).get("status")
 
+        async def worktree(ctx):
+            """This task's worktree, whether alloc ran in THIS graph or not.
+
+            Every node used to index ctx["results"][f"alloc_{tid}"] directly,
+            which is absent on a resume that starts at publish — so the first
+            node to look raised KeyError and drained the graph, stranding the
+            very PR the resume existed to finish.
+            """
+            res = (ctx.get("results", {}).get(f"alloc_{tid}") or {}).get("worktree")
+            if res:
+                return Path(res)
+            wt = await gitstore.existing_worktree(repo, tid)
+            if wt is None:
+                raise GraphError(f"{tid}: no worktree — nothing to resume")
+            return wt
+
         def cur_model(ctx):
             esc = ctx.get("results", {}).get(f"escalate_{tid}")
             return esc["to_model"] if esc else model0
@@ -518,7 +534,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             driver = _driver(model, "implementer", pol)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback), Path(results[f"alloc_{tid}"]["worktree"]),
+                    _impl_prompt(t, feedback), await worktree(ctx),
                     task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -541,7 +557,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         "output": f"implementer crashed: {prev.get('error', '')}"}
             if not cmd:
                 return {"passed": True, "output": ""}
-            wt = ctx["results"][f"alloc_{tid}"]["worktree"]
+            wt = str(await worktree(ctx))
             proc = await asyncio.create_subprocess_shell(
                 cmd, cwd=wt,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -570,7 +586,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.reviewed", passed=True, reviewer="none",
                             skipped=True)
                 return {"pass": True, "issues": [], "skipped": True}
-            wt = Path(ctx["results"][f"alloc_{tid}"]["worktree"])
+            wt = await worktree(ctx)
             diff = await gitstore.diff_full(wt, base)
             rev_tok = reviewer_for(t, cur_model(ctx))
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
@@ -726,7 +742,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     res = await drv.run(
                         _pr_review_prompt(t, diff, len(chosen), round_n,
                                           prior_r.get("issues") or []),
-                        Path(ctx["results"][f"alloc_{tid}"]["worktree"]),
+                        await worktree(ctx),
                         task_id=f"{tid}-pr{round_n}")
                 except (DriverError, ValueError) as exc:
                     return model, {"approve": False,
