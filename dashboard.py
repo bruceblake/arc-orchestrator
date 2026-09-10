@@ -845,6 +845,77 @@ def _repo_problem(path, base="main"):
     return None
 
 
+_PHASE_WORD = {"alloc": "preparing worktree", "implement": "writing code",
+               "gate": "running the verify gate", "review": "under review",
+               "escalate": "escalating to a stronger model",
+               "publish": "committing and merging", "fail": "giving up"}
+
+
+def _task_progress(ids):
+    """Per running task: what step it is on, and whether it is actually moving.
+
+    "Is this progressing?" was unanswerable from the console. The events to
+    answer it already existed — node_start/node_end say which step, and
+    driver.progress carries bytes/idle_s every 60s — but nothing joined them,
+    so a task that had produced nothing for ten minutes looked exactly like
+    one mid-edit.
+    """
+    want = {i for i in (ids or []) if i}
+    if not want:
+        return {}
+    open_node, prog, prev_bytes = {}, {}, {}
+    for line in _load_event_lines():
+        if ('"node_' not in line and '"driver.progress"' not in line
+                and '"driver.start"' not in line):
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        t = e.get("type")
+        if t in ("node_start", "node_end"):
+            node = e.get("node") or ""
+            step, _, tid = node.partition("_")
+            if tid in want:
+                if t == "node_start":
+                    open_node[tid] = step
+                elif open_node.get(tid) == step:
+                    open_node.pop(tid, None)
+        elif t in ("driver.progress", "driver.start"):
+            base, _x = _xkey(e.get("task"))
+            if base not in want:
+                continue
+            if t == "driver.start":
+                prog[base] = {"attempt": e.get("attempt"), "bytes": 0,
+                              "idle_s": 0, "elapsed_s": 0, "ts": _ts(e.get("ts"))}
+                prev_bytes[base] = 0
+                continue
+            before = prog.get(base, {}).get("bytes", 0)
+            prev_bytes[base] = before
+            prog[base] = {"attempt": e.get("attempt"), "bytes": e.get("bytes") or 0,
+                          "idle_s": e.get("idle_s"), "elapsed_s": e.get("elapsed_s"),
+                          "cpu_delta_s": e.get("cpu_delta_s"), "ts": _ts(e.get("ts"))}
+    out = {}
+    now = time.time()
+    for tid, step in open_node.items():
+        pr = prog.get(tid) or {}
+        age = now - pr["ts"] if pr.get("ts") else None
+        grew = pr.get("bytes", 0) > prev_bytes.get(tid, 0)
+        idle = pr.get("idle_s")
+        # "moving" is deliberately generous: the harness can legitimately go
+        # quiet for minutes waiting on a queued request (measured p99 TTFT is
+        # ~50s, tail to 309s), so silence alone is not stuck.
+        moving = grew or (idle is not None and idle < config.DRIVER_IDLE_TIMEOUT / 2)
+        out[tid] = {
+            "step": step, "label": _PHASE_WORD.get(step, step),
+            "attempt": pr.get("attempt"), "bytes": pr.get("bytes"),
+            "idle_s": idle, "elapsed_s": pr.get("elapsed_s"),
+            "stale_report_s": round(age) if age is not None else None,
+            "moving": bool(moving),
+        }
+    return out
+
+
 def _project_phase(statuses, ids, run_pid):
     """One word for where a project stands: running | done | attention | new.
 
@@ -1069,6 +1140,9 @@ def _projects(store):
                     "archived_at": archived.get(str(f)),
                     "phase": _project_phase(statuses, ids,
                                             run_by_file.get(f.name)),
+                    "progress": (_task_progress(ids)
+                                 if (statuses.get("running")
+                                     or run_by_file.get(f.name)) else {}),
                     "run_pid": run_by_file.get(f.name),
                     "active": statuses.get("running", 0) > 0 or any(i in live_tasks for i in ids),
                     "last_activity": last or mtime_iso})
@@ -1147,6 +1221,7 @@ def _project_detail(store, fname):
                     if r.get("taskfile") and Path(r["taskfile"]).name == fname), None)
     return {"file": fname, "title": proj.get("title") or path.stem,
             "repo": proj.get("repo"), "run_pid": run_pid,
+            "progress": _task_progress(ids),
             "tasks": tdefs, "rows": rows, "runs": runs, "events": events,
             "git": _git_block(repo_v, gh)}, 200
 
