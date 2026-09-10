@@ -79,7 +79,7 @@ def _lease_db():
     return _lease_store
 
 
-async def _lease_acquire(model, task_id, emit_ctx, cap=None):
+async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None):
     """Wait until this model is below its cross-process cap (store holds the
     lease). Emits driver.cap_wait roughly once a minute while waiting.
 
@@ -88,6 +88,11 @@ async def _lease_acquire(model, task_id, emit_ctx, cap=None):
     saturated model waited forever with neither DRIVER_TIMEOUT nor
     DRIVER_IDLE_TIMEOUT able to rescue it, and the run just sat there.
     """
+    # The lease KEY and the name reported to the dashboard differ for a
+    # harness lease: it is keyed "harness:opencode" but it belongs to a real
+    # model's attempt, and reporting the key as the model both invented a
+    # model that does not exist and split one attempt across two rows.
+    shown = report_as or model
     waits = 0
     deadline = time.monotonic() + config.DRIVER_LEASE_WAIT
     while True:
@@ -97,16 +102,16 @@ async def _lease_acquire(model, task_id, emit_ctx, cap=None):
         if in_use is None:
             return
         if time.monotonic() >= deadline:
-            events.emit("driver.cap_timeout", model=model, task=task_id,
+            events.emit("driver.cap_timeout", model=shown, task=task_id,
                         in_use=in_use, cap=limit,
                         waited_s=round(config.DRIVER_LEASE_WAIT), **emit_ctx)
             # Worded to match Driver.is_capacity_error, so the retry ladder
             # uses the long capacity backoff rather than the crash schedule.
             raise DriverError(
-                f"{model} concurrent session limit: no driver slot after "
+                f"{shown} concurrent session limit: no driver slot after "
                 f"{config.DRIVER_LEASE_WAIT:.0f}s ({in_use}/{limit} in use)")
         if waits % 3 == 0:
-            events.emit("driver.cap_wait", model=model, task=task_id,
+            events.emit("driver.cap_wait", model=shown, task=task_id,
                         in_use=in_use, cap=limit, **emit_ctx)
         waits += 1
         await asyncio.sleep(min(20, max(1, deadline - time.monotonic())))
@@ -490,8 +495,9 @@ class Driver:
                     await _lease_acquire(
                         hkey, task_id,
                         {"harness": self.harness, "role": self.role,
-                         "pid": os.getpid()},
-                        cap=config.harness_limit(self.harness))
+                         "pid": os.getpid(), "scope": "harness"},
+                        cap=config.harness_limit(self.harness),
+                        report_as=self.model)
                     try:
                 # Both slots held: this driver is genuinely occupying capacity
                 # now, so this is the event in-flight accounting must pair with.

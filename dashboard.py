@@ -843,6 +843,11 @@ def _pid_alive(pid):
     return True
 
 
+def _harness_of(model):
+    """Which local harness runs this model. Mirrors code_tasks._driver."""
+    return "kimi" if model == "Kimi-K3" else "opencode"
+
+
 def _queue(store):
     """Who is holding a model slot right now, and who is queued behind them.
 
@@ -955,6 +960,8 @@ def _queue(store):
         run_n = harness_running.get(h, 0)
         wait_n = sum(1 for w in waiting if w.get("scope") == "harness"
                      and w.get("harness") == h)
+        run_n = run_n or sum(1 for r in running
+                             if _harness_of(r["model"]) == h)
         harnesses.append({"harness": h, "cap": cap, "running": run_n,
                           "waiting": wait_n, "free": max(0, cap - run_n)})
 

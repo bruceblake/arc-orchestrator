@@ -435,3 +435,34 @@ class LiveQueueView(unittest.TestCase):
         models = {m["model"] for m in dashboard._queue(self._store())["models"]}
         self.assertIn("Kimi-K3", models)
         self.assertIn("GLM-5.3", models)
+
+    def test_a_harness_wait_is_shown_under_the_real_model(self):
+        # drivers report the harness lease with report_as=<real model> so one
+        # attempt does not split into two rows, one of them under a model name
+        # ("harness:opencode") that does not exist.
+        self._write(self._ev("driver.cap_wait", "t1", "GLM-5.3",
+                             scope="harness", harness="opencode", cap=5))
+        q = dashboard._queue(self._store())
+        self.assertEqual(len(q["waiting"]), 1)
+        row = q["waiting"][0]
+        self.assertEqual(row["model"], "GLM-5.3")
+        self.assertEqual(row["scope"], "harness")
+        self.assertEqual(q["harnesses"][0]["waiting"], 1)
+
+    def test_a_harness_lease_is_capacity_not_a_second_running_task(self):
+        now = time.time()
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": now - 10},
+            {"id": 2, "model": "harness:opencode", "pid": os.getpid(),
+             "task": "t1", "acquired_at": now - 10}]))
+        self.assertEqual(q["totals"]["running"], 1)
+        oc = next(h for h in q["harnesses"] if h["harness"] == "opencode")
+        self.assertEqual((oc["running"], oc["free"]), (1, oc["cap"] - 1))
+
+    def test_harness_rows_never_appear_as_models(self):
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "harness:opencode", "pid": os.getpid(),
+             "task": "t1", "acquired_at": time.time()}]))
+        self.assertEqual([m for m in q["models"]
+                          if m["model"].startswith("harness:")], [])
