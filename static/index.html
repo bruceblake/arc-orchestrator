@@ -209,9 +209,9 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   <span class="pill" id="stale" style="display:none">stale (retrying…)</span>
   <span class="pill">updated <b id="clock">-</b></span>
   <div class="fbar">
-    <select class="fsel" id="f-proj" title="project filter"><option value="">All projects</option></select>
-    <select class="fsel" id="f-repo" title="repo filter" style="display:none"><option value="">All repos</option></select>
-    <select class="fsel" id="f-model" title="agent model filter"><option value="">All models</option></select>
+    <select class="fsel" id="f-proj" title="project filter" aria-label="project filter"><option value="">All projects</option></select>
+    <select class="fsel" id="f-repo" title="repo filter" style="display:none" aria-label="repo filter"><option value="">All repos</option></select>
+    <select class="fsel" id="f-model" title="agent model filter" aria-label="agent model filter"><option value="">All models</option></select>
     <button class="pill on" id="d-compact" title="one line per project">compact</button>
     <button class="pill" id="d-comfort" title="full cards">comfort</button>
     <span class="hint" id="f-hint"></span>
@@ -307,28 +307,28 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
     </div>
     <div id="tab-plan">
       <div class="hint">Describe the goal in one or two sentences — Kimi-K3 drafts the task DAG (implemented by gpt-oss/DeepSeek, reviewed by GLM/Kimi) into ~/tasks/.</div>
-      <label class="hint">repo</label>
+      <label class="hint" for="p-repo">repo</label>
       <select id="p-repo">
         <option>/home/proxyie/minecraft-web</option>
         <option>/home/proxyie/repos/multi-harness-sandbox</option>
         <option value="__custom">custom path…</option>
       </select>
-      <input id="p-repo-custom" placeholder="/home/proxyie/…" style="display:none">
-      <label class="hint">goal</label>
+      <input id="p-repo-custom" placeholder="/home/proxyie/…" style="display:none" aria-label="repo path">
+      <label class="hint" for="p-goal">goal</label>
       <textarea id="p-goal" rows="3" placeholder="e.g. Add a settings menu with volume sliders to the minecraft clone"></textarea>
       <button class="act primary" id="p-go">Plan project</button>
       <div id="p-msg"></div>
     </div>
     <div id="tab-json" style="display:none">
-      <label class="hint">title</label><input id="j-title" placeholder="my feature">
-      <label class="hint">repo</label>
+      <label class="hint" for="j-title">title</label><input id="j-title" placeholder="my feature">
+      <label class="hint" for="j-repo">repo</label>
       <select id="j-repo">
         <option>/home/proxyie/minecraft-web</option>
         <option>/home/proxyie/repos/multi-harness-sandbox</option>
         <option value="__custom">custom path…</option>
       </select>
-      <input id="j-repo-custom" placeholder="/home/proxyie/…" style="display:none">
-      <label class="hint">tasks JSON</label>
+      <input id="j-repo-custom" placeholder="/home/proxyie/…" style="display:none" aria-label="repo path">
+      <label class="hint" for="j-tasks">tasks JSON</label>
       <textarea id="j-tasks" rows="9">[
   {"id": "first-task", "title": "short title", "prompt": "what to build, in detail"}
 ]</textarea>
