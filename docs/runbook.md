@@ -37,6 +37,24 @@ nohup .venv/bin/python main.py serve --port 8787 >> logs/server.log 2>&1 &
 The dashboard is **read-only**: it only reads `orchestrator.db` and
 `logs/events.jsonl`, plus the harness transcripts under `logs/harness/`.
 
+### 1.1 Pre-flight checks (`main.py doctor`)
+
+```bash
+cd /home/proxyie/arc-orchestrator
+.venv/bin/python main.py doctor
+```
+
+- Runs the passive checks that catch misconfiguration *before* a run burns
+  model calls on it: kimi plan mode is off (plan mode silently leaves agents
+  researching instead of editing), `ARC_API_KEY` is set and not the
+  placeholder, the `kimi` and `opencode` harness binaries are on `PATH`, the
+  worktree and tasks directories are creatable, the timeout invariants hold
+  (`DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT`), and there are
+  no stale `running` task rows.
+- Exits **non-zero on any failure**, so it works in scripts and as a habit:
+  run it after installing, after editing `.env` or `config.py`, and as the
+  first step whenever "runs fail for no obvious reason".
+
 ## 2. Plan -> run workflow
 
 The code workload is a DAG of coding-agent tasks described in a JSON task
@@ -87,6 +105,21 @@ cd /home/proxyie/arc-orchestrator
 - Watch progress with `.venv/bin/python main.py code status` (dumps the
   `code_tasks` and `harness_runs` tables as JSON), and the dashboard live at
   `http://localhost:8787/`.
+
+### 2.4 Seeing every project at a glance (`code list`)
+
+```bash
+cd /home/proxyie/arc-orchestrator
+.venv/bin/python main.py code list            # or: code list --json
+```
+
+- Prints **one row per task file in `~/tasks/`**: how many tasks it declares,
+  how many are `merged`, the status counts, and the last activity time — the
+  per-project merge progress across everything you have ever run or planned.
+- Reach for it when you come back after a break and want to know which
+  projects are done, half-merged, or stuck before deciding what to resume.
+- `--json` emits the same data as JSON for scripting (e.g. feeding a status
+  check into another tool); `--db` points it at a non-default database.
 
 ## 3. Dashboard map
 
