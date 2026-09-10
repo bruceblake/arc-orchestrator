@@ -29,8 +29,11 @@ globalThis.fetch = async () => ({ json: async () => ({}), status: 200 });
 globalThis.setInterval = () => 0; globalThis.setTimeout = () => 0; globalThis.clearInterval = () => 0;
 
 const src = fs.readFileSync(new URL("../static/index.html", import.meta.url), "utf8");
+// The page loads its shared helpers (esc, short, fmtK, ...) from common.js
+// before the inline script; do the same so they are defined here too.
+const common = fs.readFileSync(new URL("../static/common.js", import.meta.url), "utf8");
 const js = src.slice(src.indexOf("<script>") + 8, src.lastIndexOf("</script>"));
-const mod = new Function(js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects};");
+const mod = new Function(common + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects};");
 const api = mod();
 
 const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));

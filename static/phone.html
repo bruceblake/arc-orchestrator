@@ -107,15 +107,10 @@ main { padding: 8px; display: grid; gap: 8px; max-width: 720px; margin: 0 auto; 
   <div class="foot">auto-refresh 5s · <a href="/">flows</a> · <a href="/usage.html">usage</a></div>
 </main>
 
+<script src="/common.js"></script>
 <script>
 "use strict";
 const $ = s => document.getElementById(s);
-const esc = s => String(s ?? '').replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-const fmt = n => n == null ? '–' : n >= 1e6 ? (n/1e6).toFixed(2)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
-const SHORT = {"Kimi-K3":"K3","GLM-5.3":"GLM","gpt-oss-120b":"120B","DeepSeek-V4-Flash":"V4"};
-const short = m => SHORT[m] || m || '—';
-const COLORS = {'gpt-oss':'#3fb950', glm:'#58a6ff', kimi:'#bc8cff', deepseek:'#d29922', 'kimi-code':'#8b949e', harness:'#e3b341'};
-const DOT = {pending:'#484f58', running:'#58a6ff', merged:'#3fb950', conflict:'#d29922', failed:'#f85149'};
 function familyOf(model) {
   const m = String(model || '').toLowerCase();
   if (m.includes('kimi')) return 'kimi';
@@ -265,7 +260,7 @@ function renderTasks() {
   $('task-cnt').textContent = rows.length ? '(' + rows.length + ')' : '';
   if (!rows.length) { list.innerHTML = '<div class="empty">no tasks yet</div>'; return; }
   list.innerHTML = rows.map(t => {
-    const c = DOT[t.status] || DOT.pending;
+    const c = STATUSC[t.status] || STATUSC.pending;
     return `<div class="task" title="${esc(t.title)}">
       <span class="dot" style="background:${c}${(t.status === 'running' || t.live) ? ';animation:pulse 1.2s infinite' : ''}"></span>
       <span class="tname">${esc(t.id)}</span>

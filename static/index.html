@@ -274,25 +274,20 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   <pre id="drawer-body">loading…</pre>
 </div>
 
+<script src="/common.js"></script>
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
-const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash"};
-const short = m => SHORT[m] || m || "—";
 let SHOW_ARCHIVED = false, PHASE_FILT = "", OPEN_PHASES = {};
 let PROJECTS = [], AGENTS = [], RECENT = [], FLEET = null;
 let CUR = null, CUR_DATA = null, CUR_PID = null, detailTimer = null, drawerFile = null;
 let FILT = {p: "", r: "", m: ""}, DENSE = true;
-const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f0883e", pending: "#484f58"};
 // Glyph cue that survives greyscale (colour alone must not carry status).
 const STATUSG = {merged: " ✓", done: " ✓", running: " …", failed: " ✗", conflict: " !", pending: " ○"};
 
 const fmtT = iso => { if (!iso) return "—"; const s = (Date.now() - new Date(iso).getTime())/1000;
   if (s < 60) return Math.round(s)+"s ago"; if (s < 3600) return Math.round(s/60)+"m ago";
   if (s < 86400) return (s/3600).toFixed(1)+"h ago"; return (s/86400).toFixed(1)+"d ago"; };
-const tick = s => { s = Math.round(s||0); if (s < 60) return s+"s"; if (s < 3600) return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; };
-const fmtK = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n || 0);
-const esc = s => String(s == null ? "" : s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const AGO = ts => { if (!ts) return ""; const d = Date.now()/1000 - ts;
   return d < 60 ? Math.round(d)+"s" : d < 3600 ? Math.round(d/60)+"m" : (d/3600).toFixed(1)+"h"; };
 async function jget(u) { const r = await fetch(u, {cache:"no-store"}); return r.json(); }

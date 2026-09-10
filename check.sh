@@ -70,7 +70,12 @@ step "dashboard javascript"
 if command -v node >/dev/null 2>&1; then
     tmp=$(mktemp -d)
     for f in static/*.html; do
-        sed -n '/<script[^>]*>/,/<\/script>/p' "$f" | sed '1d;$d' > "$tmp/$(basename "$f").js"
+        # A one-line external tag (<script src="..."></script>) is not inline
+        # JS: it opens and closes a sed range on the same line, so the range
+        # extraction below would hand node --check a stray "<script>". Drop
+        # complete external tags first; pages without them are unaffected.
+        sed '/^[[:space:]]*<script[^>]*src=[^>]*><\/script>[[:space:]]*$/d' "$f" \
+          | sed -n '/<script[^>]*>/,/<\/script>/p' | sed '1d;$d' > "$tmp/$(basename "$f").js"
         if ! node --check "$tmp/$(basename "$f").js" 2>&1; then
             echo "FAIL: $f has a JavaScript syntax error"; rc=1
         fi
