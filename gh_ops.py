@@ -121,6 +121,17 @@ def _triage_prompt(repo, issues_json):
 
 
 def _write_taskfile(repo, rows):
+    # code_tasks.load_taskfile resolves project.repo against the CWD, so a bare
+    # 'owner/name' would not be runnable: pass through the real local path when
+    # repo is a directory, resolve the blessed clone ~/repos/<name> when it
+    # exists, and otherwise write a clearly-marked placeholder.
+    _, cwd = _repo_target(repo)
+    if cwd:
+        proj_repo = cwd
+    else:
+        clone = Path.home() / "repos" / repo.rstrip("/").split("/")[-1]
+        proj_repo = str(clone) if clone.is_dir() else \
+            f"EDIT-ME/local/path/to/{repo.rstrip('/').split('/')[-1]}"
     tasks = []
     for i, r in enumerate(rows):
         if r.get("kind") not in ("bug", "feature") or not r.get("actionable", True):
@@ -130,7 +141,7 @@ def _write_taskfile(repo, rows):
             model = config.IMPLEMENT_TIERS.get(r.get("tier", "medium"),
                                                ["DeepSeek-V4-Flash"])[-1]
         n = r.get("number", i)
-        view = f"gh issue view {n}" if _repo_target(repo)[1] else \
+        view = f"gh issue view {n}" if cwd else \
             f"gh issue view {n} --repo {repo}"
         tasks.append({
             "id": re.sub(r"[^a-z0-9-]+", "-", f"issue-{n}".lower()),
@@ -149,13 +160,16 @@ def _write_taskfile(repo, rows):
     slug = re.sub(r"[^a-z0-9]+", "-", repo.lower()).strip("-")[:50]
     Path(config.TASKS_DIR).mkdir(parents=True, exist_ok=True)
     out = Path(config.TASKS_DIR) / f"{slug}-issues.json"
-    tf = {"project": {"repo": repo, "title": f"{repo} issue triage",
+    tf = {"project": {"repo": proj_repo, "title": f"{repo} issue triage",
                       "tasks": tasks}}
     out.write_text(json.dumps(tf, indent=2) + "\n", encoding="utf-8")
-    print(f"\ntaskfile: {out}")
-    print("NOTE: fill in an honest verify_cmd per task, set project.repo to a "
-          "local checkout, and dry-run it (main.py code run "
-          f"{out} --dry-run) before executing.")
+    print(f"\ntaskfile: {out}  (project.repo: {proj_repo})")
+    if proj_repo.startswith("EDIT-ME"):
+        print("NOTE: project.repo is a placeholder — no local checkout of "
+              f"{repo} was found; EDIT the taskfile and point it at a local "
+              "clone before running.")
+    print("NOTE: fill in an honest verify_cmd per task, then dry-run it "
+          f"(main.py code run {out} --dry-run) before executing.")
 
 
 async def triage(repo, model=None, apply_labels=False):

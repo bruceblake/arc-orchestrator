@@ -464,7 +464,7 @@ def cmd_gh(args):
         else:  # pr-review
             rc = asyncio.run(gh_ops.pr_review(args.repo, args.number,
                                               model=args.model, post=args.post))
-    except RuntimeError as exc:
+    except (RuntimeError, ValueError) as exc:
         print(f"error: {exc}")
         sys.exit(1)
     sys.exit(rc)
