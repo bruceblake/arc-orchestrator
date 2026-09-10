@@ -118,6 +118,10 @@ PYEOF
     else
         echo "(dashboard not running — skipping the live render check)"
     fi
+    # Behavioural unit checks of the render functions; needs no running server.
+    if ! node tests/ui_render.test.mjs; then
+        echo "FAIL: dashboard render functions misbehave"; rc=1
+    fi
 else
     echo "(node not installed — skipping JavaScript checks)"
 fi
