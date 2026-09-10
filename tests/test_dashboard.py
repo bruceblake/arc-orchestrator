@@ -139,3 +139,79 @@ class KimiSessionExclusion(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RepoValidation(unittest.TestCase):
+    """A project must be rejected at CREATE time if its repo cannot host a run.
+
+    Without this the task file is written happily and the failure surfaces
+    minutes later inside gitstore.alloc as "fatal: not in a git directory" or
+    "fatal: invalid reference: main" — by which point a worktree and a DB row
+    already exist and the operator has no idea what went wrong.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._dir.name)
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def _git(self, repo, *args):
+        import subprocess
+        subprocess.run(["git", "-C", str(repo), *args], check=True,
+                       capture_output=True, text=True)
+
+    def test_plain_directory_is_rejected(self):
+        d = self.root / "plain"; d.mkdir()
+        msg = dashboard._repo_problem(d)
+        self.assertIsNotNone(msg)
+        self.assertIn("not a git repository", msg)
+
+    def test_git_repo_without_a_base_commit_is_rejected(self):
+        d = self.root / "empty"; d.mkdir()
+        self._git(d, "init", "-q")
+        msg = dashboard._repo_problem(d)
+        self.assertIsNotNone(msg)
+        self.assertIn("no 'main' branch", msg)
+
+    def test_a_usable_repo_passes(self):
+        d = self.root / "good"; d.mkdir()
+        self._git(d, "init", "-q", "-b", "main")
+        self._git(d, "config", "user.email", "t@t")
+        self._git(d, "config", "user.name", "t")
+        (d / "f.txt").write_text("hi\n")
+        self._git(d, "add", "-A")
+        self._git(d, "commit", "-qm", "init")
+        self.assertIsNone(dashboard._repo_problem(d))
+
+    def test_error_message_tells_the_operator_what_to_do(self):
+        d = self.root / "plain2"; d.mkdir()
+        msg = dashboard._repo_problem(d)
+        self.assertIn("git init", msg)
+
+
+class AtomicTaskfileWrite(unittest.TestCase):
+    """A crash mid-write must not leave a task file that breaks everything.
+
+    A plain write truncates first and fills after; a process killed in that
+    window leaves a ZERO-BYTE task file, which then fails every later run of
+    it and every check.sh gate. Observed for real on 2026-09-09.
+    """
+
+    def test_write_is_atomic_and_leaves_no_temp_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "proj.json"
+            doc = {"project": {"repo": "/tmp", "title": "T", "tasks": []}}
+            dashboard._write_taskfile_atomically(f, doc)
+            self.assertEqual(json.loads(f.read_text()), doc)
+            self.assertEqual([p.name for p in Path(d).iterdir()], ["proj.json"])
+
+    def test_overwriting_never_exposes_an_empty_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "proj.json"
+            f.write_text('{"project": {"tasks": ["old"]}}')
+            dashboard._write_taskfile_atomically(
+                f, {"project": {"repo": "/tmp", "title": "new", "tasks": []}})
+            self.assertEqual(json.loads(f.read_text())["project"]["title"], "new")
+            self.assertGreater(f.stat().st_size, 0)

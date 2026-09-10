@@ -821,6 +821,28 @@ def _valid_repo(p):
     return path if path.is_dir() else None
 
 
+def _repo_problem(path, base="main"):
+    """Why this directory cannot host a task run, or None if it can.
+
+    Checked at CREATE time on purpose. Without it the project is written
+    happily and the failure surfaces minutes later inside gitstore.alloc as
+    "fatal: not in a git directory" or "fatal: invalid reference: main",
+    by which point a worktree and a DB row already exist.
+    """
+    if not (path / ".git").exists():
+        return (f"{path} is not a git repository — run `git init` in it and "
+                f"make one commit on {base}")
+    try:
+        r = subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", base],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"could not inspect {path}: {exc}"
+    if r.returncode != 0:
+        return (f"{path} has no '{base}' branch with any commits — tasks branch "
+                f"from {base}; create it with `git commit` on {base}")
+    return None
+
+
 def _task_loop_stats(store, task_ids):
     """Fix-loop stats per base task id: implement-attempt max (harness_runs is
     authoritative), task.escalated/task.conflict event counts, newest reviewer
@@ -1144,12 +1166,39 @@ def _spawn_logged(argv, log_name):
     return proc, log_name
 
 
+def _write_taskfile_atomically(fpath, doc):
+    """Write via a temp file + rename, so a crash cannot leave a partial one.
+
+    A plain write_text truncates first and fills after. A process killed in
+    that window leaves a ZERO-BYTE task file, which then fails every later run
+    of it and every check.sh gate with "Expecting value: line 1 column 1" —
+    observed for real on 2026-09-09. rename(2) within a directory is atomic:
+    readers see either the old file or the complete new one.
+    """
+    tmp = fpath.with_name(fpath.name + f".tmp{os.getpid()}")
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(doc, fh, indent=2)
+            fh.write("\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, fpath)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def _create_project(body):
     if not isinstance(body, dict):
         return {"error": "JSON body required"}, 400
     repo = _valid_repo(body.get("repo"))
     if repo is None:
         return {"error": "repo must be an existing absolute path under /home/proxyie"}, 400
+    problem = _repo_problem(repo)
+    if problem:
+        return {"error": problem}, 400
     overwrite = bool(body.get("overwrite"))
     py = str(Path(config.ROOT) / ".venv" / "bin" / "python")
 
@@ -1212,7 +1261,7 @@ def _create_project(body):
                 "file": fname}, 409
     Path(config.TASKS_DIR).mkdir(parents=True, exist_ok=True)
     doc = {"project": {"repo": str(repo), "title": title, "tasks": clean}}
-    fpath.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    _write_taskfile_atomically(fpath, doc)
     return {"mode": "tasks", "file": fname, "n_tasks": len(clean)}, 200
 
 
@@ -1225,6 +1274,17 @@ def _run_project(body):
     path = Path(config.TASKS_DIR) / fname
     if not path.is_file():
         return {"error": "not found"}, 404
+    try:
+        proj = (json.loads(path.read_text(encoding="utf-8", errors="replace"))
+                .get("project") or {})
+    except Exception as exc:
+        return {"error": f"invalid task file: {exc}"}, 400
+    repo = _valid_repo(proj.get("repo") or "")
+    if repo is None:
+        return {"error": f"task file names an unusable repo: {proj.get('repo')!r}"}, 400
+    problem = _repo_problem(repo)
+    if problem:
+        return {"error": problem}, 400
     dry_run = bool(body.get("dry_run"))
     _prune_registry()
     key = str(path)
