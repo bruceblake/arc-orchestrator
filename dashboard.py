@@ -1774,7 +1774,19 @@ def _archive_project(body):
         return {"error": str(exc)}, 500
     _emit_event("project.archived" if archived else "project.restored",
                 taskfile=str(path))
-    return {"file": fname, "archived": archived}, 200
+    resp = {"file": fname, "archived": archived}
+    if archived:
+        try:
+            bad = [r for r in Handler.store.code_tasks_all()
+                   if r.get("taskfile")
+                   and (r["taskfile"] == str(path) or r["taskfile"].endswith("/" + fname))
+                   and r.get("status") in ("failed", "conflict")]
+        except Exception:
+            bad = []
+        if bad:
+            resp["warning"] = (f"{len(bad)} task(s) ended failed/conflict — "
+                               "archiving hides this project from the active list")
+    return resp, 200
 
 
 def _retry_task(body):

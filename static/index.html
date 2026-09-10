@@ -479,7 +479,7 @@ function card(p, i) {
   const pct = n => (100 * n / tot).toFixed(1);
   const bar = `<div class="pbar"><i class="done" style="width:${pct(done)}%"></i><i class="running" style="width:${pct(running)}%"></i><i class="failed" style="width:${pct(failed)}%"></i></div>`;
   return `<div class="card ${p.archived ? "archived" : ""}" data-i="${i}" role="button" tabindex="0" aria-label="open project ${esc(p.title)}">
-    <div><b>${esc(p.title)}</b> ${liveBadge(p)}</div>
+    <div><b>${esc(p.title)}</b> ${liveBadge(p)}${p.archived ? ' <span class="chip pending" title="archived — hidden from the active list">archived</span>' : ""}</div>
     ${bar}
     ${progressLines(p.task_progress)}
     <div class="hint">${done}/${tot} merged${failed ? ` · <span class="bad">${failed} failed</span>` : ""}${running ? ` · ${running} running` : ""}</div>
@@ -523,10 +523,10 @@ function renderProjects() {
     ["new",       "never run"],
     ["done",      "done"],
   ];
-  const visible = PROJECTS.filter(p => SHOW_ARCHIVED ? p.archived : !p.archived)
+  const visible = PROJECTS.filter(p => SHOW_ARCHIVED ? p.archived : (!p.archived || p.phase === "attention"))
                           .filter(p => !PHASE_FILT || p.phase === PHASE_FILT);
   const counts = {};
-  PROJECTS.filter(p => !p.archived).forEach(p => counts[p.phase] = (counts[p.phase] || 0) + 1);
+  PROJECTS.filter(p => !p.archived || p.phase === "attention").forEach(p => counts[p.phase] = (counts[p.phase] || 0) + 1);
   $("#phase-filter").innerHTML = PHASES.filter(([k]) => counts[k])
     .map(([k, label]) => `<button class="act seg ${PHASE_FILT === k ? "on" : ""}" data-ph="${k}">${label} ${counts[k]}</button>`)
     .join("") + (PHASE_FILT ? '<button class="act seg" data-ph="">all</button>' : "");
@@ -563,6 +563,7 @@ function renderProjects() {
       const {code, body} = await jpost("/api/projects/archive",
         {file: b.dataset.arch, archived: b.dataset.on !== "1"});
       if (code !== 200) alert(body.error || "failed");
+      else if (body.warning) alert(body.warning);
       pollProjects();
     });
   bindDagClicks("#projects");

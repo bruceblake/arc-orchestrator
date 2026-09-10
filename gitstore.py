@@ -230,7 +230,7 @@ async def merge_to_main(repo, task_id):
 
 
 async def push_and_open_pr(repo, task_id, title, taskfile=""):
-    """Best-effort GitHub publish: push branch + main, open a PR.
+    """Best-effort GitHub publish: push the branch, open a PR, then push main.
 
     Never raises; returns (pr_url_or_None, note). With no remote / no gh /
     no auth it reports a skip note via the events emitted by the caller —
@@ -243,9 +243,14 @@ async def push_and_open_pr(repo, task_id, title, taskfile=""):
         return None, "no git remote configured"
     if not shutil.which("gh"):
         return None, "gh CLI not installed"
+    # ORDER MATTERS. The branch goes up first and the PR is opened while
+    # origin/main still LACKS these commits; main is pushed afterwards, which
+    # marks the PR merged. Pushing main first — which is what this did — left
+    # GitHub with nothing between the two refs, so every `gh pr create`
+    # failed with "No commits between main and task/<id>" and this hook had
+    # never once opened a PR.
     try:
         await _git(["push", "-u", "origin", branch], cwd=repo)
-        await _git(["push", "origin", "main"], cwd=repo)
     except GitError as exc:
         return None, f"push failed: {exc}"[:200]
     proc = await asyncio.create_subprocess_exec(
@@ -262,8 +267,14 @@ async def push_and_open_pr(repo, task_id, title, taskfile=""):
         await proc.wait()
         return None, "gh pr create timed out"
     if proc.returncode != 0:
+        # main still needs publishing even when the PR could not be opened.
+        await _git(["push", "origin", "main"], cwd=repo, check=False)
         return None, f"gh pr create failed: {err.decode(errors='replace').strip()[:200]}"
-    return out.decode(errors="replace").strip(), "opened"
+    url = out.decode(errors="replace").strip()
+    # Now publish main; GitHub sees the branch's commits land and marks the PR
+    # merged, leaving a reviewable diff and the review trail behind it.
+    await _git(["push", "origin", "main"], cwd=repo, check=False)
+    return url, "opened"
 
 
 async def github_status(repo):
