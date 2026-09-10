@@ -327,6 +327,44 @@ class StallInstrumentation(unittest.TestCase):
         self.assertLessEqual(beats[0]["idle_s"], beats[-1]["idle_s"],
                              "idle time must grow while the harness is quiet")
 
+    def test_pump_heartbeats_report_liveness(self):
+        """driver.heartbeat is the wall-clock liveness ping behind the
+        dashboard's last_event_s / stalled fields — it must fire while the
+        pump loop runs even when no output arrives, and carry the sample
+        (bytes, idle, elapsed) plus task/attempt attribution."""
+        orig_idle = config.DRIVER_IDLE_TIMEOUT
+        orig_hb = drivers.HEARTBEAT_INTERVAL
+        config.DRIVER_IDLE_TIMEOUT = 1.0
+        drivers.HEARTBEAT_INTERVAL = 0.15
+
+        class Sleeper(Driver):
+            harness = "sleep"
+            model = "gpt-oss-120b"
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                return ["sleep", "30"]
+
+        try:
+            with capture_events() as ev:
+                async def go():
+                    with self.assertRaises(DriverError):
+                        await Sleeper()._once("p", Path("."), None, "t1", 1)
+                asyncio.run(go())
+        finally:
+            config.DRIVER_IDLE_TIMEOUT = orig_idle
+            drivers.HEARTBEAT_INTERVAL = orig_hb
+        beats = ev.of("driver.heartbeat")
+        self.assertGreaterEqual(len(beats), 2, "heartbeats should repeat")
+        for b in beats:
+            self.assertEqual(b.get("task"), "t1")
+            self.assertEqual(b.get("attempt"), 1)
+            self.assertIn("bytes", b)
+            self.assertIn("idle_s", b)
+            self.assertIn("seconds", b)
+        self.assertLessEqual(beats[0]["idle_s"], beats[-1]["idle_s"],
+                             "idle time must grow while the harness is quiet")
+
 
 class CapacityClassification(unittest.TestCase):
     """Capacity rejections need a long backoff; crashes need a short one."""

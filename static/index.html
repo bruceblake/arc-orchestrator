@@ -762,7 +762,9 @@ function renderAgents() {
       <span class="who">${esc(a.pretty || short(a.model))} ${esc(a.role || "")}</span>
       <span>${esc(a.task)}</span>
       ${att ? `<span class="hint">attempt ${att}</span>` : ""}
+      ${a.stalled ? '<span class="bad">STALLED</span>' : ""}
       <span class="hint" data-el="${a.started || 0}">${a.started ? tick(Date.now() / 1000 - a.started) : ""}</span>
+      <span class="hint">hb ${a.last_event_s != null ? tick(a.last_event_s) + " ago" : "starting"}</span>
       ${a.bytes ? `<span class="hint">${fmtK(a.bytes)}B out</span>` : ""}
       ${quiet}</div>`;
   }).join("");

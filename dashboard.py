@@ -395,6 +395,7 @@ def _collect_inflight(now, store=None):
     starts = {}      # request_start req_id -> event (in-flight raw pool/stream requests)
     driver_starts = {}  # (harness, model, role, task, attempt) -> event (in-flight task runs)
     driver_progress = {}  # same key -> newest driver.progress heartbeat
+    driver_last = {}  # same key -> newest start/heartbeat/stalled/timeout event
     for line in _load_event_lines():
         try:
             e = json.loads(line)
@@ -408,8 +409,15 @@ def _collect_inflight(now, store=None):
         elif etype in ("request", "request_end"):
             starts.pop(e.get("req_id"), None)
         elif etype == "driver.start":
-            driver_starts[(e.get("harness"), e.get("model"), e.get("role"),
-                           e.get("task"), e.get("attempt"))] = e
+            key = (e.get("harness"), e.get("model"), e.get("role"),
+                   e.get("task"), e.get("attempt"))
+            driver_starts[key] = e
+            driver_last[key] = e
+        elif etype in ("driver.heartbeat", "driver.stalled", "driver.timeout"):
+            # Liveness/failure pings for an in-flight attempt — they settle
+            # nothing, but the newest one is what "last_event_s" reports.
+            driver_last[(e.get("harness"), e.get("model"), e.get("role"),
+                         e.get("task"), e.get("attempt"))] = e
         elif etype == "driver.progress":
             # Not a terminal event — it settles nothing. It is proof the driver
             # was alive at that moment, and carries the idle/CPU sample that
@@ -421,10 +429,12 @@ def _collect_inflight(now, store=None):
             key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
             if key in driver_starts:
                 del driver_starts[key]
+                driver_last.pop(key, None)
             else:  # driver.error/stale may carry no role; settle by the other fields
                 for k in list(driver_starts):
                     if k[:2] == key[:2] and k[3:] == key[3:]:
                         del driver_starts[k]
+                        driver_last.pop(k, None)
                         break
         elif etype == "request.stale":
             starts.pop(e.get("req_id"), None)
@@ -472,6 +482,12 @@ def _collect_inflight(now, store=None):
         idle_s = None
         if prog_ts is not None and isinstance(prog.get("idle_s"), (int, float)):
             idle_s = round(prog["idle_s"] + max(0.0, now - prog_ts), 1)
+        # Age of the agent's most recent liveness event (start/heartbeat/
+        # stalled/timeout) — the heartbeat the UI renders per agent. A run
+        # is "stalled" when that newest event is a stall report or its idle
+        # time has grown far past what a live driver would tolerate.
+        last = driver_last.get((harness, model, role, task, attempt)) or e
+        last_ts = _ts(last.get("ts")) or started
         rows.append({"req_id": f"driver/{harness}:{model}:{role}:{task}",
                      "family": config.MODEL_FAMILY.get(model, "harness"), "model": model,
                      "pretty": _pretty(model), "source": f"driver:{harness}",
@@ -483,6 +499,9 @@ def _collect_inflight(now, store=None):
                      "cpu_delta_s": prog.get("cpu_delta_s"),
                      "stuck": bool(idle_s is not None
                                    and idle_s > config.DRIVER_IDLE_TIMEOUT * 0.5),
+                     "last_event_s": round(max(0.0, now - last_ts), 1),
+                     "stalled": bool(last.get("type") == "driver.stalled"
+                                     or (idle_s is not None and idle_s > 300)),
                      "transcript": transcript})
     kimi = _kimi_code_usage(now, _fleet_task_names(store))
     rows.extend(kimi["inflight"])

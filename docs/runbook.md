@@ -382,6 +382,57 @@ silences are queueing, which is a different thing.
 60s) carry the same `/proc` sample while an agent is healthy, so the Fleet
 panel can show "quiet 90s" on a live agent without it meaning trouble.
 
+### Harness instrumentation (`driver.*` events)
+
+Every harness attempt is visible in `logs/events.jsonl` from spawn to exit.
+The vocabulary, in the order an attempt produces it:
+
+| event | when | payload highlights |
+| --- | --- | --- |
+| `driver.cap_wait` | waiting for a cross-process driver lease | `model`, `task`, `in_use`, `cap` |
+| `driver.start` | harness process spawned | `harness`, `model`, `role`, `task`, `attempt` |
+| `driver.resume` | a retry reattaches to a live kimi session instead of restarting from scratch (drivers.py) | `session_id` |
+| `driver.heartbeat` | every ≤15s while the pump loop runs (`HEARTBEAT_INTERVAL`, drivers.py) | `bytes`, `idle_s`, `seconds` |
+| `driver.progress` | every `ARC_DRIVER_PROGRESS_INTERVAL` (60s) with a `/proc` sample | `state`, `cpu_delta_s`, `blocked`, `last_activity` |
+| `driver.stalled` | idle > `ARC_DRIVER_IDLE_TIMEOUT`, killed after forensics | see table above |
+| `driver.timeout` | total runtime > `ARC_DRIVER_TIMEOUT`, killed | `seconds` |
+| `driver.done` / `driver.error` | attempt exited | exit code / error, transcript path |
+| `driver.cancelled` / `driver.cap_timeout` | run cancelled / lease wait gave out | — |
+| `driver.stale` | dashboard pruned a `driver.start` with no end (killed run) | `age_s` |
+
+`driver.heartbeat` is the liveness floor: unlike `driver.progress`, which
+only fires on the read-timeout path (a chatty agent streaming constantly may
+never hit it), the heartbeat is a wall-clock ping — the pump loop emits one
+every 15s regardless of output, carrying cumulative `bytes`, the current
+`idle_s`, and total `seconds`. It is skipped only when the sample is
+byte-identical to the previous one, which in practice means it never stops
+while the process lives. That is what makes it the wedge detector: **a
+healthy agent's heartbeats march on; a dead one's stop.**
+
+The dashboard surfaces this directly: each Agents-panel row shows
+`hb 12s ago` (age of the newest `start`/`heartbeat`/`stalled`/`timeout`
+event, `starting` before the first one) and a `STALLED` badge when that
+newest event is a `driver.stalled` or the carried-forward idle time exceeds
+300s. The `/api/agents` rows expose the same as `last_event_s` / `stalled`.
+
+To read a stuck run by hand — `logs/events.jsonl` tells you *which*
+attempt is stuck, then the live transcript under `logs/harness/` tells you
+*what it was doing*:
+
+```bash
+grep '"driver.heartbeat"' logs/events.jsonl | grep '"<task-id>"' | tail -5
+tail -f logs/harness/<task-id>-<role>-<attempt>.jsonl
+```
+
+The transcript filename's `<attempt>` is the one from the last
+`driver.start`/`driver.resume` for that task; the dashboard links it
+directly. Heartbeats continuing with growing `idle_s` mean queueing (see
+the TTFT table above — wait); heartbeats that stopped while the attempt
+has no `driver.done`/`driver.error` mean the orchestrator itself died
+mid-run — that start will eventually be pruned as `driver.stale`. In both
+cases the transcript's last lines show the final tool call or API request
+the harness was waiting on.
+
 ### Terminated requests (the real failure mode)
 
 ARC terminates long-running requests. kimi-code's session log records them —
