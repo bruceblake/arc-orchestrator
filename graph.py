@@ -17,10 +17,26 @@ class Node:
 
 
 class Edge:
-    def __init__(self, src, dst, when=None):
+    """A directed edge, optionally conditional on the source node's result.
+
+    ``on_drain`` marks an edge that keeps firing after the graph has started
+    draining. Use it for the tail of a chain whose expensive work is already
+    DONE and only needs landing — in the code workload, a task that has pushed
+    a branch and opened a pull request still has to get that PR reviewed and
+    merged. Without it a sibling task's failure orphans a perfectly good PR:
+    ``publish`` completes, nothing schedules ``pr_review``, and the branch sits
+    on GitHub with no one coming back for it.
+
+    It is deliberately NOT the default. Draining exists to stop committing new
+    model time to a run that has already failed, so edges that kick off fresh
+    implement/rework work must stay closed.
+    """
+
+    def __init__(self, src, dst, when=None, on_drain=False):
         self.src = src
         self.dst = dst
         self.when = when
+        self.on_drain = on_drain
 
 
 class Graph:
@@ -44,8 +60,8 @@ class Graph:
 
         return register(fn) if fn is not None else register
 
-    def edge(self, src, dst, when=None):
-        self.edges.append(Edge(src, dst, when))
+    def edge(self, src, dst, when=None, *, on_drain=False):
+        self.edges.append(Edge(src, dst, when, on_drain))
 
     def start(self, name):
         self.starts.append(name)
@@ -95,10 +111,10 @@ class _Execution:
     def _sources_of(self, name):
         return {e.src for e in self.g.edges if e.dst == name}
 
-    def _put(self, name, src, ctx):
+    def _put(self, name, src, ctx, on_drain=False):
         ctx = dict(ctx)
         ctx["results"] = dict(ctx.get("results", {}))
-        self.queues[name].put_nowait((src, ctx))
+        self.queues[name].put_nowait((src, ctx, on_drain))
         self.in_flight += 1
 
     def _settle(self):
@@ -169,8 +185,8 @@ class _Execution:
     async def _worker(self, node):
         q = self.queues[node.name]
         while True:
-            src, ctx = await q.get()
-            if self.error is not None:
+            src, ctx, on_drain = await q.get()
+            if self.error is not None and not on_drain:
                 self._settle()  # graph is draining: drop queued work
                 continue
             t0 = time.monotonic()
@@ -217,10 +233,12 @@ class _Execution:
             events.emit("node_end", graph=self.g.name, node=node.name, run=runs[node.name],
                         seconds=round(time.monotonic() - t0, 3))
             self.log.debug("node '%s' fired (run %d, firings=%d, in_flight=%d)", node.name, runs[node.name], self.firings, self.in_flight)
-            if self.error is None:  # draining: fire no further edges
-                for e in self.g.edges:
-                    if e.src != node.name:
-                        continue
-                    if e.when is None or e.when(result, ctx):
-                        self._put(e.dst, node.name, ctx)
+            draining = self.error is not None
+            for e in self.g.edges:
+                if e.src != node.name:
+                    continue
+                if draining and not e.on_drain:
+                    continue  # draining: only landing edges keep firing
+                if e.when is None or e.when(result, ctx):
+                    self._put(e.dst, node.name, ctx, e.on_drain)
             self._settle()

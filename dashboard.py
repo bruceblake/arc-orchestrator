@@ -821,6 +821,124 @@ def _fleet(store):
     return {"totals": totals, "models": models, "ranges": RANGES, "ts": time.time()}
 
 
+ROLE_LABEL = {"pr_reviewer": "PR review", "reviewer": "gate review",
+              "implementer": "coding", "planner": "planning"}
+# How long a wait may sit unrefreshed before it is presumed dead. driver.queued
+# fires once, then cap_wait re-fires roughly once a minute, so a live wait is
+# always younger than this unless its run process was killed.
+WAIT_STALE_S = 900
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
+def _queue(store):
+    """Who is holding a model slot right now, and who is queued behind them.
+
+    Two separate queues sit in front of every driver attempt and they fail in
+    different ways, so they are reported separately rather than summed:
+
+      process  — this run's own asyncio.Semaphore (driver.slot_wait)
+      fleet    — the cross-process DB lease shared by every run (driver.cap_wait)
+
+    Running comes from the lease table because that IS the definition of
+    occupying a slot, and it carries a pid so a dead run cannot pin capacity in
+    the UI. Waiting comes from the event log, pairing each driver.queued with
+    its terminal event; anything whose pid is gone, or that has gone quiet for
+    WAIT_STALE_S, is dropped rather than shown as a phantom queue.
+    """
+    now = time.time()
+    running, waiting = [], []
+    roles, leases = {}, []
+    try:
+        leases = list(store.driver_lease_rows() or [])
+    except Exception:
+        leases = []
+
+    # Last event per attempt decides that attempt's state.
+    state = {}
+    for line in _load_event_lines()[-6000:]:
+        if '"driver.' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        kind = e.get("type", "")
+        if not kind.startswith("driver."):
+            continue
+        key = (e.get("task"), e.get("model"), e.get("attempt"))
+        if e.get("role"):
+            roles[(e.get("task"), e.get("model"))] = e["role"]
+        if kind in ("driver.queued", "driver.slot_wait", "driver.cap_wait"):
+            state[key] = e
+        elif kind.startswith("driver."):
+            state.pop(key, None)  # start/done/error/timeout/cancelled all settle it
+
+    for (task, model, _attempt), e in state.items():
+        ts = _ts(e.get("ts")) or 0
+        if now - ts > WAIT_STALE_S or not _pid_alive(e.get("pid")):
+            continue
+        kind = e.get("type")
+        waiting.append({
+            "task": task, "model": model, "pretty": _pretty(model),
+            "role": e.get("role"), "role_label": ROLE_LABEL.get(e.get("role"), e.get("role")),
+            "scope": "fleet" if kind == "driver.cap_wait" else "process",
+            "seconds": round(now - ts) if ts else None,
+            "in_use": e.get("in_use"), "cap": e.get("cap"),
+        })
+
+    for r in leases:
+        pid = r["pid"] if isinstance(r, dict) or hasattr(r, "keys") else None
+        if not _pid_alive(pid):
+            continue
+        ts = _ts(r["acquired_at"]) or 0
+        model = r["model"]
+        role = roles.get((r["task"], model))
+        running.append({
+            "task": r["task"], "model": model, "pretty": _pretty(model),
+            "role": role, "role_label": ROLE_LABEL.get(role, role or "working"),
+            "pid": pid, "seconds": round(now - ts) if ts else None,
+        })
+
+    running.sort(key=lambda x: -(x["seconds"] or 0))
+    waiting.sort(key=lambda x: -(x["seconds"] or 0))
+
+    models = []
+    for model in sorted(set(config.MODEL_FAMILY) | {r["model"] for r in running}
+                        | {w["model"] for w in waiting}):
+        try:
+            cap = config.driver_limit(model)
+        except Exception:
+            continue
+        run_n = sum(1 for r in running if r["model"] == model)
+        wait_n = sum(1 for w in waiting if w["model"] == model)
+        models.append({
+            "model": model, "pretty": _pretty(model), "cap": cap,
+            "running": run_n, "waiting": wait_n, "free": max(0, cap - run_n),
+            "reviewers_waiting": sum(1 for w in waiting if w["model"] == model
+                                     and w["role"] == "pr_reviewer"),
+        })
+    models.sort(key=lambda m: (-(m["running"] + m["waiting"]), m["model"]))
+    return {"running": running, "waiting": waiting, "models": models,
+            "totals": {"running": len(running), "waiting": len(waiting),
+                       "reviewers_waiting": sum(1 for w in waiting
+                                                if w["role"] == "pr_reviewer"),
+                       "capacity": sum(m["cap"] for m in models)},
+            "ts": now}
+
+
 def _task_slug(text):
     return re.sub(r"[^a-z0-9]+", "-", (text or "").lower())[:40].strip("-")
 
@@ -2017,6 +2135,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_usage(Handler.store, range_key, include_series))
             if u.path == "/api/fleet":
                 return self._json(_fleet(Handler.store))
+            if u.path == "/api/queue":
+                return self._json(_queue(Handler.store))
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
             if u.path == "/api/project":

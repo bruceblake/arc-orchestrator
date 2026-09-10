@@ -104,6 +104,35 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .gauge > i { display: block; height: 100%; background: var(--accent); }
 .mcap.atcap .gauge > i { background: var(--warn); }
 .mcap.over .gauge > i { background: var(--err); }
+/* --- model slots: who holds capacity and who is queued behind them --- */
+.slots { display: flex; gap: 10px; flex-wrap: wrap; }
+.slot { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-width: 158px; }
+.slot.busy { border-color: var(--accent); }
+.slot.full { border-color: var(--warn); }
+.slot.queued { border-color: var(--err); }
+.slot-h { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.slot-h b { color: var(--text); font-weight: 600; }
+.slot-h .n { margin-left: auto; color: var(--dim); font-size: 11px; }
+.pips { display: flex; gap: 3px; margin: 6px 0 4px; }
+.pip { flex: 1; height: 7px; border-radius: 2px; background: #21262d; }
+.pip.on { background: var(--accent); }
+.slot.full .pip.on { background: var(--warn); }
+.qbar { display: flex; gap: 3px; }
+.qpip { width: 7px; height: 7px; border-radius: 2px; background: var(--err); opacity: .75; }
+.qpip.rev { background: var(--purple); opacity: 1; }
+.slot-q { font-size: 11px; color: var(--dim); margin-top: 4px; }
+.slot-q .rev { color: var(--purple); }
+.qrows { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
+.qrow { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 3px 6px;
+        border-radius: 5px; background: #0d1117; border: 1px solid var(--border); }
+.qrow.rev { border-color: var(--purple); }
+.qrow .who { color: var(--text); font-family: ui-monospace, monospace; }
+.qrow .role { font-size: 10px; padding: 0 5px; border-radius: 8px;
+              border: 1px solid var(--border); color: var(--dim); }
+.qrow.rev .role { border-color: var(--purple); color: var(--purple); }
+.qrow .wait { margin-left: auto; color: var(--warn); font-variant-numeric: tabular-nums; }
+.qrow.running .wait { color: var(--ok); }
+.qrow .why { color: var(--dim); }
 .problems { margin-top: 8px; max-height: 160px; overflow: auto; }
 .problems div { padding: 2px 0; font-size: 11px; border-bottom: 1px solid var(--border); }
 .errbox { margin-top: 6px; border-left: 2px solid var(--err); padding: 3px 0 3px 8px;
@@ -189,6 +218,16 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       </h2>
       <div class="health" id="health-models"></div>
       <div class="problems" id="health-problems" style="display:none"></div>
+    </div>
+    <div class="panel" id="slots-panel">
+      <h2>Model slots <span class="hint" id="slots-meta">idle</span>
+        <span style="flex:1"></span>
+        <button class="act seg on" id="sl-tab-all" data-sl="all">everything</button>
+        <button class="act seg" id="sl-tab-rev" data-sl="rev">reviewers only</button>
+      </h2>
+      <div class="slots" id="slots"></div>
+      <div class="qrows" id="slot-rows"></div>
+      <div class="empty" id="slots-empty" style="display:none">Nothing is running or queued — every model slot is free.</div>
     </div>
     <div class="panel" id="agents-panel">
       <h2>Agents <span class="hint" id="agents-meta"></span>
@@ -856,6 +895,79 @@ async function pollFleet() {
   } catch (e) { markFail("fleet", true); }
 }
 
+// ---- live model slots: who holds capacity, who is queued behind them ----
+// The reviewer queue is the fleet's real bottleneck (PR_REVIEWERS scarce
+// cross-family models per PR round), so reviewers are given their own colour,
+// their own count, and their own filter rather than being averaged into a
+// single "N waiting" number that hides which queue is actually stuck.
+let SLOT_VIEW = "all", SLOTS = null;
+
+function slotCard(m) {
+  const cls = m.waiting ? "queued" : m.running >= m.cap ? "full" : m.running ? "busy" : "";
+  const pips = Array.from({length: m.cap},
+    (_, i) => `<i class="pip${i < m.running ? " on" : ""}"></i>`).join("");
+  const q = Array.from({length: Math.min(m.waiting, 12)}, (_, i) =>
+    `<i class="qpip${i < m.reviewers_waiting ? " rev" : ""}"></i>`).join("");
+  const revs = m.reviewers_waiting
+    ? ` · <span class="rev">${m.reviewers_waiting} review${m.reviewers_waiting > 1 ? "s" : ""}</span>` : "";
+  return `<div class="slot ${cls}">
+    <div class="slot-h"><b>${esc(m.pretty)}</b><span class="n">${m.running}/${m.cap}</span></div>
+    <div class="pips">${pips}</div>
+    ${m.waiting ? `<div class="qbar">${q}</div>
+      <div class="slot-q">${m.waiting} queued${revs}</div>`
+      : `<div class="slot-q">${m.free} free</div>`}
+  </div>`;
+}
+
+function slotRow(r, running) {
+  const rev = r.role === "pr_reviewer";
+  const why = running ? "holding a slot"
+    : r.scope === "fleet"
+      ? `fleet at cap${r.cap ? ` (${r.in_use}/${r.cap})` : ""}`
+      : "waiting for a slot in its own run";
+  return `<div class="qrow${rev ? " rev" : ""}${running ? " running" : ""}">
+    <span>${running ? "▶" : "⏳"}</span>
+    <span class="who">${esc(r.task)}</span>
+    <span class="role">${esc(r.role_label || "working")}</span>
+    <span class="why">${esc(r.pretty)} · ${why}</span>
+    <span class="wait">${tick(r.seconds)}</span>
+  </div>`;
+}
+
+function renderSlots(q) {
+  SLOTS = q;
+  const t = q.totals || {};
+  const revWait = t.reviewers_waiting || 0;
+  $("#slots-meta").innerHTML = t.running || t.waiting
+    ? `${t.running} running · ${t.waiting} queued`
+      + (revWait ? ` · <span style="color:var(--purple)">${revWait} reviewer${revWait > 1 ? "s" : ""} blocked</span>` : "")
+      + ` · ${t.capacity} slots total`
+    : "idle";
+  $("#slots").innerHTML = (q.models || []).map(slotCard).join("");
+  const revOnly = SLOT_VIEW === "rev";
+  const keep = r => !revOnly || r.role === "pr_reviewer";
+  const rows = (q.waiting || []).filter(keep).map(r => slotRow(r, false))
+    .concat((q.running || []).filter(keep).map(r => slotRow(r, true)));
+  $("#slot-rows").innerHTML = rows.join("");
+  $("#slots-empty").style.display = rows.length ? "none" : "";
+  $("#slots-empty").textContent = revOnly && (t.running || t.waiting)
+    ? "No PR reviewers running or queued right now."
+    : "Nothing is running or queued — every model slot is free.";
+}
+
+async function pollSlots() {
+  try { renderSlots(await jget("/api/queue")); markFail("queue", false); }
+  catch (e) { markFail("queue", true); }
+}
+
+for (const b of document.querySelectorAll("[data-sl]")) {
+  b.onclick = () => {
+    SLOT_VIEW = b.dataset.sl;
+    for (const o of document.querySelectorAll("[data-sl]")) o.classList.toggle("on", o === b);
+    if (SLOTS) renderSlots(SLOTS);
+  };
+}
+
 // ---- today's merged/failed via the incremental /api/events cursor ----
 const dayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
 let EV_NEXT = 0, EV_DAY = dayStart(), TODAY = {merged: 0, failed: 0, conflict: 0};
@@ -1279,6 +1391,7 @@ loadHash(); syncFilterControls();
 pollProjects();
 initEvents();
 setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
+setTimeout(() => { pollSlots(); setInterval(pollSlots, 3000); }, 400);
 setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
 setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
 setTimeout(() => setInterval(pollEvents, 8000), 1200);

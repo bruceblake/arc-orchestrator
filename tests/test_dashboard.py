@@ -4,6 +4,7 @@ These numbers govern operator decisions — whether the fleet looks wedged,
 whether to throttle — so over-counting is not a cosmetic bug.
 """
 import json
+import os
 import pathlib
 import tempfile
 import time
@@ -330,3 +331,107 @@ class ProjectPayloadShape(unittest.TestCase):
         src = pathlib.Path("dashboard.py").read_text()
         self.assertIn('"progress": {"done"', src,
                       "progress must stay the {done,total} rollup")
+
+
+class LiveQueueView(unittest.TestCase):
+    """What /api/queue reports as running vs waiting.
+
+    These numbers tell the operator whether the fleet is busy or wedged, and
+    which model the PR reviewers are stuck behind. A phantom queue entry — one
+    left by a run that was killed — is worse than no queue view at all, so the
+    liveness filtering is tested as carefully as the happy path.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.log = Path(self.dir) / "events.jsonl"
+        self._orig = config.EVENTS_LOG
+        config.EVENTS_LOG = str(self.log)
+        dashboard._lines_cache["key"] = None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        config.EVENTS_LOG = self._orig
+        dashboard._lines_cache["key"] = None
+
+    def _write(self, *events_):
+        self.log.write_text("".join(json.dumps(e) + "\n" for e in events_))
+        dashboard._lines_cache["key"] = None
+
+    def _ev(self, type, task, model, role="pr_reviewer", age=5, **kw):
+        return dict(type=type, task=task, model=model, role=role, attempt=1,
+                    pid=os.getpid(), ts=time.time() - age, **kw)
+
+    def _store(self, leases=()):
+        class S:
+            def driver_lease_rows(self_):
+                return list(leases)
+        return S()
+
+    def test_a_queued_attempt_with_no_start_is_waiting(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3"))
+        q = dashboard._queue(self._store())
+        self.assertEqual(q["totals"]["waiting"], 1)
+        self.assertEqual(q["waiting"][0]["task"], "t1")
+
+    def test_driver_start_settles_the_wait(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=9),
+                    self._ev("driver.start", "t1", "Kimi-K3", age=8))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_done_and_error_also_settle_it(self):
+        for terminal in ("driver.done", "driver.error", "driver.cancelled",
+                         "driver.timeout", "driver.cap_timeout"):
+            with self.subTest(terminal=terminal):
+                self._write(self._ev("driver.queued", "t1", "GLM-5.3", age=9),
+                            self._ev(terminal, "t1", "GLM-5.3", age=8))
+                self.assertEqual(
+                    dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_a_wait_left_by_a_dead_run_is_not_shown(self):
+        e = self._ev("driver.queued", "t1", "Kimi-K3")
+        e["pid"] = 2 ** 22  # never a live pid
+        self._write(e)
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_a_wait_that_has_gone_quiet_is_not_shown(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3",
+                             age=dashboard.WAIT_STALE_S + 60))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_it_separates_the_process_queue_from_the_fleet_queue(self):
+        self._write(self._ev("driver.slot_wait", "t1", "GLM-5.3"),
+                    self._ev("driver.cap_wait", "t2", "GLM-5.3", in_use=4, cap=4))
+        scopes = {w["task"]: w["scope"] for w in dashboard._queue(self._store())["waiting"]}
+        self.assertEqual(scopes, {"t1": "process", "t2": "fleet"})
+
+    def test_pr_reviewers_are_counted_separately_from_implementers(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", role="pr_reviewer"),
+                    self._ev("driver.queued", "t2", "Kimi-K3", role="implementer"))
+        q = dashboard._queue(self._store())
+        self.assertEqual(q["totals"]["waiting"], 2)
+        self.assertEqual(q["totals"]["reviewers_waiting"], 1)
+        kimi = next(m for m in q["models"] if m["model"] == "Kimi-K3")
+        self.assertEqual(kimi["reviewers_waiting"], 1)
+
+    def test_running_comes_from_live_leases_and_reports_free_slots(self):
+        self._write(self._ev("driver.start", "t1", "Kimi-K3", role="pr_reviewer"))
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "Kimi-K3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": time.time() - 30}]))
+        self.assertEqual(q["totals"]["running"], 1)
+        self.assertEqual(q["running"][0]["role_label"], "PR review")
+        kimi = next(m for m in q["models"] if m["model"] == "Kimi-K3")
+        self.assertEqual((kimi["running"], kimi["free"]), (1, kimi["cap"] - 1))
+
+    def test_a_lease_whose_run_died_does_not_pin_a_slot(self):
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "Kimi-K3", "pid": 2 ** 22, "task": "t1",
+             "acquired_at": time.time() - 30}]))
+        self.assertEqual(q["totals"]["running"], 0)
+
+    def test_every_known_model_appears_even_when_idle(self):
+        self._write()
+        models = {m["model"] for m in dashboard._queue(self._store())["models"]}
+        self.assertIn("Kimi-K3", models)
+        self.assertIn("GLM-5.3", models)

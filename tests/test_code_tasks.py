@@ -394,3 +394,30 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
             self.assertEqual(len(picked), config.PR_REVIEWERS,
                              f"cannot fill {config.PR_REVIEWERS} reviewers when "
                              f"the implementer is {fam}")
+
+
+class ResumingAnOpenPullRequest(unittest.TestCase):
+    """A task whose PR is already open must not be re-implemented.
+
+    Restarting it at alloc would discard a pushed branch and an open pull
+    request that reviewers may have partly read, and burn a model redoing
+    work that is sitting on GitHub waiting for approval.
+    """
+
+    def _graph(self, status):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        prior = [{"id": "t1", "status": status, "model": "gpt-oss-120b", "error": None}]
+        with capture_events():
+            return code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
+
+    def test_in_review_resumes_at_publish_not_alloc(self):
+        g = self._graph("in_review")
+        self.assertIn("publish_t1", g.starts)
+        self.assertNotIn("alloc_t1", g.starts)
+
+    def test_conflict_still_resumes_at_publish(self):
+        self.assertIn("publish_t1", self._graph("conflict").starts)
+
+    def test_a_failed_task_still_starts_from_scratch(self):
+        g = self._graph("failed")
+        self.assertIn("alloc_t1", g.starts)

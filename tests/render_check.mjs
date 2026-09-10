@@ -39,7 +39,7 @@ const externals = [...src.matchAll(/<script[^>]+src="([^"]+)"/g)]
   .filter(f => fs.existsSync(f))
   .map(f => fs.readFileSync(f, "utf8"))
   .join("\n");
-const mod = new Function(externals + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects};");
+const mod = new Function(externals + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects, renderSlots};");
 const api = mod();
 
 const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -59,6 +59,43 @@ const d = JSON.parse(fs.readFileSync(process.argv[4], "utf8"));
 api.renderDag(d); api.renderFeed(d);
 console.log("dag svg:", document.querySelector("#dag").innerHTML.slice(0, 40) + "...");
 console.log("feed entries:", (document.querySelector("#feed").innerHTML.match(/border-bottom/g) || []).length);
+
+// Model slots. Driven by a synthetic BUSY payload rather than the live one:
+// the fleet is usually idle when check.sh runs, and an all-zeros payload would
+// exercise none of the queue rendering this panel exists for.
+const queue = {
+  totals: {running: 2, waiting: 3, reviewers_waiting: 2, capacity: 17},
+  models: [
+    {model: "Kimi-K3", pretty: "Kimi K3", cap: 3, running: 3, waiting: 2, free: 0, reviewers_waiting: 2},
+    {model: "GLM-5.3", pretty: "GLM 5.3", cap: 4, running: 1, waiting: 1, free: 3, reviewers_waiting: 0},
+    // saturated but nobody blocked behind it — amber, not red
+    {model: "gpt-oss-120b", pretty: "gpt-oss 120B", cap: 5, running: 5, waiting: 0, free: 0, reviewers_waiting: 0},
+    {model: "DeepSeek-V4-Flash", pretty: "DeepSeek V4 Flash", cap: 5, running: 0, waiting: 0, free: 5, reviewers_waiting: 0},
+  ],
+  running: [{task: "qa-http-core", model: "Kimi-K3", pretty: "Kimi K3", role: "pr_reviewer",
+             role_label: "PR review", pid: 1234, seconds: 91}],
+  waiting: [{task: '<img src=x onerror=alert(1)>', model: "Kimi-K3", pretty: "Kimi K3",
+             role: "pr_reviewer", role_label: "PR review", scope: "fleet",
+             seconds: 240, in_use: 3, cap: 3}],
+};
+api.renderSlots(queue);
+const slotHtml = document.querySelector("#slots").innerHTML;
+const rowHtml = document.querySelector("#slot-rows").innerHTML;
+console.log("slot cards:", (slotHtml.match(/class="slot /g) || []).length,
+            "| queue rows:", (rowHtml.match(/class="qrow/g) || []).length);
+console.log("slots meta:", document.querySelector("#slots-meta").innerHTML.replace(/<[^>]+>/g, ""));
+if (!/class="slot full"/.test(slotHtml)) {
+  console.error("render_check: FAIL — a saturated model is not marked full"); process.exit(1);
+}
+if (!/class="slot queued"/.test(slotHtml)) {
+  console.error("render_check: FAIL — a model with a queue behind it is not marked queued"); process.exit(1);
+}
+if (!/qrow rev/.test(rowHtml)) {
+  console.error("render_check: FAIL — a queued PR reviewer is not highlighted"); process.exit(1);
+}
+if (rowHtml.includes("<img src=x")) {
+  console.error("render_check: FAIL — a task id reached the slot panel unescaped"); process.exit(1);
+}
 
 // XSS / escaping probe: a task title containing markup must not become markup.
 const evil = { file: "x.json", title: '<img src=x onerror=alert(1)>', statuses: {}, n_tasks: 1,

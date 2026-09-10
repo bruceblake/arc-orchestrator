@@ -574,6 +574,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 {"Harness": impl.get("harness", "?"), "Model": model,
                  "Reviewer": rev, "Task-Id": tid})
             if head is None:
+                # No new commit. That is only a failure if there is also no PR:
+                # on RESUME of an in_review task the branch is already pushed
+                # and its PR already open, and re-implementing would throw away
+                # a diff that reviewers may have half-read.
+                number, url, note = await gitstore.open_pr(
+                    repo, tid, f"task({tid}): {t['title']}", "", base)
+                if number is not None:
+                    store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                           "in_review", branch=f"task/{tid}")
+                    events.emit("task.pr_reattached", task=tid, pr=number,
+                                url=url, note=note)
+                    return {"published": True, "pr": number, "url": url,
+                            "head": None, "reattached": True}
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "failed", error="implementer produced no changes",
                                        finished=True)
@@ -633,7 +646,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             chosen = pool[:max(1, config.PR_REVIEWERS)]
 
             async def one(model):
-                drv = _driver(model, "reviewer", pol)
+                # "pr_reviewer", not "reviewer": these are the gate on an open
+                # PR and they are the scarcest thing in the fleet (PR_REVIEWERS
+                # cross-family models per round). The dashboard separates them
+                # from the pre-PR gate reviewer so a reviewer queue is legible.
+                drv = _driver(model, "pr_reviewer", pol)
                 try:
                     res = await drv.run(
                         _pr_review_prompt(t, diff, len(chosen), round_n,
@@ -750,10 +767,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         def pr_rounds(c):
             return c.get("runs", {}).get(f"pr_review_{tid}", 0)
 
+        # on_drain: once a branch is pushed and a PR is open, the model time is
+        # already spent. If a SIBLING task fails and drains the graph, these two
+        # edges still fire so the PR gets reviewed and merged instead of being
+        # orphaned on GitHub. The rework edge below is deliberately not marked —
+        # draining must not start a fresh implementer.
         g.edge(f"publish_{tid}", f"pr_review_{tid}",
-               when=lambda r, c: bool(r.get("published")))
+               when=lambda r, c: bool(r.get("published")), on_drain=True)
         g.edge(f"pr_review_{tid}", f"pr_merge_{tid}",
-               when=lambda r, c: bool(r.get("approved")))
+               when=lambda r, c: bool(r.get("approved")), on_drain=True)
         g.edge(f"pr_review_{tid}", f"implement_{tid}",
                when=lambda r, c: not r.get("approved")
                and pr_rounds(c) < config.PR_MAX_ROUNDS)
@@ -776,7 +798,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         g.edge(f"publish_{tid}", f"alloc_{tid}",
                when=lambda r, c, i=tid: not r.get("published")
                and f"alloc_{i}" not in c.get("results", {}))
-        first = "publish" if prior_status == "conflict" else "alloc"
+        # in_review resumes at publish, which finds the already-open PR and
+        # hands it straight to pr_review — restarting at alloc would discard a
+        # pushed branch and an open pull request.
+        first = "publish" if prior_status in ("conflict", "in_review") else "alloc"
         if t["deps"]:
             # Wait for the dep's PR to MERGE into the base branch, not just to
             # open — otherwise a dependent branches from a base that lacks the

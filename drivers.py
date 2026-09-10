@@ -389,7 +389,7 @@ class Driver:
             # driver.start is emitted by _guarded_once once both slots are held.
             events.emit("driver.queued", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
-                        resume=bool(sid))
+                        resume=bool(sid), pid=os.getpid())
             try:
                 result = await self._guarded_once(continuation or prompt, worktree,
                                                   sid, task_id, attempt)
@@ -451,16 +451,26 @@ class Driver:
         a lease row pinning the model at cap until its 30-minute TTL.
         """
         gate = _gate(self.model)
+        # Two different queues sit in front of every attempt, and only the
+        # second one used to be instrumented. A task blocked here — on this
+        # process's own semaphore — showed up nowhere at all, so a run with
+        # more tasks than slots looked idle rather than queued.
+        if gate.locked():
+            events.emit("driver.slot_wait", harness=self.harness, model=self.model,
+                        role=self.role, task=task_id, attempt=attempt,
+                        scope="process", cap=config.driver_limit(self.model),
+                        pid=os.getpid())
         await gate.acquire()
         try:
             await _lease_acquire(self.model, task_id,
-                                 {"harness": self.harness, "role": self.role})
+                                 {"harness": self.harness, "role": self.role,
+                                  "pid": os.getpid()})
             try:
                 # Both slots held: this driver is genuinely occupying capacity
                 # now, so this is the event in-flight accounting must pair with.
                 events.emit("driver.start", harness=self.harness,
                             model=self.model, role=self.role, task=task_id,
-                            attempt=attempt)
+                            attempt=attempt, pid=os.getpid())
                 return await self._once(prompt, worktree, sid, task_id, attempt)
             finally:
                 _lease_release(self.model, task_id)
