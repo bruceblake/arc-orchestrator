@@ -535,6 +535,69 @@ def cmd_bench(args):
         pass
 
 
+def cmd_doctor(args):
+    import shutil
+
+    import reconcile
+    from store import Store
+
+    failures = 0
+
+    def report(name, ok, detail=""):
+        nonlocal failures
+        print(f"{'PASS' if ok else 'FAIL'}  {name}" + ("" if ok else f" — {detail}"))
+        if not ok:
+            failures += 1
+
+    if config.kimi_plan_mode_on():
+        report("kimi plan mode off", False,
+               f"default_plan_mode = true in {config.KIMI_CONFIG}; plan mode makes "
+               "headless agents research and propose instead of edit — leaving it "
+               "needs ExitPlanMode approved, which nothing does in a headless run. "
+               "This silently wasted most fleet runs before it was found; set "
+               f"default_plan_mode = false in {config.KIMI_CONFIG}")
+    else:
+        report("kimi plan mode off", True)
+
+    key = config.API_KEY
+    report("ARC_API_KEY set", bool(key) and "PASTE-YOUR-KEY" not in key,
+           "ARC_API_KEY is missing or still the placeholder — add your key from "
+           "llm.arc.vt.edu to the .env file")
+
+    for harness in ("kimi", "opencode"):
+        report(f"'{harness}' on PATH", shutil.which(harness) is not None,
+               f"the {harness} harness binary was not found on PATH")
+
+    for label, path in (("WORKTREE_ROOT", config.WORKTREE_ROOT),
+                        ("TASKS_DIR", config.TASKS_DIR)):
+        try:
+            Path(path).mkdir(parents=True, exist_ok=True)
+            ok, detail = True, ""
+        except OSError as exc:
+            ok, detail = False, f"cannot create {path}: {exc}"
+        report(f"{label} exists or can be created ({path})", ok, detail)
+
+    report("timeouts: DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT",
+           config.DRIVER_LEASE_TTL > config.DRIVER_TIMEOUT > config.DRIVER_IDLE_TIMEOUT,
+           f"DRIVER_LEASE_TTL={config.DRIVER_LEASE_TTL}s, "
+           f"DRIVER_TIMEOUT={config.DRIVER_TIMEOUT}s, "
+           f"DRIVER_IDLE_TIMEOUT={config.DRIVER_IDLE_TIMEOUT}s — leases must outlive "
+           "a harness run and the idle timeout must stay under the total cap")
+
+    if reconcile.live_runs():
+        report("no stale 'running' code_tasks", True)
+    else:
+        stale = [r["id"] for r in
+                 Store(args.db or config.DB_PATH).running_code_tasks()]
+        report("no stale 'running' code_tasks", not stale,
+               f"{len(stale)} task(s) marked 'running' but no `main.py code run` "
+               f"process is alive ({', '.join(stale)}) — run `main.py code reconcile` "
+               "or `main.py code status --reset-stale`")
+
+    if failures:
+        sys.exit(1)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="24/7 multi-model graph orchestrator for https://llm-api.arc.vt.edu"
@@ -554,6 +617,8 @@ def main():
     serve_p.add_argument("--port", type=int, default=None, help=f"port (default {8787})")
     serve_p.add_argument("--db", default=None, help="sqlite database path")
     serve_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    doc_p = sub.add_parser("doctor", help="check for misconfiguration that silently breaks runs")
+    doc_p.add_argument("--db", default=None, help="sqlite database path")
     code_p = sub.add_parser("code", help="multi-harness code workload (worktrees + reviews)")
     code_sub = code_p.add_subparsers(dest="code_cmd", required=True)
     cr_p = code_sub.add_parser("run", help="run a task file")
@@ -650,6 +715,8 @@ def main():
         cmd_code(args)
     elif args.cmd == "serve":
         cmd_serve(args)
+    elif args.cmd == "doctor":
+        cmd_doctor(args)
     elif args.cmd == "bench":
         cmd_bench(args)
 
