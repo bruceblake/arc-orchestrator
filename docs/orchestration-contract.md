@@ -188,3 +188,12 @@ crash, `SIGINT`, `SIGTERM` — a run cancels in-flight work, kills its harness
 child processes, marks its unfinished tasks `failed` with an infrastructure
 reason, and releases the driver leases it held. `main.py code reconcile`
 reaps orphans from runs that died before this was true.
+
+**Standalone PR review (gh_ops).** The `pr-reviewer` agent (`main.py gh
+pr-review <repo> <N>`) reviews an arbitrary open pull request under the exact
+verdict contract of the internal reviewers above — strict JSON
+`{"pass": true}` or `{"pass": false, "issues": [...]}`, parsed by the same
+`code_tasks._parse_verdict` — so a verdict from either path means the same
+thing. It is print-only unless `--post` submits the verdict via `gh pr
+review` (approve on pass, otherwise a comment listing the issues), and it
+plays no role in the governed merge gate described here.

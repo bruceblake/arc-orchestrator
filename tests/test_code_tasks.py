@@ -1,4 +1,5 @@
 """Taskfile validation, reviewer-verdict parsing, and resume/escalation planning."""
+import asyncio
 import json
 import pathlib
 import tempfile
@@ -11,9 +12,11 @@ import code_tasks
 import config
 
 
-def taskfile(tasks, repo="/tmp", title="t"):
+def taskfile(tasks, repo="/tmp", title="t", pattern=None):
     """Write a taskfile to a temp path and return it."""
     doc = {"project": {"repo": repo, "title": title, "tasks": tasks}}
+    if pattern is not None:
+        doc["project"]["pattern"] = pattern
     fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(doc, fh)
     fh.close()
@@ -63,6 +66,48 @@ class LoadTaskfile(unittest.TestCase):
         ts = code_tasks.load_taskfile(taskfile([same]),
                                       policy={"allow_self_review": True})
         self.assertEqual(ts["tasks"]["t1"]["reviewer"], "kimi")
+
+    def test_passes_through_project_pattern(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], pattern="chain"))
+        self.assertEqual(ts["pattern"], "chain")
+
+    def test_pattern_defaults_to_empty_when_absent(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        self.assertEqual(ts["pattern"], "")
+
+
+class PlannerPatternLibrary(unittest.TestCase):
+    """The planner is told to pick a named pattern from the library doc."""
+
+    def test_schema_hint_carries_the_pattern_field(self):
+        self.assertIn('"pattern"', code_tasks.PLAN_SCHEMA_HINT)
+        self.assertIn("graph-pattern library", code_tasks.PLAN_SCHEMA_HINT)
+
+    def test_planner_prompt_points_at_the_pattern_library(self):
+        seen = {}
+
+        class FakeDriver:
+            def __init__(self, role):
+                pass
+
+            async def run(self, prompt, cwd, task_id=None):
+                seen["prompt"] = prompt
+                return object()
+
+        orig_driver = code_tasks.KimiDriver
+        orig_extract = code_tasks._plan_json_from_run
+        code_tasks.KimiDriver = FakeDriver
+        code_tasks._plan_json_from_run = (
+            lambda res: '{"project": {"repo": "/tmp", "tasks": []}}')
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                asyncio.run(code_tasks.plan_tasks(
+                    "g", "/tmp", out_path=Path(d) / "plan.json"))
+        finally:
+            code_tasks.KimiDriver = orig_driver
+            code_tasks._plan_json_from_run = orig_extract
+        self.assertIn("docs/graph-patterns.md", seen["prompt"])
+        self.assertIn('"pattern"', seen["prompt"])
 
 
 class ParseVerdict(unittest.TestCase):

@@ -59,6 +59,8 @@ main { padding: 8px; display: grid; gap: 8px; max-width: 720px; margin: 0 auto; 
 .a-head .role { color: var(--dim); font-size: 10.5px; flex: 0 0 auto; }
 .a-head .task { color: var(--accent); font-size: 11px; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
 .a-head .att { color: var(--warn); font-size: 10.5px; flex: 0 0 auto; }
+.a-head .stall { color: var(--err); border: 1px solid var(--err); font-size: 9px; font-weight: 700; padding: 0 3px; border-radius: 3px; flex: 0 0 auto; }
+.a-head .hb { color: var(--dim); font-size: 10.5px; flex: 0 0 auto; }
 .a-head .elp { color: var(--dim); font-size: 11px; flex: 0 0 auto; }
 .a-head .chev { color: var(--dim); font-size: 11px; flex: 0 0 auto; }
 .a-tx { background: #0d1117; border-top: 1px solid var(--border); }
@@ -78,6 +80,7 @@ main { padding: 8px; display: grid; gap: 8px; max-width: 720px; margin: 0 auto; 
 .task .tstate { font-size: 9.5px; text-transform: uppercase; flex: 0 0 auto; }
 .foot { color: var(--dim); font-size: 10px; text-align: center; padding: 6px; }
 .foot a { color: var(--accent); text-decoration: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 </style>
 </head>
 <body>
@@ -191,6 +194,8 @@ function renderAgents() {
         <span class="role">${esc(a.role || a.purpose || '')}</span>
         <span class="task" title="${esc(a.task || '')}">${esc(baseOf(a.task))}</span>
         ${att ? `<span class="att">×${att}</span>` : ''}
+        ${a.stalled ? '<span class="stall">STALLED</span>' : ''}
+        <span class="hb">${a.last_event_s != null ? 'hb ' + tick(a.last_event_s) : 'starting'}</span>
         <span class="elp">${(a.elapsed_s || 0).toFixed(0)}s</span>
         <span class="chev">${open ? '▾' : '▸'}</span>
       </div>

@@ -23,6 +23,11 @@ import events
 
 log = logging.getLogger("drivers")
 TRANSCRIPT_DIR = Path(config.ROOT) / "logs" / "harness"
+# Liveness ping emitted from the _pump streaming loop. Unlike
+# driver.progress (a /proc sample that only fires on a read timeout), this
+# fires on a wall clock whether or not output is arriving, so the dashboard
+# can show a per-agent heartbeat age and flag a stalled run.
+HEARTBEAT_INTERVAL = 15
 
 
 class DriverError(RuntimeError):
@@ -569,6 +574,8 @@ class Driver:
         chunks = []
         last_chunk_t = time.monotonic()
         last_progress_t = time.monotonic()
+        last_hb_t = time.monotonic()
+        last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
         last_cpu = None
         deadline = t0 + config.DRIVER_TIMEOUT
         interval = config.DRIVER_PROGRESS_INTERVAL
@@ -583,9 +590,24 @@ class Driver:
                     idle_for = now - last_chunk_t
                     if idle_for >= config.DRIVER_IDLE_TIMEOUT or now >= deadline:
                         raise asyncio.TimeoutError
+                    # Heartbeat: at most one driver.heartbeat every
+                    # HEARTBEAT_INTERVAL seconds, and only when something
+                    # moved (bytes written or the idle clock ticked) — a pure
+                    # wall-clock ping even for chatty agents that never hit
+                    # the read-timeout progress path.
+                    if (now - last_hb_t >= HEARTBEAT_INTERVAL
+                            and last_hb != (written(), round(idle_for, 1))):
+                        events.emit("driver.heartbeat", harness=self.harness,
+                                    model=self.model, role=self.role,
+                                    task=task_id, attempt=attempt,
+                                    bytes=written(), idle_s=round(idle_for, 1),
+                                    seconds=round(now - t0, 1))
+                        last_hb_t = now
+                        last_hb = (written(), round(idle_for, 1))
                     wait = max(0.05, min(deadline - now,
                                          config.DRIVER_IDLE_TIMEOUT - idle_for,
-                                         interval - (now - last_progress_t)))
+                                         interval - (now - last_progress_t),
+                                         HEARTBEAT_INTERVAL - (now - last_hb_t)))
                     try:
                         chunk = await asyncio.wait_for(proc.stdout.read(65536), wait)
                     except asyncio.TimeoutError:
@@ -678,9 +700,12 @@ class KimiDriver(Driver):
     model = "Kimi-K3"
 
     def __init__(self, role, bench=False):
-        if not bench and role not in ("planner", "reviewer", "pr_reviewer", "implementer"):
-            raise ValueError("KimiDriver role must be "
-                             f"planner|reviewer|pr_reviewer|implementer, got {role!r}")
+        if not bench and role not in ("planner", "reviewer", "pr_reviewer",
+                                      "implementer", "issue-triager",
+                                      "issue-maker", "pr-reviewer"):
+            raise ValueError("KimiDriver role must be planner|reviewer|"
+                             "pr_reviewer|implementer|issue-triager|"
+                             f"issue-maker|pr-reviewer, got {role!r}")
         self.role = role
 
     def argv(self, prompt, session_id):
@@ -710,9 +735,11 @@ class OpencodeDriver(Driver):
                 raise ValueError(
                     f"{model} may only implement or review a PR, not {role!r}")
             if model == "GLM-5.3" and role not in ("planner", "reviewer",
-                                                   "pr_reviewer", "implementer"):
+                                                   "pr_reviewer", "implementer",
+                                                   "issue-triager", "issue-maker",
+                                                   "pr-reviewer"):
                 raise ValueError(
-                    f"GLM-5.3 may only plan/review/implement, not {role!r}")
+                    f"GLM-5.3 may only plan/review/implement/gh-ops, not {role!r}")
             if model not in config.IMPLEMENTER_MODELS:
                 raise ValueError(f"unmapped opencode model: {model!r}")
         self.model = model

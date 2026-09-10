@@ -451,6 +451,25 @@ def cmd_code_bench(args):
         pass
 
 
+def cmd_gh(args):
+    import gh_ops
+
+    try:
+        if args.gh_cmd == "triage":
+            rc = asyncio.run(gh_ops.triage(args.repo, model=args.model,
+                                           apply_labels=args.apply_labels))
+        elif args.gh_cmd == "issue":
+            rc = asyncio.run(gh_ops.make_issue(args.desc, args.repo,
+                                               model=args.model, create=args.create))
+        else:  # pr-review
+            rc = asyncio.run(gh_ops.pr_review(args.repo, args.number,
+                                              model=args.model, post=args.post))
+    except (RuntimeError, ValueError) as exc:
+        print(f"error: {exc}")
+        sys.exit(1)
+    sys.exit(rc)
+
+
 def cmd_serve(args):
     from dashboard import serve
 
@@ -719,6 +738,26 @@ def main():
     bun_p.add_argument("--dry-run", action="store_true", help="simulate all model calls")
     bun_p.add_argument("--db", default=None, help="sqlite database path")
     bun_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    gh_p = sub.add_parser("gh", help="GitHub ops agents (gh CLI): triage, issue, pr-review")
+    gh_sub = gh_p.add_subparsers(dest="gh_cmd", required=True)
+    gt_p = gh_sub.add_parser("triage", help="classify open issues; writes a taskfile to ~/tasks")
+    gt_p.add_argument("repo", help="owner/name or a local checkout path")
+    gt_p.add_argument("--apply-labels", action="store_true",
+                      help="apply triage labels via gh issue edit (writes to GitHub)")
+    gi_p = gh_sub.add_parser("issue", help="draft an issue from a description (prints a preview)")
+    gi_p.add_argument("desc", help="free-form goal or bug description")
+    gi_p.add_argument("repo", help="owner/name or a local checkout path")
+    gi_p.add_argument("--create", action="store_true",
+                      help="file the issue via gh issue create (default: print preview)")
+    gp_p = gh_sub.add_parser("pr-review", help="review a PR (verdict contract of internal review)")
+    gp_p.add_argument("repo", help="owner/name or a local checkout path")
+    gp_p.add_argument("number", type=int, help="pull request number")
+    gp_p.add_argument("--post", action="store_true",
+                      help="submit via gh pr review (default: print only)")
+    for gp in (gt_p, gi_p, gp_p):
+        gp.add_argument("--model", choices=["Kimi-K3", "GLM-5.3"], default=None,
+                        help=f"agent model (default {config.GH_MODEL})")
+        gp.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     args = ap.parse_args()
     setup_logging(getattr(args, "verbose", False))
@@ -735,6 +774,8 @@ def main():
         cmd_build(args)
     elif args.cmd == "code":
         cmd_code(args)
+    elif args.cmd == "gh":
+        cmd_gh(args)
     elif args.cmd == "serve":
         cmd_serve(args)
     elif args.cmd == "doctor":

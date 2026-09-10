@@ -302,7 +302,7 @@ scores a reviewer on whichever ceiling binds first.
   cap; over cap the task **waits** (poll every 20 s) and emits
   `driver.cap_wait {model, task, in_use, cap}` about once a minute — that event
   is the warning surface for "a new task is about to exceed concurrency".
-  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (1800 s) or when
+  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (3300 s) or when
   the owning pid is dead, so killed runs never deadlock the fleet.
 - For the research workload, `pool.py` additionally enforces per-family
   `asyncio.Semaphore(config.family_limit(f))` client-side.
@@ -361,7 +361,7 @@ processes and move git refs on the same terms.
   (distinct from `failed` red), and the last review verdict on each node.
 - Harness-level resilience: `config.DRIVER_TIMEOUT` = 2700 s per harness
   invocation (override `ARC_DRIVER_TIMEOUT`) as a total-runtime backstop, and
-  `config.DRIVER_IDLE_TIMEOUT` = 120 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
+  `config.DRIVER_IDLE_TIMEOUT` = 420 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
   a **stall detector**: a harness that produces no stdout for that long is
   waiting on a request that is not coming back, so it is killed and retried
   rather than waited out. Every stall records forensics first — process state,
@@ -431,6 +431,38 @@ to `logs/orchbench/<stamp>/results.jsonl`; the table is
 `harness_runs` rows are produced exactly as in normal runs (Rule 7 holds
 for benchmarks too).
 
+### GitHub operations agents (gh_ops.py)
+
+Standalone `gh`-CLI agents for GitHub housekeeping — NOT part of the governed
+code pipeline (no worktree, no gate, no publish; Rules 1–8 do not apply):
+
+- **`issue-triager`** — `main.py gh triage <repo> [--apply-labels] [--model
+  Kimi-K3|GLM-5.3]`: classifies open issues (kind bug|feature|question|docs,
+  size S|M|L, recommended tier per `config.IMPLEMENT_TIERS`), prints a triage
+  table, and writes a ready-to-run taskfile to `~/tasks/<repo>-issues.json`
+  with correct cross-review pairing (fill in each `verify_cmd` and dry-run
+  before executing — Rules 4/8 apply once it becomes a taskfile).
+- **`issue-maker`** — `main.py gh issue "<desc>" <repo> [--create]`: drafts a
+  structured issue (title; body with context/repro/acceptance) and prints it.
+- **`pr-reviewer`** — `main.py gh pr-review <repo> <N> [--post]`: reviews a PR
+  under the same verdict JSON contract as internal review (it reuses
+  `code_tasks._parse_verdict`; see docs/orchestration-contract.md).
+
+Only **Kimi-K3** and **GLM-5.3** may hold these three roles —
+`drivers.KimiDriver.__init__` / `drivers.OpencodeDriver.__init__` raise
+`ValueError` if gpt-oss-120b or DeepSeek-V4-Flash is given one (same
+enforcement pattern as Rule 2). Default model `config.GH_MODEL`
+(`ARC_GH_MODEL`, default Kimi-K3); each `gh` subprocess is bounded by
+`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 60 s).
+
+**Preview by default.** `--apply-labels`, `--create`, and `--post` are the
+ONLY paths that write to GitHub; without them every command is read-only.
+Every gh-touching command checks `gh auth status` first and exits with
+`run: gh auth login` when unauthenticated (drafting/printing need no gh).
+These agents do not change publishing: project publishes still merge via
+`gitstore` exactly as Rule 5 defines; a gh_ops PR-publishing mode is a future
+policy hook and is deliberately not implemented here.
+
 ---
 
 ## 4. Repo file map
@@ -446,6 +478,7 @@ Top-level Python modules (one role each):
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
+| `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
 | `gitstore.py` | The only git actor: blessed clone `~/repos/<project>`, worktree `alloc`/`publish`/`merge_to_main`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout) |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), and `code {plan,run,status,bench}` |
@@ -463,7 +496,7 @@ Everything else at the top level:
 | `static/usage.html` | Dashboard usage/tokens view |
 | `static/phone.html` | Small-screen dashboard page (add `/phone.html` to the URL) |
 | `start.sh` / `stop.sh` | Start/stop the dashboard (`nohup .venv/bin/python main.py serve` → `logs/server.log`; `pkill -f "main\.py serve"` — never touches an orchestrator process) |
-| `docs/` | Detail reference docs — see [Links](#links) |
+| `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the pattern library the planner consults |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
 | `production/minecraft` | Build-workload output dir (`config.BUILD_OUTPUT_DIR`) |
 | `requirements.txt` | Python dependencies (openai, python-dotenv) — install into `.venv`; the system `python3` lacks them |
@@ -515,6 +548,11 @@ The full operator runbook, with troubleshooting, is
   of concurrency caps and their env overrides
 - [docs/taskfile-schema.md](docs/taskfile-schema.md) — taskfile JSON reference
   and validation rules
+- [docs/graph-patterns.md](docs/graph-patterns.md) — the graph-pattern library
+  for multi-agent work (chain, fan-out/fan-in, diamond, router,
+  orchestrator-workers, …); the `code plan` planner
+  (`code_tasks.plan_tasks`) consults it and records its choice as
+  `"pattern"` in the taskfile
 - [docs/runbook.md](docs/runbook.md) — operator runbook: dashboard,
   plan → dry-run → run, troubleshooting
 - [docs/audit-2026-09-09.md](docs/audit-2026-09-09.md) — reliability audit
