@@ -371,7 +371,7 @@ Everything else at the top level:
 | `static/usage.html` | Dashboard usage/tokens view |
 | `static/phone.html` | Small-screen dashboard page (add `/phone.html` to the URL) |
 | `start.sh` / `stop.sh` | Start/stop the dashboard (`nohup .venv/bin/python main.py serve` → `logs/server.log`; `pkill -f "main\.py serve"` — never touches an orchestrator process) |
-| `docs/` | Detail reference docs — see [Links](#links) |
+| `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the pattern library the planner consults |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
 | `production/minecraft` | Build-workload output dir (`config.BUILD_OUTPUT_DIR`) |
 | `requirements.txt` | Python dependencies (openai, python-dotenv) — install into `.venv`; the system `python3` lacks them |
@@ -423,6 +423,11 @@ The full operator runbook, with troubleshooting, is
   of concurrency caps and their env overrides
 - [docs/taskfile-schema.md](docs/taskfile-schema.md) — taskfile JSON reference
   and validation rules
+- [docs/graph-patterns.md](docs/graph-patterns.md) — the graph-pattern library
+  for multi-agent work (chain, fan-out/fan-in, diamond, router,
+  orchestrator-workers, …); the `code plan` planner
+  (`code_tasks.plan_tasks`) consults it and records its choice as
+  `"pattern"` in the taskfile
 - [docs/runbook.md](docs/runbook.md) — operator runbook: dashboard,
   plan → dry-run → run, troubleshooting
 - [docs/audit-2026-09-09.md](docs/audit-2026-09-09.md) — reliability audit
