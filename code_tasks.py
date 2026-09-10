@@ -439,10 +439,20 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             except asyncio.TimeoutError:
                 proc.kill()
                 await proc.wait()
-                return {"passed": False, "output": f"gate timed out after {config.GATE_TIMEOUT}s"}
+                return {"passed": False, "output": f"gate timed out after {config.GATE_TIMEOUT}s",
+                        "log_path": None}
             output = out.decode(errors="replace")[-2000:]
-            events.emit("task.gate", passed=proc.returncode == 0)
-            return {"passed": proc.returncode == 0, "output": output}
+            attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0)
+            log_path = None
+            try:
+                log_dir = Path(config.ROOT) / "logs" / "gates"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                log_path = str(log_dir / f"{tid}-x{attempt}.log")
+                Path(log_path).write_text(out.decode(errors="replace"))
+            except OSError:
+                log_path = None
+            events.emit("task.gate", passed=proc.returncode == 0, log=log_path)
+            return {"passed": proc.returncode == 0, "output": output, "log_path": log_path}
 
         async def review(ctx):
             if not review_on:
