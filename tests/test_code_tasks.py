@@ -781,7 +781,7 @@ class ResumingAConflictedTask(unittest.TestCase):
         pub = src[src.index("async def publish(ctx):\n            \"\"\"Commit"):]
         pub = pub[:pub.index("async def pr_review")]
         self.assertIn("sync_with_base", pub)
-        self.assertIn('prior_status == "conflict"', pub)
+        self.assertIn("keep_conflicts=True", pub)
 
     def test_the_resynced_branch_is_pushed_before_the_pr_is_reattached(self):
         src = pathlib.Path(code_tasks.__file__).read_text()
@@ -793,11 +793,22 @@ class ResumingAConflictedTask(unittest.TestCase):
         self.assertLess(push, attach,
                         "the merge commit exists only locally until it is pushed")
 
-    def test_an_in_review_resume_does_not_resync(self):
-        # Nothing is known to be wrong with its diff; resyncing would rewrite
-        # the branch and invalidate reviews already in progress.
+    def test_an_in_review_resume_also_resyncs(self):
+        """Because the FIRST resume of a conflicted task marks it in_review.
+
+        Gating the resync on prior_status=="conflict" meant the second resume
+        no longer knew the branch conflicted and reviewed a diff that could not
+        merge. Whether a branch merges is a fact about the branch, so publish
+        asks git on every resume rather than trusting a status field another
+        node overwrote.
+        """
         g = self._graph("in_review")
         self.assertIn("publish_t1", g.starts)
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        pub = src[src.index("async def publish(ctx):\n            \"\"\"Commit"):]
+        pub = pub[:pub.index("async def pr_review")]
+        self.assertIn("if alloc_res is None:", pub)
+        self.assertNotIn('prior_status == "conflict" and alloc_res is None', pub)
 
 
 class ResolvingARealMergeConflict(unittest.TestCase):

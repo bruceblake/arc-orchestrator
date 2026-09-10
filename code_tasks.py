@@ -696,8 +696,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # reviewers read a diff and approve it, pr_merge then finds the
             # conflict, resyncs, and sends the CHANGED diff back for two more
             # reviewers — four scarce reviewer slots to land one task.
+            # Gated on RESUMING, not on the recorded status. Gating it on
+            # `conflict` looked right and was not: the first resume re-attaches
+            # to the PR and marks the task in_review, so the second resume no
+            # longer remembers it conflicts and sails past the check into a
+            # review of a diff that still cannot merge. Whether a branch merges
+            # is a fact about the branch — ask git, do not consult a status
+            # field that another node overwrote.
             resynced = False
-            if prior_status == "conflict" and alloc_res is None:
+            if alloc_res is None:
                 ok, conflicts, note = await gitstore.sync_with_base(
                     wt, base, keep_conflicts=True)
                 resynced = ok
