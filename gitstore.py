@@ -56,6 +56,35 @@ async def _ensure_identity(repo):
                     raise
 
 
+async def _base_ref(repo, base="main"):
+    """The ref a task branches from — the LOCAL base, always.
+
+    This used to prefer origin/<base> whenever any remote existed. That is
+    wrong for this system: merge_to_main merges into the LOCAL branch and the
+    push is best-effort, so the moment a push is skipped or fails, local main
+    is ahead and every new task would branch from a stale origin — silently
+    reverting merged work the next time it published.
+
+    origin is a publishing target here, not the source of truth. If origin is
+    genuinely ahead (someone pushed elsewhere), that is a real divergence and
+    it is reported rather than silently preferred either way.
+    """
+    rc, out, _ = await _git(["rev-parse", "--verify", base], cwd=repo, check=False)
+    if rc != 0:
+        return base
+    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
+    if remotes.strip():
+        rc, ahead, _ = await _git(
+            ["rev-list", "--count", f"{base}..origin/{base}"], cwd=repo, check=False)
+        if rc == 0 and (ahead.strip() or "0").isdigit() and int(ahead.strip() or 0):
+            import events
+            events.emit("git.remote_ahead", repo=str(repo), base=base,
+                        commits=int(ahead.strip()),
+                        note="origin is ahead of local; tasks still branch from "
+                             "local — pull before running to avoid diverging")
+    return base
+
+
 async def alloc(repo, task_id, base="main"):
     """Create (or recreate, on retry) the task worktree; returns its Path.
 
@@ -69,8 +98,7 @@ async def alloc(repo, task_id, base="main"):
     await _ensure_identity(repo)
     if wt.exists():
         await _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
-    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
-    base_ref = "origin/main" if remotes.strip() else base
+    base_ref = await _base_ref(repo, base)
     await _git(["worktree", "add", "--force", "-B", branch, str(wt), base_ref],
                cwd=repo)
     return wt
@@ -146,8 +174,7 @@ async def branch_ahead(repo, task_id, base="main"):
     rc, _, _ = await _git(["rev-parse", "--verify", branch], cwd=repo, check=False)
     if rc != 0:
         return False
-    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
-    base_ref = "origin/main" if remotes.strip() else base
+    base_ref = await _base_ref(repo, base)
     rc, out, _ = await _git(["rev-list", "--count", f"{base_ref}..{branch}"],
                             cwd=repo, check=False)
     return rc == 0 and (out.strip() or "0").isdigit() and int(out.strip() or 0) > 0

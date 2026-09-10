@@ -170,3 +170,45 @@ class MergeToMain(RepoFixture):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BaseRefIsLocal(unittest.TestCase):
+    """Tasks must branch from the LOCAL base, even once a remote exists.
+
+    alloc() used to prefer origin/<base> whenever any remote was configured.
+    merge_to_main merges into the LOCAL branch and the push is best-effort, so
+    the first time a push is skipped or fails, local main is ahead and every
+    new task would branch from a stale origin — silently reverting merged work
+    the next time it published. Adding a GitHub remote would have armed that.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        base = Path(self._dir.name)
+        self.repo = base / "proj"; self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "config", "user.email", "t@t")
+        git(self.repo, "config", "user.name", "t")
+        (self.repo / "a.txt").write_text("one\n")
+        git(self.repo, "add", "-A"); git(self.repo, "commit", "-qm", "init")
+        # a bare "remote" that is deliberately BEHIND local
+        self.remote = base / "origin.git"
+        git(self.repo, "clone", "--bare", "-q", str(self.repo), str(self.remote))
+        git(self.repo, "remote", "add", "origin", str(self.remote))
+        git(self.repo, "fetch", "-q", "origin")
+        (self.repo / "b.txt").write_text("two\n")     # local moves ahead
+        git(self.repo, "add", "-A"); git(self.repo, "commit", "-qm", "local only")
+        self._orig_root = config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = str(base / "worktrees")
+
+    def tearDown(self):
+        config.WORKTREE_ROOT = self._orig_root
+        self._dir.cleanup()
+
+    def test_base_ref_is_the_local_branch(self):
+        self.assertEqual(asyncio.run(gitstore._base_ref(self.repo)), "main")
+
+    def test_a_new_worktree_contains_unpushed_local_commits(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1"))
+        self.assertTrue((wt / "b.txt").exists(),
+                        "task branched from stale origin and lost local work")
