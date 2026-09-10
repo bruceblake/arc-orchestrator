@@ -399,7 +399,8 @@ document.querySelectorAll("#ranges .seg").forEach(b => b.onclick = () => applyRa
 window.addEventListener("hashchange", () => applyRange(location.hash.replace("#", "")));
 
 function refresh() {
-  load().finally(() => { nextAt = Date.now() + AUTO; });
+  nextAt = Date.now() + AUTO;
+  load();
 }
 let tickTimer = null;
 if (!document.hidden) tickTimer = setInterval(() => {
