@@ -894,17 +894,27 @@ def _queue(store):
         waiting.append({
             "task": task, "model": model, "pretty": _pretty(model),
             "role": e.get("role"), "role_label": ROLE_LABEL.get(e.get("role"), e.get("role")),
-            "scope": "fleet" if kind == "driver.cap_wait" else "process",
+            "scope": e.get("scope") or ("fleet" if kind == "driver.cap_wait"
+                                        else "process"),
+            "harness": e.get("harness"),
             "seconds": round(now - ts) if ts else None,
             "in_use": e.get("in_use"), "cap": e.get("cap"),
         })
 
+    harness_running = {}
     for r in leases:
         pid = r["pid"] if isinstance(r, dict) or hasattr(r, "keys") else None
         if not _pid_alive(pid):
             continue
         ts = _ts(r["acquired_at"]) or 0
         model = r["model"]
+        # A harness lease is the SAME attempt as its model lease, held one
+        # level out. Counting it as another running task would double every
+        # row; it is capacity accounting, so it is reported as capacity.
+        if model.startswith("harness:"):
+            harness_running[model.split(":", 1)[1]] = \
+                harness_running.get(model.split(":", 1)[1], 0) + 1
+            continue
         role = roles.get((r["task"], model))
         running.append({
             "task": r["task"], "model": model, "pretty": _pretty(model),
@@ -916,8 +926,11 @@ def _queue(store):
     waiting.sort(key=lambda x: -(x["seconds"] or 0))
 
     models = []
-    for model in sorted(set(config.MODEL_FAMILY) | {r["model"] for r in running}
+    for model in sorted(set(config.MODEL_FAMILY)
+                        | {r["model"] for r in running}
                         | {w["model"] for w in waiting}):
+        if model.startswith("harness:"):
+            continue
         try:
             cap = config.driver_limit(model)
         except Exception:
@@ -931,7 +944,22 @@ def _queue(store):
                                      and w["role"] == "pr_reviewer"),
         })
     models.sort(key=lambda m: (-(m["running"] + m["waiting"]), m["model"]))
+
+    # The harness is a real ceiling and usually the BINDING one: opencode's
+    # models can each be under their own cap while the single local opencode
+    # process pool is saturated. Without this row that shows up as "everything
+    # idle, nothing progressing".
+    harnesses = []
+    for h in ("opencode", "kimi"):
+        cap = config.harness_limit(h)
+        run_n = harness_running.get(h, 0)
+        wait_n = sum(1 for w in waiting if w.get("scope") == "harness"
+                     and w.get("harness") == h)
+        harnesses.append({"harness": h, "cap": cap, "running": run_n,
+                          "waiting": wait_n, "free": max(0, cap - run_n)})
+
     return {"running": running, "waiting": waiting, "models": models,
+            "harnesses": harnesses,
             "totals": {"running": len(running), "waiting": len(waiting),
                        "reviewers_waiting": sum(1 for w in waiting
                                                 if w["role"] == "pr_reviewer"),

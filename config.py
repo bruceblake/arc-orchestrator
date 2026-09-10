@@ -323,6 +323,37 @@ _MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
                      for m, n in _MEASURED_CONCURRENCY.items()}
 
 
+# The per-MODEL caps above are the ARC API's ceiling. They are not the only
+# ceiling: every opencode-backed model shares ONE local harness, and that
+# harness serialises through a single ~240MB sqlite db in
+# ~/.local/share/opencode. The model caps permit GLM 4 + DeepSeek 5 + gpt-oss 5
+# = 14 concurrent opencode processes against it, and measured on this machine
+# (identical prompt, warm cache):
+#
+#     3 concurrent   3/3 ok
+#     4 concurrent   4/4 ok
+#     5 concurrent   5/5 ok
+#     6 concurrent   4/6 ok
+#    10 concurrent   4/10 ok
+#
+# Past 5 it fails fast with an empty stderr, which the fleet logged as
+# "opencode exited 1: " and retried four times per task — burning the retry
+# ladder on self-inflicted contention and blaming the provider for it. The
+# kimi CLI has no shared store, so its limit is just Kimi-K3's own cap.
+_HARNESS_CAP = {"opencode": 5, "kimi": _MEASURED_CONCURRENCY["Kimi-K3"]}
+
+
+def harness_limit(harness):
+    """Max concurrent processes for a HARNESS, across every model it serves."""
+    override = os.getenv(f"ARC_HARNESS_LIMIT_{harness.upper()}")
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+    return _HARNESS_CAP.get(harness, 8)
+
+
 def driver_limit(model):
     """Max concurrent harness instances for a model (ARC cap minus headroom)."""
     override = os.getenv(f"ARC_DRIVER_LIMIT_{MODEL_FAMILY[model].upper().replace('-', '_')}")

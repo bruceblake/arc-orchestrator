@@ -72,6 +72,8 @@ const queue = {
     {model: "gpt-oss-120b", pretty: "gpt-oss 120B", cap: 5, running: 5, waiting: 0, free: 0, reviewers_waiting: 0},
     {model: "DeepSeek-V4-Flash", pretty: "DeepSeek V4 Flash", cap: 5, running: 0, waiting: 0, free: 5, reviewers_waiting: 0},
   ],
+  harnesses: [{harness: "opencode", cap: 5, running: 5, waiting: 2, free: 0},
+              {harness: "kimi", cap: 3, running: 1, waiting: 0, free: 2}],
   running: [{task: "qa-http-core", model: "Kimi-K3", pretty: "Kimi K3", role: "pr_reviewer",
              role_label: "PR review", pid: 1234, seconds: 91}],
   waiting: [{task: '<img src=x onerror=alert(1)>', model: "Kimi-K3", pretty: "Kimi K3",
@@ -81,6 +83,9 @@ const queue = {
 api.renderSlots(queue);
 const slotHtml = document.querySelector("#slots").innerHTML;
 const rowHtml = document.querySelector("#slot-rows").innerHTML;
+if (!/slot .*harness/.test(slotHtml)) {
+  console.error("render_check: FAIL — harness capacity is not rendered"); process.exit(1);
+}
 console.log("slot cards:", (slotHtml.match(/class="slot /g) || []).length,
             "| queue rows:", (rowHtml.match(/class="qrow/g) || []).length);
 console.log("slots meta:", document.querySelector("#slots-meta").innerHTML.replace(/<[^>]+>/g, ""));

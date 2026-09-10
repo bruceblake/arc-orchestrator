@@ -121,6 +121,9 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .qpip { width: 7px; height: 7px; border-radius: 2px; background: var(--err); opacity: .75; }
 .qpip.rev { background: var(--purple); opacity: 1; }
 .slot-q { font-size: 11px; color: var(--dim); margin-top: 4px; }
+.slot.harness { background: #12171e; }
+.tagh { font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
+        color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0 4px; }
 .slot-q .rev { color: var(--purple); }
 .qrows { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
 .qrow { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 3px 6px;
@@ -910,8 +913,8 @@ function slotCard(m) {
     `<i class="qpip${i < m.reviewers_waiting ? " rev" : ""}"></i>`).join("");
   const revs = m.reviewers_waiting
     ? ` · <span class="rev">${m.reviewers_waiting} review${m.reviewers_waiting > 1 ? "s" : ""}</span>` : "";
-  return `<div class="slot ${cls}">
-    <div class="slot-h"><b>${esc(m.pretty)}</b><span class="n">${m.running}/${m.cap}</span></div>
+  return `<div class="slot ${cls}${m.isHarness ? " harness" : ""}">
+    <div class="slot-h"><b>${esc(m.pretty)}</b>${m.isHarness ? '<span class="tagh">harness</span>' : ""}<span class="n">${m.running}/${m.cap}</span></div>
     <div class="pips">${pips}</div>
     ${m.waiting ? `<div class="qbar">${q}</div>
       <div class="slot-q">${m.waiting} queued${revs}</div>`
@@ -922,9 +925,11 @@ function slotCard(m) {
 function slotRow(r, running) {
   const rev = r.role === "pr_reviewer";
   const why = running ? "holding a slot"
-    : r.scope === "fleet"
-      ? `fleet at cap${r.cap ? ` (${r.in_use}/${r.cap})` : ""}`
-      : "waiting for a slot in its own run";
+    : r.scope === "harness"
+      ? `${r.harness || "harness"} pool full${r.cap ? ` (cap ${r.cap})` : ""}`
+      : r.scope === "fleet"
+        ? `fleet at cap${r.cap ? ` (${r.in_use}/${r.cap})` : ""}`
+        : "waiting for a slot in its own run";
   return `<div class="qrow${rev ? " rev" : ""}${running ? " running" : ""}">
     <span>${running ? "▶" : "⏳"}</span>
     <span class="who">${esc(r.task)}</span>
@@ -943,7 +948,14 @@ function renderSlots(q) {
       + (revWait ? ` · <span style="color:var(--purple)">${revWait} reviewer${revWait > 1 ? "s" : ""} blocked</span>` : "")
       + ` · ${t.capacity} slots total`
     : "idle";
-  $("#slots").innerHTML = (q.models || []).map(slotCard).join("");
+  // Harness rows first: opencode's own pool is usually the binding limit, and
+  // when it is saturated every model looks comfortably under its cap while
+  // nothing moves.
+  const hs = (q.harnesses || []).map(h => slotCard({
+    pretty: h.harness, cap: h.cap, running: h.running, waiting: h.waiting,
+    free: h.free, reviewers_waiting: 0, isHarness: true,
+  })).join("");
+  $("#slots").innerHTML = hs + (q.models || []).map(slotCard).join("");
   const revOnly = SLOT_VIEW === "rev";
   const keep = r => !revOnly || r.role === "pr_reviewer";
   const rows = (q.waiting || []).filter(keep).map(r => slotRow(r, false))

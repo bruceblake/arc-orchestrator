@@ -55,6 +55,19 @@ def _gate(model):
     return _semaphores[model]
 
 
+def _harness_gate(harness):
+    """The whole harness's slot, shared by every model it serves.
+
+    Distinct from the per-model gate: opencode runs GLM, DeepSeek and gpt-oss
+    through one local binary backed by one sqlite store, so their model caps
+    sum to far more than the harness can survive.
+    """
+    key = f"harness:{harness}"
+    if key not in _semaphores:
+        _semaphores[key] = asyncio.Semaphore(config.harness_limit(harness))
+    return _semaphores[key]
+
+
 _lease_store = None
 
 
@@ -66,7 +79,7 @@ def _lease_db():
     return _lease_store
 
 
-async def _lease_acquire(model, task_id, emit_ctx):
+async def _lease_acquire(model, task_id, emit_ctx, cap=None):
     """Wait until this model is below its cross-process cap (store holds the
     lease). Emits driver.cap_wait roughly once a minute while waiting.
 
@@ -78,25 +91,23 @@ async def _lease_acquire(model, task_id, emit_ctx):
     waits = 0
     deadline = time.monotonic() + config.DRIVER_LEASE_WAIT
     while True:
+        limit = config.driver_limit(model) if cap is None else cap
         in_use = _lease_db().acquire_driver_lease(
-            model, os.getpid(), task_id,
-            config.driver_limit(model), config.DRIVER_LEASE_TTL)
+            model, os.getpid(), task_id, limit, config.DRIVER_LEASE_TTL)
         if in_use is None:
             return
         if time.monotonic() >= deadline:
             events.emit("driver.cap_timeout", model=model, task=task_id,
-                        in_use=in_use, cap=config.driver_limit(model),
+                        in_use=in_use, cap=limit,
                         waited_s=round(config.DRIVER_LEASE_WAIT), **emit_ctx)
             # Worded to match Driver.is_capacity_error, so the retry ladder
             # uses the long capacity backoff rather than the crash schedule.
             raise DriverError(
                 f"{model} concurrent session limit: no driver slot after "
-                f"{config.DRIVER_LEASE_WAIT:.0f}s ({in_use}/"
-                f"{config.driver_limit(model)} in use)")
+                f"{config.DRIVER_LEASE_WAIT:.0f}s ({in_use}/{limit} in use)")
         if waits % 3 == 0:
             events.emit("driver.cap_wait", model=model, task=task_id,
-                        in_use=in_use, cap=config.driver_limit(model),
-                        **emit_ctx)
+                        in_use=in_use, cap=limit, **emit_ctx)
         waits += 1
         await asyncio.sleep(min(20, max(1, deadline - time.monotonic())))
 
@@ -466,12 +477,34 @@ class Driver:
                                  {"harness": self.harness, "role": self.role,
                                   "pid": os.getpid()})
             try:
+                hgate = _harness_gate(self.harness)
+                if hgate.locked():
+                    events.emit("driver.slot_wait", harness=self.harness,
+                                model=self.model, role=self.role, task=task_id,
+                                attempt=attempt, scope="harness",
+                                cap=config.harness_limit(self.harness),
+                                pid=os.getpid())
+                await hgate.acquire()
+                try:
+                    hkey = f"harness:{self.harness}"
+                    await _lease_acquire(
+                        hkey, task_id,
+                        {"harness": self.harness, "role": self.role,
+                         "pid": os.getpid()},
+                        cap=config.harness_limit(self.harness))
+                    try:
                 # Both slots held: this driver is genuinely occupying capacity
                 # now, so this is the event in-flight accounting must pair with.
-                events.emit("driver.start", harness=self.harness,
-                            model=self.model, role=self.role, task=task_id,
-                            attempt=attempt, pid=os.getpid())
-                return await self._once(prompt, worktree, sid, task_id, attempt)
+                        events.emit("driver.start", harness=self.harness,
+                                    model=self.model, role=self.role,
+                                    task=task_id, attempt=attempt,
+                                    pid=os.getpid())
+                        return await self._once(prompt, worktree, sid,
+                                                task_id, attempt)
+                    finally:
+                        _lease_release(hkey, task_id)
+                finally:
+                    hgate.release()
             finally:
                 _lease_release(self.model, task_id)
         finally:
@@ -613,9 +646,16 @@ class Driver:
         sid, text = parse_transcript(raw)
         toks, ptok, ctok = transcript_tokens(raw)
         if proc.returncode != 0:
-            raise DriverError(
-                f"{argv[0]} exited {proc.returncode}: {err.decode(errors='replace')[-300:]}",
-                session_id=sid or session_id)
+            # opencode reports plenty of its failures on STDOUT and exits with
+            # an empty stderr, which produced the useless "opencode exited 1: "
+            # — a message that says a run died and nothing about why, and that
+            # the retry ladder then repeated four times per task. Fall back to
+            # the tail of stdout, and say so when there is genuinely nothing.
+            detail = err.decode(errors="replace").strip()
+            if not detail:
+                detail = (text or raw).strip()[-300:] or "no output on stdout or stderr"
+            raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}",
+                              session_id=sid or session_id)
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             session_id or sid, str(tpath), text,
                             round(time.monotonic() - t0, 1), toks, ptok, ctok)

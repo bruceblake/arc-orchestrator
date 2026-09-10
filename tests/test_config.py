@@ -6,6 +6,7 @@ under running drivers, which lets a model exceed its ARC cap — the exact
 failure the lease table exists to prevent.
 """
 import pathlib
+import os
 import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
@@ -211,3 +212,42 @@ class DriverCapsMatchMeasuredReality(unittest.TestCase):
             self.assertGreaterEqual(config.driver_limit(model), 1,
                                     f"{model}: headroom must never reach zero drivers")
             self.assertLessEqual(config.driver_limit(model), measured)
+
+
+class HarnessConcurrencyCeiling(unittest.TestCase):
+    """The harness is a second, lower ceiling than the per-model caps.
+
+    Every opencode-backed model shares one local binary and one sqlite store.
+    Measured on this machine with an identical prompt: 5 concurrent runs all
+    succeed, 6 loses 2, 10 loses 6 — failing fast with an empty stderr that the
+    fleet logged as "opencode exited 1: " and retried four times per task.
+    """
+
+    def test_opencode_is_capped_below_the_sum_of_its_models_caps(self):
+        served = [m for m in ("GLM-5.3", "DeepSeek-V4-Flash", "gpt-oss-120b")]
+        self.assertLess(config.harness_limit("opencode"),
+                        sum(config.driver_limit(m) for m in served))
+
+    def test_opencode_sits_at_the_measured_ceiling(self):
+        self.assertEqual(config.harness_limit("opencode"), 5)
+
+    def test_kimi_is_not_throttled_below_its_model_cap(self):
+        self.assertGreaterEqual(config.harness_limit("kimi"),
+                                config.driver_limit("Kimi-K3"))
+
+    def test_an_unknown_harness_still_gets_a_finite_cap(self):
+        self.assertGreater(config.harness_limit("nope"), 0)
+
+    def test_the_env_override_is_honoured(self):
+        os.environ["ARC_HARNESS_LIMIT_OPENCODE"] = "2"
+        try:
+            self.assertEqual(config.harness_limit("opencode"), 2)
+        finally:
+            del os.environ["ARC_HARNESS_LIMIT_OPENCODE"]
+
+    def test_a_junk_override_falls_back_rather_than_crashing(self):
+        os.environ["ARC_HARNESS_LIMIT_OPENCODE"] = "lots"
+        try:
+            self.assertEqual(config.harness_limit("opencode"), 5)
+        finally:
+            del os.environ["ARC_HARNESS_LIMIT_OPENCODE"]
