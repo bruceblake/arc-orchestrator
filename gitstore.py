@@ -5,9 +5,13 @@ The blessed clone (~/repos/<project>) keeps main clean; every task runs in
 the only git actor — harnesses only write files inside their worktree.
 """
 import asyncio
+import logging
 from pathlib import Path
 
 import config
+import events
+
+log = logging.getLogger("gitstore")
 
 GIT_TIMEOUT = 60
 
@@ -182,9 +186,20 @@ async def merge_to_main(repo, task_id):
     if stashed:
         rc, _, err = await _git(["stash", "pop", "-q"], cwd=repo, check=False)
         if rc != 0:
-            raise GitError(
-                f"merged {branch}, but restoring stashed local edits to {blocking} "
-                f"conflicted — resolve with `git stash pop`: {err.strip()[:200]}")
+            # The merge LANDED. Failing here marked a successfully merged task
+            # 'conflict', which is a lie — and the common trigger is benign:
+            # the branch adds a path the operator also has as an untracked
+            # local file (a log, a transcript), so git refuses to restore it
+            # over the merged copy. Leave the stash for the operator and say
+            # so; do not fail work that actually succeeded.
+            events.emit("merge.stash_retained", task=task_id, paths=blocking,
+                        error=err.strip()[:200],
+                        note="merge landed; local edits are still in the stash "
+                             "— inspect with `git stash list` / `git stash pop`")
+            log.warning(
+                "merged %s, but local edits to %s stayed in the stash (%s) — "
+                "recover them with `git stash pop`",
+                branch, blocking, err.strip()[:120])
 
 
 async def push_and_open_pr(repo, task_id, title, taskfile=""):

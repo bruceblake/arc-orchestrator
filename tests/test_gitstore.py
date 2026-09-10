@@ -112,6 +112,54 @@ class MergeToMain(RepoFixture):
         self.assertIn("operator was mid-edit", (self.repo / "calc.py").read_text(),
                       "the operator's uncommitted edit was lost")
 
+    def test_merges_over_an_untracked_directory_in_the_blessed_repo(self):
+        """The bug that blocked every merge once tasks started reaching one.
+
+        `git status --porcelain` collapses a wholly untracked directory into
+        one entry ("?? logs/"), so a branch adding "logs/x.jsonl" matched
+        nothing in the dirty set, nothing was stashed, and git refused with
+        "untracked working tree files would be overwritten by merge".
+        """
+        wt = self.alloc("t1")
+        (wt / "logs").mkdir()
+        (wt / "logs" / "run.jsonl").write_text("from the task\n")
+        asyncio.run(gitstore.publish(wt, "task(t1): add logs/run.jsonl"))
+        # the operator's copy has that whole directory untracked
+        (self.repo / "logs").mkdir(exist_ok=True)
+        (self.repo / "logs" / "run.jsonl").write_text("local, uncommitted\n")
+        st = git(self.repo, "status", "--porcelain")
+        self.assertIn("?? logs/", st, "fixture must reproduce the collapsed entry")
+
+        with capture_events() as ev:
+            asyncio.run(gitstore.merge_to_main(self.repo, "t1"))
+        self.assertIn("logs/run.jsonl",
+                      git(self.repo, "ls-tree", "-r", "--name-only", "HEAD"))
+        # the operator's colliding file could not be restored over the merged
+        # copy — that is reported, NOT treated as a failed merge
+        retained = ev.of("merge.stash_retained")
+        if retained:
+            self.assertIn("logs/run.jsonl", retained[0]["paths"])
+
+    def test_a_landed_merge_is_never_reported_as_a_conflict(self):
+        """A stash-pop collision must not fail work that actually merged."""
+        wt = self.alloc("t1")
+        (wt / "shared.txt").write_text("from the task\n")
+        asyncio.run(gitstore.publish(wt, "task(t1): add shared.txt"))
+        (self.repo / "shared.txt").write_text("local, uncommitted\n")
+        with capture_events():
+            asyncio.run(gitstore.merge_to_main(self.repo, "t1"))  # must not raise
+        self.assertIn("shared.txt",
+                      git(self.repo, "ls-tree", "-r", "--name-only", "HEAD"))
+
+    def test_dirty_paths_lists_files_not_directories(self):
+        (self.repo / "nested").mkdir()
+        (self.repo / "nested" / "a.txt").write_text("a\n")
+        (self.repo / "nested" / "b.txt").write_text("b\n")
+        paths = asyncio.run(gitstore._dirty_paths(self.repo))
+        self.assertIn("nested/a.txt", paths)
+        self.assertIn("nested/b.txt", paths)
+        self.assertNotIn("nested/", paths)
+
     def test_branch_ahead_reflects_unmerged_commits(self):
         wt = self.alloc("t1")
         self.assertFalse(asyncio.run(gitstore.branch_ahead(self.repo, "t1")))

@@ -369,6 +369,25 @@ same task file** — it resumes (see "Retrying / resuming"): merged tasks are
 skipped and this task restarts one escalation tier higher than its recorded
 model with a fresh fix budget.
 
+### Merge landed but local edits stayed stashed (`merge.stash_retained`)
+
+Not a failure. The blessed repo doubles as the operator's working copy, so
+`merge_to_main` path-scoped stashes any locally-dirty file the merge needs to
+touch, merges, then pops. The pop can fail when the branch **adds** a path the
+operator also has as an untracked local file (a log, a transcript): git will
+not restore it over the merged copy.
+
+The merge has already landed. The event names the paths and the stash is left
+intact — recover with:
+
+```bash
+git -C <repo> stash list
+git -C <repo> stash pop
+```
+
+This used to raise, which marked a **successfully merged task `conflict`**.
+It no longer does; only a genuinely failed merge does that.
+
 ### Task conflict
 
 When a merge collides, `publish` marks the task `conflict` (`error` holds the
