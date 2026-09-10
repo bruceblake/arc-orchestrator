@@ -300,8 +300,22 @@ async function poll() {
 }
 
 poll();
-setInterval(poll, 5000);
-setInterval(() => { if (state.expanded) pollTranscript(state.expanded); }, 3000);
+let pollTimer = null, transcriptTimer = null;
+if (!document.hidden) {
+  pollTimer = setInterval(poll, 5000);
+  transcriptTimer = setInterval(() => { if (state.expanded) pollTranscript(state.expanded); }, 3000);
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearInterval(pollTimer);
+    clearInterval(transcriptTimer);
+  } else {
+    poll();
+    if (state.expanded) pollTranscript(state.expanded);
+    pollTimer = setInterval(poll, 5000);
+    transcriptTimer = setInterval(() => { if (state.expanded) pollTranscript(state.expanded); }, 3000);
+  }
+});
 </script>
 </body>
 </html>

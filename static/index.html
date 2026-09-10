@@ -1174,7 +1174,8 @@ $("#drawer-close").onclick = closeDrawer;
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") { closeDrawer(); $("#modal").classList.remove("open"); }
 });
-setInterval(() => { if (drawerFile && $("#drawer").classList.contains("open")) pollTranscript(); }, 3000);
+let drawerTimer = null;
+if (!document.hidden) drawerTimer = setInterval(() => { if (drawerFile && $("#drawer").classList.contains("open")) pollTranscript(); }, 3000);
 setInterval(() => { // live elapsed ticking for agent rows
   const now = Date.now() / 1000;
   document.querySelectorAll("[data-el]").forEach(el => {
@@ -1278,13 +1279,40 @@ $("#projects").onclick = ev => {
 loadHash(); syncFilterControls();
 pollProjects();
 initEvents();
-setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
-setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
-setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
-setTimeout(() => setInterval(pollEvents, 8000), 1200);
-setInterval(pollProjects, 5000);
-setInterval(pollGithub, 20000);
-setInterval( 30000);
+let pollTimers = [];
+let pollingStarted = false;
+function stopPolling() { pollTimers.forEach(t => clearInterval(t)); pollTimers = []; }
+function startPolling() {
+  stopPolling();
+  pollingStarted = true;
+  pollTimers.push(setInterval(pollFleet, 5000));
+  pollTimers.push(setInterval(pollAgents, 4500));
+  pollTimers.push(setInterval(pollHealth, 6000));
+  pollTimers.push(setInterval(pollEvents, 8000));
+  pollTimers.push(setInterval(pollProjects, 5000));
+  pollTimers.push(setInterval(pollGithub, 20000));
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    stopPolling();
+    if (detailTimer) { clearInterval(detailTimer); detailTimer = null; }
+    clearInterval(drawerTimer);
+  } else {
+    pollFleet(); pollAgents(); pollHealth(); pollEvents(); pollProjects(); pollGithub();
+    if (drawerFile || $("#drawer").classList.contains("open")) pollTranscript();
+    startPolling();
+    if (CUR) { refreshDetail(); detailTimer = setInterval(refreshDetail, 5000); }
+    drawerTimer = setInterval(() => { if (drawerFile && $("#drawer").classList.contains("open")) pollTranscript(); }, 3000);
+  }
+});
+if (!document.hidden) {
+  setTimeout(() => { if (!document.hidden && !pollingStarted) { pollFleet(); pollTimers.push(setInterval(pollFleet, 5000)); } }, 1600);
+  setTimeout(() => { if (!document.hidden && !pollingStarted) { pollAgents(); pollTimers.push(setInterval(pollAgents, 4500)); } }, 800);
+  setTimeout(() => { if (!document.hidden && !pollingStarted) { pollHealth(); pollTimers.push(setInterval(pollHealth, 6000)); } }, 2400);
+  setTimeout(() => { if (!document.hidden && !pollingStarted) pollTimers.push(setInterval(pollEvents, 8000)); }, 1200);
+  pollTimers.push(setInterval(pollProjects, 5000));
+  pollTimers.push(setInterval(pollGithub, 20000));
+}
 </script>
 </body>
 </html>

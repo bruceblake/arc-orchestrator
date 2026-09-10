@@ -401,11 +401,24 @@ window.addEventListener("hashchange", () => applyRange(location.hash.replace("#"
 function refresh() {
   load().finally(() => { nextAt = Date.now() + AUTO; });
 }
-setInterval(() => {
+let tickTimer = null;
+if (!document.hidden) tickTimer = setInterval(() => {
   const left = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
   $("#count").textContent = left + "s";
   if (Date.now() >= nextAt) refresh();
 }, 1000);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearInterval(tickTimer);
+  } else {
+    refresh();
+    tickTimer = setInterval(() => {
+      const left = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
+      $("#count").textContent = left + "s";
+      if (Date.now() >= nextAt) refresh();
+    }, 1000);
+  }
+});
 window.addEventListener("resize", () => { if (USAGE) updateUI(USAGE, FLEET); });
 
 const initRange = location.hash.replace("#", "");
