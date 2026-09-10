@@ -105,6 +105,54 @@ class InflightAttribution(unittest.TestCase):
         rows, _ = dashboard._collect_inflight(now, None)
         self.assertEqual(rows, [], "a killed run's start event must not count forever")
 
+    def test_last_event_age_and_stall_flag_come_from_the_newest_ping(self):
+        """last_event_s must read the newest liveness event, not the start —
+        a live agent shows a fresh heartbeat age, not its total runtime."""
+        now = time.time()
+        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+                "task": "t1", "attempt": 1}
+        self.write_events({"ts": now - 90, "type": "driver.start", **base},
+                          {"ts": now - 12, "type": "driver.heartbeat", **base})
+        rows, _ = dashboard._collect_inflight(now, None)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["last_event_s"], 12.0, delta=0.5)
+        self.assertFalse(rows[0]["stalled"])
+
+    def test_a_stalled_driver_is_flagged(self):
+        now = time.time()
+        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+                "task": "t1", "attempt": 1}
+        self.write_events({"ts": now - 90, "type": "driver.start", **base},
+                          {"ts": now - 12, "type": "driver.stalled", **base})
+        rows, _ = dashboard._collect_inflight(now, None)
+        self.assertEqual(len(rows), 1, "a stall report settles nothing")
+        self.assertTrue(rows[0]["stalled"])
+
+    def test_long_idle_progress_flags_stalled(self):
+        """Idle time is carried forward from the newest progress sample; far
+        past the 300s stall threshold it must flag the row even with no
+        driver.stalled event."""
+        now = time.time()
+        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+                "task": "t1", "attempt": 1}
+        self.write_events({"ts": now - 90, "type": "driver.start", **base},
+                          {"ts": now - 5, "type": "driver.progress",
+                           "idle_s": 400, **base})
+        rows, _ = dashboard._collect_inflight(now, None)
+        self.assertTrue(rows[0]["stalled"])
+
+    def test_a_heartbeat_does_not_outlive_its_driver(self):
+        """driver.done must clear the liveness record with the start — a
+        settled run must not keep reporting a heartbeat age."""
+        now = time.time()
+        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+                "task": "t1", "attempt": 1}
+        self.write_events({"ts": now - 90, "type": "driver.start", **base},
+                          {"ts": now - 30, "type": "driver.heartbeat", **base},
+                          {"ts": now - 5, "type": "driver.done", **base})
+        rows, _ = dashboard._collect_inflight(now, None)
+        self.assertEqual(rows, [])
+
 
 class KimiSessionExclusion(unittest.TestCase):
     def setUp(self):
