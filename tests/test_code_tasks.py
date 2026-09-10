@@ -421,3 +421,57 @@ class ResumingAnOpenPullRequest(unittest.TestCase):
     def test_a_failed_task_still_starts_from_scratch(self):
         g = self._graph("failed")
         self.assertIn("alloc_t1", g.starts)
+
+
+class ReviewersSendingAPullRequestBack(unittest.TestCase):
+    """The rework implementer must actually be told why the PR was rejected.
+
+    This path was dead in production. pr_review computed issues, posted them to
+    GitHub and fired the edge back into implement — but implement only ever
+    read review_ and gate_, and BOTH of those had passed (that is how the task
+    reached publish). The implementer got an empty feedback string, re-read its
+    own finished work, concluded there was nothing to do, and the task died as
+    "no changes to publish" with the objections never delivered.
+    """
+
+    def _feedback(self, results):
+        return code_tasks._rework_feedback("t1", results)
+
+    def test_the_production_shape_no_longer_yields_empty_feedback(self):
+        # Exactly what the graph holds after a PR rejection: review and gate
+        # both passed, pr_review did not.
+        fb = self._feedback({
+            "review_t1": {"pass": True, "issues": []},
+            "gate_t1": {"passed": True, "output": ""},
+            "pr_review_t1": {"approved": False, "reviewers": ["Kimi-K3", "GLM-5.3"],
+                             "issues": ["[Kimi-K3] leaks a file handle"]},
+        })
+        self.assertTrue(fb)
+        self.assertIn("leaks a file handle", fb)
+        self.assertIn("Kimi-K3, GLM-5.3", fb)
+
+    def test_it_tells_the_implementer_not_to_call_the_task_done(self):
+        fb = self._feedback({"pr_review_t1": {"approved": False, "issues": ["x"]}})
+        self.assertIn("Do not conclude", fb)
+
+    def test_an_approved_pr_contributes_no_feedback(self):
+        self.assertEqual(self._feedback({
+            "pr_review_t1": {"approved": True, "issues": [], "reviewers": ["K"]}}), "")
+
+    def test_a_gate_failure_is_reported_alongside_the_pr_issues(self):
+        fb = self._feedback({
+            "pr_review_t1": {"approved": False, "issues": ["style"], "reviewers": ["K"]},
+            "gate_t1": {"passed": False, "output": "3 tests failed"},
+        })
+        self.assertIn("style", fb)
+        self.assertIn("3 tests failed", fb)
+
+    def test_the_issues_reach_the_prompt_the_model_actually_sees(self):
+        p = code_tasks._impl_prompt(
+            {"id": "t1", "title": "T1", "prompt": "do it", "files_hint": [],
+             "model": "", "reviewer": ""},
+            self._feedback({
+                "pr_review_t1": {"approved": False, "reviewers": ["GLM-5.3"],
+                                 "issues": ["[GLM-5.3] no test for the error path"]}}))
+        self.assertIn("no test for the error path", p)
+        self.assertIn("REJECTED", p)

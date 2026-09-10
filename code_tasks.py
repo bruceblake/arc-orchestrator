@@ -140,6 +140,38 @@ def _impl_prompt(t, feedback):
     return p
 
 
+def _rework_feedback(tid, results):
+    """Why this task is being implemented again, most authoritative first.
+
+    pr_review USED TO BE MISSING from this: reviewers rejected an open PR, the
+    edge fired back into implement, and the implementer was handed an empty
+    feedback string — because review_ and gate_ had both PASSED, which is how
+    the task reached publish in the first place. It re-read its own finished
+    work, correctly concluded there was nothing left to do, exited in two
+    minutes with no commit, and the task died as "no changes to publish" with
+    the reviewers' objections never delivered to anyone. The whole
+    send-it-back path was inert.
+    """
+    parts = []
+    pr = results.get(f"pr_review_{tid}")
+    if pr and not pr.get("approved"):
+        who = ", ".join(pr.get("reviewers") or []) or "the reviewers"
+        parts.append(
+            f"Your pull request was REVIEWED AND REJECTED by {who}. "
+            f"The code you already wrote is on the branch and is NOT "
+            f"acceptable as-is — you must change it. Do not conclude "
+            f"the task is already done.\n"
+            + "\n".join(f"- {i}" for i in pr.get("issues", [])))
+    rev = results.get(f"review_{tid}")
+    if rev and not rev.get("pass"):
+        parts.append("Pre-merge review rejected it:\n"
+                     + "\n".join(f"- {i}" for i in rev.get("issues", [])))
+    gate = results.get(f"gate_{tid}")
+    if gate and not gate.get("passed"):
+        parts.append(f"The verify gate failed, output:\n{gate.get('output', '')}")
+    return "\n\n".join(parts)
+
+
 def _review_prompt(t, diff):
     return (
         f"You are reviewing an implementation produced by another AI agent.\n\n"
@@ -458,13 +490,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         async def implement(ctx):
             results = ctx.get("results", {})
-            feedback = ""
-            rev = results.get(f"review_{tid}")
-            if rev and not rev.get("pass"):
-                feedback = "\n".join(f"- {i}" for i in rev.get("issues", []))
-            gate = results.get(f"gate_{tid}")
-            if not feedback and gate and not gate.get("passed"):
-                feedback = f"verify gate failed, output:\n{gate.get('output', '')}"
+            feedback = _rework_feedback(tid, results)
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
             model = cur_model(ctx)
             driver = _driver(model, "implementer", pol)
@@ -574,12 +600,16 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 {"Harness": impl.get("harness", "?"), "Model": model,
                  "Reviewer": rev, "Task-Id": tid})
             if head is None:
-                # No new commit. That is only a failure if there is also no PR:
-                # on RESUME of an in_review task the branch is already pushed
-                # and its PR already open, and re-implementing would throw away
-                # a diff that reviewers may have half-read.
-                number, url, note = await gitstore.open_pr(
-                    repo, tid, f"task({tid}): {t['title']}", "", base)
+                # No new commit. On a RESUME the branch is already pushed and
+                # its PR already open, so re-attach rather than re-implementing
+                # and throwing that diff away. But if a PR review round has
+                # already run in THIS graph, "no changes" means the rework
+                # produced nothing — re-reviewing an identical diff would just
+                # burn reviewers to reach the same verdict, so let it fail.
+                reworked = f"pr_review_{tid}" in ctx.get("results", {})
+                number, url, note = (None, None, None) if reworked else \
+                    await gitstore.open_pr(repo, tid,
+                                           f"task({tid}): {t['title']}", "", base)
                 if number is not None:
                     store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                            "in_review", branch=f"task/{tid}")
@@ -587,10 +617,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                 url=url, note=note)
                     return {"published": True, "pr": number, "url": url,
                             "head": None, "reattached": True}
-                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
-                                       "failed", error="implementer produced no changes",
-                                       finished=True)
-                events.emit("task.failed", task=tid, reason="no changes to publish")
+                store.upsert_code_task(
+                    taskfile, tid, t["title"], model, rev, "failed",
+                    error=("rework after PR rejection produced no changes"
+                           if reworked else "implementer produced no changes"),
+                    finished=True)
+                events.emit("task.failed", task=tid,
+                            reason=("rework produced no changes" if reworked
+                                    else "no changes to publish"))
                 return {"published": False, "reason": "no changes"}
             ok, note = await gitstore.push_task_branch(repo, tid)
             if not ok:
@@ -704,7 +738,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                          round_n, "\n".join(f"- {i}" for i in issues[:20]))],
                     cwd=repo)
             return {"approved": approved, "issues": issues,
-                    "approvals": approvals, "pr": number, "round": round_n}
+                    "approvals": approvals, "reviewers": chosen,
+                    "pr": number, "round": round_n}
 
         async def pr_merge(ctx):
             """Merge the PR — reached only once every reviewer approved."""
