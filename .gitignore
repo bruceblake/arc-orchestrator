@@ -13,3 +13,6 @@ __pycache__/
 # edit dropped it, the live event log went back under version control and the
 # next merge clobbered 1.3MB of fleet history.
 logs/
+
+# Per-session handoff scratch, not a project artifact
+.kimi-handoff-state.md
