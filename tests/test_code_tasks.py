@@ -342,3 +342,14 @@ class PullRequestIsTheGate(unittest.TestCase):
             'first {"approve": true} then actually {"approve": false, "issues": ["x"]}')
         self.assertFalse(v["approve"], "the last verdict is the reviewer's answer")
         self.assertEqual(v["issues"], ["x"])
+
+
+class DescribeReportsTheRealBase(unittest.TestCase):
+    """`--dry-run` output is what an operator reads before spending tokens; it
+    hardcoded base=main long after tasks started branching from development."""
+
+    def test_describe_names_the_configured_base_branch(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        out = code_tasks.describe(ts)
+        self.assertIn(f"base={config.BASE_BRANCH}", out)
+        self.assertNotIn("base=main", out) if config.BASE_BRANCH != "main" else None

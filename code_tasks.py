@@ -101,7 +101,8 @@ def describe(taskset):
         cross = "cross-family" if impl_fam != rev_fam else "SAME-FAMILY(!)"
         lines.append(
             f"  {tid}: implement={t['model']} review={rev_fam}({cross}) "
-            f"deps={t['deps'] or '[]'} base=main verify={t['verify_cmd'] or '(none)'}"
+            f"deps={t['deps'] or '[]'} base={config.BASE_BRANCH} "
+            f"verify={t['verify_cmd'] or '(none)'}"
         )
     return "\n".join(lines)
 

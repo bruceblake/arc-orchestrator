@@ -122,6 +122,31 @@ else
     echo "(node not installed — skipping JavaScript checks)"
 fi
 
+step "task gates are worktree-safe"
+"$PY" - <<'PYEOF' || rc=1
+import json, pathlib, sys
+bad = 0
+d = pathlib.Path.home() / "tasks"
+for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+    try:
+        proj = json.loads(f.read_text()).get("project") or {}
+    except Exception:
+        continue
+    if "arc-orchestrator" not in str(proj.get("repo", "")):
+        continue
+    for t in proj.get("tasks") or []:
+        cmd = t.get("verify_cmd") or ""
+        # A gate runs inside a git WORKTREE, which has no .venv (gitignored).
+        # `.venv/bin/python` there is "No such file or directory" no matter how
+        # correct the work is — 26 wasted implement attempts before it was
+        # found. ./py resolves the interpreter from the main worktree.
+        if ".venv/bin/python" in cmd:
+            print(f"FAIL: {f.name}:{t['id']} gate uses .venv/bin/python; "
+                  f"use ./py (worktrees have no .venv)")
+            bad = 1
+sys.exit(bad)
+PYEOF
+
 step "taskfile validity"
 "$PY" - <<'PYEOF' || rc=1
 import sys, pathlib, config, code_tasks
