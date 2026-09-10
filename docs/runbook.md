@@ -256,6 +256,35 @@ work never leaks into a retry — and merges are stash-tolerant (see
 "Task conflict"). Never hand-write a reduced task file to retry a subset;
 that was the old workaround, it is no longer needed.
 
+### Per-task retry
+
+Re-running the task file is the normal retry path above, but when a project has
+already merged most of its tasks it re-runs the whole DAG anyway. To re-execute
+**one** task without touching the rest of the project, reset that task to
+`pending`:
+
+```bash
+cd /home/proxyie/arc-orchestrator
+curl -s -X POST localhost:8787/api/projects/retry-task \
+  -H 'Content-Type: application/json' \
+  -d '{"file": "<taskfile>.json", "task": "<task-id>"}'
+```
+
+- It resets **only that task's** `code_tasks` row to `pending`; every other
+  task keeps its recorded status, so the next `code run` of the same task file
+  re-executes just that task (and its dependencies, which are already
+  satisfied) instead of re-running the whole project.
+- Use it when you have looked at one task's failure, fixed the underlying
+  cause (a bad taskfile, a flaky dependency, a one-off crash), and want a
+  clean single-task re-run — the same effect as hand-writing a reduced task
+  file, without the workaround.
+- It is **refused while a run owns the task file**: if any `code run` process
+  is live for that task file the endpoint returns `409` and tells you to stop
+  the run first (`/api/projects/stop`). Reset a task before the run starts,
+  never mid-run.
+- It emits a `task.reset` event `{taskfile, task}` in `logs/events.jsonl`, and
+  the dashboard project detail shows the task back at `pending` immediately.
+
 ### Agents produce output but change no files (plan mode)
 
 The single most damaging misconfiguration found so far, and it looks exactly
