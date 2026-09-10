@@ -47,8 +47,16 @@ class InflightAttribution(unittest.TestCase):
         dashboard._lines_cache["key"] = None
         dashboard._kimi_cache.clear()
         dashboard._fleet_names_cache.update(key=0.0, names=frozenset())
+        # _collect_inflight also merges kimi-code sessions read from the real
+        # ~/.kimi-code/sessions. Without stubbing that, these tests count
+        # whatever the operator happens to be running and fail at random —
+        # which they did, the moment a planner agent was live.
+        self._orig_kimi = dashboard._kimi_code_usage
+        dashboard._kimi_code_usage = lambda now, fleet_names=frozenset(): {
+            "models": [], "inflight": [], "points": []}
 
     def tearDown(self):
+        dashboard._kimi_code_usage = self._orig_kimi
         config.EVENTS_LOG = self._orig_log
         dashboard._lines_cache["key"] = None
         dashboard._fleet_names_cache.update(key=0.0, names=frozenset())
