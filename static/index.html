@@ -129,10 +129,6 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
            border-bottom: 1px solid var(--border); font-size: 11px; }
 .donerow .who { min-width: 190px; color: var(--text); }
 .donerow.bad .who { color: var(--err); }
-#health-agents { margin-top: 4px; }
-#health-agents .quiet.hint { color: var(--dim); }
-#health-agents .quiet.warn { color: var(--warn); }
-#health-agents .quiet.err { color: var(--err); }
 .agentrow.has-t:hover { background: #1c2128; }
 </style>
 </head>
@@ -633,15 +629,6 @@ function renderHealth(h) {
       ${esc(m.pretty)} <b>${m.drivers}/${cap || "?"}</b>${extra ? `<span class="hint">${extra}</span>` : ""}
       <span class="gauge"><i style="width:${pct}%"></i></span></span>`;
   }).join("") || '<span class="hint">no models reporting</span>';
-  $("#health-agents").innerHTML = (h.agents || []).map(a => {
-    const bits = [`<b>${esc(a.pretty || short(a.model))}</b>`,
-                  esc(a.task || a.role || a.purpose || "")];
-    if (a.elapsed_s != null) bits.push(tick(a.elapsed_s));
-    if (typeof a.idle_s === "number")
-      bits.push(`<span class="quiet ${a.idle_s > 300 ? "err" : a.idle_s > 120 ? "warn" : "hint"}">quiet ${tick(a.idle_s)}</span>`);
-    if (typeof a.bytes === "number") bits.push(`${fmtK(a.bytes)}B`);
-    return `<div class="agentrow">${bits.filter(Boolean).join(" · ")}</div>`;
-  }).join("");
   const probs = (h.problems || []);
   $("#btn-problems").textContent = `recent problems (${probs.length})`;
   $("#health-problems").innerHTML = probs.length ? probs.map(e => {
