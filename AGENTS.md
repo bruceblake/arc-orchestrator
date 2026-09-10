@@ -302,7 +302,7 @@ scores a reviewer on whichever ceiling binds first.
   cap; over cap the task **waits** (poll every 20 s) and emits
   `driver.cap_wait {model, task, in_use, cap}` about once a minute — that event
   is the warning surface for "a new task is about to exceed concurrency".
-  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (1800 s) or when
+  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (3300 s) or when
   the owning pid is dead, so killed runs never deadlock the fleet.
 - For the research workload, `pool.py` additionally enforces per-family
   `asyncio.Semaphore(config.family_limit(f))` client-side.
@@ -330,7 +330,7 @@ scores a reviewer on whichever ceiling binds first.
   (distinct from `failed` red), and the last review verdict on each node.
 - Harness-level resilience: `config.DRIVER_TIMEOUT` = 2700 s per harness
   invocation (override `ARC_DRIVER_TIMEOUT`) as a total-runtime backstop, and
-  `config.DRIVER_IDLE_TIMEOUT` = 120 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
+  `config.DRIVER_IDLE_TIMEOUT` = 420 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
   a **stall detector**: a harness that produces no stdout for that long is
   waiting on a request that is not coming back, so it is killed and retried
   rather than waited out. Every stall records forensics first — process state,
