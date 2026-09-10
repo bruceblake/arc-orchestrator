@@ -6,6 +6,8 @@ session-limit detector are what keep 24/7 rounds from silently misbehaving.
 """
 import asyncio
 import types
+import pathlib
+import re
 import unittest
 
 from helpers import capture_events  # noqa: F401  (fixes sys.path, redirects the event log)
@@ -72,18 +74,52 @@ class PoolDryRunChat(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.pool = ArcPool(dry_run=True)
 
-    async def test_returns_non_empty_text_for_each_purpose(self):
-        purposes = (
-            "questions", "answer", "critique", "synthesis", "verify",
-            "plan", "implement", "review",
-        )
+    @staticmethod
+    def _purposes_used_in_the_codebase():
+        """Every purpose= the code actually passes to pool.chat().
+
+        Derived, not hand-listed. The hand-written list here named eight and
+        the codebase used thirteen, so `bench` (used four times in bench.py)
+        had no dry-run response at all and nothing noticed: --dry-run returned
+        a generic string where the caller expected fenced code.
+        """
+        found = set()
+        for f in sorted(pathlib.Path(__file__).resolve().parent.parent.glob("*.py")):
+            for m in re.finditer(r'purpose\s*=\s*"([a-z_]+)"', f.read_text()):
+                found.add(m.group(1))
+        return sorted(found)
+
+    async def test_every_purpose_has_its_own_dry_run_response(self):
+        """Not merely non-empty — non-GENERIC.
+
+        The fallthrough is `[dry-run <family>] <prompt>`, which is non-empty,
+        so an assertion that the text is truthy passes for a purpose that has
+        no case at all. `bench` was missing for exactly that reason: bench.py
+        asks for it four times and got an echo of its own prompt where it
+        expected a fenced code block.
+        """
+        purposes = self._purposes_used_in_the_codebase()
+        self.assertGreaterEqual(len(purposes), 8, "purpose scan found too few")
         for purpose in purposes:
+            if purpose == "chat":
+                continue  # the echo IS chat's intended response
             with self.subTest(purpose=purpose):
                 text = await self.pool.chat(
                     "deepseek", [{"role": "user", "content": "hello"}],
                     purpose=purpose,
                 )
-                self.assertTrue(text.strip())
+                self.assertTrue(text.strip(),
+                                f"dry-run has no response for purpose={purpose!r}")
+                self.assertFalse(
+                    text.startswith("[dry-run deepseek] hello"),
+                    f"purpose={purpose!r} fell through to the generic echo — "
+                    f"add a case for it in pool._dry_run_text")
+
+    async def test_the_generic_fallthrough_still_exists_for_unknown_purposes(self):
+        text = await self.pool.chat(
+            "deepseek", [{"role": "user", "content": "hello"}],
+            purpose="not-a-real-purpose")
+        self.assertTrue(text.strip())
 
     async def test_populates_meta_with_model_tokens_and_latency(self):
         meta = {}

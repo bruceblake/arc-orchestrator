@@ -251,6 +251,9 @@ class ArcPool:
             m = re.search(r"propose\s+(\d+)", u)
             n = int(m.group(1)) if m else 3
             return json.dumps({"topics": [f"Dry-run follow-up topic {i + 1}" for i in range(n)]})
+        if purpose == "bench":
+            return ("```python\n# dry-run placeholder solution\ndef placeholder():\n"
+                    "    return None\n```")
         if purpose == "plan":
             return json.dumps({
                 "modules": {
