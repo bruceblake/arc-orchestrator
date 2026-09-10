@@ -155,3 +155,32 @@ class ExtractPlanJson(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ImplementPromptDiscipline(unittest.TestCase):
+    """The prompt carries the mitigation for the fleet's dominant failure.
+
+    ARC terminates long-running requests. Measured on this fleet: tasks doing
+    whole-file rewrites lost 33% of their requests to termination against an
+    8.3% baseline, each costing ~5 minutes of retry. Response length is the
+    variable the implementer actually controls.
+    """
+
+    def test_prompt_forbids_whole_file_rewrites(self):
+        p = code_tasks._impl_prompt(
+            {"id": "t", "title": "T", "prompt": "rewrite index.html",
+             "files_hint": [], "model": "", "reviewer": ""}, "")
+        self.assertIn("NEVER rewrite a whole file", p)
+
+    def test_prompt_tells_the_agent_to_read_narrowly(self):
+        p = code_tasks._impl_prompt(
+            {"id": "t", "title": "T", "prompt": "x", "files_hint": [],
+             "model": "", "reviewer": ""}, "")
+        for phrase in ("grep/search FIRST", "line ranges", "Do not re-read"):
+            self.assertIn(phrase, p)
+
+    def test_review_feedback_still_reaches_the_implementer(self):
+        p = code_tasks._impl_prompt(
+            {"id": "t", "title": "T", "prompt": "x", "files_hint": [],
+             "model": "", "reviewer": ""}, "- missing the null check")
+        self.assertIn("missing the null check", p)

@@ -253,6 +253,46 @@ silences are queueing, which is a different thing.
 60s) carry the same `/proc` sample while an agent is healthy, so the Fleet
 panel can show "quiet 90s" on a live agent without it meaning trouble.
 
+### Terminated requests (the real failure mode)
+
+ARC terminates long-running requests. kimi-code's session log records them —
+the wire log does not, which is why this went unexplained for so long:
+
+```
+~/.kimi-code/sessions/<session>/logs/kimi-code.log
+  WARN llm request failed turnStep=0.12 model=arc/kimi-k3-fleet
+       errorName=APIConnectionError errorMessage=terminated
+```
+
+They arrive after roughly 310s in flight. It is **not** a hard ceiling — 27
+responses succeeded with decode times over 300s, one at 828.9s — so treat it
+as a probability that rises with how long a request stays open, not a cutoff.
+
+**Response length is the variable you control**, and it dominates:
+
+| workload | terminated |
+| --- | --- |
+| all sessions baseline | 179 / 2144 = **8.3%** |
+| a task prompted to rewrite a 504-line file | 6 / 18 = **33%** |
+
+Each termination costs ~5 minutes of retry. That task burned 30 of its
+45-minute budget on them and never finished. Median decode is ~52 ms/token, so
+a 9000-token response is already ~8 minutes in flight.
+
+Mitigations, in order of effect:
+
+1. **Never ask for a whole-file rewrite.** Write task prompts that name the
+   specific change. `code_tasks._impl_prompt` now instructs the implementer to
+   make targeted edits even when the task sounds like a rewrite.
+2. Keep tasks small enough that no single response needs to be long.
+3. `ARC_DRIVER_TIMEOUT` (2700s) bounds a task that is retrying productively;
+   it is a backstop, not a cure — raising it buys time at ~5 min per retry.
+
+Note kimi requests `maxTokens = 131072` (derived from `max_context_size`; no
+separate output cap exists in its config — `max_output_tokens`, `max_tokens`
+and `output_tokens` were all tested and none change it). So generation length
+is bounded only by the model deciding to stop.
+
 ### Context budget (per harness — they fail differently)
 
 Both harnesses ship configured for a **131072-token** context and compact near
