@@ -845,6 +845,25 @@ def _repo_problem(path, base="main"):
     return None
 
 
+def _project_phase(statuses, ids, run_pid):
+    """One word for where a project stands: running | done | attention | new.
+
+    The operator's question is "what needs me?", and a status dict of five
+    counters does not answer it. `attention` means finished executing with
+    something unresolved — a failure or conflict that will not fix itself.
+    """
+    total = len(ids)
+    if run_pid or statuses.get("running"):
+        return "running"
+    if statuses.get("failed") or statuses.get("conflict"):
+        return "attention"
+    if total and statuses.get("merged", 0) >= total:
+        return "done"
+    if not statuses:
+        return "new"
+    return "attention"
+
+
 def _task_loop_stats(store, task_ids):
     """Fix-loop stats per base task id: implement-attempt max (harness_runs is
     authoritative), task.escalated/task.conflict event counts, newest reviewer
@@ -959,6 +978,10 @@ def _projects(store):
     for r in reconcile.live_runs():
         if r.get("taskfile"):
             run_by_file[Path(r["taskfile"]).name] = r["pid"]
+    try:
+        archived = store.archived_projects() if store else {}
+    except Exception:
+        archived = {}
     out = []
     tdir = Path(config.TASKS_DIR)
     # Parse every task file first and collect ALL task ids, so the fix-loop
@@ -1042,6 +1065,10 @@ def _projects(store):
                     "done_tokens": tok_total, "done_seconds": sec_total,
                     "live_tokens": live_tok, "live_seconds": live_sec,
                     "errors": errors,
+                    "archived": str(f) in archived,
+                    "archived_at": archived.get(str(f)),
+                    "phase": _project_phase(statuses, ids,
+                                            run_by_file.get(f.name)),
                     "run_pid": run_by_file.get(f.name),
                     "active": statuses.get("running", 0) > 0 or any(i in live_tasks for i in ids),
                     "last_activity": last or mtime_iso})
@@ -1124,12 +1151,54 @@ def _project_detail(store, fname):
             "git": _git_block(repo_v, gh)}, 200
 
 
+def _recent_agent_runs(store, limit=40):
+    """Finished harness runs, newest first — the other half of an agents view.
+
+    /api/agents only ever showed what is in flight, so the moment an agent
+    finished it vanished with no trace of whether it succeeded. An operator
+    asking "did that review pass?" had nowhere to look.
+    """
+    try:
+        rows = store.harness_runs_all(limit=limit * 3) if store else []
+    except Exception:
+        return []
+    out = []
+    for r in rows[:limit]:
+        verdict = None
+        if r.get("verdict"):
+            try:
+                v = json.loads(r["verdict"])
+                if isinstance(v, dict) and "pass" in v:
+                    verdict = {"pass": bool(v["pass"]),
+                               "issues": len(v.get("issues") or [])}
+            except ValueError:
+                pass
+        ts = None
+        try:
+            ts = datetime.fromisoformat(r["created_at"]).timestamp()
+        except (TypeError, ValueError):
+            pass
+        out.append({
+            "task": r.get("task_id"), "model": r.get("model"),
+            "pretty": _pretty(r.get("model")), "harness": r.get("harness"),
+            "role": r.get("role"), "attempt": r.get("attempt"),
+            "exit_code": r.get("exit_code"),
+            "ok": r.get("exit_code") == 0,
+            "seconds": r.get("seconds"), "verdict": verdict,
+            "transcript": (Path(r["transcript"]).name
+                           if r.get("transcript") else None),
+            "ts": ts,
+        })
+    return out
+
+
 def _agents(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
     _prune_registry()
     runs = [{"taskfile": k, **v} for k, v in _launch_registry.items()]
-    return {"now": now, "agents": inflight, "runs": runs}
+    return {"now": now, "agents": inflight, "runs": runs,
+            "recent": _recent_agent_runs(store)}
 
 
 _TRANSCRIPT_RE = re.compile(r"^[\w.-]+\.jsonl$")
@@ -1488,6 +1557,30 @@ def _metrics(store):
         models.values(), key=lambda m: (-m["runs"], m["model"])), "tasks": tasks}
 
 
+def _archive_project(body):
+    """Archive or restore a project. The task file is never touched."""
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    fname = body.get("file") or ""
+    if not re.fullmatch(r"[\w.-]+\.json", fname):
+        return {"error": "bad file name"}, 400
+    path = Path(config.TASKS_DIR) / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    archived = bool(body.get("archived", True))
+    import reconcile
+    if archived and any(r.get("taskfile") and Path(r["taskfile"]).name == fname
+                        for r in reconcile.live_runs()):
+        return {"error": "this project is running — stop it before archiving"}, 409
+    try:
+        Handler.store.set_project_archived(str(path), archived)
+    except Exception as exc:
+        return {"error": str(exc)}, 500
+    _emit_event("project.archived" if archived else "project.restored",
+                taskfile=str(path))
+    return {"file": fname, "archived": archived}, 200
+
+
 def _stop_project(body):
     """SIGTERM every `code run` process owning this task file.
 
@@ -1674,6 +1767,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)
+                return self._json(obj, code)
+            if u.path == "/api/projects/archive":
+                obj, code = _archive_project(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:

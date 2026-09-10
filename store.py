@@ -141,6 +141,12 @@ CREATE TABLE IF NOT EXISTS bench_results(
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bench_results_run ON bench_results(run_id);
+CREATE TABLE IF NOT EXISTS project_state(
+  taskfile TEXT PRIMARY KEY,
+  archived INTEGER NOT NULL DEFAULT 0,
+  archived_at TEXT,
+  note TEXT
+);
 CREATE TABLE IF NOT EXISTS driver_leases(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   model TEXT NOT NULL,
@@ -490,6 +496,30 @@ class Store:
                 "DELETE FROM driver_leases WHERE model=? AND pid=? AND task IS ?",
                 (model, pid, task))
             self.conn.commit()
+
+    def set_project_archived(self, taskfile, archived, note=None):
+        """Archive or restore one project.
+
+        Archiving is a DASHBOARD concern only: the task file stays where it
+        is and the project remains runnable. It exists because a finished
+        project has nothing left to watch, and eighteen of them on one page
+        buries the two that are actually working.
+        """
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO project_state(taskfile, archived, archived_at, note) "
+                "VALUES (?,?,?,?) ON CONFLICT(taskfile) DO UPDATE SET "
+                "archived=excluded.archived, archived_at=excluded.archived_at, "
+                "note=COALESCE(excluded.note, project_state.note)",
+                (taskfile, 1 if archived else 0,
+                 _now() if archived else None, note))
+            self.conn.commit()
+
+    def archived_projects(self):
+        """{taskfile: archived_at} for every archived project."""
+        with self.lock:
+            return {r["taskfile"]: r["archived_at"] for r in self.conn.execute(
+                "SELECT taskfile, archived_at FROM project_state WHERE archived=1")}
 
     def code_tasks_all(self, limit=500):
         with self.lock:

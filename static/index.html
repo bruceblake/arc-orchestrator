@@ -115,6 +115,20 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .agentrow .who { color: var(--text); }
 .agentrow .quiet { color: var(--warn); }
 .agentrow.has-t { cursor: pointer; }
+.seg { font-size: 11px; padding: 2px 8px; }
+.seg.on { border-color: var(--accent); color: var(--accent); }
+.phasehead { display: flex; align-items: baseline; gap: 10px; margin: 14px 0 6px; }
+.phasehead h3 { margin: 0; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+.phasehead.running h3 { color: var(--accent); }
+.phasehead.attention h3 { color: var(--err); }
+.phasehead.done h3 { color: var(--ok); }
+.phasehead.new h3 { color: var(--dim); }
+.card.archived { opacity: .55; }
+.card .cardact { display: flex; gap: 6px; margin-top: 6px; }
+.donerow { display: flex; gap: 8px; align-items: baseline; padding: 3px 0;
+           border-bottom: 1px solid var(--border); font-size: 11px; }
+.donerow .who { min-width: 190px; color: var(--text); }
+.donerow.bad .who { color: var(--err); }
 #health-agents { margin-top: 4px; }
 #health-agents .quiet.hint { color: var(--dim); }
 #health-agents .quiet.warn { color: var(--warn); }
@@ -155,17 +169,23 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <button class="act" id="btn-problems">recent problems</button>
       </h2>
       <div class="health" id="health-models"></div>
-      <div id="health-agents"></div>
       <div class="problems" id="health-problems" style="display:none"></div>
     </div>
     <div class="panel" id="agents-panel">
-      <h2>Agents <span class="hint" id="agents-meta"></span></h2>
+      <h2>Agents <span class="hint" id="agents-meta"></span>
+        <span style="flex:1"></span>
+        <button class="act seg on" id="ag-tab-live" data-ag="live">running</button>
+        <button class="act seg" id="ag-tab-done" data-ag="done">finished</button>
+      </h2>
       <div id="agents"></div>
+      <div id="agents-done" style="display:none"></div>
       <div class="empty" id="agents-empty" style="display:none">No agents running right now.</div>
     </div>
     <div class="panel">
       <h2>Projects <span class="hint" id="proj-meta"></span>
         <span style="flex:1"></span>
+        <span id="phase-filter"></span>
+        <button class="act" id="btn-show-archived">show archived</button>
         <button class="act primary" id="btn-new">+ New project</button>
       </h2>
       <div id="projects"></div>
@@ -262,7 +282,8 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 const $ = s => document.querySelector(s);
 const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash"};
 const short = m => SHORT[m] || m || "—";
-let PROJECTS = [], AGENTS = [], FLEET = null;
+let SHOW_ARCHIVED = false, PHASE_FILT = "", OPEN_PHASES = {};
+let PROJECTS = [], AGENTS = [], RECENT = [], FLEET = null;
 let CUR = null, CUR_DATA = null, CUR_PID = null, detailTimer = null, drawerFile = null;
 let FILT = {p: "", r: "", m: ""}, DENSE = true;
 const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f0883e", pending: "#484f58"};
@@ -408,7 +429,7 @@ function card(p, i) {
   const failed = ((p.statuses && (p.statuses.failed || 0)) + ((p.statuses && p.statuses.conflict) || 0));
   const pct = n => (100 * n / tot).toFixed(1);
   const bar = `<div class="pbar"><i class="done" style="width:${pct(done)}%"></i><i class="running" style="width:${pct(running)}%"></i><i class="failed" style="width:${pct(failed)}%"></i></div>`;
-  return `<div class="card" data-i="${i}">
+  return `<div class="card ${p.archived ? "archived" : ""}" data-i="${i}">
     <div><b>${esc(p.title)}</b> ${p.active ? '<span class="live">LIVE</span>' : ""}</div>
     ${bar}
     <div class="hint">${done}/${tot} merged${failed ? ` · <span class="bad">${failed} failed</span>` : ""}${running ? ` · ${running} running` : ""}</div>
@@ -423,6 +444,9 @@ function card(p, i) {
       ${(p.reviewers || []).map(m => `<span class="tag">review: ${revShort(m)}</span>`).join("")}</div>
     ${(p.errors && p.errors.length) ? `<div class="cardnote" title="${esc(p.errors[0].error)}">⚠ ${esc(p.errors[0].id)}: ${esc(String(p.errors[0].error).slice(0, 90))}</div>` : ""}
     <div class="hint" style="margin-top:5px">${esc(p.file)} · ${fmtT(p.last_activity)}${p.run_pid ? ` · <span class="good">running (pid ${p.run_pid})</span>` : ""}</div>
+    <div class="cardact">
+      <button class="act seg" data-arch="${esc(p.file)}" data-on="${p.archived ? 1 : 0}">${p.archived ? "restore" : "archive"}</button>
+    </div>
   </div>`;
 }
 function visibleProjects() {
@@ -440,21 +464,57 @@ function renderProjects() {
     (b[1].some(x => x.p.active) - a[1].some(x => x.p.active)) ||
     (b[1].reduce((s, x) => s + (x.p.tokens || 0), 0) - a[1].reduce((s, x) => s + (x.p.tokens || 0), 0)) ||
     a[0].localeCompare(b[0]));
-  $("#projects").innerHTML = ordered.map(([repo, items]) => {
-    const live = items.filter(x => x.p.active).length;
-    const toks = items.reduce((s, x) => s + (x.p.tokens || 0), 0);
-    const tasksN = items.reduce((s, x) => s + (x.p.n_tasks || 0), 0);
-    return `<div class="repohead">
-        <h3>⌥ ${esc(repoShort(repo))}</h3>
-        <span class="hint">${esc(repo || "no repo")}</span>
-        ${live ? `<span class="live">LIVE ×${live}</span>` : ""}
-        <span class="hint">${items.length} project${items.length === 1 ? "" : "s"} · ${tasksN} tasks · ${fmtK(toks)} tok</span>
+  // Grouped by PHASE, not by repo. The operator's question is "what needs
+  // me?", and eighteen cards sorted by repo answered a question nobody asked:
+  // finished work buried the two projects that were actually running.
+  const PHASES = [
+    ["running",   "running now"],
+    ["attention", "needs attention"],
+    ["new",       "never run"],
+    ["done",      "done"],
+  ];
+  const visible = PROJECTS.filter(p => SHOW_ARCHIVED ? p.archived : !p.archived)
+                          .filter(p => !PHASE_FILT || p.phase === PHASE_FILT);
+  const counts = {};
+  PROJECTS.filter(p => !p.archived).forEach(p => counts[p.phase] = (counts[p.phase] || 0) + 1);
+  $("#phase-filter").innerHTML = PHASES.filter(([k]) => counts[k])
+    .map(([k, label]) => `<button class="act seg ${PHASE_FILT === k ? "on" : ""}" data-ph="${k}">${label} ${counts[k]}</button>`)
+    .join("") + (PHASE_FILT ? '<button class="act seg" data-ph="">all</button>' : "");
+
+  const byPhase = {};
+  visible.forEach(p => (byPhase[p.phase] = byPhase[p.phase] || []).push(p));
+  $("#projects").innerHTML = PHASES.map(([key, label]) => {
+    const items = byPhase[key] || [];
+    if (!items.length) return "";
+    // `done` collapses by default: it is the largest group and the least
+    // actionable, which is exactly what was causing the clutter.
+    const collapsed = key === "done" && !PHASE_FILT && !SHOW_ARCHIVED && !OPEN_PHASES.done;
+    return `<div class="phasehead ${key}">
+        <h3>${label}</h3><span class="hint">${items.length}</span>
+        ${key === "done" ? `<button class="act seg" data-toggle="done">${collapsed ? "show" : "hide"}</button>
+          <button class="act seg" data-archive-all="1">archive all done</button>` : ""}
       </div>
-      ${DENSE ? items.map(x => prow(x.p, x.i)).join("")
-              : `<div class="repogrid">${items.map(x => card(x.p, x.i)).join("")}</div>`}`;
-  }).join("");
-  document.querySelectorAll("#projects .prow, #projects .card").forEach(c =>
-    c.onclick = () => openDetail(PROJECTS[+c.dataset.i].file));
+      ${collapsed ? "" : `<div class="repogrid">${items.map(p => card(p, PROJECTS.indexOf(p))).join("")}</div>`}`;
+  }).join("") || `<div class="empty">${SHOW_ARCHIVED ? "Nothing archived." : "No projects match this filter."}</div>`;
+
+  document.querySelectorAll("#phase-filter [data-ph]").forEach(b =>
+    b.onclick = () => { PHASE_FILT = b.dataset.ph; loadProjects(); });
+  document.querySelectorAll("#projects [data-toggle]").forEach(b =>
+    b.onclick = () => { OPEN_PHASES.done = !OPEN_PHASES.done; loadProjects(); });
+  document.querySelectorAll("#projects [data-archive-all]").forEach(b =>
+    b.onclick = async () => {
+      const done = PROJECTS.filter(p => p.phase === "done" && !p.archived);
+      if (!done.length || !confirm(`Archive ${done.length} finished project(s)?\n\nTask files are not touched and they stay runnable.`)) return;
+      for (const p of done) await jpost("/api/projects/archive", {file: p.file, archived: true});
+      loadProjects();
+    });
+  document.querySelectorAll("#projects [data-arch]").forEach(b =>
+    b.onclick = async ev => { ev.stopPropagation();
+      const {code, body} = await jpost("/api/projects/archive",
+        {file: b.dataset.arch, archived: b.dataset.on !== "1"});
+      if (code !== 200) alert(body.error || "failed");
+      loadProjects();
+    });
   bindDagClicks("#projects");
 }
 async function pollProjects() {
@@ -473,6 +533,7 @@ async function pollAgents() {
   try {
     const d = await jget("/api/agents");
     AGENTS = (d.agents || []).filter(a => a.task);
+    RECENT = d.recent || [];
     markFail("agents", false);
   } catch (e) { markFail("agents", true); }
   renderAgentChips(); renderAgents();
@@ -483,7 +544,38 @@ function renderAgentChips() {
   $("#agent-chips").innerHTML = Object.entries(by).sort((a, b) => b[1] - a[1])
     .map(([k, n]) => `<span class="achip">${esc(k)} x${n}</span>`).join("");
 }
+let AG_TAB = "live";
+document.querySelectorAll("[data-ag]").forEach(b => b.onclick = () => {
+  AG_TAB = b.dataset.ag;
+  document.querySelectorAll("[data-ag]").forEach(x => x.classList.toggle("on", x === b));
+  $("#agents").style.display = AG_TAB === "live" ? "" : "none";
+  $("#agents-done").style.display = AG_TAB === "done" ? "" : "none";
+  renderAgents();
+});
+
+function renderRecent() {
+  const rows = FILT.m ? RECENT.filter(a => a.model === FILT.m || a.pretty === FILT.m) : RECENT;
+  $("#agents-done").innerHTML = rows.length ? rows.map(a => {
+    const v = a.verdict;
+    const badge = v ? (v.pass ? '<span class="good">review pass</span>'
+                              : `<span class="bad">review fail${v.issues ? " · " + v.issues + " issue" + (v.issues === 1 ? "" : "s") : ""}</span>`)
+                    : (a.ok ? '<span class="hint">ok</span>' : '<span class="bad">exit ' + esc(a.exit_code) + "</span>");
+    return `<div class="donerow ${a.ok && (!v || v.pass) ? "" : "bad"} ${a.transcript ? "has-t" : ""}"
+                 data-t="${esc(a.transcript || "")}" data-m="${esc(a.pretty)}" data-r="${esc(a.role || "")}" data-task="${esc(a.task || "")}">
+      <span class="who">${esc(a.pretty)} ${esc(a.role || "")}</span>
+      <span>${esc(a.task || "")}</span>
+      <span class="hint">att ${esc(a.attempt)}</span>
+      <span class="hint">${a.seconds ? tick(a.seconds) : ""}</span>
+      <span style="flex:1"></span>${badge}
+      <span class="hint">${a.ts ? fmtT(new Date(a.ts * 1000).toISOString()) : ""}</span>
+    </div>`;
+  }).join("") : '<div class="empty">No finished agent runs recorded yet.</div>';
+  document.querySelectorAll("#agents-done .donerow.has-t").forEach(el => el.onclick = () =>
+    openTranscript(el.dataset.t, `${el.dataset.m} ${el.dataset.r}`, el.dataset.task));
+}
+
 function renderAgents() {
+  if (AG_TAB === "done") { renderRecent(); }
   const rows = FILT.m ? AGENTS.filter(a => a.model === FILT.m || a.pretty === FILT.m) : AGENTS;
   $("#agents-meta").textContent = `(${rows.length} running${FILT.m ? " of " + AGENTS.length : ""} — click for live transcript)`;
   $("#agents-empty").style.display = rows.length ? "none" : "";
@@ -859,6 +951,12 @@ setInterval(() => { // live elapsed ticking for agent rows
 
 // ---- new project modal ----
 const modal = $("#modal");
+$("#btn-show-archived").onclick = () => {
+  SHOW_ARCHIVED = !SHOW_ARCHIVED;
+  $("#btn-show-archived").textContent = SHOW_ARCHIVED ? "show active" : "show archived";
+  $("#btn-show-archived").classList.toggle("primary", SHOW_ARCHIVED);
+  loadProjects();
+};
 $("#btn-new").onclick = () => { modal.classList.add("open"); $("#p-msg").textContent = ""; $("#j-msg").textContent = ""; };
 $("#modal-close").onclick = () => modal.classList.remove("open");
 modal.onclick = ev => { if (ev.target === modal) modal.classList.remove("open"); };

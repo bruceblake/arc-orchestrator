@@ -223,3 +223,71 @@ class AtomicTaskfileWrite(unittest.TestCase):
                 f, {"project": {"repo": "/tmp", "title": "new", "tasks": []}})
             self.assertEqual(json.loads(f.read_text())["project"]["title"], "new")
             self.assertGreater(f.stat().st_size, 0)
+
+
+class ProjectPhase(unittest.TestCase):
+    """One word for "what is this project doing", because a dict of five
+    status counters does not answer the operator's actual question: what
+    needs me? `attention` means finished executing with something unresolved."""
+
+    def test_running_wins_over_everything(self):
+        self.assertEqual(
+            dashboard._project_phase({"merged": 2, "failed": 1}, ["a", "b", "c"], 123),
+            "running")
+        self.assertEqual(
+            dashboard._project_phase({"running": 1, "failed": 1}, ["a", "b"], None),
+            "running")
+
+    def test_all_merged_is_done(self):
+        self.assertEqual(
+            dashboard._project_phase({"merged": 3}, ["a", "b", "c"], None), "done")
+
+    def test_a_failure_needs_attention_even_when_the_rest_merged(self):
+        self.assertEqual(
+            dashboard._project_phase({"merged": 2, "failed": 1}, ["a", "b", "c"], None),
+            "attention")
+
+    def test_a_conflict_needs_attention(self):
+        self.assertEqual(
+            dashboard._project_phase({"conflict": 1}, ["a"], None), "attention")
+
+    def test_never_run_is_new(self):
+        self.assertEqual(dashboard._project_phase({}, ["a", "b"], None), "new")
+
+    def test_partially_merged_but_idle_needs_attention(self):
+        """Nothing running, not everything merged: it stopped short."""
+        self.assertEqual(
+            dashboard._project_phase({"merged": 1}, ["a", "b"], None), "attention")
+
+
+class ProjectArchive(unittest.TestCase):
+    """Archiving is a dashboard concern: the task file is never touched and
+    the project stays runnable. It exists so finished work stops burying the
+    projects that still need the operator."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.store = __import__("store").Store(str(Path(self._dir.name) / "t.db"))
+
+    def tearDown(self):
+        self._dir.cleanup()
+
+    def test_archive_and_restore_round_trip(self):
+        tf = "/tasks/x.json"
+        self.assertEqual(self.store.archived_projects(), {})
+        self.store.set_project_archived(tf, True)
+        self.assertIn(tf, self.store.archived_projects())
+        self.assertIsNotNone(self.store.archived_projects()[tf], "needs a timestamp")
+        self.store.set_project_archived(tf, False)
+        self.assertEqual(self.store.archived_projects(), {})
+
+    def test_archiving_twice_is_idempotent(self):
+        self.store.set_project_archived("/tasks/x.json", True)
+        self.store.set_project_archived("/tasks/x.json", True)
+        self.assertEqual(len(self.store.archived_projects()), 1)
+
+    def test_projects_are_tracked_independently(self):
+        self.store.set_project_archived("/tasks/a.json", True)
+        self.store.set_project_archived("/tasks/b.json", True)
+        self.store.set_project_archived("/tasks/a.json", False)
+        self.assertEqual(list(self.store.archived_projects()), ["/tasks/b.json"])
