@@ -466,6 +466,24 @@ JS-based tooling must do the same. Similarly, the kimi CLI's stream-json
 puts assistant text in `"content"` fields (opencode uses `"text"`), and
 `drivers.parse_transcript` accepts both.
 
+## Worktrees and project chains
+
+Every fleet task runs in its own git worktree at
+`~/worktrees/<project>/<task-id>` on a branch `task/<task-id>` cut from
+`main`. The orchestrator (`gitstore.py`) is the only git actor: harnesses
+only write files inside their worktree and never commit.
+
+Merges back to `main` are serialized by a lock, so concurrent task
+completions cannot interleave. A task that will not merge cleanly ends in
+status `conflict` and `main` stays untouched.
+
+Projects can be chained into sequences: put `"after": ["other-taskfile.json"]`
+in a taskfile's project object and `code run` waits until that whole
+project's tasks are merged before starting (aborting if the dependency
+project failed); `--no-wait` checks once instead of waiting. Details:
+[docs/taskfile-schema.md](docs/taskfile-schema.md) and
+[docs/runbook.md](docs/runbook.md).
+
 ## Governance
 Multi-model orchestration is governed by [AGENTS.md](AGENTS.md).
 
