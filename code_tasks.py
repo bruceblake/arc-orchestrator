@@ -810,9 +810,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             inconclusive = bool(crashed) and not issues
             prior_incon = (prior_r or {}).get("inconclusive_n", 0)
             inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
+            # The issue TEXT, not just a count. "3 issues" tells an operator
+            # nothing about whether the reviewers found something real; the
+            # dashboard could only ever show the number, so the actual verdict
+            # lived on GitHub and nowhere else.
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
                         reviewers=chosen, n_issues=len(issues),
+                        issues=[i[:400] for i in issues[:10]],
                         crashed=crashed, inconclusive=inconclusive)
             # Post each verdict AS A GITHUB REVIEW, not just internally. The
             # approvals existed only in our event log, so a PR merged by two

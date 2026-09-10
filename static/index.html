@@ -122,6 +122,11 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .qpip.rev { background: var(--purple); opacity: 1; }
 .slot-q { font-size: 11px; color: var(--dim); margin-top: 4px; }
 .prrow.stranded { border-left: 2px solid var(--err); padding-left: 6px; }
+.prissues { flex-basis: 100%; margin-top: 4px; font-size: 11px; }
+.prissues summary { cursor: pointer; color: var(--dim); }
+.prissues div { color: var(--text); padding: 4px 0 4px 10px;
+                border-left: 2px solid var(--border); margin-top: 3px;
+                white-space: pre-wrap; }
 .slot.harness { background: #12171e; }
 .tagh { font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
         color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0 4px; }
@@ -616,7 +621,15 @@ function renderGithub() {
       ? '<span class="hint">no fleet review recorded</span>'
       : last.approved
         ? `<span class="good">✓ ${(last.approvals || []).map(esc).join(" + ")}</span>`
-        : `<span class="bad">✗ changes requested${last.issues ? ` · ${last.issues} issue${last.issues === 1 ? "" : "s"}` : ""}</span>`;
+        : last.inconclusive
+          ? `<span class="warn">⟳ no verdict — ${(last.crashed || []).map(short).map(esc).join(", ") || "a reviewer"} could not run</span>`
+          : `<span class="bad">✗ changes requested${last.issues ? ` · ${last.issues} issue${last.issues === 1 ? "" : "s"}` : ""}</span>`;
+    // What the reviewers actually said. A count told an operator nothing about
+    // whether the objection was real; the text lived only on GitHub.
+    const detail = (last && (last.detail || []).length)
+      ? `<details class="prissues"><summary>why it was sent back</summary>${
+          (last.detail || []).map(i => `<div>${esc(i)}</div>`).join("")}</details>`
+      : "";
     const roundNote = rounds.length > 1 ? `<span class="tag">round ${rounds.length}</span>` : "";
     // A PR nobody is working on looks identical to a healthy open one. Seven
     // were stranded at once here — branch pushed, PR open, no process ever
@@ -630,7 +643,7 @@ function renderGithub() {
       <span class="ttl">${esc(p.title)}</span>
       <span class="hint">${esc(p.headRefName)} → ${esc(p.baseRefName)}</span>
       <span class="hint">+${esc(p.additions)}/-${esc(p.deletions)}</span>
-      ${roundNote}${stranded}${verdict}
+      ${roundNote}${stranded}${verdict}${detail}
     </div>`;
   }).join("") || '<div class="empty">No pull requests yet.</div>';
 }

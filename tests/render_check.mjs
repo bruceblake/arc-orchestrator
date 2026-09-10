@@ -95,7 +95,9 @@ api.setGH({ready: true, base: "development", prod: "main", unpromoted: 2,
   stranded: 1,
   prs: [
     {number: 7, state: "OPEN", title: "t", url: "u", headRefName: "task/a",
-     baseRefName: "development", additions: 1, deletions: 0, rounds: [], stranded: true},
+     baseRefName: "development", additions: 1, deletions: 0, stranded: true,
+     rounds: [{round: 1, approved: false, approvals: [], issues: 1,
+               detail: ["[GLM-5.3] <img src=x> ships no tests"]}]},
     {number: 8, state: "OPEN", title: "t", url: "u", headRefName: "task/b",
      baseRefName: "development", additions: 1, deletions: 0, rounds: [], stranded: false},
   ]});
@@ -106,6 +108,13 @@ if ((gh.match(/prrow stranded/g) || []).length !== 1) {
 }
 if (!document.querySelector("#gh-meta").innerHTML.includes("1 stranded")) {
   console.error("render_check: FAIL — the stranded count is not in the header"); process.exit(1);
+}
+if (!gh.includes("why it was sent back")) {
+  console.error("render_check: FAIL — review issues are not shown"); process.exit(1);
+}
+if (gh.includes("<img src=x>")) {
+  console.error("render_check: FAIL — a reviewer's text reached the DOM unescaped");
+  process.exit(1);
 }
 console.log("github rows rendered:", (gh.match(/class="prrow/g) || []).length);
 

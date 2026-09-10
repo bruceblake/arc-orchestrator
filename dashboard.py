@@ -1620,7 +1620,13 @@ def _github(store, repo=None):
                 "round": e.get("round"), "approved": e.get("approved"),
                 "approvals": e.get("approvals") or [],
                 "reviewers": e.get("reviewers") or [],
-                "issues": e.get("n_issues") or 0, "ts": _ts(e.get("ts"))})
+                "issues": e.get("n_issues") or 0,
+                # What they actually objected to, so the verdict is readable
+                # here rather than only on GitHub.
+                "detail": e.get("issues") or [],
+                "inconclusive": bool(e.get("inconclusive")),
+                "crashed": e.get("crashed") or [],
+                "ts": _ts(e.get("ts"))})
 
     ahead = git("rev-list", "--count",
                 f"{config.PROD_BRANCH}..{config.BASE_BRANCH}").strip()
