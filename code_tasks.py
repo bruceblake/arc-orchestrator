@@ -76,7 +76,7 @@ def load_taskfile(path, policy=None):
                 raise ValueError(f"task {tid}: unknown dep {d!r}")
     _topo(tasks)  # raises on cycles
     return {"repo": repo, "tasks": tasks, "title": data.get("project", {}).get("title", ""),
-            "policy": pol}
+            "pattern": data.get("project", {}).get("pattern", ""), "policy": pol}
 
 
 def _topo(tasks):
@@ -1015,6 +1015,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
 PLAN_SCHEMA_HINT = """\
 {"project": {"repo": "<abs path>", "title": "<short>",
+ "pattern": "<name from the graph-pattern library, e.g. fan-out-fan-in>",
  "tasks": [{"id": "<kebab-id>", "title": "...", "prompt": "<detailed spec>",
             "model": "gpt-oss-120b" | "DeepSeek-V4-Flash" | "GLM-5.3" | "Kimi-K3",
             "reviewer": "kimi" | "glm",
@@ -1160,6 +1161,12 @@ async def plan_tasks(goal, repo, out_path=None):
         "DeepSeek work may be reviewed by either. Split reviews between "
         "kimi and glm so neither idles nor saturates.\n\n"
         "GRAPH DESIGN (maximize safe parallelism):\n"
+        "- First choose ONE graph pattern for the plan from the pattern "
+        "library in docs/graph-patterns.md of the orchestrator repo: chain, "
+        "fan-out-fan-in, diamond, router, orchestrator-workers, "
+        "evaluator-optimizer, debate-vote, hierarchical. Record your choice "
+        "as \"pattern\": \"<name>\" in the project object (a label only — "
+        "the deps are still the whole graph).\n"
         "- 2-8 tasks. Fan out: every task that does NOT consume another "
         "task's output gets no deps and starts immediately at t=0.\n"
         "- Add a dep ONLY when a task truly reads code another task writes "
