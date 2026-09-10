@@ -281,7 +281,9 @@ async function tryFleet() {
 async function poll() {
   const before = window.scrollY;
   let ok = true, u = null, ag = null, pr = null;
-  try { u = await j('/api/usage?range=1h'); } catch (e) { ok = false; }
+  // phone.html sums u.series for tok1h, so it opts in with ?series=1 (series is
+  // omitted from /api/usage by default; usage.html/index.html never draw it).
+  try { u = await j('/api/usage?range=1h&series=1'); } catch (e) { ok = false; }
   try { ag = await j('/api/agents'); } catch (e) { ok = false; }
   try { pr = await j('/api/projects'); } catch (e) { ok = false; }
   if (u) {
