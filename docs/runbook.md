@@ -139,6 +139,35 @@ Open `http://localhost:8787/` (or the LAN/Tailscale URL `start.sh` prints).
 Clicking a running agent (a `driver:*` row under `/api/agents`) shows its live
 transcript via `/api/transcript`.
 
+### Enabling GitHub PR flow
+
+To have the orchestrator open a GitHub Pull Request after a successful merge, enable the PR flow:
+
+1. **Create a GitHub repository** for the project (or use an existing one).
+2. Add the remote to the local blessed clone:
+   ```bash
+   git -C ~/repos/<project> remote add origin <url>
+   ```
+3. Install the GitHub CLI if not already present (`apt install gh` or similar).
+4. Authenticate the CLI:
+   ```bash
+   gh auth login
+   ```
+   Follow the prompts to log in with your GitHub account and grant access.
+5. Verify that the CLI is authenticated:
+   ```bash
+   gh auth status
+   ```
+   It should report a logged-in user.
+   Verify the git remote with:
+   ```bash
+   git -C ~/repos/<project> remote -v
+   ```
+6. Confirm it is on: the project detail page shows a **PR readiness** hint line on the git block — `PRs on: <remote>` when ready, or `PRs off: <reason>` otherwise.
+7. Run a task as usual. On success, the orchestrator will emit a `task.pr_opened` event and the PR URL appears in the logs. If the remote is missing or the CLI is unauthenticated, the run will emit `task.pr_skipped` but the local merge still lands.
+
+The PR flow is additive — it never blocks the local merge. Enabling it simply adds a best-effort push and PR creation after the merge lock releases.
+
 ## 4. File and log locations
 
 All paths are under `/home/proxyie/arc-orchestrator` unless shown absolute.
