@@ -944,6 +944,21 @@ def _task_progress(ids):
             prog[base] = {"attempt": e.get("attempt"), "bytes": e.get("bytes") or 0,
                           "idle_s": e.get("idle_s"), "elapsed_s": e.get("elapsed_s"),
                           "cpu_delta_s": e.get("cpu_delta_s"), "ts": _ts(e.get("ts"))}
+    # Why the last gate rejected the task. Without this a fix loop is
+    # indistinguishable from progress: the console says "writing code" while
+    # the same gate rejects the same work over and over.
+    gate_fail = {}
+    for line in _load_event_lines():
+        if '"task.gate"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        tid = e.get("module") or e.get("task")
+        if tid in want:
+            gate_fail[tid] = bool(e.get("passed"))
+
     out = {}
     now = time.time()
     for tid, step in open_node.items():
@@ -961,6 +976,9 @@ def _task_progress(ids):
             "idle_s": idle, "elapsed_s": pr.get("elapsed_s"),
             "stale_report_s": round(age) if age is not None else None,
             "moving": bool(moving),
+            "last_gate_failed": gate_fail.get(tid) is False,
+            "gate_log": (f"{tid}-x{pr.get('attempt') or 1}.log"
+                         if gate_fail.get(tid) is False else None),
         }
     return out
 
@@ -1337,6 +1355,49 @@ def _agents(store):
 
 
 _TRANSCRIPT_RE = re.compile(r"^[\w.-]+\.jsonl$")
+
+
+def _task_deliverable(repo, task_id, want_patch=False):
+    """What a finished task actually changed, from its commit.
+
+    A merged task showed a green chip and nothing else — no way to see whether
+    it wrote the thing you asked for or something else entirely. The commit is
+    right there: gitstore.publish tags it `task(<id>): <title>`.
+    """
+    if not repo or not repo.is_dir():
+        return {"error": "repo not found"}
+    if not re.fullmatch(r"[\w.-]{1,80}", task_id or ""):
+        return {"error": "bad task id"}
+
+    def git(*args, limit=200000):
+        try:
+            r = subprocess.run(["git", "-C", str(repo), *args],
+                               capture_output=True, text=True, timeout=10)
+            return r.stdout[:limit] if r.returncode == 0 else ""
+        except Exception:
+            return ""
+
+    sha = git("log", "--format=%H", "-1", f"--grep=^task({task_id}):").strip()
+    if not sha:
+        return {"task": task_id, "found": False,
+                "reason": "no commit for this task — it never reached publish"}
+    subject = git("log", "-1", "--format=%s", sha).strip()
+    when = git("log", "-1", "--format=%cI", sha).strip()
+    stat = [l for l in git("show", "--stat", "--format=", sha).splitlines() if l.strip()]
+    files = []
+    for line in stat[:-1] if stat else []:
+        name, _, churn = line.partition("|")
+        if name.strip():
+            files.append({"path": name.strip(), "churn": churn.strip()})
+    out = {"task": task_id, "found": True, "sha": sha[:10], "subject": subject,
+           "when": when, "files": files,
+           "summary": stat[-1].strip() if stat else ""}
+    if want_patch:
+        # Bounded: a review diff can be huge and this renders in a drawer.
+        patch = git("show", "--format=", sha, limit=120000)
+        out["patch"] = patch
+        out["truncated"] = len(patch) >= 120000
+    return out
 
 
 def _transcript_tail(fname, tail):
@@ -1862,6 +1923,35 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_health(Handler.store))
             if u.path == "/api/metrics":
                 return self._json(_metrics(Handler.store))
+            if u.path == "/api/task-diff":
+                q = parse_qs(u.query)
+                fname = q.get("file", [""])[0]
+                if not re.fullmatch(r"[\w.-]+\.json", fname):
+                    return self._json({"error": "bad file name"}, 400)
+                tf = Path(config.TASKS_DIR) / fname
+                if not tf.is_file():
+                    return self._json({"error": "not found"}, 404)
+                try:
+                    proj = json.loads(tf.read_text(encoding="utf-8", errors="replace")).get("project") or {}
+                except Exception as exc:
+                    return self._json({"error": f"invalid task file: {exc}"}, 400)
+                return self._json(_task_deliverable(
+                    _valid_repo(proj.get("repo") or ""), q.get("task", [""])[0],
+                    want_patch=q.get("patch", ["0"])[0] == "1"))
+            if u.path == "/api/gate-log":
+                q = parse_qs(u.query)
+                fn = q.get("file", [""])[0]
+                if not re.fullmatch(r"[\w.-]+\.log", fn):
+                    return self._json({"error": "bad file name"}, 400)
+                path = Path(config.ROOT) / "logs" / "gates" / fn
+                if not path.is_file():
+                    return self._json({"error": "no gate log for this attempt"}, 404)
+                try:
+                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError as exc:
+                    return self._json({"error": str(exc)}, 500)
+                return self._json({"file": fn, "total_lines": len(lines),
+                                   "lines": lines[-200:]})
             if u.path == "/api/transcript":
                 q = parse_qs(u.query)
                 tail = q.get("tail", ["200"])[0]
