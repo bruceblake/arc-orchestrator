@@ -753,3 +753,48 @@ class AConflictingPullRequestIsRetried(unittest.TestCase):
         # Each resync rewrites the branch and costs a fresh review round.
         self.assertGreaterEqual(config.PR_MAX_RESYNCS, 1)
         self.assertLessEqual(config.PR_MAX_RESYNCS, 3)
+
+
+class ResumingAConflictedTask(unittest.TestCase):
+    """A conflict resume already knows the branch does not merge.
+
+    Without resyncing at publish, the task re-attaches to its PR, two reviewers
+    read the stale diff and approve it, pr_merge THEN discovers the conflict,
+    resyncs, and sends the changed diff back for two more reviewers. Four
+    scarce reviewer slots to land one task, and the first two read a diff that
+    was never going to be what merged.
+    """
+
+    def _graph(self, status):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        prior = [{"id": "t1", "status": status, "model": "gpt-oss-120b", "error": None}]
+        with capture_events():
+            return code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
+
+    def test_a_conflicted_task_resumes_at_publish(self):
+        self.assertIn("publish_t1", self._graph("conflict").starts)
+
+    def test_publish_is_where_the_resync_happens(self):
+        # The resync must precede review, not follow it: pr_merge's own resync
+        # is the fallback for a base that moves DURING the run.
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        pub = src[src.index("async def publish(ctx):\n            \"\"\"Commit"):]
+        pub = pub[:pub.index("async def pr_review")]
+        self.assertIn("sync_with_base", pub)
+        self.assertIn('prior_status == "conflict"', pub)
+
+    def test_the_resynced_branch_is_pushed_before_the_pr_is_reattached(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        pub = src[src.index("async def publish(ctx):\n            \"\"\"Commit"):]
+        pub = pub[:pub.index("async def pr_review")]
+        push = pub.index("push_task_branch(repo, tid)\n                number")
+        attach = pub.index("await gitstore.open_pr(repo, tid,\n"
+                           "                                           f\"task({tid})")
+        self.assertLess(push, attach,
+                        "the merge commit exists only locally until it is pushed")
+
+    def test_an_in_review_resume_does_not_resync(self):
+        # Nothing is known to be wrong with its diff; resyncing would rewrite
+        # the branch and invalidate reviews already in progress.
+        g = self._graph("in_review")
+        self.assertIn("publish_t1", g.starts)

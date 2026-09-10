@@ -676,6 +676,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)
+            # A conflict resume already KNOWS the branch does not merge, so
+            # resync here rather than discovering it at pr_merge. Otherwise two
+            # reviewers read a diff and approve it, pr_merge then finds the
+            # conflict, resyncs, and sends the CHANGED diff back for two more
+            # reviewers — four scarce reviewer slots to land one task.
+            resynced = False
+            if prior_status == "conflict" and alloc_res is None:
+                ok, conflicts, note = await gitstore.sync_with_base(wt, base)
+                resynced = ok
+                events.emit("task.resynced" if ok else "task.resync_failed",
+                            task=tid, base=base, note=note, files=conflicts[:20])
             impl = results.get(f"implement_{tid}", {})
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             head = await gitstore.publish(
@@ -690,6 +701,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # produced nothing — re-reviewing an identical diff would just
                 # burn reviewers to reach the same verdict, so let it fail.
                 reworked = f"pr_review_{tid}" in ctx.get("results", {})
+                if resynced:
+                    # The merge commit only exists locally until this runs, and
+                    # the re-attach path below does no pushing of its own.
+                    await gitstore.push_task_branch(repo, tid)
                 number, url, note = (None, None, None) if reworked else \
                     await gitstore.open_pr(repo, tid,
                                            f"task({tid}): {t['title']}", "", base)
