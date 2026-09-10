@@ -494,22 +494,22 @@ function renderProjects() {
   }).join("") || `<div class="empty">${SHOW_ARCHIVED ? "Nothing archived." : "No projects match this filter."}</div>`;
 
   document.querySelectorAll("#phase-filter [data-ph]").forEach(b =>
-    b.onclick = () => { PHASE_FILT = b.dataset.ph; loadProjects(); });
+    b.onclick = () => { PHASE_FILT = b.dataset.ph; renderProjects(); });
   document.querySelectorAll("#projects [data-toggle]").forEach(b =>
-    b.onclick = () => { OPEN_PHASES.done = !OPEN_PHASES.done; loadProjects(); });
+    b.onclick = () => { OPEN_PHASES.done = !OPEN_PHASES.done; renderProjects(); });
   document.querySelectorAll("#projects [data-archive-all]").forEach(b =>
     b.onclick = async () => {
       const done = PROJECTS.filter(p => p.phase === "done" && !p.archived);
       if (!done.length || !confirm(`Archive ${done.length} finished project(s)?\n\nTask files are not touched and they stay runnable.`)) return;
       for (const p of done) await jpost("/api/projects/archive", {file: p.file, archived: true});
-      loadProjects();
+      pollProjects();
     });
   document.querySelectorAll("#projects [data-arch]").forEach(b =>
     b.onclick = async ev => { ev.stopPropagation();
       const {code, body} = await jpost("/api/projects/archive",
         {file: b.dataset.arch, archived: b.dataset.on !== "1"});
       if (code !== 200) alert(body.error || "failed");
-      loadProjects();
+      pollProjects();
     });
   bindDagClicks("#projects");
 }
@@ -942,7 +942,7 @@ $("#btn-show-archived").onclick = () => {
   SHOW_ARCHIVED = !SHOW_ARCHIVED;
   $("#btn-show-archived").textContent = SHOW_ARCHIVED ? "show active" : "show archived";
   $("#btn-show-archived").classList.toggle("primary", SHOW_ARCHIVED);
-  loadProjects();
+  renderProjects();
 };
 $("#btn-new").onclick = () => { modal.classList.add("open"); $("#p-msg").textContent = ""; $("#j-msg").textContent = ""; };
 $("#modal-close").onclick = () => modal.classList.remove("open");

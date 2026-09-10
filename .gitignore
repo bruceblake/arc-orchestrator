@@ -1,13 +1,15 @@
 .env
 *.db
+*.db-shm
+*.db-wal
+*.db-journal
 .venv/
 __pycache__/
-*.pyclogs/*.lock
-logs/.run-queue.lock
-logs/events.jsonl.prefilter-bak
-logs/*.pre-check-bak
-logs/gates/
+*.pyc
 
-# Subagent investigation reports (regenerated on demand)
-PLANNER_DIAGNOSIS.md
-FLEET_EFFICIENCY.md
+# Runtime state. A task's verify gate runs inside its worktree, so transcripts,
+# logs and sqlite sidecars are produced there and `git add -A` at publish would
+# sweep them into the branch. logs/ must stay blanket-ignored: when a task
+# edit dropped it, the live event log went back under version control and the
+# next merge clobbered 1.3MB of fleet history.
+logs/

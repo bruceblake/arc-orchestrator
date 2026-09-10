@@ -75,6 +75,13 @@ if command -v node >/dev/null 2>&1; then
             echo "FAIL: $f has a JavaScript syntax error"; rc=1
         fi
     done
+    # A call to a function that does not exist is valid syntax and fails at
+    # RUNTIME, on click — node --check cannot see it, and neither could the
+    # DOM-reference check below. loadProjects() shipped that way.
+    if ! node tests/undefined_calls.mjs static/*.html; then
+        echo "FAIL: a page calls a function that is never defined"; rc=1
+    fi
+
     # Every $("#id") the script reaches for must exist in the markup.
     "$PY" - <<'PYEOF' || rc=1
 import re, pathlib, sys
