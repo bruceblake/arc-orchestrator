@@ -103,6 +103,47 @@ Typical honest gates:
 | Test suite | `npm test --silent` / `python -m pytest tests/` |
 | Contract grep | `test -f src/index.html && grep -q Hello src/index.html` |
 
+### Two rules a gate must follow
+
+**Use `./py`, never `.venv/bin/python`.** A gate runs inside the task's git
+worktree, and worktrees have no `.venv` — it is gitignored, so one is never
+checked out. `.venv/bin/python` there is "No such file or directory" no matter
+how correct the work is. That cost 26 implement attempts and 6 escalations
+across two tasks before it was found, then was reintroduced in four more task
+files. `./py` resolves the interpreter from the main worktree. `check.sh`
+fails any gate that still names `.venv/bin/python`.
+
+**Grep alone proves nothing.** A grep says a string is present, not that the
+change works — and it cannot tell a working config from a corrupted one. One
+task rewrote `.gitignore` into `*.pyclogs/*.lock`, which still contains the
+substring its gate grepped for, so the gate passed and the corruption landed.
+Make `./check.sh` the FIRST clause of any gate that touches code:
+
+```
+"verify_cmd": "./check.sh && test -f humanize.py && ./py -m unittest discover -s tests -t tests -k Humanize 2>&1 | grep -q 'OK'"
+```
+
+**A gate must FAIL before the task is done.** A gate that already passes on an
+unchanged tree tests nothing. Before running a task file, check that each
+gate's task-specific clause currently fails — and that it greps for something
+the task will CREATE, not for a symbol that has since been renamed. One gate
+grepped `miniDag` after that function had been consolidated into `taskDag`; it
+could never pass, and the task looped through three implement attempts before
+anyone noticed.
+
+### Tests are mandatory
+
+Every task that changes code must add or update tests, and the task prompt
+should say so explicitly. After the pre-PR review, `config.PR_REVIEWERS` (2)
+independent reviewers read the pull request and are instructed to **reject a
+code change that ships no test which would fail without it**. A task with no
+tests does not merge slowly — it loops through `PR_MAX_ROUNDS` and fails.
+
+Keep each task's tests in their own file where possible: two parallel tasks
+editing one test file will conflict.
+
+Documentation-only tasks are exempt.
+
 ### What the implementer sees (exactly)
 
 `code_tasks._impl_prompt` builds, verbatim:
@@ -254,6 +295,23 @@ Why it is shaped this way:
   `export.py`, `README.md`) so merges cannot collide.
 - **Single-dep lists**: each dependent lists exactly one dep; with
   `deps: [a, b]` only `b` gates the start (see section 2).
+
+## 4b. What happens to your task file
+
+```
+alloc (worktree on task/<id>, branched from development)
+  └─ implement ─ gate ─ review ─ publish (commit, push, OPEN PR)
+                                    └─ pr_review (2 reviewers, unanimous)
+                                         ├─ approved → pr_merge (squash into development)
+                                         └─ rejected → back to implement, same PR, max 3 rounds
+```
+
+Nothing is merged locally. The pull request is the gate, so a reviewer's
+rejection genuinely withholds the change. A task with `deps` starts only once
+its dependency's PR has **merged**, not merely opened.
+
+`development` reaches `main` only through `main.py code promote`, which opens
+a PR for a human to merge. The fleet never writes to `main`.
 
 ## 5. Authoring tips
 
