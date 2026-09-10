@@ -46,10 +46,10 @@ whoever writes a taskfile by hand) and is **enforced again by the loader**,
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review | 3 | 2 |
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review | 4 | 3 |
-| gpt-oss-120b | `opencode` (`OpencodeDriver`) | basic | **Implement only** | 10 | 8 |
-| DeepSeek-V4-Flash | `opencode` (`OpencodeDriver`) | medium | **Implement only** | 10 | 8 |
+| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review, PR-review | 3 | 3 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
+| gpt-oss-120b | `opencode` (`OpencodeDriver`) | basic | **Implement only** | 10 | 5 |
+| DeepSeek-V4-Flash | `opencode` (`OpencodeDriver`) | medium | **Implement, PR-review** | 10 | 5 |
 
 - **Tiers** (`config.IMPLEMENT_TIERS`): `basic` → gpt-oss-120b (very basic /
   mechanical work only), `medium` → DeepSeek-V4-Flash (moderate work only),
@@ -106,10 +106,22 @@ the implementer it reviews when a strong model implemented.
   (gpt-oss-120b / DeepSeek-V4-Flash implementations may be reviewed by
   either `kimi` or `glm` — never by themselves, since they cannot review at
   all.)
-- The review node (code_tasks.py:208) instantiates `KimiDriver("reviewer")`
-  or `OpencodeDriver("GLM-5.3", "reviewer")` accordingly and sends the full
+- The review node instantiates `KimiDriver("reviewer")` or
+  `OpencodeDriver("GLM-5.3", "reviewer")` accordingly and sends the full
   diff (`gitstore.diff_full`) with the original spec; the verdict must be
   JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
+- **`reviewer` and `pr_reviewer` are different roles.** `reviewer` is this
+  pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5),
+  and `DeepSeek-V4-Flash` may hold it even though it may not hold `reviewer`:
+  judging a bounded diff against a spec is a much smaller job than authoring
+  the change, and with three cross-family-eligible models a two-reviewer merge
+  gate is otherwise unreachable whenever Kimi or GLM implemented — which is
+  most tasks. `gpt-oss-120b` stays implement-only.
+- **Never keep a second list of who may review.** Eligibility is decided by
+  CONSTRUCTING the driver (`code_tasks._eligible_pr_reviewers`). A hand-kept
+  pool and the drivers' own role rules drifted apart once and it cost seven
+  pull requests: the pool offered DeepSeek, `OpencodeDriver` refused the role,
+  and the `ValueError` killed `pr_review` one second after each PR opened.
 - A failed review sends the issues back to the implementer as feedback
   (bounded fix loop, Rule 4); nothing merges without `pass: true`
   (edge `review_<tid> -> publish_<tid>`, code_tasks.py:257).
@@ -200,6 +212,31 @@ PR** in the life of the repo.
   updates the same PR and a new round begins.
 - The loop is bounded by `config.PR_MAX_ROUNDS` (default 3); exhausting it
   fails the task rather than looping forever.
+- **A reviewer that crashed did not review.** If no reviewer objects but one
+  never ran, the round is *inconclusive*, not a rejection: nothing is posted
+  as `--request-changes`, the task goes back to `pr_review` rather than to the
+  implementer, and the retry comes from `config.PR_MAX_INCONCLUSIVE` — kept
+  separate from `PR_MAX_ROUNDS` so infrastructure failures cannot eat the
+  rounds reserved for real disagreement about the code. A genuine objection
+  still beats a crash. Before this, a crash was posted to a public PR as
+  "changes requested: reviewer crashed" and sent the implementer to fix issues
+  that did not exist.
+- **A conflicting PR is resynced, not abandoned.** `pr_merge` merges the
+  current base into the task branch (`gitstore.sync_with_base`, which ABORTS
+  on failure so a genuine overlap never leaves a half-merged worktree for the
+  next publish to commit), pushes, and routes back to `pr_review` — the diff
+  changed, so the approval it already has no longer covers it. Bounded by
+  `config.PR_MAX_RESYNCS` (default 2). A real textual conflict still stops,
+  recording which files disagree.
+- **Resuming a task whose PR is open re-attaches to it.** `in_review` and
+  `conflict` tasks restart at `publish`, which finds the existing worktree and
+  the open PR and hands it straight to review. Do not "fix" this by starting
+  at `alloc`: alloc RESETS `task/<id>` to the base and discards the branch the
+  PR was opened from.
+- **A sibling's failure must not orphan an open PR.** The `publish ->
+  pr_review -> pr_merge` edges are marked `on_drain=True`, so they keep firing
+  after the graph starts draining. The rework edge deliberately is not:
+  draining must still refuse to start fresh model time.
 - Reviewers are told that a code change **must** ship tests that would fail
   without it (`config.REQUIRE_TESTS`), and to check for regressions in what
   calls the changed code. Documentation-only changes are exempt.
@@ -221,19 +258,43 @@ preferred `origin/<base>` whenever a remote existed, which meant the first
 skipped push would have every new task branch from a stale origin and revert
 merged work.
 
-### Rule 6 — Concurrency caps are two-layer; know both before launching anything
+### Rule 6 — Concurrency caps are THREE-layer; know all three before launching anything
 
 | Layer | Where | gpt-oss | deepseek | glm | kimi | Override |
 |---|---|---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
-| Driver semaphores | `config._MODEL_DRIVER_CAP` via `drivers._gate` → `config.driver_limit` | 8 | 8 | 3 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| Driver leases | `store.driver_leases` via `drivers._lease_acquire` — same caps, enforced **across processes** | shared | shared | shared | shared | `ARC_DRIVER_LEASE_TTL` |
+| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` via `drivers._gate` → `config.driver_limit`, and `store.driver_leases` across processes | 5 | 5 | 4 | 3 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode: **5** total | ← shared | ← shared | kimi: 3 | `ARC_HARNESS_LIMIT_<HARNESS>` |
+
+The driver numbers are the ceilings MEASURED on this fleet (2026-09-10), not
+guesses. gpt-oss and DeepSeek were previously configured at 8 against a real
+ceiling of 5, so the fleet generated its own 400s under load and blamed the
+provider.
+
+**The harness layer is the one people forget, and it is often the binding
+one.** Every opencode-backed model runs through ONE local binary backed by ONE
+~240MB sqlite store in `~/.local/share/opencode`. The per-model caps permit
+GLM 4 + DeepSeek 5 + gpt-oss 5 = **14** concurrent opencode processes against
+it. Measured with an identical prompt and a warm cache:
+
+| concurrent | 3 | 4 | 5 | 6 | 10 |
+|---|---|---|---|---|---|
+| succeeded | 3/3 | 4/4 | 5/5 | 4/6 | 4/10 |
+
+Past five it fails fast with an EMPTY stderr, which the fleet logged as
+`opencode exited 1: ` and retried four times per task — burning the retry
+ladder on self-inflicted contention. A model sitting under its own cap is NOT
+available if its harness is full, which is why `code_tasks._reviewer_pressure`
+scores a reviewer on whichever ceiling binds first.
 
 - The **account caps are per API key, not per process** — other agents and
   interactive sessions share them (config.py:88).
-- The **driver semaphores bound concurrent `kimi`/`opencode` harness
-  instances in this process** and sit deliberately below the account caps to
-  reserve headroom for interactive use (config.py:108, drivers.py:47).
+- The **driver semaphores bound concurrent harness instances of one MODEL in
+  this process**; `ARC_DRIVER_HEADROOM` reserves slots for interactive use of
+  the same account.
+- Acquisition order is always model gate → model lease → harness gate →
+  harness lease. One global order means no circular wait, and the scarce
+  harness slot is never held while queueing for a plentiful model slot.
 - The **driver leases close the cross-process hole**: semaphores alone let a
   terminal queue AND dashboard-launched runs each hold their own cap and stack
   to 2× the account limit. Before spawning a harness, `drivers._lease_acquire`

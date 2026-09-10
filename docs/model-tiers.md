@@ -10,10 +10,10 @@ that violates it. There is no runtime triage.
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review | 3 | 2 |
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review | 4 | 3 |
-| gpt-oss-120b | `opencode` (`OpencodeDriver`) | basic | Implement only | 10 | 8 |
-| DeepSeek-V4-Flash | `opencode` (`OpencodeDriver`) | medium | Implement only | 10 | 8 |
+| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review, PR-review | 3 | 3 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
+| gpt-oss-120b | `opencode` (`OpencodeDriver`) | basic | Implement only | 10 | 5 |
+| DeepSeek-V4-Flash | `opencode` (`OpencodeDriver`) | medium | Implement, PR-review | 10 | 5 |
 
 - **Per-account API cap** — `config.FAMILIES[*].limit` (`gpt-oss` 10,
   `glm` 4, `kimi` 3, `deepseek` 10). These are per-account ARC limits, not

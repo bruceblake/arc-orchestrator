@@ -24,7 +24,8 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 | `/api/transcript` | `file` = `<task>-<role>-<attempt>.jsonl`, `tail` = 1..1000 (default 200) | Last N lines of a harness transcript in `logs/harness/` |
 | `/api/summary` | none | Research/build stats, critique matrix, family limits, event-log and build-dir paths |
 | `/api/metrics` | none | Per-model run/token/stall rollup plus a code-task status rollup — see [Metrics endpoint](#metrics-endpoint) |
-| `/api/events` | `after` = 0-based line offset into `logs/events.jsonl` | Batch of parsed events plus `next` offset and `reset` flag |
+| `/api/queue` | none | LIVE capacity: `running` and `waiting` attempt rows (task, role, model, seconds, why), one `models` row per model and one `harnesses` row per harness with `cap`/`running`/`waiting`/`free`, and `totals` including `reviewers_waiting` |
+| `/api/events` | `after` = 0-based line offset into `logs/events.jsonl`; `since` = epoch seconds (seeds the cursor, first request only) | Batch of parsed events plus `next` offset, `total`, and `reset` flag |
 | `/api/graphs` | none | Static node/edge topology of the research-round and build graphs |
 | `/api/code` | `file` = path relative to the build output dir | Contents of one generated build file (404 outside the build dir) |
 
@@ -75,6 +76,31 @@ $ curl -s localhost:8787/api/metrics | python3 -m json.tool
 ```
 
 (sample trimmed to one model row.)
+
+## Model slots panel
+
+Answers two questions the rest of the UI could not: **what is holding a model
+slot right now, and who is queued behind them.**
+
+- **Capacity cards** — one per harness *and* one per model, pips for held vs
+  free. Harness rows come first because the harness is frequently the binding
+  ceiling: every opencode model can sit under its own cap while the single
+  opencode pool is saturated, which reads as "idle" exactly when it is most
+  wrong. Amber = at cap, red = a queue behind it.
+- **Attempt rows** — each running and queued attempt with its task, role,
+  model, wait time, and *why* it is waiting: `fleet at cap (4/4)`,
+  `opencode pool full`, or `waiting for a slot in its own run`.
+- **PR reviewers are separated out** in purple, with their own count and a
+  "reviewers only" filter. They are the fleet's bottleneck — `PR_REVIEWERS`
+  scarce cross-family models per round — and averaging them into one
+  "N waiting" number hid which queue was actually stuck.
+
+Data comes from `dashboard._queue`: **running** from the `driver_leases` table
+(that IS the definition of occupying a slot, and it carries a pid so a killed
+run cannot pin phantom capacity), **waiting** from pairing each
+`driver.queued` with its terminal event. An attempt holding its model lease
+while queued for the harness lease counts as waiting, not running — it is not
+running until it holds every slot it needs.
 
 ## Notes
 
