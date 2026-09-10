@@ -400,6 +400,38 @@ to `logs/orchbench/<stamp>/results.jsonl`; the table is
 `harness_runs` rows are produced exactly as in normal runs (Rule 7 holds
 for benchmarks too).
 
+### GitHub operations agents (gh_ops.py)
+
+Standalone `gh`-CLI agents for GitHub housekeeping — NOT part of the governed
+code pipeline (no worktree, no gate, no publish; Rules 1–8 do not apply):
+
+- **`issue-triager`** — `main.py gh triage <repo> [--apply-labels] [--model
+  Kimi-K3|GLM-5.3]`: classifies open issues (kind bug|feature|question|docs,
+  size S|M|L, recommended tier per `config.IMPLEMENT_TIERS`), prints a triage
+  table, and writes a ready-to-run taskfile to `~/tasks/<repo>-issues.json`
+  with correct cross-review pairing (fill in each `verify_cmd` and dry-run
+  before executing — Rules 4/8 apply once it becomes a taskfile).
+- **`issue-maker`** — `main.py gh issue "<desc>" <repo> [--create]`: drafts a
+  structured issue (title; body with context/repro/acceptance) and prints it.
+- **`pr-reviewer`** — `main.py gh pr-review <repo> <N> [--post]`: reviews a PR
+  under the same verdict JSON contract as internal review (it reuses
+  `code_tasks._parse_verdict`; see docs/orchestration-contract.md).
+
+Only **Kimi-K3** and **GLM-5.3** may hold these three roles —
+`drivers.KimiDriver.__init__` / `drivers.OpencodeDriver.__init__` raise
+`ValueError` if gpt-oss-120b or DeepSeek-V4-Flash is given one (same
+enforcement pattern as Rule 2). Default model `config.GH_MODEL`
+(`ARC_GH_MODEL`, default Kimi-K3); each `gh` subprocess is bounded by
+`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 60 s).
+
+**Preview by default.** `--apply-labels`, `--create`, and `--post` are the
+ONLY paths that write to GitHub; without them every command is read-only.
+Every gh-touching command checks `gh auth status` first and exits with
+`run: gh auth login` when unauthenticated (drafting/printing need no gh).
+These agents do not change publishing: project publishes still merge via
+`gitstore` exactly as Rule 5 defines; a gh_ops PR-publishing mode is a future
+policy hook and is deliberately not implemented here.
+
 ---
 
 ## 4. Repo file map
@@ -415,6 +447,7 @@ Top-level Python modules (one role each):
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
+| `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
 | `gitstore.py` | The only git actor: blessed clone `~/repos/<project>`, worktree `alloc`/`publish`/`merge_to_main`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout) |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), and `code {plan,run,status,bench}` |

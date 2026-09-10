@@ -611,3 +611,40 @@ class ReviewingAnOpenPullRequest(unittest.TestCase):
         for role in ("pr_reviewer", "reviewer", "planner"):
             with self.assertRaises(ValueError):
                 drivers.OpencodeDriver("gpt-oss-120b", role)
+
+
+class GitHubOpsRoles(unittest.TestCase):
+    """Who may hold the gh_ops roles (issue-triager / issue-maker /
+    pr-reviewer): only Kimi-K3 and GLM-5.3 — the same enforcement pattern as
+    review eligibility, so a hand-kept pool can never drift from the drivers'
+    own role rules."""
+
+    GH_ROLES = ("issue-triager", "issue-maker", "pr-reviewer")
+
+    def test_kimi_may_hold_every_gh_role(self):
+        for role in self.GH_ROLES:
+            self.assertEqual(drivers.KimiDriver(role).role, role)
+
+    def test_glm_may_hold_every_gh_role(self):
+        for role in self.GH_ROLES:
+            self.assertEqual(
+                drivers.OpencodeDriver("GLM-5.3", role).role, role)
+
+    def test_gpt_oss_may_hold_no_gh_role(self):
+        for role in self.GH_ROLES:
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("gpt-oss-120b", role)
+
+    def test_deepseek_may_hold_no_gh_role(self):
+        # pr_reviewer (an open-PR merge review) is allowed for DeepSeek; the
+        # hyphenated gh_ops 'pr-reviewer' is a different role and is not.
+        for role in self.GH_ROLES:
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("DeepSeek-V4-Flash", role)
+
+    def test_existing_roles_still_construct(self):
+        # The gh roles were added without breaking planner|reviewer|implementer.
+        for role in ("planner", "reviewer", "implementer"):
+            self.assertEqual(drivers.KimiDriver(role).role, role)
+            self.assertEqual(
+                drivers.OpencodeDriver("GLM-5.3", role).role, role)
