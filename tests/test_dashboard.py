@@ -4,6 +4,7 @@ These numbers govern operator decisions — whether the fleet looks wedged,
 whether to throttle — so over-counting is not a cosmetic bug.
 """
 import json
+import os
 import pathlib
 import tempfile
 import time
@@ -330,3 +331,267 @@ class ProjectPayloadShape(unittest.TestCase):
         src = pathlib.Path("dashboard.py").read_text()
         self.assertIn('"progress": {"done"', src,
                       "progress must stay the {done,total} rollup")
+
+
+class LiveQueueView(unittest.TestCase):
+    """What /api/queue reports as running vs waiting.
+
+    These numbers tell the operator whether the fleet is busy or wedged, and
+    which model the PR reviewers are stuck behind. A phantom queue entry — one
+    left by a run that was killed — is worse than no queue view at all, so the
+    liveness filtering is tested as carefully as the happy path.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.log = Path(self.dir) / "events.jsonl"
+        self._orig = config.EVENTS_LOG
+        config.EVENTS_LOG = str(self.log)
+        dashboard._lines_cache["key"] = None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        config.EVENTS_LOG = self._orig
+        dashboard._lines_cache["key"] = None
+
+    def _write(self, *events_):
+        self.log.write_text("".join(json.dumps(e) + "\n" for e in events_))
+        dashboard._lines_cache["key"] = None
+
+    def _ev(self, type, task, model, role="pr_reviewer", age=5, **kw):
+        return dict(type=type, task=task, model=model, role=role, attempt=1,
+                    pid=os.getpid(), ts=time.time() - age, **kw)
+
+    def _store(self, leases=()):
+        class S:
+            def driver_lease_rows(self_):
+                return list(leases)
+        return S()
+
+    def test_a_queued_attempt_with_no_start_is_waiting(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3"))
+        q = dashboard._queue(self._store())
+        self.assertEqual(q["totals"]["waiting"], 1)
+        self.assertEqual(q["waiting"][0]["task"], "t1")
+
+    def test_driver_start_settles_the_wait(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=9),
+                    self._ev("driver.start", "t1", "Kimi-K3", age=8))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_done_and_error_also_settle_it(self):
+        for terminal in ("driver.done", "driver.error", "driver.cancelled",
+                         "driver.timeout", "driver.cap_timeout"):
+            with self.subTest(terminal=terminal):
+                self._write(self._ev("driver.queued", "t1", "GLM-5.3", age=9),
+                            self._ev(terminal, "t1", "GLM-5.3", age=8))
+                self.assertEqual(
+                    dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_a_wait_left_by_a_dead_run_is_not_shown(self):
+        e = self._ev("driver.queued", "t1", "Kimi-K3")
+        e["pid"] = 2 ** 22  # never a live pid
+        self._write(e)
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_a_wait_that_has_gone_quiet_is_not_shown(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3",
+                             age=dashboard.WAIT_STALE_S + 60))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_it_separates_the_process_queue_from_the_fleet_queue(self):
+        self._write(self._ev("driver.slot_wait", "t1", "GLM-5.3"),
+                    self._ev("driver.cap_wait", "t2", "GLM-5.3", in_use=4, cap=4))
+        scopes = {w["task"]: w["scope"] for w in dashboard._queue(self._store())["waiting"]}
+        self.assertEqual(scopes, {"t1": "process", "t2": "fleet"})
+
+    def test_pr_reviewers_are_counted_separately_from_implementers(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", role="pr_reviewer"),
+                    self._ev("driver.queued", "t2", "Kimi-K3", role="implementer"))
+        q = dashboard._queue(self._store())
+        self.assertEqual(q["totals"]["waiting"], 2)
+        self.assertEqual(q["totals"]["reviewers_waiting"], 1)
+        kimi = next(m for m in q["models"] if m["model"] == "Kimi-K3")
+        self.assertEqual(kimi["reviewers_waiting"], 1)
+
+    def test_running_comes_from_live_leases_and_reports_free_slots(self):
+        self._write(self._ev("driver.start", "t1", "Kimi-K3", role="pr_reviewer"))
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "Kimi-K3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": time.time() - 30}]))
+        self.assertEqual(q["totals"]["running"], 1)
+        self.assertEqual(q["running"][0]["role_label"], "PR review")
+        kimi = next(m for m in q["models"] if m["model"] == "Kimi-K3")
+        self.assertEqual((kimi["running"], kimi["free"]), (1, kimi["cap"] - 1))
+
+    def test_a_lease_whose_run_died_does_not_pin_a_slot(self):
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "Kimi-K3", "pid": 2 ** 22, "task": "t1",
+             "acquired_at": time.time() - 30}]))
+        self.assertEqual(q["totals"]["running"], 0)
+
+    def test_every_known_model_appears_even_when_idle(self):
+        self._write()
+        models = {m["model"] for m in dashboard._queue(self._store())["models"]}
+        self.assertIn("Kimi-K3", models)
+        self.assertIn("GLM-5.3", models)
+
+    def test_a_harness_wait_is_shown_under_the_real_model(self):
+        # drivers report the harness lease with report_as=<real model> so one
+        # attempt does not split into two rows, one of them under a model name
+        # ("harness:opencode") that does not exist.
+        self._write(self._ev("driver.cap_wait", "t1", "GLM-5.3",
+                             scope="harness", harness="opencode", cap=5))
+        q = dashboard._queue(self._store())
+        self.assertEqual(len(q["waiting"]), 1)
+        row = q["waiting"][0]
+        self.assertEqual(row["model"], "GLM-5.3")
+        self.assertEqual(row["scope"], "harness")
+        self.assertEqual(q["harnesses"][0]["waiting"], 1)
+
+    def test_a_harness_lease_is_capacity_not_a_second_running_task(self):
+        now = time.time()
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": now - 10},
+            {"id": 2, "model": "harness:opencode", "pid": os.getpid(),
+             "task": "t1", "acquired_at": now - 10}]))
+        self.assertEqual(q["totals"]["running"], 1)
+        oc = next(h for h in q["harnesses"] if h["harness"] == "opencode")
+        self.assertEqual((oc["running"], oc["free"]), (1, oc["cap"] - 1))
+
+    def test_harness_rows_never_appear_as_models(self):
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "harness:opencode", "pid": os.getpid(),
+             "task": "t1", "acquired_at": time.time()}]))
+        self.assertEqual([m for m in q["models"]
+                          if m["model"].startswith("harness:")], [])
+
+    def test_a_task_queued_for_the_harness_is_not_also_reported_running(self):
+        # It holds its model lease but not yet the harness lease nested inside
+        # it. Reporting it as both running and queued double-counts one attempt.
+        self._write(self._ev("driver.cap_wait", "t1", "GLM-5.3",
+                             scope="harness", harness="opencode", cap=5))
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": time.time() - 5}]))
+        self.assertEqual(q["totals"]["running"], 0)
+        self.assertEqual(q["totals"]["waiting"], 1)
+
+    def test_a_task_holding_every_slot_is_reported_running(self):
+        self._write(self._ev("driver.start", "t1", "GLM-5.3"))
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": time.time() - 5}]))
+        self.assertEqual((q["totals"]["running"], q["totals"]["waiting"]), (1, 0))
+
+    def test_a_start_settles_a_cap_wait_from_the_same_attempt(self):
+        # cap_wait and driver.start must key identically, or the wait is never
+        # cleared and the panel shows a queue that has already been served.
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=30),
+                    self._ev("driver.cap_wait", "t1", "Kimi-K3", age=20,
+                             in_use=3, cap=3),
+                    self._ev("driver.start", "t1", "Kimi-K3", age=10))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
+
+    def test_a_cap_wait_with_no_start_is_still_a_wait(self):
+        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=30),
+                    self._ev("driver.cap_wait", "t1", "Kimi-K3", age=20,
+                             in_use=3, cap=3))
+        self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 1)
+
+
+class SeekingIntoTheEventLog(unittest.TestCase):
+    """Finding where a time window starts, without walking the whole log.
+
+    The dashboard only counts TODAY's merges and failures, but its client
+    walked the event log from line 0 on every page load — the entire history
+    the fleet has ever emitted, which rotates only at 100MB.
+    """
+
+    def _lines(self, *ts):
+        return [json.dumps({"ts": t, "type": "x"}) for t in ts]
+
+    def test_it_finds_the_first_event_at_the_cutoff(self):
+        lines = self._lines(1, 2, 3, 4, 5)
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 3), 2)
+
+    def test_an_exact_match_is_included_not_skipped(self):
+        lines = self._lines(10, 20, 30)
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 20), 1)
+
+    def test_a_cutoff_before_everything_returns_the_start(self):
+        self.assertEqual(dashboard._first_event_at_or_after(self._lines(5, 6), 1), 0)
+
+    def test_a_cutoff_after_everything_returns_the_end(self):
+        lines = self._lines(5, 6)
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 99), len(lines))
+
+    def test_an_empty_log_is_not_an_error(self):
+        self.assertEqual(dashboard._first_event_at_or_after([], 5), 0)
+
+    def test_malformed_and_ts_less_lines_are_stepped_over(self):
+        # A bisect cannot do this, which is why the scan is linear.
+        lines = [json.dumps({"ts": 1, "type": "x"}), "{not json",
+                 json.dumps({"type": "no-ts"}),
+                 json.dumps({"ts": 9, "type": "x"})]
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 9), 3)
+
+    def test_it_seeks_rather_than_scanning_from_zero(self):
+        lines = self._lines(*range(1, 501))
+        self.assertEqual(dashboard._first_event_at_or_after(lines, 480), 479)
+
+
+class StrandedPullRequests(unittest.TestCase):
+    """A PR nobody is working on looks identical to a healthy open one.
+
+    This is the failure that cost this repo the most: publish opened the PR,
+    pr_review never ran, the run ended, and the branch sat on GitHub with no
+    process ever coming back for it. Seven at once, and the UI showed seven
+    ordinary open pull requests. The detector is deliberately conservative —
+    calling a live PR abandoned is worse than staying quiet.
+    """
+
+    LIVE = "/t/live.json"
+    IDLE = "/t/idle.json"
+
+    def _owner(self, status="in_review", taskfile=None):
+        return {"t1": {"id": "t1", "status": status,
+                       "taskfile": taskfile or self.IDLE}}
+
+    def _pr(self, **kw):
+        base = {"state": "OPEN", "number": 1, "task": "t1"}
+        base.update(kw)
+        return base
+
+    def test_an_open_pr_with_no_run_is_stranded(self):
+        self.assertTrue(dashboard._pr_is_stranded(
+            self._pr(), self._owner(), {self.LIVE}))
+
+    def test_a_pr_whose_project_is_running_is_not(self):
+        self.assertFalse(dashboard._pr_is_stranded(
+            self._pr(), self._owner(taskfile=self.LIVE), {self.LIVE}))
+
+    def test_a_closed_or_merged_pr_is_never_stranded(self):
+        for state in ("MERGED", "CLOSED"):
+            self.assertFalse(dashboard._pr_is_stranded(
+                self._pr(state=state), self._owner(), {self.LIVE}))
+
+    def test_a_finished_task_is_not_stranded(self):
+        for status in ("merged", "failed"):
+            self.assertFalse(dashboard._pr_is_stranded(
+                self._pr(), self._owner(status=status), {self.LIVE}))
+
+    def test_nothing_is_reported_when_the_run_list_is_unreadable(self):
+        # live=None means we could not tell. Report nothing, not everything.
+        self.assertFalse(dashboard._pr_is_stranded(self._pr(), self._owner(), None))
+
+    def test_a_pr_the_fleet_does_not_own_is_left_alone(self):
+        # Probably a human's branch; calling their PR abandoned is worse than
+        # saying nothing.
+        self.assertFalse(dashboard._pr_is_stranded(
+            self._pr(task=None, headRefName="feature/mine"), self._owner(), set()))
+
+    def test_the_task_is_recovered_from_the_branch_name(self):
+        pr = self._pr(task=None, headRefName="task/t1")
+        self.assertTrue(dashboard._pr_is_stranded(pr, self._owner(), set()))

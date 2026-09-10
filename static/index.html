@@ -104,6 +104,44 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .gauge > i { display: block; height: 100%; background: var(--accent); }
 .mcap.atcap .gauge > i { background: var(--warn); }
 .mcap.over .gauge > i { background: var(--err); }
+/* --- model slots: who holds capacity and who is queued behind them --- */
+.slots { display: flex; gap: 10px; flex-wrap: wrap; }
+.slot { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; min-width: 158px; }
+.slot.busy { border-color: var(--accent); }
+.slot.full { border-color: var(--warn); }
+.slot.queued { border-color: var(--err); }
+.slot-h { display: flex; align-items: baseline; gap: 6px; font-size: 12px; }
+.slot-h b { color: var(--text); font-weight: 600; }
+.slot-h .n { margin-left: auto; color: var(--dim); font-size: 11px; }
+.pips { display: flex; gap: 3px; margin: 6px 0 4px; }
+.pip { flex: 1; height: 7px; border-radius: 2px; background: #21262d; }
+.pip.on { background: var(--accent); }
+.slot.full .pip.on { background: var(--warn); }
+.qbar { display: flex; gap: 3px; }
+.qpip { width: 7px; height: 7px; border-radius: 2px; background: var(--err); opacity: .75; }
+.qpip.rev { background: var(--purple); opacity: 1; }
+.slot-q { font-size: 11px; color: var(--dim); margin-top: 4px; }
+.prrow.stranded { border-left: 2px solid var(--warn); padding-left: 6px; }
+.prissues { flex-basis: 100%; margin-top: 4px; font-size: 11px; }
+.prissues summary { cursor: pointer; color: var(--dim); }
+.prissues div { color: var(--text); padding: 4px 0 4px 10px;
+                border-left: 2px solid var(--border); margin-top: 3px;
+                white-space: pre-wrap; }
+.slot.harness { background: #12171e; }
+.tagh { font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
+        color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0 4px; }
+.slot-q .rev { color: var(--purple); }
+.qrows { margin-top: 10px; display: flex; flex-direction: column; gap: 3px; }
+.qrow { display: flex; align-items: center; gap: 8px; font-size: 11px; padding: 3px 6px;
+        border-radius: 5px; background: #0d1117; border: 1px solid var(--border); }
+.qrow.rev { border-color: var(--purple); }
+.qrow .who { color: var(--text); font-family: ui-monospace, monospace; }
+.qrow .role { font-size: 10px; padding: 0 5px; border-radius: 8px;
+              border: 1px solid var(--border); color: var(--dim); }
+.qrow.rev .role { border-color: var(--purple); color: var(--purple); }
+.qrow .wait { margin-left: auto; color: var(--warn); font-variant-numeric: tabular-nums; }
+.qrow.running .wait { color: var(--ok); }
+.qrow .why { color: var(--dim); }
 .problems { margin-top: 8px; max-height: 160px; overflow: auto; }
 .problems div { padding: 2px 0; font-size: 11px; border-bottom: 1px solid var(--border); }
 .errbox { margin-top: 6px; border-left: 2px solid var(--err); padding: 3px 0 3px 8px;
@@ -189,6 +227,16 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       </h2>
       <div class="health" id="health-models"></div>
       <div class="problems" id="health-problems" style="display:none"></div>
+    </div>
+    <div class="panel" id="slots-panel">
+      <h2>Model slots <span class="hint" id="slots-meta">idle</span>
+        <span style="flex:1"></span>
+        <button class="act seg on" id="sl-tab-all" data-sl="all">everything</button>
+        <button class="act seg" id="sl-tab-rev" data-sl="rev">reviewers only</button>
+      </h2>
+      <div class="slots" id="slots"></div>
+      <div class="qrows" id="slot-rows"></div>
+      <div class="empty" id="slots-empty" style="display:none">Nothing is running or queued — every model slot is free.</div>
     </div>
     <div class="panel" id="agents-panel">
       <h2>Agents <span class="hint" id="agents-meta"></span>
@@ -560,9 +608,10 @@ function renderGithub() {
     return;
   }
   const open = (d.prs || []).filter(p => p.state === "OPEN");
-  $("#gh-meta").textContent =
-    `(${open.length} open · ${d.base} → ${d.prod}` +
-    `${d.unpromoted ? ` · ${d.unpromoted} commit${d.unpromoted === 1 ? "" : "s"} unpromoted` : " · in sync"})`;
+  $("#gh-meta").innerHTML =
+    `(${open.length} open · ${esc(d.base)} → ${esc(d.prod)}` +
+    `${d.unpromoted ? ` · ${d.unpromoted} commit${d.unpromoted === 1 ? "" : "s"} unpromoted` : " · in sync"})` +
+    (d.stranded ? ` <span class="warn">· ${d.stranded} with no run</span>` : "");
   const repo = $("#gh-repo");
   if (repo && d.repo_url) repo.href = d.repo_url;
   $("#gh-prs").innerHTML = (d.prs || []).slice(0, 10).map(p => {
@@ -572,15 +621,29 @@ function renderGithub() {
       ? '<span class="hint">no fleet review recorded</span>'
       : last.approved
         ? `<span class="good">✓ ${(last.approvals || []).map(esc).join(" + ")}</span>`
-        : `<span class="bad">✗ changes requested${last.issues ? ` · ${last.issues} issue${last.issues === 1 ? "" : "s"}` : ""}</span>`;
+        : last.inconclusive
+          ? `<span class="warn">⟳ no verdict — ${(last.crashed || []).map(short).map(esc).join(", ") || "a reviewer"} could not run</span>`
+          : `<span class="bad">✗ changes requested${last.issues ? ` · ${last.issues} issue${last.issues === 1 ? "" : "s"}` : ""}</span>`;
+    // What the reviewers actually said. A count told an operator nothing about
+    // whether the objection was real; the text lived only on GitHub.
+    const detail = (last && (last.detail || []).length)
+      ? `<details class="prissues"><summary>why it was sent back</summary>${
+          (last.detail || []).map(i => `<div>${esc(i)}</div>`).join("")}</details>`
+      : "";
     const roundNote = rounds.length > 1 ? `<span class="tag">round ${rounds.length}</span>` : "";
-    return `<div class="prrow">
+    // A PR nobody is working on looks identical to a healthy open one. Seven
+    // were stranded at once here — branch pushed, PR open, no process ever
+    // coming back — and nothing in the UI said so.
+    const stranded = p.stranded
+      ? '<span class="warn" title="No run is currently working on this PR — either its project is queued behind others, or its run ended before the review finished. Re-run the project to pick it back up.">◌ no run</span>'
+      : "";
+    return `<div class="prrow${p.stranded ? " stranded" : ""}">
       <a class="num" href="${esc(p.url)}" target="_blank" rel="noopener">#${esc(p.number)}</a>
       <span class="prstate ${esc(p.state)}">${esc(p.state.toLowerCase())}</span>
       <span class="ttl">${esc(p.title)}</span>
       <span class="hint">${esc(p.headRefName)} → ${esc(p.baseRefName)}</span>
       <span class="hint">+${esc(p.additions)}/-${esc(p.deletions)}</span>
-      ${roundNote}${verdict}
+      ${roundNote}${stranded}${verdict}${detail}
     </div>`;
   }).join("") || '<div class="empty">No pull requests yet.</div>';
 }
@@ -856,6 +919,88 @@ async function pollFleet() {
   } catch (e) { markFail("fleet", true); }
 }
 
+// ---- live model slots: who holds capacity, who is queued behind them ----
+// The reviewer queue is the fleet's real bottleneck (PR_REVIEWERS scarce
+// cross-family models per PR round), so reviewers are given their own colour,
+// their own count, and their own filter rather than being averaged into a
+// single "N waiting" number that hides which queue is actually stuck.
+let SLOT_VIEW = "all", SLOTS = null;
+
+function slotCard(m) {
+  const cls = m.waiting ? "queued" : m.running >= m.cap ? "full" : m.running ? "busy" : "";
+  const pips = Array.from({length: m.cap},
+    (_, i) => `<i class="pip${i < m.running ? " on" : ""}"></i>`).join("");
+  const q = Array.from({length: Math.min(m.waiting, 12)}, (_, i) =>
+    `<i class="qpip${i < m.reviewers_waiting ? " rev" : ""}"></i>`).join("");
+  const revs = m.reviewers_waiting
+    ? ` · <span class="rev">${m.reviewers_waiting} review${m.reviewers_waiting > 1 ? "s" : ""}</span>` : "";
+  return `<div class="slot ${cls}${m.isHarness ? " harness" : ""}">
+    <div class="slot-h"><b>${esc(m.pretty)}</b>${m.isHarness ? '<span class="tagh">harness</span>' : ""}<span class="n">${m.running}/${m.cap}</span></div>
+    <div class="pips">${pips}</div>
+    ${m.waiting ? `<div class="qbar">${q}</div>
+      <div class="slot-q">${m.waiting} queued${revs}</div>`
+      : `<div class="slot-q">${m.free} free</div>`}
+  </div>`;
+}
+
+function slotRow(r, running) {
+  const rev = r.role === "pr_reviewer";
+  const why = running ? "holding a slot"
+    : r.scope === "harness"
+      ? `${r.harness || "harness"} pool full${r.cap ? ` (cap ${r.cap})` : ""}`
+      : r.scope === "fleet"
+        ? `fleet at cap${r.cap ? ` (${r.in_use}/${r.cap})` : ""}`
+        : "waiting for a slot in its own run";
+  return `<div class="qrow${rev ? " rev" : ""}${running ? " running" : ""}">
+    <span>${running ? "▶" : "⏳"}</span>
+    <span class="who">${esc(r.task)}</span>
+    <span class="role">${esc(r.role_label || "working")}</span>
+    <span class="why">${esc(r.pretty)} · ${why}</span>
+    <span class="wait">${tick(r.seconds)}</span>
+  </div>`;
+}
+
+function renderSlots(q) {
+  SLOTS = q;
+  const t = q.totals || {};
+  const revWait = t.reviewers_waiting || 0;
+  $("#slots-meta").innerHTML = t.running || t.waiting
+    ? `${t.running} running · ${t.waiting} queued`
+      + (revWait ? ` · <span style="color:var(--purple)">${revWait} reviewer${revWait > 1 ? "s" : ""} blocked</span>` : "")
+      + ` · ${t.capacity} slots total`
+    : "idle";
+  // Harness rows first: opencode's own pool is usually the binding limit, and
+  // when it is saturated every model looks comfortably under its cap while
+  // nothing moves.
+  const hs = (q.harnesses || []).map(h => slotCard({
+    pretty: h.harness, cap: h.cap, running: h.running, waiting: h.waiting,
+    free: h.free, reviewers_waiting: 0, isHarness: true,
+  })).join("");
+  $("#slots").innerHTML = hs + (q.models || []).map(slotCard).join("");
+  const revOnly = SLOT_VIEW === "rev";
+  const keep = r => !revOnly || r.role === "pr_reviewer";
+  const rows = (q.waiting || []).filter(keep).map(r => slotRow(r, false))
+    .concat((q.running || []).filter(keep).map(r => slotRow(r, true)));
+  $("#slot-rows").innerHTML = rows.join("");
+  $("#slots-empty").style.display = rows.length ? "none" : "";
+  $("#slots-empty").textContent = revOnly && (t.running || t.waiting)
+    ? "No PR reviewers running or queued right now."
+    : "Nothing is running or queued — every model slot is free.";
+}
+
+async function pollSlots() {
+  try { renderSlots(await jget("/api/queue")); markFail("queue", false); }
+  catch (e) { markFail("queue", true); }
+}
+
+for (const b of document.querySelectorAll("[data-sl]")) {
+  b.onclick = () => {
+    SLOT_VIEW = b.dataset.sl;
+    for (const o of document.querySelectorAll("[data-sl]")) o.classList.toggle("on", o === b);
+    if (SLOTS) renderSlots(SLOTS);
+  };
+}
+
 // ---- today's merged/failed via the incremental /api/events cursor ----
 const dayStart = () => { const d = new Date(); d.setHours(0, 0, 0, 0); return d.getTime() / 1000; };
 let EV_NEXT = 0, EV_DAY = dayStart(), TODAY = {merged: 0, failed: 0, conflict: 0};
@@ -873,7 +1018,10 @@ async function initEvents() {
   try {
     let after = 0, chunks = 0;
     while (chunks++ < 60) {
-      const d = await jget("/api/events?after=" + after);
+      // Seed from today rather than line 0: the counters below only care
+      // about today, and the log holds every event the fleet has ever emitted.
+      const d = await jget("/api/events?after=" + after
+                           + (after === 0 ? "&since=" + Math.floor(EV_DAY) : ""));
       const evs = d.events || [];
       evs.forEach(countEv);
       if (!evs.length || d.next === after) { after = d.next; break; }
@@ -983,13 +1131,30 @@ function friendly(e) {
     case "task.start": return `task started · ${task}`;
     case "task.end": return `task ended · ${task} → ${esc(e.status || "")}`;
     case "task.escalated": return `<span class="warn">⬆ ${task} escalated ${esc(short(e.from_model))} → ${esc(short(e.to_model))}</span>`;
-    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason || e.error ? ": " + cut(e.reason || e.error, 120) : ""}</span>`;
+    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason || e.error ? ": " + cut(e.reason || e.error, 120) : ""}${(e.files || []).length ? ` <span class="hint">(${(e.files || []).map(esc).join(", ").slice(0, 120)})</span>` : ""}</span>`;
     case "task.failed": return `<span class="bad">✗ ${task} failed${e.reason ? ": " + cut(e.reason, 120) : ""}</span>`;
     case "task.merged": return `<span class="good">⬢ ${task} merged</span>`;
     case "task.budget": {
       const a = e.implement_attempts || 0, x = e.escalations || 0, k = e.total_tokens || 0;
       return `<span class="hint">⛁ ${task} cost ${a} attempt${a === 1 ? "" : "s"}, ${x} escalation${x === 1 ? "" : "s"}, ${tick(e.total_driver_seconds)}, ${k >= 1000 ? Math.round(k / 1000) + "k" : k} tok</span>`;
     }
+    case "task.gate": return e.passed
+      ? `<span class="good">✓ verify gate passed · ${task}</span>`
+      : `<span class="bad">✗ verify gate failed · ${task}${e.tail ? `: ${cut(e.tail, 160)}` : ""}</span>`;
+    case "task.reviewed": return e.passed
+      ? `<span class="good">✓ review passed · ${task} <span class="hint">by ${esc(e.reviewer)}</span></span>`
+      : `<span class="warn">↩ review sent it back · ${task}${e.n_issues ? ` (${esc(e.n_issues)} issue${e.n_issues === 1 ? "" : "s"})` : ""} <span class="hint">by ${esc(e.reviewer)}</span></span>`;
+    case "task.pr_reviewed": {
+      const who = (e.approvals || []).map(short).map(esc).join(" + ");
+      return e.approved
+        ? `<span class="good">✓ PR #${esc(e.pr)} approved · ${task} <span class="hint">by ${who}</span></span>`
+        : `<span class="warn">↩ PR #${esc(e.pr)} sent back · ${task} — ${esc(e.n_issues)} issue${e.n_issues === 1 ? "" : "s"} (round ${esc(e.round)})</span>`;
+    }
+    case "task.resumed": return `<span class="hint">↻ resumed ${task} <span class="hint">(was ${esc(e.prior_status || "?")})</span></span>`;
+    case "task.pr_reattached": return `<span class="hint">↻ reattached to PR #${esc(e.pr)} · ${task}</span>`;
+    case "task.resynced": return `<span class="warn">⟳ ${task}: PR #${esc(e.pr)} resynced with ${esc(e.base)} — needs re-review</span>`;
+    case "task.branch_reset": return `<span class="bad">⚠ ${task}: reset ${esc(e.branch)} — ${esc(e.commits_discarded)} commit(s) discarded</span>`;
+    case "driver.slot_wait": return `<span class="warn">⏳ ${m} queued · ${task} <span class="hint">(${esc(e.scope)} pool full)</span></span>`;
     case "task.pr_opened": return `<span class="good">⇪ PR opened · ${task} ${cut(e.url, 80)}</span>`;
     case "task.pr_skipped": return `<span class="hint">PR skipped · ${task}: ${cut(e.reason, 100)}</span>`;
     case "run.resume": return `↻ resumed: skipped ${(e.skipped_merged || []).length} merged, retried ${(e.retried || []).length}`;
@@ -1279,6 +1444,7 @@ loadHash(); syncFilterControls();
 pollProjects();
 initEvents();
 setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
+setTimeout(() => { pollSlots(); setInterval(pollSlots, 3000); }, 400);
 setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
 setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
 setTimeout(() => setInterval(pollEvents, 8000), 1200);

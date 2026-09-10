@@ -551,3 +551,25 @@ class InflightIsCountedOnlyWhenHoldingASlot(unittest.TestCase):
                 drivers.asyncio.sleep = orig_sleep
         self.assertEqual(ev.of("driver.start"), [],
                          "a driver that never got a slot must not emit start")
+
+
+class ReviewingAnOpenPullRequest(unittest.TestCase):
+    """Which models may hold the pr_reviewer role."""
+
+    def test_kimi_and_glm_may_review_a_pr(self):
+        self.assertEqual(drivers.KimiDriver("pr_reviewer").role, "pr_reviewer")
+        self.assertEqual(
+            drivers.OpencodeDriver("GLM-5.3", "pr_reviewer").role, "pr_reviewer")
+
+    def test_deepseek_may_review_a_pr_but_not_gate_or_plan(self):
+        self.assertEqual(
+            drivers.OpencodeDriver("DeepSeek-V4-Flash", "pr_reviewer").role,
+            "pr_reviewer")
+        for role in ("reviewer", "planner"):
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("DeepSeek-V4-Flash", role)
+
+    def test_gpt_oss_stays_implement_only(self):
+        for role in ("pr_reviewer", "reviewer", "planner"):
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("gpt-oss-120b", role)

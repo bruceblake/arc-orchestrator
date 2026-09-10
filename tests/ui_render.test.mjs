@@ -4,9 +4,22 @@
 // static/common.js + index.html's inline script evaluated with new Function.
 import fs from "node:fs";
 const els = new Map();
-const mk = id => ({ id, innerHTML: "", textContent: "", className: "", title: "", value: "", options: [], dataset: {}, checked: false,
-                    style: {}, disabled: false, classList: {add(){},remove(){},contains:()=>false},
-                    querySelectorAll: () => [], appendChild(){}, onclick: null });
+// innerHTML and textContent are LINKED in a real DOM: setting markup updates
+// the text, and setting text replaces the markup. Two independent fields made
+// an element written with .innerHTML read as empty through .textContent, which
+// failed a legitimate assertion for a reason that exists nowhere but here.
+const mk = id => {
+  let html = "";
+  return {
+    id, className: "", title: "", value: "", options: [], dataset: {}, checked: false,
+    style: {}, disabled: false, classList: {add(){},remove(){},contains:()=>false},
+    querySelectorAll: () => [], appendChild(){}, onclick: null,
+    get innerHTML() { return html; },
+    set innerHTML(v) { html = String(v == null ? "" : v); },
+    get textContent() { return html.replace(/<[^>]*>/g, ""); },
+    set textContent(v) { html = String(v == null ? "" : v); },
+  };
+};
 globalThis.document = {
   querySelector: sel => { const id = sel.replace(/^#/, ""); if (!els.has(id)) els.set(id, mk(id)); return els.get(id); },
   querySelectorAll: () => [],

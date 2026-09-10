@@ -6,6 +6,7 @@ under running drivers, which lets a model exceed its ARC cap — the exact
 failure the lease table exists to prevent.
 """
 import pathlib
+import os
 import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
@@ -285,3 +286,73 @@ class HarnessContextBounds(unittest.TestCase):
                              "context beyond the provider window is clamped or fails")
 
 
+
+class DriverCapsMatchMeasuredReality(unittest.TestCase):
+    """Driver caps must equal what ARC actually serves, not a guess.
+
+    Measured 2026-09-10 by ramping concurrent requests until rejection, with
+    the fleet's own usage counted in: gpt-oss 5, DeepSeek 5, GLM 4, Kimi 3.
+    The config claimed 10 account / 8 drivers for gpt-oss and DeepSeek, so the
+    fleet over-subscribed by 3 and generated its own 400s under load — then
+    the capacity backoff blamed the provider. GLM and Kimi were under by one
+    slot each, wasting capacity the operator had paid for.
+    """
+
+    def test_no_model_is_over_subscribed(self):
+        for model, family in config.MODEL_FAMILY.items():
+            self.assertLessEqual(
+                config.driver_limit(model), config.family_limit(family),
+                f"{model}: more drivers than the account can serve — the fleet "
+                f"would generate its own 400s")
+
+    def test_account_caps_match_the_measurement(self):
+        for model, measured in config._MEASURED_CONCURRENCY.items():
+            self.assertEqual(
+                config.family_limit(config.MODEL_FAMILY[model]), measured,
+                f"{model}: family limit disagrees with the measured ceiling")
+
+    def test_headroom_reserves_slots_without_starving(self):
+        """ARC_DRIVER_HEADROOM trades fleet throughput for interactive use."""
+        for model, measured in config._MEASURED_CONCURRENCY.items():
+            self.assertGreaterEqual(config.driver_limit(model), 1,
+                                    f"{model}: headroom must never reach zero drivers")
+            self.assertLessEqual(config.driver_limit(model), measured)
+
+
+class HarnessConcurrencyCeiling(unittest.TestCase):
+    """The harness is a second, lower ceiling than the per-model caps.
+
+    Every opencode-backed model shares one local binary and one sqlite store.
+    Measured on this machine with an identical prompt: 5 concurrent runs all
+    succeed, 6 loses 2, 10 loses 6 — failing fast with an empty stderr that the
+    fleet logged as "opencode exited 1: " and retried four times per task.
+    """
+
+    def test_opencode_is_capped_below_the_sum_of_its_models_caps(self):
+        served = [m for m in ("GLM-5.3", "DeepSeek-V4-Flash", "gpt-oss-120b")]
+        self.assertLess(config.harness_limit("opencode"),
+                        sum(config.driver_limit(m) for m in served))
+
+    def test_opencode_sits_at_the_measured_ceiling(self):
+        self.assertEqual(config.harness_limit("opencode"), 5)
+
+    def test_kimi_is_not_throttled_below_its_model_cap(self):
+        self.assertGreaterEqual(config.harness_limit("kimi"),
+                                config.driver_limit("Kimi-K3"))
+
+    def test_an_unknown_harness_still_gets_a_finite_cap(self):
+        self.assertGreater(config.harness_limit("nope"), 0)
+
+    def test_the_env_override_is_honoured(self):
+        os.environ["ARC_HARNESS_LIMIT_OPENCODE"] = "2"
+        try:
+            self.assertEqual(config.harness_limit("opencode"), 2)
+        finally:
+            del os.environ["ARC_HARNESS_LIMIT_OPENCODE"]
+
+    def test_a_junk_override_falls_back_rather_than_crashing(self):
+        os.environ["ARC_HARNESS_LIMIT_OPENCODE"] = "lots"
+        try:
+            self.assertEqual(config.harness_limit("opencode"), 5)
+        finally:
+            del os.environ["ARC_HARNESS_LIMIT_OPENCODE"]

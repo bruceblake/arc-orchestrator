@@ -353,3 +353,358 @@ class DescribeReportsTheRealBase(unittest.TestCase):
         out = code_tasks.describe(ts)
         self.assertIn(f"base={config.BASE_BRANCH}", out)
         self.assertNotIn("base=main", out) if config.BASE_BRANCH != "main" else None
+
+
+class ReviewerSelectionIsLoadAware(unittest.TestCase):
+    """Reviewers are picked by contention, not a fixed order.
+
+    A fixed order sent every PR review to Kimi and GLM — the two scarcest
+    models — while DeepSeek sat idle. With nine runs in flight that produced
+    260 cap_wait events in an hour and three tasks giving up after waiting the
+    full 30-minute lease timeout for a slot another model could have served
+    immediately.
+    """
+
+    def _pick(self, usage, impl_family=None, n=2):
+        pool = [m for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash")
+                if config.MODEL_FAMILY.get(m) != impl_family]
+        pool.sort(key=lambda m: (usage.get(m, 0) / max(1, config.driver_limit(m)),
+                                 usage.get(m, 0)))
+        return pool[:n]
+
+    def test_the_idle_model_is_preferred_over_saturated_ones(self):
+        picked = self._pick({"Kimi-K3": 3, "GLM-5.3": 4, "DeepSeek-V4-Flash": 0})
+        self.assertEqual(picked[0], "DeepSeek-V4-Flash")
+
+    def test_saturation_is_relative_to_each_cap_not_absolute(self):
+        """4 GLM of 4 is full; 4 DeepSeek of 5 is not."""
+        picked = self._pick({"GLM-5.3": 4, "DeepSeek-V4-Flash": 4, "Kimi-K3": 3})
+        self.assertEqual(picked[0], "DeepSeek-V4-Flash")
+
+    def test_the_implementers_family_is_never_chosen(self):
+        for fam in ("kimi", "glm", "deepseek"):
+            picked = self._pick({}, impl_family=fam, n=2)
+            for m in picked:
+                self.assertNotEqual(config.MODEL_FAMILY[m], fam)
+
+    def test_enough_reviewers_remain_after_excluding_the_implementer(self):
+        """PR_REVIEWERS must be satisfiable from the remaining families."""
+        for fam in ("kimi", "glm", "deepseek"):
+            picked = self._pick({}, impl_family=fam, n=config.PR_REVIEWERS)
+            self.assertEqual(len(picked), config.PR_REVIEWERS,
+                             f"cannot fill {config.PR_REVIEWERS} reviewers when "
+                             f"the implementer is {fam}")
+
+
+class ResumingAnOpenPullRequest(unittest.TestCase):
+    """A task whose PR is already open must not be re-implemented.
+
+    Restarting it at alloc would discard a pushed branch and an open pull
+    request that reviewers may have partly read, and burn a model redoing
+    work that is sitting on GitHub waiting for approval.
+    """
+
+    def _graph(self, status):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        prior = [{"id": "t1", "status": status, "model": "gpt-oss-120b", "error": None}]
+        with capture_events():
+            return code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
+
+    def test_in_review_resumes_at_publish_not_alloc(self):
+        g = self._graph("in_review")
+        self.assertIn("publish_t1", g.starts)
+        self.assertNotIn("alloc_t1", g.starts)
+
+    def test_conflict_still_resumes_at_publish(self):
+        self.assertIn("publish_t1", self._graph("conflict").starts)
+
+    def test_a_failed_task_still_starts_from_scratch(self):
+        g = self._graph("failed")
+        self.assertIn("alloc_t1", g.starts)
+
+
+class ReviewersSendingAPullRequestBack(unittest.TestCase):
+    """The rework implementer must actually be told why the PR was rejected.
+
+    This path was dead in production. pr_review computed issues, posted them to
+    GitHub and fired the edge back into implement — but implement only ever
+    read review_ and gate_, and BOTH of those had passed (that is how the task
+    reached publish). The implementer got an empty feedback string, re-read its
+    own finished work, concluded there was nothing to do, and the task died as
+    "no changes to publish" with the objections never delivered.
+    """
+
+    def _feedback(self, results):
+        return code_tasks._rework_feedback("t1", results)
+
+    def test_the_production_shape_no_longer_yields_empty_feedback(self):
+        # Exactly what the graph holds after a PR rejection: review and gate
+        # both passed, pr_review did not.
+        fb = self._feedback({
+            "review_t1": {"pass": True, "issues": []},
+            "gate_t1": {"passed": True, "output": ""},
+            "pr_review_t1": {"approved": False, "reviewers": ["Kimi-K3", "GLM-5.3"],
+                             "issues": ["[Kimi-K3] leaks a file handle"]},
+        })
+        self.assertTrue(fb)
+        self.assertIn("leaks a file handle", fb)
+        self.assertIn("Kimi-K3, GLM-5.3", fb)
+
+    def test_it_tells_the_implementer_not_to_call_the_task_done(self):
+        fb = self._feedback({"pr_review_t1": {"approved": False, "issues": ["x"]}})
+        self.assertIn("Do not conclude", fb)
+
+    def test_an_approved_pr_contributes_no_feedback(self):
+        self.assertEqual(self._feedback({
+            "pr_review_t1": {"approved": True, "issues": [], "reviewers": ["K"]}}), "")
+
+    def test_a_gate_failure_is_reported_alongside_the_pr_issues(self):
+        fb = self._feedback({
+            "pr_review_t1": {"approved": False, "issues": ["style"], "reviewers": ["K"]},
+            "gate_t1": {"passed": False, "output": "3 tests failed"},
+        })
+        self.assertIn("style", fb)
+        self.assertIn("3 tests failed", fb)
+
+    def test_the_issues_reach_the_prompt_the_model_actually_sees(self):
+        p = code_tasks._impl_prompt(
+            {"id": "t1", "title": "T1", "prompt": "do it", "files_hint": [],
+             "model": "", "reviewer": ""},
+            self._feedback({
+                "pr_review_t1": {"approved": False, "reviewers": ["GLM-5.3"],
+                                 "issues": ["[GLM-5.3] no test for the error path"]}}))
+        self.assertIn("no test for the error path", p)
+        self.assertIn("REJECTED", p)
+
+
+class ChoosingPullRequestReviewers(unittest.TestCase):
+    """Reviewer selection must never name a model the driver will refuse.
+
+    The pool and the drivers' role rules were two separate lists, and they
+    drifted: the pool offered DeepSeek, OpencodeDriver refused the role, and
+    the ValueError killed pr_review one second after the PR opened. Seven pull
+    requests were stranded that way in a single run — branch pushed, PR open,
+    nobody coming back. Eligibility is now decided by building the driver.
+    """
+
+    def test_every_implementer_family_has_enough_reviewers(self):
+        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+            with self.subTest(family=fam):
+                self.assertGreaterEqual(
+                    len(code_tasks._eligible_pr_reviewers(fam, None)),
+                    config.PR_REVIEWERS,
+                    f"{fam} cannot field {config.PR_REVIEWERS} PR reviewers")
+
+    def test_it_never_picks_the_implementer_s_own_family(self):
+        for fam in ("kimi", "glm", "deepseek"):
+            for m in code_tasks._eligible_pr_reviewers(fam, None):
+                self.assertNotEqual(config.MODEL_FAMILY.get(m), fam)
+
+    def test_every_model_it_offers_can_actually_be_built(self):
+        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+            for m in code_tasks._eligible_pr_reviewers(fam, None):
+                code_tasks._driver(m, "pr_reviewer", None)  # must not raise
+
+    def test_gpt_oss_is_never_offered_as_a_reviewer(self):
+        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+            self.assertNotIn("gpt-oss-120b",
+                             code_tasks._eligible_pr_reviewers(fam, None))
+
+
+class ReviewerContention(unittest.TestCase):
+    """Reviewer choice must respect whichever ceiling binds first.
+
+    Scoring on the model's own cap alone sent reviews to GLM and DeepSeek while
+    the single opencode pool those two share sat at 5/5 with seven reviewers
+    queued behind it — and the kimi harness idle at 1/3.
+    """
+
+    def test_a_saturated_harness_makes_its_models_look_busy(self):
+        usage = {"GLM-5.3": 1, "harness:opencode": config.harness_limit("opencode")}
+        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+
+    def test_a_models_own_cap_still_counts_when_the_harness_is_free(self):
+        usage = {"GLM-5.3": config.driver_limit("GLM-5.3"), "harness:opencode": 0}
+        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+
+    def test_kimi_is_preferred_when_the_opencode_pool_is_full(self):
+        usage = {"Kimi-K3": 1, "GLM-5.3": 1, "DeepSeek-V4-Flash": 1,
+                 "harness:opencode": config.harness_limit("opencode"),
+                 "harness:kimi": 1}
+        order = sorted(["GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3"],
+                       key=lambda m: code_tasks._reviewer_pressure(m, usage))
+        self.assertEqual(order[0], "Kimi-K3")
+
+    def test_an_idle_fleet_scores_everything_zero(self):
+        for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash"):
+            self.assertEqual(code_tasks._reviewer_pressure(m, {}), 0.0)
+
+    def test_kimi_routes_to_the_kimi_harness_and_the_rest_to_opencode(self):
+        self.assertEqual(code_tasks._harness_of("Kimi-K3"), "kimi")
+        for m in ("GLM-5.3", "DeepSeek-V4-Flash", "gpt-oss-120b"):
+            self.assertEqual(code_tasks._harness_of(m), "opencode")
+
+
+class EveryTaskEventNamesItsTask(unittest.TestCase):
+    """A task.* event with no `task` field cannot be acted on.
+
+    task.gate (146 events) and task.reviewed (108) were both emitted without
+    one, so the two per-node progress signals the dashboard depends on were
+    anonymous in the log — you could see that A gate had failed, but not whose.
+    """
+
+    def _emits(self):
+        import ast
+        tree = ast.parse(pathlib.Path(code_tasks.__file__).read_text())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "emit"
+                    and getattr(node.func.value, "id", None) == "events"):
+                continue
+            if not (node.args and isinstance(node.args[0], ast.Constant)):
+                continue
+            name = node.args[0].value
+            if isinstance(name, str) and name.startswith("task."):
+                yield name, node
+
+    def test_it_finds_the_emit_sites_at_all(self):
+        self.assertGreater(len(list(self._emits())), 8)
+
+    def test_every_task_event_passes_a_task(self):
+        missing = sorted({name for name, node in self._emits()
+                          if not any(k.arg == "task" for k in node.keywords)})
+        self.assertEqual(missing, [],
+                         f"emitted without a task= field: {missing}")
+
+
+class AReviewerThatCrashedDidNotReview(unittest.TestCase):
+    """A crashed reviewer is an inconclusive round, not a rejection.
+
+    Observed on PR #12: both reviewers died on opencode contention, and the
+    crash was posted to a PUBLIC pull request as "changes requested: reviewer
+    crashed", then sent the implementer back to fix issues that did not exist.
+    Three infrastructure blips would have failed a perfectly good task, because
+    each one consumed one of three PR rounds.
+    """
+
+    def _outcomes(self, *pairs):
+        """Replicates pr_review's aggregation over reviewer outcomes."""
+        issues, approvals, crashed = [], [], []
+        for model, v in pairs:
+            if v.get("crashed"):
+                crashed.append(model)
+            elif v["approve"]:
+                approvals.append(model)
+            else:
+                issues.extend(f"[{model}] {i}" for i in v["issues"])
+        approved = bool(pairs) and len(approvals) == len(pairs)
+        return {"approved": approved, "issues": issues, "crashed": crashed,
+                "inconclusive": bool(crashed) and not issues}
+
+    CRASH = {"approve": False, "crashed": True, "issues": ["boom"]}
+    OK = {"approve": True, "issues": []}
+    NO = {"approve": False, "issues": ["real problem"]}
+
+    def test_all_reviewers_crashing_is_inconclusive_not_a_rejection(self):
+        r = self._outcomes(("A", self.CRASH), ("B", self.CRASH))
+        self.assertTrue(r["inconclusive"])
+        self.assertFalse(r["approved"])
+        self.assertEqual(r["issues"], [])
+
+    def test_one_crash_and_one_approval_is_inconclusive(self):
+        # Unanimity is required and cannot be established, so retry the review.
+        r = self._outcomes(("A", self.CRASH), ("B", self.OK))
+        self.assertTrue(r["inconclusive"])
+
+    def test_a_real_objection_beats_a_crash(self):
+        r = self._outcomes(("A", self.CRASH), ("B", self.NO))
+        self.assertFalse(r["inconclusive"])
+        self.assertEqual(r["issues"], ["[B] real problem"])
+
+    def test_unanimous_approval_still_merges(self):
+        r = self._outcomes(("A", self.OK), ("B", self.OK))
+        self.assertTrue(r["approved"])
+        self.assertFalse(r["inconclusive"])
+
+    def test_a_normal_rejection_is_unchanged(self):
+        r = self._outcomes(("A", self.OK), ("B", self.NO))
+        self.assertFalse(r["approved"])
+        self.assertFalse(r["inconclusive"])
+        self.assertEqual(r["issues"], ["[B] real problem"])
+
+    def test_the_inconclusive_budget_is_separate_from_the_round_budget(self):
+        self.assertGreater(config.PR_MAX_INCONCLUSIVE, 0)
+        self.assertGreater(config.PR_MAX_ROUNDS, 0)
+
+
+class InconclusiveReviewRouting(unittest.TestCase):
+    """Where an inconclusive round sends the task."""
+
+    def _edges(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        return [e for e in g.edges if e.src == "pr_review_t1"]
+
+    def _fires(self, dst, result):
+        for e in self._edges():
+            if e.dst == dst and (e.when is None or e.when(result, {})):
+                return True
+        return False
+
+    def test_an_inconclusive_round_retries_the_review(self):
+        r = {"approved": False, "inconclusive": True, "inconclusive_n": 1}
+        self.assertTrue(self._fires("pr_review_t1", r))
+        self.assertFalse(self._fires("implement_t1", r))
+
+    def test_it_stops_retrying_once_the_budget_is_spent(self):
+        r = {"approved": False, "inconclusive": True,
+             "inconclusive_n": config.PR_MAX_INCONCLUSIVE}
+        self.assertFalse(self._fires("pr_review_t1", r))
+        self.assertTrue(self._fires("fail_t1", r))
+
+    def test_a_real_rejection_still_goes_to_the_implementer(self):
+        r = {"approved": False, "inconclusive": False, "issues": ["x"]}
+        self.assertTrue(self._fires("implement_t1", r))
+        self.assertFalse(self._fires("pr_review_t1", r))
+
+    def test_approval_still_merges(self):
+        self.assertTrue(self._fires("pr_merge_t1", {"approved": True}))
+
+
+class AConflictingPullRequestIsRetried(unittest.TestCase):
+    """A PR that conflicts with the base was a terminal state.
+
+    Every task merges into one integration branch, so conflicts are the normal
+    cost of parallelism — and most are not disagreements about the code, just a
+    base that moved on under a long task. Those merge cleanly with no model.
+    """
+
+    def _edges(self, src):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        return [e for e in g.edges if e.src == src]
+
+    def _fires(self, src, dst, result):
+        return any(e.dst == dst and (e.when is None or e.when(result, {}))
+                   for e in self._edges(src))
+
+    def test_a_resynced_branch_goes_back_for_review(self):
+        # The diff changed, so the approval it already has no longer covers it.
+        r = {"merged": False, "resynced": True, "resyncs": 1}
+        self.assertTrue(self._fires("pr_merge_t1", "pr_review_t1", r))
+
+    def test_a_clean_merge_does_not_loop_back(self):
+        self.assertFalse(self._fires("pr_merge_t1", "pr_review_t1",
+                                     {"merged": True, "pr": 4}))
+
+    def test_a_terminal_conflict_does_not_loop_back(self):
+        self.assertFalse(self._fires("pr_merge_t1", "pr_review_t1",
+                                     {"merged": False, "reason": "conflict"}))
+
+    def test_the_resync_budget_is_small_and_positive(self):
+        # Each resync rewrites the branch and costs a fresh review round.
+        self.assertGreaterEqual(config.PR_MAX_RESYNCS, 1)
+        self.assertLessEqual(config.PR_MAX_RESYNCS, 3)

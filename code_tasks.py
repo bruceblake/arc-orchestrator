@@ -17,7 +17,7 @@ import config
 import events
 import gitstore
 from drivers import DriverError, KimiDriver, OpencodeDriver, transcript_tokens
-from graph import Graph
+from graph import Graph, GraphError
 
 log = logging.getLogger("code-tasks")
 
@@ -143,6 +143,79 @@ def _impl_prompt(t, feedback):
     if feedback:
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"
     return p
+
+
+def _harness_of(model):
+    """The local harness that runs this model. Mirrors _driver()'s routing."""
+    return "kimi" if model == "Kimi-K3" else "opencode"
+
+
+def _reviewer_pressure(model, usage):
+    """How contended this reviewer is, 0.0 (idle) to 1.0+ (at a ceiling).
+
+    Whichever ceiling binds FIRST wins: a model comfortably under its own cap
+    is not actually available if the harness it shares with two other models is
+    full. Scoring on the model alone sent every review to GLM and DeepSeek while
+    the single opencode pool they share sat at 5/5 with seven reviewers queued
+    behind it and the kimi harness idle at 1/3.
+    """
+    h = _harness_of(model)
+    return max(usage.get(model, 0) / max(1, config.driver_limit(model)),
+               usage.get(f"harness:{h}", 0) / max(1, config.harness_limit(h)))
+
+
+def _eligible_pr_reviewers(impl_fam, pol):
+    """Cross-family models that may actually review an open PR.
+
+    Eligibility is decided by CONSTRUCTING the driver, not by a second list
+    kept alongside the drivers' own rules. Those two drifted apart once and it
+    cost seven pull requests: the pool named DeepSeek, the driver refused the
+    role, and the ValueError — which the reviewer wrapper did not catch —
+    killed pr_review one second after each PR opened, leaving the branch and
+    the PR stranded with nobody coming back for them.
+    """
+    out = []
+    for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash"):
+        if config.MODEL_FAMILY.get(m) == impl_fam:
+            continue
+        try:
+            _driver(m, "pr_reviewer", pol)
+        except ValueError:
+            continue
+        out.append(m)
+    return out
+
+
+def _rework_feedback(tid, results):
+    """Why this task is being implemented again, most authoritative first.
+
+    pr_review USED TO BE MISSING from this: reviewers rejected an open PR, the
+    edge fired back into implement, and the implementer was handed an empty
+    feedback string — because review_ and gate_ had both PASSED, which is how
+    the task reached publish in the first place. It re-read its own finished
+    work, correctly concluded there was nothing left to do, exited in two
+    minutes with no commit, and the task died as "no changes to publish" with
+    the reviewers' objections never delivered to anyone. The whole
+    send-it-back path was inert.
+    """
+    parts = []
+    pr = results.get(f"pr_review_{tid}")
+    if pr and not pr.get("approved"):
+        who = ", ".join(pr.get("reviewers") or []) or "the reviewers"
+        parts.append(
+            f"Your pull request was REVIEWED AND REJECTED by {who}. "
+            f"The code you already wrote is on the branch and is NOT "
+            f"acceptable as-is — you must change it. Do not conclude "
+            f"the task is already done.\n"
+            + "\n".join(f"- {i}" for i in pr.get("issues", [])))
+    rev = results.get(f"review_{tid}")
+    if rev and not rev.get("pass"):
+        parts.append("Pre-merge review rejected it:\n"
+                     + "\n".join(f"- {i}" for i in rev.get("issues", [])))
+    gate = results.get(f"gate_{tid}")
+    if gate and not gate.get("passed"):
+        parts.append(f"The verify gate failed, output:\n{gate.get('output', '')}")
+    return "\n\n".join(parts)
 
 
 def _review_prompt(t, diff):
@@ -408,6 +481,22 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         model0 = start_model(tid)
         prior_status = (prior.get(tid) or {}).get("status")
 
+        async def worktree(ctx):
+            """This task's worktree, whether alloc ran in THIS graph or not.
+
+            Every node used to index ctx["results"][f"alloc_{tid}"] directly,
+            which is absent on a resume that starts at publish — so the first
+            node to look raised KeyError and drained the graph, stranding the
+            very PR the resume existed to finish.
+            """
+            res = (ctx.get("results", {}).get(f"alloc_{tid}") or {}).get("worktree")
+            if res:
+                return Path(res)
+            wt = await gitstore.existing_worktree(repo, tid)
+            if wt is None:
+                raise GraphError(f"{tid}: no worktree — nothing to resume")
+            return wt
+
         def cur_model(ctx):
             esc = ctx.get("results", {}).get(f"escalate_{tid}")
             return esc["to_model"] if esc else model0
@@ -463,19 +552,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         async def implement(ctx):
             results = ctx.get("results", {})
-            feedback = ""
-            rev = results.get(f"review_{tid}")
-            if rev and not rev.get("pass"):
-                feedback = "\n".join(f"- {i}" for i in rev.get("issues", []))
-            gate = results.get(f"gate_{tid}")
-            if not feedback and gate and not gate.get("passed"):
-                feedback = f"verify gate failed, output:\n{gate.get('output', '')}"
+            feedback = _rework_feedback(tid, results)
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
             model = cur_model(ctx)
             driver = _driver(model, "implementer", pol)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback), Path(results[f"alloc_{tid}"]["worktree"]),
+                    _impl_prompt(t, feedback), await worktree(ctx),
                     task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -498,7 +581,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         "output": f"implementer crashed: {prev.get('error', '')}"}
             if not cmd:
                 return {"passed": True, "output": ""}
-            wt = ctx["results"][f"alloc_{tid}"]["worktree"]
+            wt = str(await worktree(ctx))
             proc = await asyncio.create_subprocess_shell(
                 cmd, cwd=wt,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
@@ -519,15 +602,21 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 Path(log_path).write_text(out.decode(errors="replace"))
             except OSError:
                 log_path = None
-            events.emit("task.gate", passed=proc.returncode == 0, log=log_path)
-            return {"passed": proc.returncode == 0, "output": output, "log_path": log_path}
+            passed = proc.returncode == 0
+            # Attribution and a reason, not just a boolean: a bare
+            # {"passed": false} in the log cannot be tied to a task or acted
+            # on, and this is the per-node progress signal the dashboard reads.
+            events.emit("task.gate", task=tid, attempt=attempt, passed=passed,
+                        log=log_path, cmd=cmd[:120],
+                        tail=None if passed else output.strip()[-400:])
+            return {"passed": passed, "output": output, "log_path": log_path}
 
         async def review(ctx):
             if not review_on:
-                events.emit("task.reviewed", passed=True, reviewer="none",
+                events.emit("task.reviewed", task=tid, passed=True, reviewer="none",
                             skipped=True)
                 return {"pass": True, "issues": [], "skipped": True}
-            wt = Path(ctx["results"][f"alloc_{tid}"]["worktree"])
+            wt = await worktree(ctx)
             diff = await gitstore.diff_full(wt, base)
             rev_tok = reviewer_for(t, cur_model(ctx))
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
@@ -547,7 +636,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
-            events.emit("task.reviewed", passed=verdict["pass"], reviewer=rev_tok)
+            events.emit("task.reviewed", task=tid, passed=verdict["pass"],
+                        reviewer=rev_tok,
+                        n_issues=len(verdict.get("issues") or []))
             return verdict
 
         async def escalate(ctx):
@@ -569,9 +660,22 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             """
             results = ctx.get("results", {})
             alloc_res = results.get(f"alloc_{tid}")
-            if alloc_res is None:
-                return {"published": False, "reason": "no worktree"}
-            wt = Path(alloc_res["worktree"])
+            if alloc_res is not None:
+                wt = Path(alloc_res["worktree"])
+            else:
+                # publish is the START node: this is a resume of a task that
+                # already has a branch (conflict repair, or in_review with a PR
+                # open). It used to bail out with "no worktree" here, which fired
+                # the fallthrough edge into alloc — and alloc RESETS task/<id> to
+                # base, so every such resume silently threw away the very work it
+                # was resuming and re-implemented from scratch. Re-attach to the
+                # existing worktree instead; only fall through when there really
+                # is not one.
+                wt = await gitstore.existing_worktree(repo, tid)
+                if wt is None:
+                    return {"published": False, "reason": "no worktree"}
+                events.emit("task.resumed", task=tid, worktree=str(wt),
+                            prior_status=prior_status)
             impl = results.get(f"implement_{tid}", {})
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             head = await gitstore.publish(
@@ -579,10 +683,31 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 {"Harness": impl.get("harness", "?"), "Model": model,
                  "Reviewer": rev, "Task-Id": tid})
             if head is None:
-                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
-                                       "failed", error="implementer produced no changes",
-                                       finished=True)
-                events.emit("task.failed", task=tid, reason="no changes to publish")
+                # No new commit. On a RESUME the branch is already pushed and
+                # its PR already open, so re-attach rather than re-implementing
+                # and throwing that diff away. But if a PR review round has
+                # already run in THIS graph, "no changes" means the rework
+                # produced nothing — re-reviewing an identical diff would just
+                # burn reviewers to reach the same verdict, so let it fail.
+                reworked = f"pr_review_{tid}" in ctx.get("results", {})
+                number, url, note = (None, None, None) if reworked else \
+                    await gitstore.open_pr(repo, tid,
+                                           f"task({tid}): {t['title']}", "", base)
+                if number is not None:
+                    store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                           "in_review", branch=f"task/{tid}")
+                    events.emit("task.pr_reattached", task=tid, pr=number,
+                                url=url, note=note)
+                    return {"published": True, "pr": number, "url": url,
+                            "head": None, "reattached": True}
+                store.upsert_code_task(
+                    taskfile, tid, t["title"], model, rev, "failed",
+                    error=("rework after PR rejection produced no changes"
+                           if reworked else "implementer produced no changes"),
+                    finished=True)
+                events.emit("task.failed", task=tid,
+                            reason=("rework produced no changes" if reworked
+                                    else "no changes to publish"))
                 return {"published": False, "reason": "no changes"}
             ok, note = await gitstore.push_task_branch(repo, tid)
             if not ok:
@@ -623,20 +748,50 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # Reviewers differ from the implementer's family AND from each
             # other, so two approvals mean two genuinely separate readings.
             impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
-            pool = [m for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash")
-                    if config.MODEL_FAMILY.get(m) != impl_fam]
+            pool = _eligible_pr_reviewers(impl_fam, pol)
+            # Pick the LEAST CONTENDED eligible models, not a fixed order.
+            # The fixed order sent every review to Kimi and GLM while DeepSeek
+            # sat idle, so tasks waited 30 minutes for a slot another model
+            # could have served at once (260 cap_wait events in one hour).
+            #
+            # Contention is whichever ceiling binds FIRST — the model's own cap
+            # or its harness's. Sorting on the model alone sent reviews to GLM
+            # and DeepSeek while the single opencode pool they share sat at 5/5
+            # with seven reviewers queued behind it and the kimi harness idle at
+            # 1/3. A model under its own cap is not available if its harness
+            # is full.
+            try:
+                usage = store.lease_usage()
+            except Exception:
+                usage = {}
+
+            pool.sort(key=lambda m: (_reviewer_pressure(m, usage),
+                                     usage.get(m, 0)))
             chosen = pool[:max(1, config.PR_REVIEWERS)]
 
             async def one(model):
-                drv = _driver(model, "reviewer", pol)
+                # Never let one reviewer take the whole graph down with it: a
+                # crashed or unbuildable reviewer is a rejection with a reason,
+                # not an exception that orphans an open PR.
+                # "pr_reviewer", not "reviewer": these are the gate on an open
+                # PR and they are the scarcest thing in the fleet (PR_REVIEWERS
+                # cross-family models per round). The dashboard separates them
+                # from the pre-PR gate reviewer so a reviewer queue is legible.
                 try:
+                    drv = _driver(model, "pr_reviewer", pol)
                     res = await drv.run(
                         _pr_review_prompt(t, diff, len(chosen), round_n,
                                           prior_r.get("issues") or []),
-                        Path(ctx["results"][f"alloc_{tid}"]["worktree"]),
+                        await worktree(ctx),
                         task_id=f"{tid}-pr{round_n}")
-                except DriverError as exc:
-                    return model, {"approve": False,
+                except (DriverError, ValueError) as exc:
+                    # A reviewer that crashed did NOT review. Reporting that as
+                    # a rejection posted "changes requested: reviewer crashed"
+                    # to a public PR and sent the implementer back to fix
+                    # issues that did not exist — and burned one of three PR
+                    # rounds doing it, so three infrastructure blips failed a
+                    # perfectly good task.
+                    return model, {"approve": False, "crashed": True,
                                    "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
                 verdict = _parse_approval(res.text)
                 store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
@@ -645,36 +800,58 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return model, verdict
 
             outcomes = await asyncio.gather(*[one(m) for m in chosen])
-            issues, approvals = [], []
+            issues, approvals, crashed = [], [], []
             for model, v in outcomes:
-                if v["approve"]:
+                if v.get("crashed"):
+                    crashed.append(model)
+                elif v["approve"]:
                     approvals.append(model)
                 else:
                     issues.extend(f"[{model}] {i}" for i in v["issues"])
-            approved = len(approvals) == len(chosen)
+            approved = bool(chosen) and len(approvals) == len(chosen)
+            # Nobody actually objected, but a reviewer never ran: this round
+            # reached no verdict. That is a review to RETRY, not a change to
+            # request — the diff has not been read.
+            inconclusive = bool(crashed) and not issues
+            prior_incon = (prior_r or {}).get("inconclusive_n", 0)
+            inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
+            # The issue TEXT, not just a count. "3 issues" tells an operator
+            # nothing about whether the reviewers found something real; the
+            # dashboard could only ever show the number, so the actual verdict
+            # lived on GitHub and nowhere else.
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
-                        reviewers=chosen, n_issues=len(issues))
+                        reviewers=chosen, n_issues=len(issues),
+                        issues=[i[:400] for i in issues[:10]],
+                        crashed=crashed, inconclusive=inconclusive)
             # Post each verdict AS A GITHUB REVIEW, not just internally. The
             # approvals existed only in our event log, so a PR merged by two
             # AI reviewers showed "0 reviews" on GitHub — the trail was
             # invisible exactly where a human would look for it.
             for model, v in outcomes:
-                body = (f"**{model}** (round {round_n}) — "
-                        + ("approved." if v["approve"] else "changes requested:\n\n"
-                           + "\n".join(f"- {i}" for i in v["issues"][:20])))
+                if v.get("crashed"):
+                    # A neutral note, never a formal rejection: this reviewer
+                    # never read the diff and must not appear to have judged it.
+                    body = (f"**{model}** (round {round_n}) — review could not "
+                            f"run: {'; '.join(v['issues'])[:400]}")
+                else:
+                    body = (f"**{model}** (round {round_n}) — "
+                            + ("approved." if v["approve"] else "changes requested:\n\n"
+                               + "\n".join(f"- {i}" for i in v["issues"][:20])))
                 # A bot cannot formally approve its own repo's PR, so an
                 # approval is posted as a comment and a rejection uses
                 # --request-changes where permitted; both fall back to a plain
                 # comment so the verdict is never lost.
-                rc, _, _ = await gitstore._gh(
-                    ["pr", "review", str(number),
-                     "--approve" if v["approve"] else "--request-changes",
-                     "--body", body], cwd=repo)
+                rc = 1
+                if not v.get("crashed"):
+                    rc, _, _ = await gitstore._gh(
+                        ["pr", "review", str(number),
+                         "--approve" if v["approve"] else "--request-changes",
+                         "--body", body], cwd=repo)
                 if rc != 0:
                     await gitstore._gh(["pr", "comment", str(number),
                                         "--body", body], cwd=repo)
-            if not approved:
+            if not approved and not inconclusive:
                 await gitstore._gh(
                     ["pr", "comment", str(number), "--body",
                      "**Changes requested** (round %d) — returning to the "
@@ -682,7 +859,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                          round_n, "\n".join(f"- {i}" for i in issues[:20]))],
                     cwd=repo)
             return {"approved": approved, "issues": issues,
-                    "approvals": approvals, "pr": number, "round": round_n}
+                    "approvals": approvals, "reviewers": chosen,
+                    "crashed": crashed, "inconclusive": inconclusive,
+                    "inconclusive_n": inconclusive_n,
+                    "pr": number, "round": round_n}
 
         async def pr_merge(ctx):
             """Merge the PR — reached only once every reviewer approved."""
@@ -691,12 +871,33 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             state = await gitstore.pr_state(repo, number)
             if state.get("mergeable") == "CONFLICTING":
-                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
-                                       "conflict",
-                                       error=f"PR #{number} conflicts with {base}",
-                                       finished=True)
-                events.emit("task.conflict", task=tid, pr=number,
-                            reason="PR conflicts with the base branch")
+                # Try to resolve it before giving up. Most conflicts here are
+                # not a disagreement about the code at all — they are a base
+                # branch that moved on under a task that took twenty minutes,
+                # and they merge cleanly with no model involved. This used to
+                # be a dead end: mark conflict, finish, wait for a human.
+                resyncs = (ctx.get("results", {}).get(f"pr_merge_{tid}") or {}
+                           ).get("resyncs", 0)
+                ok, conflicts, note = await gitstore.sync_with_base(
+                    await worktree(ctx), base)
+                if ok and resyncs < config.PR_MAX_RESYNCS:
+                    pushed, pnote = await gitstore.push_task_branch(repo, tid)
+                    if pushed:
+                        events.emit("task.resynced", task=tid, pr=number,
+                                    base=base, resyncs=resyncs + 1)
+                        # The diff on the PR just changed, so the approval it
+                        # already has no longer covers it: review it again.
+                        return {"merged": False, "resynced": True,
+                                "resyncs": resyncs + 1, "pr": number}
+                    note = f"resynced but push failed: {pnote}"
+                elif ok:
+                    note = f"still conflicting after {resyncs} resync(s)"
+                store.upsert_code_task(
+                    taskfile, tid, t["title"], model, rev, "conflict",
+                    error=f"PR #{number} conflicts with {base}: {note}",
+                    finished=True)
+                events.emit("task.conflict", task=tid, pr=number, reason=note,
+                            files=conflicts[:20])
                 return {"merged": False, "reason": "conflict"}
             ok, note = await gitstore.merge_pr(repo, number)
             if not ok:
@@ -745,16 +946,36 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         def pr_rounds(c):
             return c.get("runs", {}).get(f"pr_review_{tid}", 0)
 
+        # on_drain: once a branch is pushed and a PR is open, the model time is
+        # already spent. If a SIBLING task fails and drains the graph, these two
+        # edges still fire so the PR gets reviewed and merged instead of being
+        # orphaned on GitHub. The rework edge below is deliberately not marked —
+        # draining must not start a fresh implementer.
         g.edge(f"publish_{tid}", f"pr_review_{tid}",
-               when=lambda r, c: bool(r.get("published")))
+               when=lambda r, c: bool(r.get("published")), on_drain=True)
         g.edge(f"pr_review_{tid}", f"pr_merge_{tid}",
-               when=lambda r, c: bool(r.get("approved")))
+               when=lambda r, c: bool(r.get("approved")), on_drain=True)
+        # A resync rewrote the branch, so the approval the PR already has no
+        # longer covers what is on it. Back to review, not straight to merge.
+        g.edge(f"pr_merge_{tid}", f"pr_review_{tid}",
+               when=lambda r, c: bool(r.get("resynced")), on_drain=True)
+        # An inconclusive round reached no verdict: every reviewer crashed and
+        # nobody read the diff. Retry the REVIEW — sending the implementer back
+        # to fix issues that do not exist wastes a model and burns a real round.
+        # on_drain, because the PR is already open and this is still landing it.
+        g.edge(f"pr_review_{tid}", f"pr_review_{tid}",
+               when=lambda r, c: r.get("inconclusive")
+               and r.get("inconclusive_n", 0) < config.PR_MAX_INCONCLUSIVE,
+               on_drain=True)
         g.edge(f"pr_review_{tid}", f"implement_{tid}",
                when=lambda r, c: not r.get("approved")
+               and not r.get("inconclusive")
                and pr_rounds(c) < config.PR_MAX_ROUNDS)
         g.edge(f"pr_review_{tid}", f"fail_{tid}",
                when=lambda r, c: not r.get("approved")
-               and pr_rounds(c) >= config.PR_MAX_ROUNDS)
+               and (r.get("inconclusive_n", 0) >= config.PR_MAX_INCONCLUSIVE
+                    if r.get("inconclusive")
+                    else pr_rounds(c) >= config.PR_MAX_ROUNDS))
         for src in ("gate", "review"):
             key = "passed" if src == "gate" else "pass"
             g.edge(f"{src}_{tid}", f"implement_{tid}",
@@ -771,7 +992,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         g.edge(f"publish_{tid}", f"alloc_{tid}",
                when=lambda r, c, i=tid: not r.get("published")
                and f"alloc_{i}" not in c.get("results", {}))
-        first = "publish" if prior_status == "conflict" else "alloc"
+        # in_review resumes at publish, which finds the already-open PR and
+        # hands it straight to pr_review — restarting at alloc would discard a
+        # pushed branch and an open pull request.
+        first = "publish" if prior_status in ("conflict", "in_review") else "alloc"
         if t["deps"]:
             # Wait for the dep's PR to MERGE into the base branch, not just to
             # open — otherwise a dependent branches from a base that lacks the
