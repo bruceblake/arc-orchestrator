@@ -543,3 +543,36 @@ class ReviewerContention(unittest.TestCase):
         self.assertEqual(code_tasks._harness_of("Kimi-K3"), "kimi")
         for m in ("GLM-5.3", "DeepSeek-V4-Flash", "gpt-oss-120b"):
             self.assertEqual(code_tasks._harness_of(m), "opencode")
+
+
+class EveryTaskEventNamesItsTask(unittest.TestCase):
+    """A task.* event with no `task` field cannot be acted on.
+
+    task.gate (146 events) and task.reviewed (108) were both emitted without
+    one, so the two per-node progress signals the dashboard depends on were
+    anonymous in the log — you could see that A gate had failed, but not whose.
+    """
+
+    def _emits(self):
+        import ast
+        tree = ast.parse(pathlib.Path(code_tasks.__file__).read_text())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "emit"
+                    and getattr(node.func.value, "id", None) == "events"):
+                continue
+            if not (node.args and isinstance(node.args[0], ast.Constant)):
+                continue
+            name = node.args[0].value
+            if isinstance(name, str) and name.startswith("task."):
+                yield name, node
+
+    def test_it_finds_the_emit_sites_at_all(self):
+        self.assertGreater(len(list(self._emits())), 8)
+
+    def test_every_task_event_passes_a_task(self):
+        missing = sorted({name for name, node in self._emits()
+                          if not any(k.arg == "task" for k in node.keywords)})
+        self.assertEqual(missing, [],
+                         f"emitted without a task= field: {missing}")

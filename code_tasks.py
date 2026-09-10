@@ -597,12 +597,18 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 Path(log_path).write_text(out.decode(errors="replace"))
             except OSError:
                 log_path = None
-            events.emit("task.gate", passed=proc.returncode == 0, log=log_path)
-            return {"passed": proc.returncode == 0, "output": output, "log_path": log_path}
+            passed = proc.returncode == 0
+            # Attribution and a reason, not just a boolean: a bare
+            # {"passed": false} in the log cannot be tied to a task or acted
+            # on, and this is the per-node progress signal the dashboard reads.
+            events.emit("task.gate", task=tid, attempt=attempt, passed=passed,
+                        log=log_path, cmd=cmd[:120],
+                        tail=None if passed else output.strip()[-400:])
+            return {"passed": passed, "output": output, "log_path": log_path}
 
         async def review(ctx):
             if not review_on:
-                events.emit("task.reviewed", passed=True, reviewer="none",
+                events.emit("task.reviewed", task=tid, passed=True, reviewer="none",
                             skipped=True)
                 return {"pass": True, "issues": [], "skipped": True}
             wt = await worktree(ctx)
@@ -625,7 +631,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
-            events.emit("task.reviewed", passed=verdict["pass"], reviewer=rev_tok)
+            events.emit("task.reviewed", task=tid, passed=verdict["pass"],
+                        reviewer=rev_tok,
+                        n_issues=len(verdict.get("issues") or []))
             return verdict
 
         async def escalate(ctx):
