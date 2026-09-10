@@ -906,6 +906,7 @@ def _queue(store):
             "in_use": e.get("in_use"), "cap": e.get("cap"),
         })
 
+    blocked = {(w["task"], w["model"]) for w in waiting}
     harness_running = {}
     for r in leases:
         pid = r["pid"] if isinstance(r, dict) or hasattr(r, "keys") else None
@@ -919,6 +920,12 @@ def _queue(store):
         if model.startswith("harness:"):
             harness_running[model.split(":", 1)[1]] = \
                 harness_running.get(model.split(":", 1)[1], 0) + 1
+            continue
+        # A task can hold its MODEL lease while still queued for the harness
+        # lease nested inside it. The model lease makes it look running and the
+        # harness wait makes it look queued, and it was reported as both. It is
+        # not running until it holds every slot it needs, so the wait wins.
+        if (r["task"], model) in blocked:
             continue
         role = roles.get((r["task"], model))
         running.append({

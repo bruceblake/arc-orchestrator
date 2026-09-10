@@ -466,3 +466,21 @@ class LiveQueueView(unittest.TestCase):
              "task": "t1", "acquired_at": time.time()}]))
         self.assertEqual([m for m in q["models"]
                           if m["model"].startswith("harness:")], [])
+
+    def test_a_task_queued_for_the_harness_is_not_also_reported_running(self):
+        # It holds its model lease but not yet the harness lease nested inside
+        # it. Reporting it as both running and queued double-counts one attempt.
+        self._write(self._ev("driver.cap_wait", "t1", "GLM-5.3",
+                             scope="harness", harness="opencode", cap=5))
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": time.time() - 5}]))
+        self.assertEqual(q["totals"]["running"], 0)
+        self.assertEqual(q["totals"]["waiting"], 1)
+
+    def test_a_task_holding_every_slot_is_reported_running(self):
+        self._write(self._ev("driver.start", "t1", "GLM-5.3"))
+        q = dashboard._queue(self._store([
+            {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
+             "acquired_at": time.time() - 5}]))
+        self.assertEqual((q["totals"]["running"], q["totals"]["waiting"]), (1, 0))
