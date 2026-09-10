@@ -73,6 +73,9 @@ const feedProbe = [
   {type: "task.pr_reattached", task: "t1", pr: 5},
   {type: "task.branch_reset", task: "t1", branch: "task/t1", commits_discarded: 3},
   {type: "driver.slot_wait", task: "t1", model: "GLM-5.3", scope: "harness"},
+  {type: "task.resynced", task: "t1", pr: 4, base: "development", resyncs: 1},
+  {type: "task.conflict", task: "t1", pr: 4, reason: "2 conflicting file(s)",
+   files: ["config.py", "dashboard.py"]},
 ];
 for (const e of feedProbe) {
   const out = api.friendly(e);

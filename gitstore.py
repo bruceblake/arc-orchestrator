@@ -406,6 +406,39 @@ async def ensure_base_branch(repo, base=None, prod=None):
     return base
 
 
+async def sync_with_base(wt, base=None):
+    """Merge the current base into this task's branch, inside its worktree.
+
+    Returns (ok, conflicts, note). A PR that conflicts with the base branch was
+    a dead end: the task was marked "conflict", finished, and left for a human.
+    With every task merging into one integration branch that is not an edge
+    case, it is the normal cost of parallelism — and most of it is not a real
+    disagreement at all, just a base that moved on under a long-running task.
+    Those merge cleanly with no model involved.
+
+    `conflicts` is the list of paths git could not reconcile; it is empty when
+    ok is True. On failure the merge is ABORTED, so the worktree is left exactly
+    as it was rather than half-merged.
+    """
+    base = base or config.BASE_BRANCH
+    wt = Path(wt)
+    await _git(["fetch", "origin", base], cwd=wt, check=False)
+    rc, ref, _ = await _git(["rev-parse", "--verify", f"origin/{base}"],
+                            cwd=wt, check=False)
+    target = f"origin/{base}" if rc == 0 and ref.strip() else base
+    rc, _, err = await _git(
+        ["merge", "--no-edit", "-m", f"merge {base} into task branch", target],
+        cwd=wt, check=False)
+    if rc == 0:
+        return True, [], "merged cleanly"
+    rc2, out, _ = await _git(["diff", "--name-only", "--diff-filter=U"],
+                             cwd=wt, check=False)
+    conflicts = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    await _git(["merge", "--abort"], cwd=wt, check=False)
+    return False, conflicts, (f"{len(conflicts)} conflicting file(s)"
+                              if conflicts else f"merge failed: {err.strip()[:200]}")
+
+
 async def push_task_branch(repo, task_id):
     """Push task/<id> to origin. Returns (ok, note)."""
     repo = Path(repo).resolve()

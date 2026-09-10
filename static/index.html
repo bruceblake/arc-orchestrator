@@ -1107,7 +1107,7 @@ function friendly(e) {
     case "task.start": return `task started · ${task}`;
     case "task.end": return `task ended · ${task} → ${esc(e.status || "")}`;
     case "task.escalated": return `<span class="warn">⬆ ${task} escalated ${esc(short(e.from_model))} → ${esc(short(e.to_model))}</span>`;
-    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason || e.error ? ": " + cut(e.reason || e.error, 120) : ""}</span>`;
+    case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason || e.error ? ": " + cut(e.reason || e.error, 120) : ""}${(e.files || []).length ? ` <span class="hint">(${(e.files || []).map(esc).join(", ").slice(0, 120)})</span>` : ""}</span>`;
     case "task.failed": return `<span class="bad">✗ ${task} failed${e.reason ? ": " + cut(e.reason, 120) : ""}</span>`;
     case "task.merged": return `<span class="good">⬢ ${task} merged</span>`;
     case "task.budget": {
@@ -1128,6 +1128,7 @@ function friendly(e) {
     }
     case "task.resumed": return `<span class="hint">↻ resumed ${task} <span class="hint">(was ${esc(e.prior_status || "?")})</span></span>`;
     case "task.pr_reattached": return `<span class="hint">↻ reattached to PR #${esc(e.pr)} · ${task}</span>`;
+    case "task.resynced": return `<span class="warn">⟳ ${task}: PR #${esc(e.pr)} resynced with ${esc(e.base)} — needs re-review</span>`;
     case "task.branch_reset": return `<span class="bad">⚠ ${task}: reset ${esc(e.branch)} — ${esc(e.commits_discarded)} commit(s) discarded</span>`;
     case "driver.slot_wait": return `<span class="warn">⏳ ${m} queued · ${task} <span class="hint">(${esc(e.scope)} pool full)</span></span>`;
     case "task.pr_opened": return `<span class="good">⇪ PR opened · ${task} ${cut(e.url, 80)}</span>`;

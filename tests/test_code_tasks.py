@@ -671,3 +671,40 @@ class InconclusiveReviewRouting(unittest.TestCase):
 
     def test_approval_still_merges(self):
         self.assertTrue(self._fires("pr_merge_t1", {"approved": True}))
+
+
+class AConflictingPullRequestIsRetried(unittest.TestCase):
+    """A PR that conflicts with the base was a terminal state.
+
+    Every task merges into one integration branch, so conflicts are the normal
+    cost of parallelism — and most are not disagreements about the code, just a
+    base that moved on under a long task. Those merge cleanly with no model.
+    """
+
+    def _edges(self, src):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        return [e for e in g.edges if e.src == src]
+
+    def _fires(self, src, dst, result):
+        return any(e.dst == dst and (e.when is None or e.when(result, {}))
+                   for e in self._edges(src))
+
+    def test_a_resynced_branch_goes_back_for_review(self):
+        # The diff changed, so the approval it already has no longer covers it.
+        r = {"merged": False, "resynced": True, "resyncs": 1}
+        self.assertTrue(self._fires("pr_merge_t1", "pr_review_t1", r))
+
+    def test_a_clean_merge_does_not_loop_back(self):
+        self.assertFalse(self._fires("pr_merge_t1", "pr_review_t1",
+                                     {"merged": True, "pr": 4}))
+
+    def test_a_terminal_conflict_does_not_loop_back(self):
+        self.assertFalse(self._fires("pr_merge_t1", "pr_review_t1",
+                                     {"merged": False, "reason": "conflict"}))
+
+    def test_the_resync_budget_is_small_and_positive(self):
+        # Each resync rewrites the branch and costs a fresh review round.
+        self.assertGreaterEqual(config.PR_MAX_RESYNCS, 1)
+        self.assertLessEqual(config.PR_MAX_RESYNCS, 3)

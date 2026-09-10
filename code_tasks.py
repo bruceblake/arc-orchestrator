@@ -861,12 +861,33 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             state = await gitstore.pr_state(repo, number)
             if state.get("mergeable") == "CONFLICTING":
-                store.upsert_code_task(taskfile, tid, t["title"], model, rev,
-                                       "conflict",
-                                       error=f"PR #{number} conflicts with {base}",
-                                       finished=True)
-                events.emit("task.conflict", task=tid, pr=number,
-                            reason="PR conflicts with the base branch")
+                # Try to resolve it before giving up. Most conflicts here are
+                # not a disagreement about the code at all — they are a base
+                # branch that moved on under a task that took twenty minutes,
+                # and they merge cleanly with no model involved. This used to
+                # be a dead end: mark conflict, finish, wait for a human.
+                resyncs = (ctx.get("results", {}).get(f"pr_merge_{tid}") or {}
+                           ).get("resyncs", 0)
+                ok, conflicts, note = await gitstore.sync_with_base(
+                    await worktree(ctx), base)
+                if ok and resyncs < config.PR_MAX_RESYNCS:
+                    pushed, pnote = await gitstore.push_task_branch(repo, tid)
+                    if pushed:
+                        events.emit("task.resynced", task=tid, pr=number,
+                                    base=base, resyncs=resyncs + 1)
+                        # The diff on the PR just changed, so the approval it
+                        # already has no longer covers it: review it again.
+                        return {"merged": False, "resynced": True,
+                                "resyncs": resyncs + 1, "pr": number}
+                    note = f"resynced but push failed: {pnote}"
+                elif ok:
+                    note = f"still conflicting after {resyncs} resync(s)"
+                store.upsert_code_task(
+                    taskfile, tid, t["title"], model, rev, "conflict",
+                    error=f"PR #{number} conflicts with {base}: {note}",
+                    finished=True)
+                events.emit("task.conflict", task=tid, pr=number, reason=note,
+                            files=conflicts[:20])
                 return {"merged": False, "reason": "conflict"}
             ok, note = await gitstore.merge_pr(repo, number)
             if not ok:
@@ -924,6 +945,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                when=lambda r, c: bool(r.get("published")), on_drain=True)
         g.edge(f"pr_review_{tid}", f"pr_merge_{tid}",
                when=lambda r, c: bool(r.get("approved")), on_drain=True)
+        # A resync rewrote the branch, so the approval the PR already has no
+        # longer covers what is on it. Back to review, not straight to merge.
+        g.edge(f"pr_merge_{tid}", f"pr_review_{tid}",
+               when=lambda r, c: bool(r.get("resynced")), on_drain=True)
         # An inconclusive round reached no verdict: every reviewer crashed and
         # nobody read the diff. Retry the REVIEW — sending the implementer back
         # to fix issues that do not exist wastes a model and burns a real round.

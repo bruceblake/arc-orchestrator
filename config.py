@@ -185,6 +185,11 @@ PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "3"))
 # Separate from PR_MAX_ROUNDS on purpose: an infrastructure failure must
 # not consume the rounds reserved for real disagreement about the code.
 PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "3"))
+
+# How many times a conflicting PR may be resynced with the base before
+# giving up. Each resync rewrites the branch and costs a fresh review,
+# so this is deliberately small.
+PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "2"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")

@@ -283,3 +283,74 @@ class FindingAnExistingWorktree(unittest.TestCase):
         with capture_events() as ev:
             asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
         self.assertEqual([t for t, _ in ev.seen if t == "task.branch_reset"], [])
+
+
+class SyncingATaskBranchWithItsBase(unittest.TestCase):
+    """A PR that conflicts with the base was a dead end: marked conflict,
+    finished, left for a human. With every task merging into one integration
+    branch that is the normal cost of parallelism, and most of it is not a real
+    disagreement — just a base that moved on under a long-running task.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.repo = Path(self.dir) / "repo"
+        self.repo.mkdir()
+        self._orig = config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = str(Path(self.dir) / "wt")
+        self.addCleanup(setattr, config, "WORKTREE_ROOT", self._orig)
+        self._git("init", "-q", "-b", "main")
+        self._git("config", "user.email", "t@t")
+        self._git("config", "user.name", "t")
+        (self.repo / "shared.txt").write_text("line one\n")
+        (self.repo / "other.txt").write_text("untouched\n")
+        self._git("add", "-A"); self._git("commit", "-qm", "init")
+
+    def _git(self, *a, cwd=None):
+        return subprocess.run(["git", *a], cwd=cwd or self.repo, check=True,
+                              capture_output=True, text=True)
+
+    def _branch_with(self, path, text):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (wt / path).write_text(text)
+        self._git("add", "-A", cwd=wt)
+        self._git("commit", "-qm", "task work", cwd=wt)
+        return wt
+
+    def _advance_main(self, path, text):
+        (self.repo / path).write_text(text)
+        self._git("add", "-A"); self._git("commit", "-qm", "main moved on")
+
+    def test_a_base_that_moved_elsewhere_merges_with_no_model(self):
+        wt = self._branch_with("other.txt", "task changed this\n")
+        self._advance_main("shared.txt", "line one\nline two\n")
+        ok, conflicts, note = asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertTrue(ok, note)
+        self.assertEqual(conflicts, [])
+        self.assertIn("line two", (wt / "shared.txt").read_text())
+        self.assertIn("task changed this", (wt / "other.txt").read_text())
+
+    def test_a_genuine_overlap_reports_the_conflicting_paths(self):
+        wt = self._branch_with("shared.txt", "task rewrote this\n")
+        self._advance_main("shared.txt", "main rewrote this\n")
+        ok, conflicts, note = asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertFalse(ok)
+        self.assertEqual(conflicts, ["shared.txt"])
+
+    def test_a_failed_sync_leaves_the_worktree_clean(self):
+        # Aborting matters: a half-merged worktree would be committed by the
+        # next publish, pushing conflict markers into an open pull request.
+        wt = self._branch_with("shared.txt", "task rewrote this\n")
+        self._advance_main("shared.txt", "main rewrote this\n")
+        asyncio.run(gitstore.sync_with_base(wt, "main"))
+        st = subprocess.run(["git", "status", "--porcelain"], cwd=wt,
+                            capture_output=True, text=True).stdout
+        self.assertEqual(st.strip(), "")
+        self.assertNotIn("<<<<<<<", (wt / "shared.txt").read_text())
+
+    def test_syncing_an_already_current_branch_is_a_no_op(self):
+        wt = self._branch_with("other.txt", "task changed this\n")
+        ok, conflicts, _ = asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertTrue(ok)
+        self.assertEqual(conflicts, [])
