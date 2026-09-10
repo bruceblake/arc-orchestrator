@@ -13,9 +13,13 @@ Every task runs through this pipeline (full contract in
 
 ```
 alloc → implement → gate ──pass──▶ review ──pass──▶ publish → merge to main
-          ▲            │                │
-          └──── fail ◀─┴───── fail ◀────┘   (≤ ARC_MAX_FIX_ROUNDS = 3 fix rounds)
+           ▲            │                │
+           └──── fail ◀─┴───── fail ◀────┘   (≤ ARC_MAX_FIX_ROUNDS = 3 fix rounds)
 ```
+
+Before any of that, a taskfile declaring `project.after` holds at a
+`chain_wait` gate until every upstream taskfile's every task is merged
+(see "Project chaining" in section 1).
 
 Validate a taskfile and print the resolved DAG without calling any model or
 touching git:
@@ -41,6 +45,50 @@ also exits with `repo not found: <path>` if `project.repo` does not exist
 | `project.repo` | yes | Absolute path to the blessed clone (`Path(...).resolve()`d by the loader). Worktrees are allocated under `~/worktrees/<repo-name>/<task-id>` (`ARC_WORKTREE_ROOT`); reviewed merges land on its `main`. |
 | `project.title` | no | Short informational label; defaults to `""`. Never shown to the implementing agents. |
 | `project.tasks` | yes | JSON array of task objects. `load_taskfile` imposes no count limit and accepts an empty array (such a run is a no-op); the 1–50 requirement lives only in the dashboard's create-project endpoint, and the planner aims for 2–6. |
+| `project.after` | no | List of taskfile paths this project chains on (see "Project chaining" below). `[]`/absent = start immediately. |
+
+### Project chaining (`project.after`)
+
+Per-task `deps` order tasks **inside** one taskfile; `after` orders whole
+**taskfiles**: this file's run holds at the `chain_wait` gate until every
+task of every listed upstream taskfile is merged, and only then allocates
+its first worktree.
+
+```json
+{"project": {"repo": "/home/proxyie/repos/notes", "title": "notes: web UI",
+             "after": ["/home/proxyie/tasks/notes-cli.json"],
+             "tasks": [ ... ]}}
+```
+
+- **Path resolution**: an absolute path is used as-is; a bare filename
+  resolves against `config.TASKS_DIR` (`~/tasks`); a multi-component
+  relative path resolves against `~/tasks` if it exists there, else against
+  the cwd. The resolved path is the canonical key — the same form
+  `code run` records in the `code_tasks` table.
+- **Readiness is per task id, parsed from the upstream taskfile on disk** —
+  not per row. A dep run whose process died after 3 of 4 tasks merged
+  leaves 3 `merged` rows and no evidence the 4th ever ran; row-counting
+  would call that project done and branch this one from a base missing
+  task 4.
+- **Waiting vs. blocked**: a dep taskfile not on disk yet, a dep with
+  unfinished tasks, or no rows at all = *waiting* (chains may be declared
+  before the upstream project is even planned). A dep task row with status
+  `failed` or `conflict` = *blocked*: the run ends immediately with exit
+  code 1 and a `chain.blocked` event.
+- **While it waits nothing exists** — no worktree, branch, or task row for
+  this taskfile — so a cancelled wait leaves nothing behind to clean up.
+- **Budget**: the gate polls every 10 s and gives up after
+  `ARC_CHAIN_TIMEOUT` (default 6 h), ending the run with exit code 1.
+  Events: `chain.wait` on entry, `chain.ready` on release,
+  `chain.blocked` on failure/timeout.
+- **Cycles** (`a.json` after `b.json` after `a.json`) are rejected when the
+  graph is built: `ValueError: project.after cycle detected: ...`.
+- **`--no-wait`** turns the gate into a pre-flight check: instead of
+  waiting, `code run` exits with code **2** when the chain is not ready
+  (and 0 when it is) — the signal a queue wrapper uses to requeue. It
+  reads no rows and is safe to run while another process owns the file.
+- `code status` reports every taskfile in `~/tasks` that declares `after`
+  under a `chains` key: `{taskfile, after, ready, waiting, failed}`.
 
 ## 2. Per-task fields
 
@@ -181,21 +229,29 @@ to the implementer with the issue list.
 1. **JSON parses** — otherwise `json.JSONDecodeError`.
 2. **Required keys** — `project`, `project.repo`, `project.tasks` and
    per-task `id` are read up front; per-task `prompt` is read when the task
-   record is built (after checks 3–6 for that task). A missing key raises
+   record is built (after checks 4–7 for that task). A missing key raises
    `KeyError` (not `ValueError`), e.g. `KeyError: 'prompt'`.
-3. **Duplicate ids** — `ValueError: duplicate task id: {tid}`
-4. **Unknown/missing model** — the model must be one of the four
+3. **`project.after` shape** — must be a list of non-empty strings:
+   `ValueError: project.after must be a list of taskfile paths`. Entries are
+   deduplicated and resolved to canonical absolute keys; a taskfile listing
+   **itself** is rejected
+   (`ValueError: project.after lists this taskfile itself: ...`). Upstream
+   files need not exist yet — waiting is a runtime state, not a validation
+   error — but a cycle among existing files is rejected at graph build
+   (`ValueError: project.after cycle detected: ...`).
+4. **Duplicate ids** — `ValueError: duplicate task id: {tid}`
+5. **Unknown/missing model** — the model must be one of the four
    `config.IMPLEMENTER_MODELS` (a missing `model` defaults to `""` and is
    rejected here too):
    `ValueError: task {tid}: model {model!r} must be an implementer (['DeepSeek-V4-Flash', 'GLM-5.3', 'Kimi-K3', 'gpt-oss-120b'])`
-5. **Reviewer must be kimi/glm** (missing defaults to `""`, rejected):
+6. **Reviewer must be kimi/glm** (missing defaults to `""`, rejected):
    `ValueError: task {tid}: reviewer must be 'kimi' or 'glm', got {reviewer!r}`
-6. **Cross-harness rule** — only when the implementer is `Kimi-K3` or
+7. **Cross-harness rule** — only when the implementer is `Kimi-K3` or
    `GLM-5.3` (families `kimi`/`glm`); the reviewer must be the other one:
    `ValueError: task {tid}: reviewer {reviewer!r} must not be the harness that implemented ({model}); use the other one`
-7. **Unknown deps** — every `deps` entry must be a task id in this file:
+8. **Unknown deps** — every `deps` entry must be a task id in this file:
    `ValueError: task {tid}: unknown dep {d!r}`
-8. **No cycles** — topological sort over deps:
+9. **No cycles** — topological sort over deps:
    `ValueError: dependency cycle at {tid}`
 
 Not checked by the loader (know where these live):
@@ -337,6 +393,12 @@ a PR for a human to merge. The fleet never writes to `main`.
   serialize; stylistic ordering wastes parallelism. If a task needs two
   parallel tasks' output, chain them (A→B, then `deps: [B]`) rather than
   listing both — only the last dep gates the alloc.
+- **Use `after` only between taskfiles, never within one.** `deps` orders
+  tasks inside a file (fine-grained, per-task PR merges); `after` orders
+  whole files (one gate, zero worktrees until every upstream task merged).
+  Chaining two files that could interleave wastes the parallelism the DAG
+  exists to exploit — but chaining files whose tasks genuinely read the
+  upstream's merged code is exactly what `after` is for.
 - **Keep `verify_cmd` under the 180s gate timeout** and deterministic (no
   network, no flaky suites).
 - **Size tasks for one agent sitting** (<30 min) and spread them across all

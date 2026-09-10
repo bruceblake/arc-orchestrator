@@ -1,4 +1,6 @@
-"""Taskfile validation, reviewer-verdict parsing, and resume/escalation planning."""
+"""Taskfile validation, reviewer-verdict parsing, resume/escalation planning,
+and project chaining (`after`)."""
+import asyncio
 import json
 import pathlib
 import tempfile
@@ -11,9 +13,12 @@ import code_tasks
 import config
 
 
-def taskfile(tasks, repo="/tmp", title="t"):
+def taskfile(tasks, repo="/tmp", title="t", after=None):
     """Write a taskfile to a temp path and return it."""
-    doc = {"project": {"repo": repo, "title": title, "tasks": tasks}}
+    project = {"repo": repo, "title": title, "tasks": tasks}
+    if after is not None:
+        project["after"] = after
+    doc = {"project": project}
     fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(doc, fh)
     fh.close()
@@ -353,3 +358,226 @@ class DescribeReportsTheRealBase(unittest.TestCase):
         out = code_tasks.describe(ts)
         self.assertIn(f"base={config.BASE_BRANCH}", out)
         self.assertNotIn("base=main", out) if config.BASE_BRANCH != "main" else None
+
+
+class ProjectChaining(unittest.TestCase):
+    """A taskfile declaring `after` waits for whole upstream taskfiles.
+
+    Per-task `deps` order tasks inside one taskfile; `after` orders whole
+    taskfiles: no worktree allocates until every task of every upstream
+    taskfile is merged. The failure this guards against is a dependent
+    branching from a base that does not contain what it depends on.
+    """
+
+    def _depfile(self, d, name, ids):
+        p = Path(d) / name
+        p.write_text(json.dumps({"project": {
+            "repo": "/tmp", "title": name, "tasks": [
+                {"id": i, "title": i, "prompt": "x",
+                 "model": "gpt-oss-120b", "reviewer": "kimi"} for i in ids]}}))
+        return str(p.resolve())
+
+    def _row(self, tid, status):
+        return {"id": tid, "status": status, "model": "gpt-oss-120b",
+                "error": None}
+
+    def _graph(self, ts, store, taskfile_arg="tf.json"):
+        with capture_events():
+            return code_tasks.build_code_graph(store, ts,
+                                               taskfile=taskfile_arg)
+
+    def _edge(self, g, src, dst):
+        return next((e for e in g.edges if e.src == src and e.dst == dst), None)
+
+    # -- loader ---------------------------------------------------------
+
+    def test_after_must_be_a_list(self):
+        with self.assertRaises(ValueError) as cm:
+            code_tasks.load_taskfile(taskfile([BASIC], after="other.json"))
+        self.assertIn("must be a list", str(cm.exception))
+
+    def test_after_rejects_self_reference(self):
+        p = taskfile([BASIC])
+        doc = json.loads(p.read_text())
+        doc["project"]["after"] = [str(p)]
+        p.write_text(json.dumps(doc))
+        with self.assertRaises(ValueError) as cm:
+            code_tasks.load_taskfile(p)
+        self.assertIn("itself", str(cm.exception))
+
+    def test_missing_dep_files_are_fine_and_dedupe(self):
+        """Chains are declared before the upstream projects are planned —
+        a dep taskfile that does not exist yet is waited on, not rejected."""
+        ts = code_tasks.load_taskfile(
+            taskfile([BASIC], after=["ghost.json", "ghost.json"]))
+        want = str((Path(config.TASKS_DIR) / "ghost.json").resolve())
+        self.assertEqual(ts["after"], [want])
+
+    def test_describe_lists_after(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        out = code_tasks.describe(ts)
+        self.assertIn("after:", out)
+        self.assertIn("ghost.json", out)
+
+    # -- graph wiring ---------------------------------------------------
+
+    def test_without_after_heads_start_directly(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        g = self._graph(ts, FakeStore())
+        self.assertNotIn("chain_wait", g.nodes)
+        self.assertIn("alloc_t1", g.starts)
+
+    def test_with_after_every_head_gates_on_chain_wait(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        g = self._graph(ts, FakeStore())
+        self.assertEqual(g.starts, ["chain_wait"])
+        e = self._edge(g, "chain_wait", "alloc_t1")
+        self.assertIsNotNone(e)
+        self.assertTrue(e.when({"ok": True}, {}))
+        self.assertFalse(e.when({"ok": False}, {}),
+                         "a blocked chain must not allocate a worktree")
+
+    def test_conflict_repair_head_is_gated_too(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        g = self._graph(ts, FakeStore([{"id": "t1", "status": "conflict",
+                                        "model": "gpt-oss-120b",
+                                        "error": "merge failed"}]))
+        self.assertEqual(g.starts, ["chain_wait"])
+        self.assertIsNotNone(self._edge(g, "chain_wait", "publish_t1"))
+
+    def test_merged_skip_head_is_gated_too(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        g = self._graph(ts, FakeStore([{"id": "t1", "status": "merged",
+                                        "model": "gpt-oss-120b",
+                                        "error": None}]))
+        self.assertEqual(g.starts, ["chain_wait"])
+        self.assertIsNotNone(self._edge(g, "chain_wait", "publish_t1"))
+
+    def test_after_cycle_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self._depfile(d, "a.json", ["a1"])
+            b = self._depfile(d, "b.json", ["b1"])
+            for name, dep in (("a.json", b), ("b.json", a)):
+                p = Path(d) / name
+                doc = json.loads(p.read_text())
+                doc["project"]["after"] = [dep]
+                p.write_text(json.dumps(doc))
+            ts = code_tasks.load_taskfile(Path(d) / "a.json")
+            with self.assertRaises(ValueError) as cm:
+                self._graph(ts, FakeStore(), taskfile_arg=a)
+            self.assertIn("cycle", str(cm.exception))
+
+    # -- chain_status ---------------------------------------------------
+
+    def test_chain_status_requires_every_upstream_id_merged(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1", "d2"])
+            rows = [self._row("d1", "merged"), self._row("d2", "running")]
+            st = code_tasks.chain_status(FakeStore(by_taskfile={dep: rows}), [dep])
+            self.assertFalse(st["ok"])
+            self.assertEqual(st["waiting"], [dep])
+            st = code_tasks.chain_status(FakeStore(by_taskfile={
+                dep: [self._row("d1", "merged"), self._row("d2", "merged")]}), [dep])
+            self.assertTrue(st["ok"])
+
+    def test_a_killed_upstream_run_is_not_a_merged_project(self):
+        """The premature-merge hole: the dep's run process died after 3 of 4
+        tasks merged. Row-counting alone sees only merged rows and calls the
+        chain ready — so ids are parsed from the taskfile on disk, and the
+        task with no row at all (d4) keeps the chain waiting."""
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1", "d2", "d3", "d4"])
+            rows = [self._row(i, "merged") for i in ("d1", "d2", "d3")]
+            st = code_tasks.chain_status(FakeStore(by_taskfile={dep: rows}), [dep])
+            self.assertFalse(st["ok"])
+            self.assertEqual(st["waiting"], [dep])
+            self.assertEqual(st["deps"][0]["unmerged"], ["d4"])
+
+    def test_a_failed_upstream_task_blocks_the_chain(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            st = code_tasks.chain_status(FakeStore(by_taskfile={
+                dep: [self._row("d1", "failed")]}), [dep])
+            self.assertFalse(st["ok"])
+            self.assertEqual(st["failed"], {dep: ["d1"]})
+
+    def test_an_empty_upstream_taskfile_is_vacuously_done(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", [])
+            st = code_tasks.chain_status(FakeStore(), [dep])
+            self.assertTrue(st["ok"])
+
+    def test_a_dep_taskfile_not_yet_on_disk_is_waited_on(self):
+        ghost = str((Path(tempfile.mkdtemp()) / "ghost.json").resolve())
+        st = code_tasks.chain_status(FakeStore(), [ghost])
+        self.assertFalse(st["ok"])
+        self.assertEqual(st["waiting"], [ghost])
+        self.assertEqual(st["failed"], {})
+
+    # -- the chain_wait node ---------------------------------------------
+
+    def test_chain_wait_passes_when_upstream_is_merged(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            ts = code_tasks.load_taskfile(taskfile([BASIC], after=[dep]))
+            g = self._graph(ts, FakeStore(
+                by_taskfile={dep: [self._row("d1", "merged")]}))
+            with capture_events() as ev:
+                r = asyncio.run(g.nodes["chain_wait"].fn({}))
+        self.assertTrue(r["ok"])
+        self.assertTrue(ev.of("chain.ready"))
+        self.assertFalse(ev.of("chain.blocked"))
+
+    def test_chain_wait_blocks_on_a_failed_upstream_task(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            ts = code_tasks.load_taskfile(taskfile([BASIC], after=[dep]))
+            g = self._graph(ts, FakeStore(
+                by_taskfile={dep: [self._row("d1", "failed")]}))
+            with capture_events() as ev:
+                r = asyncio.run(g.nodes["chain_wait"].fn({}))
+        self.assertFalse(r["ok"])
+        self.assertIn("dependency failed", r["reason"])
+        self.assertEqual(r["failed"], {dep: ["d1"]})
+        self.assertTrue(ev.of("chain.blocked"))
+        self.assertEqual(ev.first("chain.blocked")["failed_tasks"],
+                         {dep: ["d1"]})
+
+    def test_chain_wait_times_out(self):
+        old = config.CHAIN_TIMEOUT
+        config.CHAIN_TIMEOUT = 0.0   # first poll is already past the budget
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                dep = self._depfile(d, "dep.json", ["d1"])
+                ts = code_tasks.load_taskfile(taskfile([BASIC], after=[dep]))
+                g = self._graph(ts, FakeStore())   # no rows: still waiting
+                with capture_events() as ev:
+                    r = asyncio.run(g.nodes["chain_wait"].fn({}))
+        finally:
+            config.CHAIN_TIMEOUT = old
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["timeout"])
+        self.assertEqual(r["waiting"], [dep])
+        self.assertTrue(ev.of("chain.blocked"))
+
+    # -- status -----------------------------------------------------------
+
+    def test_pending_chains_reports_readiness_per_chained_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            chained = self._depfile(d, "chained.json", ["c1"])
+            doc = json.loads(Path(chained).read_text())
+            doc["project"]["after"] = [dep]
+            Path(chained).write_text(json.dumps(doc))
+            self._depfile(d, "plain.json", ["p1"])   # no after: not reported
+            old = config.TASKS_DIR
+            config.TASKS_DIR = d
+            try:
+                out = code_tasks.pending_chains(FakeStore(
+                    by_taskfile={dep: [self._row("d1", "merged")]}))
+            finally:
+                config.TASKS_DIR = old
+        self.assertEqual([Path(e["taskfile"]).name for e in out],
+                         ["chained.json"])
+        self.assertTrue(out[0]["ready"])
+        self.assertEqual(out[0]["after"], [dep])

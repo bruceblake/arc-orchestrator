@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 import config
@@ -70,8 +71,27 @@ def load_taskfile(path, policy=None):
             if d not in tasks:
                 raise ValueError(f"task {tid}: unknown dep {d!r}")
     _topo(tasks)  # raises on cycles
+    # Project chaining: `after` names whole taskfiles whose EVERY task must be
+    # merged before this project allocates its first worktree. Existence of
+    # the dep files is deliberately NOT required here — a chain is often
+    # declared before the upstream project is even planned; a missing dep
+    # simply reads as "not done yet" at wait time (and bounded by
+    # config.CHAIN_TIMEOUT). Cross-file cycles cannot be checked here (the
+    # deps may not exist yet); build_code_graph checks them at run time.
+    after_raw = data.get("project", {}).get("after", [])
+    if not isinstance(after_raw, list) or not all(
+            isinstance(a, str) and a.strip() for a in after_raw):
+        raise ValueError("project.after must be a list of taskfile paths")
+    me = str(Path(path).resolve())
+    after = []
+    for a in after_raw:
+        k = _dep_key(a)
+        if k == me:
+            raise ValueError(f"project.after lists this taskfile itself: {a!r}")
+        if k not in after:
+            after.append(k)
     return {"repo": repo, "tasks": tasks, "title": data.get("project", {}).get("title", ""),
-            "policy": pol}
+            "policy": pol, "after": after}
 
 
 def _topo(tasks):
@@ -94,6 +114,9 @@ def _topo(tasks):
 
 def describe(taskset):
     lines = [f"repo: {taskset['repo']}"]
+    if taskset.get("after"):
+        lines.append("after: " + ", ".join(
+            Path(k).name for k in taskset["after"]))
     for tid in _topo(taskset["tasks"]):
         t = taskset["tasks"][tid]
         impl_fam = config.MODEL_FAMILY[t["model"]]
@@ -105,6 +128,181 @@ def describe(taskset):
             f"verify={t['verify_cmd'] or '(none)'}"
         )
     return "\n".join(lines)
+
+
+# --- project chaining: taskfile -> taskfile dependencies --------------------
+#
+# A taskfile may declare `"after": ["<taskfile>", ...]`: its project then
+# waits for EVERY task of each named upstream taskfile to reach 'merged'
+# before its own first worktree allocates. This is the cross-project analog
+# of per-task `deps` — DAG-of-DAGs chaining.
+
+
+def _dep_key(p):
+    """Canonical key for an `after` entry: the resolved absolute path — the
+    same form main.py stores in code_tasks.taskfile."""
+    q = Path(str(p)).expanduser()
+    if not q.is_absolute():
+        cand = Path(config.TASKS_DIR) / q
+        q = cand if len(q.parts) == 1 or cand.exists() else Path.cwd() / q
+    return str(q.resolve())
+
+
+def _taskfile_ids(key):
+    """Task ids of a taskfile on disk, or None when missing/unreadable."""
+    try:
+        data = json.loads(Path(key).read_text(encoding="utf-8"))
+        return [t["id"] for t in data["project"]["tasks"]]
+    except Exception:
+        return None
+
+
+def _read_after(key):
+    """The resolved `after` keys of a taskfile on disk ([] when unreadable)."""
+    try:
+        data = json.loads(Path(key).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    raw = data.get("project", {}).get("after", [])
+    if not isinstance(raw, list):
+        return []
+    return [_dep_key(a) for a in raw if isinstance(a, str) and a.strip()]
+
+
+def chain_status(store, after_keys):
+    """Readiness of a run's `after` dependencies.
+
+    A dependency is done when EVERY task id in its taskfile has a 'merged'
+    row — rows-only would complete prematurely: a dep run killed after 3 of
+    4 tasks leaves 3 merged rows and no evidence the 4th ever existed, so
+    the ids are parsed from disk. A dep with rows failed/conflict BLOCKS the
+    chain; anything else (rows missing, rows still running, taskfile not on
+    disk yet) is waiting, not failing — chains are declared before upstream
+    projects are planned.
+    """
+    st = {"ok": True, "waiting": [], "failed": {}, "deps": []}
+    for key in after_keys:
+        ids = _taskfile_ids(key)
+        rows = {r["id"]: r["status"] for r in store.code_tasks_for(key)}
+        bad = sorted(i for i, s in rows.items() if s in ("failed", "conflict"))
+        st["deps"].append({
+            "taskfile": key,
+            "readable": ids is not None,
+            "n_tasks": len(ids) if ids is not None else None,
+            "merged": sum(1 for s in rows.values() if s == "merged"),
+            "unmerged": [i for i in (ids or []) if rows.get(i) != "merged"],
+            "failed": bad,
+        })
+        if bad:
+            st["failed"][key] = bad
+        elif ids is None or any(rows.get(i) != "merged" for i in ids):
+            st["waiting"].append(key)
+    st["ok"] = not st["failed"] and not st["waiting"]
+    return st
+
+
+def pending_chains(store):
+    """Chain readiness for every taskfile in TASKS_DIR that declares `after`
+    (feeds `main.py code status`). Light parse only — a broken taskfile must
+    not take the status command down with it."""
+    out = []
+    d = Path(config.TASKS_DIR)
+    if not d.is_dir():
+        return out
+    for f in sorted(d.glob("*.json")):
+        raw = _read_after(f)
+        if not raw:
+            continue
+        st = chain_status(store, raw)
+        out.append({"taskfile": str(f), "after": raw, "ready": st["ok"],
+                    "waiting": st["waiting"], "failed": st["failed"]})
+    return out
+
+
+def _after_cycle(own_key, after_keys, max_depth=8):
+    """A taskfile-key path from an `after` entry back to `own_key`, or None.
+
+    Depth-bounded DFS over the `after` edges found on disk; unreadable files
+    simply have no outgoing edges (they may not exist yet). Depth-bounded
+    because a chain loop among files that all exist is the only error this
+    needs to catch, not full graph theory on a directory of taskfiles.
+    """
+    seen = set(after_keys)
+
+    def walk(key, path):
+        if len(path) >= max_depth:
+            return None
+        for dep in _read_after(key):
+            if dep == own_key:
+                return path + [dep]
+            if dep in seen:
+                continue
+            seen.add(dep)
+            hit = walk(dep, path + [dep])
+            if hit:
+                return hit
+        return None
+
+    for k in after_keys:
+        hit = walk(k, [k])
+        if hit:
+            return hit
+    return None
+
+
+_CHAIN_POLL_S = 10.0
+
+
+def _make_chain_wait(store, taskfile, after_keys):
+    """The chain gate node: poll `after` deps until every one is fully
+    merged, one of them fails, or config.CHAIN_TIMEOUT expires. It runs
+    before any alloc, so while it waits there is no worktree, branch or
+    task row for this taskfile — a cancelled wait leaves nothing behind."""
+
+    async def chain_wait(ctx):
+        t0 = time.monotonic()
+        warned = set()
+        events.emit("chain.wait", taskfile=taskfile, deps=after_keys)
+        while True:
+            st = chain_status(store, after_keys)
+            if st["ok"]:
+                waited = round(time.monotonic() - t0, 1)
+                events.emit("chain.ready", taskfile=taskfile,
+                            deps=after_keys, waited_s=waited)
+                return {"ok": True, "waited_s": waited}
+            if st["failed"]:
+                reason = "dependency failed: " + "; ".join(
+                    f"{Path(k).name}: {', '.join(v)}"
+                    for k, v in st["failed"].items())
+                events.emit("chain.blocked", taskfile=taskfile,
+                            failed_tasks=st["failed"])
+                return {"ok": False, "reason": reason, "failed": st["failed"]}
+            for d in st["deps"]:
+                if d["taskfile"] in warned:
+                    continue
+                warned.add(d["taskfile"])
+                if not d["readable"]:
+                    log.info("chain: waiting for %s (taskfile not on disk "
+                             "yet or unreadable)", Path(d["taskfile"]).name)
+                elif d["n_tasks"]:
+                    log.info("chain: waiting for %s (%d/%d merged)",
+                             Path(d["taskfile"]).name, d["merged"], d["n_tasks"])
+                else:
+                    log.info("chain: waiting for %s (no tasks parsed)",
+                             Path(d["taskfile"]).name)
+            waited = time.monotonic() - t0
+            if waited > config.CHAIN_TIMEOUT:
+                names = ", ".join(Path(k).name for k in st["waiting"])
+                reason = (f"chain wait timed out after {waited:.0f}s "
+                          f"(waiting: {names})")
+                events.emit("chain.blocked", taskfile=taskfile,
+                            reason="timeout", waited_s=round(waited, 1),
+                            waiting=st["waiting"])
+                return {"ok": False, "reason": reason, "timeout": True,
+                        "waiting": st["waiting"]}
+            await asyncio.sleep(min(_CHAIN_POLL_S, config.CHAIN_TIMEOUT))
+
+    return chain_wait
 
 
 def _impl_prompt(t, feedback):
@@ -278,6 +476,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     review_on = (pol or {}).get("review", True)
     escalate_on = (pol or {}).get("escalate", True)
     g = Graph("code-tasks", max_steps=config.MAX_GRAPH_STEPS)
+    # Task nodes with no in-task deps ("heads") start the graph — directly
+    # when there is no `after`, else behind the chain_wait gate.
+    heads = []
 
     # --- resume: statuses recorded by earlier runs of THIS taskfile ----------
     # Re-running `code run <taskfile>` is a resume of the same project: merged
@@ -391,7 +592,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         if t["deps"]:
             g.edge(f"pr_merge_{t['deps'][-1]}", f"publish_{tid}")
         else:
-            g.start(f"publish_{tid}")
+            heads.append(f"publish_{tid}")
 
     def make_chain(t):
         tid = t["id"]
@@ -773,13 +974,34 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # code it depends on.
             g.edge(f"pr_merge_{t['deps'][-1]}", f"{first}_{tid}")
         else:
-            g.start(f"{first}_{tid}")
+            heads.append(f"{first}_{tid}")
 
     for tid in _topo(tasks):
         if (prior.get(tid) or {}).get("status") == "merged":
             make_skip(tasks[tid])
         else:
             make_chain(tasks[tid])
+
+    # --- the chain gate -------------------------------------------------
+    # With `after`, every head (including conflict-repair publishes) runs
+    # only once every upstream task is merged; the gate is a plain node with
+    # conditional edges so a blocked chain ENDS the run with a clean result
+    # (main.py turns it into exit code 1) instead of a raised exception, and
+    # no head allocates a worktree while it waits.
+    after_keys = list(taskset.get("after") or [])
+    if after_keys:
+        cyc = _after_cycle(taskfile, after_keys)
+        if cyc:
+            raise ValueError(
+                "project.after cycle detected: "
+                + " -> ".join(Path(k).name for k in cyc))
+        g.node("chain_wait", _make_chain_wait(store, taskfile, after_keys))
+        g.start("chain_wait")
+        for h in heads:
+            g.edge("chain_wait", h, when=lambda r, c: r.get("ok"))
+    else:
+        for h in heads:
+            g.start(h)
     return g
 
 

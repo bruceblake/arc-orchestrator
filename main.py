@@ -175,7 +175,8 @@ def cmd_code(args):
     import json
     import events
     from store import Store
-    from code_tasks import build_code_graph, describe, load_taskfile, plan_tasks
+    from code_tasks import (build_code_graph, chain_status, describe,
+                        load_taskfile, pending_chains, plan_tasks)
 
     if args.code_cmd == "status":
         store = Store(args.db or config.DB_PATH)
@@ -183,6 +184,7 @@ def cmd_code(args):
             n = store.reset_stale_code_tasks()
             print(f"reset {n} stale 'running' task(s) -> failed")
         out = store.code_status()
+        out["chains"] = pending_chains(store)
         print(json.dumps(out, indent=2, default=str))
         return
     if args.code_cmd == "bench":
@@ -232,6 +234,29 @@ def cmd_code(args):
             sys.exit(f"repo not found: {taskset['repo']}")
         store = Store(db_path(args, False))
         tf = str(Path(args.taskfile).resolve())
+        # --no-wait: a read-only pre-flight of the chain gate. Instead of
+        # sitting in chain_wait until the upstream projects merge, fail fast
+        # with exit code 2 — the signal a queue/CI wrapper uses to requeue.
+        # Placed before the live-run guard on purpose: it touches no rows,
+        # so it is safe to run even while another process owns this file.
+        if args.no_wait and taskset.get("after"):
+            st = chain_status(store, taskset["after"])
+            if not st["ok"]:
+                bits = []
+                for d in st["deps"]:
+                    n = Path(d["taskfile"]).name
+                    if d["failed"]:
+                        bits.append(f"{n}: failed {', '.join(d['failed'])}")
+                    elif not d["readable"]:
+                        bits.append(f"{n}: taskfile not on disk yet")
+                    elif d["n_tasks"]:
+                        bits.append(f"{n}: {d['merged']}/{d['n_tasks']} merged")
+                    else:
+                        bits.append(f"{n}: no rows yet")
+                print(f"chain not ready ({'; '.join(bits)}); "
+                      "run again without --no-wait to wait for it",
+                      file=sys.stderr)
+                sys.exit(2)
         # Two processes on the SAME task file would share task ids, worktrees
         # and branches and fight over them; the stale-reset each performs at
         # startup would also clobber the other's live rows. Driver leases keep
@@ -326,6 +351,13 @@ def cmd_code(args):
         merged = sorted(k for k, v in results.items()
                         if k.startswith("publish_") and isinstance(v, dict) and v.get("merged"))
         log.info("done — merged: %s", ", ".join(merged) or "none")
+        # The chain gate failing is a clean graph end, not an exception —
+        # surface it as a non-zero exit so wrappers can tell it apart from
+        # success. (1 = chain blocked/timed out at runtime; --no-wait uses 2.)
+        cw = results.get("chain_wait")
+        if isinstance(cw, dict) and not cw.get("ok"):
+            log.error("chain blocked: %s", cw.get("reason", "unknown"))
+            sys.exit(1)
 
     try:
         asyncio.run(run())
@@ -644,6 +676,9 @@ def main():
     cr_p.add_argument("--dry-run", action="store_true", help="print the resolved DAG, no models, no git")
     cr_p.add_argument("--force", action="store_true",
                       help="run even if another process is already running this task file")
+    cr_p.add_argument("--no-wait", action="store_true",
+                      help="exit code 2 instead of waiting when the task file's "
+                           "`after` dependencies are not all merged yet")
     cr_p.add_argument("--db", default=None, help="sqlite database path")
     cr_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cp_p = code_sub.add_parser("plan", help="ask Kimi-K3 to draft a task file for a goal")
