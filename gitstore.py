@@ -96,6 +96,9 @@ async def alloc(repo, task_id, base="main"):
     BEFORE alloc runs, so reviewed commits are never discarded silently.)"""
     repo = Path(repo).resolve()
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
+    if not wt.resolve().is_relative_to(
+            Path(config.WORKTREE_ROOT).resolve() / repo.name):
+        raise ValueError(f"task id {task_id!r} escapes WORKTREE_ROOT")
     branch = f"task/{task_id}"
     await _ensure_identity(repo)
     if wt.exists():

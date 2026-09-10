@@ -183,34 +183,32 @@ to the implementer with the issue list.
    per-task `id` are read up front; per-task `prompt` is read when the task
    record is built (after checks 3–6 for that task). A missing key raises
    `KeyError` (not `ValueError`), e.g. `KeyError: 'prompt'`.
-3. **Duplicate ids** — `ValueError: duplicate task id: {tid}`
-4. **Unknown/missing model** — the model must be one of the four
+3. **Id shape** — the id must match `[a-z0-9][a-z0-9-]{0,60}` (it becomes a
+   branch name, a worktree path, a ref fragment, and a log filename):
+   `ValueError: task id {tid!r} must match [a-z0-9][a-z0-9-]{0,60} (it becomes a worktree path and a git-ref fragment)`
+4. **Duplicate ids** — `ValueError: duplicate task id: {tid}`
+5. **Unknown/missing model** — the model must be one of the four
    `config.IMPLEMENTER_MODELS` (a missing `model` defaults to `""` and is
    rejected here too):
    `ValueError: task {tid}: model {model!r} must be an implementer (['DeepSeek-V4-Flash', 'GLM-5.3', 'Kimi-K3', 'gpt-oss-120b'])`
-5. **Reviewer must be kimi/glm** (missing defaults to `""`, rejected):
+6. **Reviewer must be kimi/glm** (missing defaults to `""`, rejected):
    `ValueError: task {tid}: reviewer must be 'kimi' or 'glm', got {reviewer!r}`
-6. **Cross-harness rule** — only when the implementer is `Kimi-K3` or
+7. **Cross-harness rule** — only when the implementer is `Kimi-K3` or
    `GLM-5.3` (families `kimi`/`glm`); the reviewer must be the other one:
    `ValueError: task {tid}: reviewer {reviewer!r} must not be the harness that implemented ({model}); use the other one`
-7. **Unknown deps** — every `deps` entry must be a task id in this file:
+8. **Unknown deps** — every `deps` entry must be a task id in this file:
    `ValueError: task {tid}: unknown dep {d!r}`
-8. **No cycles** — topological sort over deps:
+9. **No cycles** — topological sort over deps:
    `ValueError: dependency cycle at {tid}`
 
 Not checked by the loader (know where these live):
 
-- **id format** — the kebab-case pattern is enforced by the dashboard's
-  create-project endpoint (`dashboard.py`: `task {i}: id must match [a-z0-9][a-z0-9-]{0,60}`);
-  hand-written files should follow the same pattern since ids become branch
-  names, log filenames, and `deps` keys. The loader itself only enforces
-  uniqueness.
 - **Tier routing** — the loader rejects models outside the four, but does not
   check basic/medium/hard suitability; tier assignment is an authoring rule
   from `config.IMPLEMENT_TIERS` and the planner prompt.
 - **Field types beyond the above** — `deps`/`files_hint` are only wrapped with
   `list(...)`; keep them JSON arrays of strings (a bare string gets split into
-  characters and then fails rule 7 with `unknown dep`).
+  characters and then fails rule 8 with `unknown dep`).
 - **Prompt quality / verify_cmd honesty** — the gate only checks exit codes;
   only you (or the planner) can make them meaningful.
 

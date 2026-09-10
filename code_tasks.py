@@ -38,6 +38,11 @@ def load_taskfile(path, policy=None):
     tasks = {}
     for t in data["project"]["tasks"]:
         tid = t["id"]
+        if not isinstance(tid, str) or \
+                not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,60}", tid):
+            raise ValueError(
+                f"task id {tid!r} must match [a-z0-9][a-z0-9-]{{0,60}} "
+                "(it becomes a worktree path and a git-ref fragment)")
         if tid in tasks:
             raise ValueError(f"duplicate task id: {tid}")
         model = t.get("model", "")
