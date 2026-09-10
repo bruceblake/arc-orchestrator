@@ -696,6 +696,7 @@ async function refreshDetail() {
   $("#d-git").innerHTML = g.error ? `<span class="hint">${esc(g.error)}</span>` : `<div class="kv">
       <span>branch <b>${esc(g.branch || "—")}</b></span><span>dirty files <b class="${(g.dirty || []).length ? "warn" : ""}">${(g.dirty || []).length}</b></span>
       <span>worktrees <b>${(g.worktrees || []).length}</b></span></div>
+    ${g.ready !== undefined ? `<div class="hint" style="margin-top:3px">PRs <b class="${g.ready ? "" : "warn"}">${esc(g.ready ? "on: " + (g.remote || "") : "off: " + (g.reason || "unavailable"))}</b></div>` : ""}
     ${(g.log || []).length ? `<div class="hint" style="margin-top:5px">${g.log.map(l => "&nbsp;&nbsp;" + esc(l)).join("<br>")}</div>` : ""}
     ${(g.worktrees || []).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.map(esc).join("<br>")}</div>` : ""}`;
   renderDag(d); renderFeed(d); renderTasks(d);

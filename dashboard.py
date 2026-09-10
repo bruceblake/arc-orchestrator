@@ -10,6 +10,7 @@ Usage layers (why a model can appear under more than one source):
   kimi-code         per-API-call usage parsed from kimi-code session wire logs
                     (covers every kimi-code session, interactive ones included)
 """
+import asyncio
 import errno
 import json
 import logging
@@ -25,6 +26,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import config
+import gitstore
 from store import Store
 
 log = logging.getLogger("dashboard")
@@ -1047,7 +1049,7 @@ def _projects(store):
     return out
 
 
-def _git_block(repo):
+def _git_block(repo, gh=None):
     info = {"repo": str(repo), "branch": None, "log": [], "worktrees": [], "dirty": []}
     if not repo or not repo.is_dir():
         info["error"] = "repo not found on disk"
@@ -1064,6 +1066,9 @@ def _git_block(repo):
     info["log"] = [l for l in git("log", "--oneline", "-6").splitlines() if l]
     info["worktrees"] = [l.strip() for l in git("worktree", "list").splitlines() if l.strip()]
     info["dirty"] = [l for l in git("status", "--short").splitlines() if l]
+    if isinstance(gh, dict):
+        for k in ("remote", "gh_installed", "gh_authed", "ready", "reason"):
+            info[k] = gh.get(k)
     return info
 
 
@@ -1106,13 +1111,17 @@ def _project_detail(store, fname):
                 break
     events.reverse()
     repo_v = _valid_repo(proj.get("repo") or "")
+    try:
+        gh = asyncio.run(gitstore.github_status(repo_v)) if repo_v else None
+    except Exception:
+        gh = None
     import reconcile
     run_pid = next((r["pid"] for r in reconcile.live_runs()
                     if r.get("taskfile") and Path(r["taskfile"]).name == fname), None)
     return {"file": fname, "title": proj.get("title") or path.stem,
             "repo": proj.get("repo"), "run_pid": run_pid,
             "tasks": tdefs, "rows": rows, "runs": runs, "events": events,
-            "git": _git_block(repo_v)}, 200
+            "git": _git_block(repo_v, gh)}, 200
 
 
 def _agents(store):
