@@ -1,5 +1,11 @@
 # Operator runbook
 
+> **Security: the dashboard has no authentication.** It binds `0.0.0.0:8787`,
+> and `POST /api/projects/create` + `/run` will execute an arbitrary
+> `verify_cmd` as you. Treat reachability of port 8787 as equivalent to shell
+> access. Keep it on a trusted LAN and never expose it to the internet. This is
+> a deliberate, operator-accepted trade-off — see AGENTS.md Rule 6b.
+
 This is the operator's runbook for the ARC multi-model orchestrator at
 `/home/proxyie/arc-orchestrator`. All commands assume you are on that machine,
 in a shell, as the user that owns the repo. Everything below is checked

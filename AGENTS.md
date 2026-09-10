@@ -309,6 +309,37 @@ scores a reviewer on whichever ceiling binds first.
 - Full explanation, including how the ARC API rejects over-limit requests:
   [docs/concurrency-limits.md](docs/concurrency-limits.md).
 
+### Rule 6b — The dashboard is UNAUTHENTICATED and this is a deliberate choice
+
+`main.py serve` binds `0.0.0.0:8787` with no authentication of any kind. That
+is not an oversight; the operator was shown the following and chose to keep it,
+on the basis that the network is trusted.
+
+**What it means concretely.** `POST /api/projects/create` accepts a task whose
+`verify_cmd` is an arbitrary shell string, and `code_tasks.gate` runs that
+string through `asyncio.create_subprocess_shell`. So:
+
+```
+POST /api/projects/create   {"tasks":[{... "verify_cmd":"<anything>"}]}
+POST /api/projects/run      {"file":"..."}
+```
+
+is remote code execution as the operator, for anyone who can reach port 8787.
+Verified live on 2026-09-10: an unauthenticated POST created a taskfile. The
+other mutating routes (`run`, `stop`, `archive`, `retry-task`, `promote`) spawn
+processes and move git refs on the same terms.
+
+**Therefore:**
+
+- Do NOT expose port 8787 beyond a trusted LAN. No port-forwarding, no tunnel,
+  no reverse proxy to the public internet.
+- Do NOT add a route that widens this — nothing that takes a path, a command,
+  or a git ref from the request body without an allowlist.
+- If the trust assumption ever stops holding, the two mechanisms already
+  designed for it are: bind `127.0.0.1` (an `ARC_DASHBOARD_BIND` env var), and
+  require a shared-secret header on POST only, so read-only access from
+  `phone.html` keeps working. Neither is implemented.
+
 ### Rule 7 — Evidence is mandatory: every agent run leaves a live transcript and events
 
 - `drivers.Driver._once` (drivers.py:145) **streams harness stdout live** to
