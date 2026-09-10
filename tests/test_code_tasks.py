@@ -509,3 +509,37 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
         for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
             self.assertNotIn("gpt-oss-120b",
                              code_tasks._eligible_pr_reviewers(fam, None))
+
+
+class ReviewerContention(unittest.TestCase):
+    """Reviewer choice must respect whichever ceiling binds first.
+
+    Scoring on the model's own cap alone sent reviews to GLM and DeepSeek while
+    the single opencode pool those two share sat at 5/5 with seven reviewers
+    queued behind it — and the kimi harness idle at 1/3.
+    """
+
+    def test_a_saturated_harness_makes_its_models_look_busy(self):
+        usage = {"GLM-5.3": 1, "harness:opencode": config.harness_limit("opencode")}
+        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+
+    def test_a_models_own_cap_still_counts_when_the_harness_is_free(self):
+        usage = {"GLM-5.3": config.driver_limit("GLM-5.3"), "harness:opencode": 0}
+        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+
+    def test_kimi_is_preferred_when_the_opencode_pool_is_full(self):
+        usage = {"Kimi-K3": 1, "GLM-5.3": 1, "DeepSeek-V4-Flash": 1,
+                 "harness:opencode": config.harness_limit("opencode"),
+                 "harness:kimi": 1}
+        order = sorted(["GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3"],
+                       key=lambda m: code_tasks._reviewer_pressure(m, usage))
+        self.assertEqual(order[0], "Kimi-K3")
+
+    def test_an_idle_fleet_scores_everything_zero(self):
+        for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash"):
+            self.assertEqual(code_tasks._reviewer_pressure(m, {}), 0.0)
+
+    def test_kimi_routes_to_the_kimi_harness_and_the_rest_to_opencode(self):
+        self.assertEqual(code_tasks._harness_of("Kimi-K3"), "kimi")
+        for m in ("GLM-5.3", "DeepSeek-V4-Flash", "gpt-oss-120b"):
+            self.assertEqual(code_tasks._harness_of(m), "opencode")

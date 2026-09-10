@@ -140,6 +140,25 @@ def _impl_prompt(t, feedback):
     return p
 
 
+def _harness_of(model):
+    """The local harness that runs this model. Mirrors _driver()'s routing."""
+    return "kimi" if model == "Kimi-K3" else "opencode"
+
+
+def _reviewer_pressure(model, usage):
+    """How contended this reviewer is, 0.0 (idle) to 1.0+ (at a ceiling).
+
+    Whichever ceiling binds FIRST wins: a model comfortably under its own cap
+    is not actually available if the harness it shares with two other models is
+    full. Scoring on the model alone sent every review to GLM and DeepSeek while
+    the single opencode pool they share sat at 5/5 with seven reviewers queued
+    behind it and the kimi harness idle at 1/3.
+    """
+    h = _harness_of(model)
+    return max(usage.get(model, 0) / max(1, config.driver_limit(model)),
+               usage.get(f"harness:{h}", 0) / max(1, config.harness_limit(h)))
+
+
 def _eligible_pr_reviewers(impl_fam, pol):
     """Cross-family models that may actually review an open PR.
 
@@ -721,11 +740,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # The fixed order sent every review to Kimi and GLM while DeepSeek
             # sat idle, so tasks waited 30 minutes for a slot another model
             # could have served at once (260 cap_wait events in one hour).
+            #
+            # Contention is whichever ceiling binds FIRST — the model's own cap
+            # or its harness's. Sorting on the model alone sent reviews to GLM
+            # and DeepSeek while the single opencode pool they share sat at 5/5
+            # with seven reviewers queued behind it and the kimi harness idle at
+            # 1/3. A model under its own cap is not available if its harness
+            # is full.
             try:
                 usage = store.lease_usage()
             except Exception:
                 usage = {}
-            pool.sort(key=lambda m: (usage.get(m, 0) / max(1, config.driver_limit(m)),
+
+            pool.sort(key=lambda m: (_reviewer_pressure(m, usage),
                                      usage.get(m, 0)))
             chosen = pool[:max(1, config.PR_REVIEWERS)]
 
