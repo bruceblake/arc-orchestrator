@@ -626,8 +626,9 @@ class KimiDriver(Driver):
     model = "Kimi-K3"
 
     def __init__(self, role, bench=False):
-        if not bench and role not in ("planner", "reviewer", "implementer"):
-            raise ValueError(f"KimiDriver role must be planner|reviewer|implementer, got {role!r}")
+        if not bench and role not in ("planner", "reviewer", "pr_reviewer", "implementer"):
+            raise ValueError("KimiDriver role must be "
+                             f"planner|reviewer|pr_reviewer|implementer, got {role!r}")
         self.role = role
 
     def argv(self, prompt, session_id):
@@ -645,10 +646,21 @@ class OpencodeDriver(Driver):
 
     def __init__(self, model, role, bench=False):
         if not bench:
-            if model in ("gpt-oss-120b", "DeepSeek-V4-Flash") and role != "implementer":
+            # DeepSeek may also review an OPEN PR. Judging a bounded diff
+            # against a spec is a materially smaller job than authoring the
+            # change, and with only three cross-family-eligible models a
+            # two-reviewer merge gate is otherwise unreachable whenever the
+            # implementer is Kimi or GLM — which is most tasks. gpt-oss-120b
+            # stays implement-only.
+            if model == "gpt-oss-120b" and role != "implementer":
                 raise ValueError(f"{model} may only implement, not {role!r}")
-            if model == "GLM-5.3" and role not in ("planner", "reviewer", "implementer"):
-                raise ValueError(f"GLM-5.3 may only plan/review/implement, not {role!r}")
+            if model == "DeepSeek-V4-Flash" and role not in ("implementer", "pr_reviewer"):
+                raise ValueError(
+                    f"{model} may only implement or review a PR, not {role!r}")
+            if model == "GLM-5.3" and role not in ("planner", "reviewer",
+                                                   "pr_reviewer", "implementer"):
+                raise ValueError(
+                    f"GLM-5.3 may only plan/review/implement, not {role!r}")
             if model not in config.IMPLEMENTER_MODELS:
                 raise ValueError(f"unmapped opencode model: {model!r}")
         self.model = model

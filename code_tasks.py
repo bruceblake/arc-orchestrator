@@ -140,6 +140,28 @@ def _impl_prompt(t, feedback):
     return p
 
 
+def _eligible_pr_reviewers(impl_fam, pol):
+    """Cross-family models that may actually review an open PR.
+
+    Eligibility is decided by CONSTRUCTING the driver, not by a second list
+    kept alongside the drivers' own rules. Those two drifted apart once and it
+    cost seven pull requests: the pool named DeepSeek, the driver refused the
+    role, and the ValueError — which the reviewer wrapper did not catch —
+    killed pr_review one second after each PR opened, leaving the branch and
+    the PR stranded with nobody coming back for them.
+    """
+    out = []
+    for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash"):
+        if config.MODEL_FAMILY.get(m) == impl_fam:
+            continue
+        try:
+            _driver(m, "pr_reviewer", pol)
+        except ValueError:
+            continue
+        out.append(m)
+    return out
+
+
 def _rework_feedback(tid, results):
     """Why this task is being implemented again, most authoritative first.
 
@@ -678,8 +700,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # Reviewers differ from the implementer's family AND from each
             # other, so two approvals mean two genuinely separate readings.
             impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
-            pool = [m for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash")
-                    if config.MODEL_FAMILY.get(m) != impl_fam]
+            pool = _eligible_pr_reviewers(impl_fam, pol)
             # Pick the LEAST CONTENDED eligible models, not a fixed order.
             # The fixed order sent every review to Kimi and GLM while DeepSeek
             # sat idle, so tasks waited 30 minutes for a slot another model
@@ -693,18 +714,21 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             chosen = pool[:max(1, config.PR_REVIEWERS)]
 
             async def one(model):
+                # Never let one reviewer take the whole graph down with it: a
+                # crashed or unbuildable reviewer is a rejection with a reason,
+                # not an exception that orphans an open PR.
                 # "pr_reviewer", not "reviewer": these are the gate on an open
                 # PR and they are the scarcest thing in the fleet (PR_REVIEWERS
                 # cross-family models per round). The dashboard separates them
                 # from the pre-PR gate reviewer so a reviewer queue is legible.
-                drv = _driver(model, "pr_reviewer", pol)
                 try:
+                    drv = _driver(model, "pr_reviewer", pol)
                     res = await drv.run(
                         _pr_review_prompt(t, diff, len(chosen), round_n,
                                           prior_r.get("issues") or []),
                         Path(ctx["results"][f"alloc_{tid}"]["worktree"]),
                         task_id=f"{tid}-pr{round_n}")
-                except DriverError as exc:
+                except (DriverError, ValueError) as exc:
                     return model, {"approve": False,
                                    "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
                 verdict = _parse_approval(res.text)

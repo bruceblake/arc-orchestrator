@@ -475,3 +475,37 @@ class ReviewersSendingAPullRequestBack(unittest.TestCase):
                                  "issues": ["[GLM-5.3] no test for the error path"]}}))
         self.assertIn("no test for the error path", p)
         self.assertIn("REJECTED", p)
+
+
+class ChoosingPullRequestReviewers(unittest.TestCase):
+    """Reviewer selection must never name a model the driver will refuse.
+
+    The pool and the drivers' role rules were two separate lists, and they
+    drifted: the pool offered DeepSeek, OpencodeDriver refused the role, and
+    the ValueError killed pr_review one second after the PR opened. Seven pull
+    requests were stranded that way in a single run — branch pushed, PR open,
+    nobody coming back. Eligibility is now decided by building the driver.
+    """
+
+    def test_every_implementer_family_has_enough_reviewers(self):
+        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+            with self.subTest(family=fam):
+                self.assertGreaterEqual(
+                    len(code_tasks._eligible_pr_reviewers(fam, None)),
+                    config.PR_REVIEWERS,
+                    f"{fam} cannot field {config.PR_REVIEWERS} PR reviewers")
+
+    def test_it_never_picks_the_implementer_s_own_family(self):
+        for fam in ("kimi", "glm", "deepseek"):
+            for m in code_tasks._eligible_pr_reviewers(fam, None):
+                self.assertNotEqual(config.MODEL_FAMILY.get(m), fam)
+
+    def test_every_model_it_offers_can_actually_be_built(self):
+        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+            for m in code_tasks._eligible_pr_reviewers(fam, None):
+                code_tasks._driver(m, "pr_reviewer", None)  # must not raise
+
+    def test_gpt_oss_is_never_offered_as_a_reviewer(self):
+        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+            self.assertNotIn("gpt-oss-120b",
+                             code_tasks._eligible_pr_reviewers(fam, None))
