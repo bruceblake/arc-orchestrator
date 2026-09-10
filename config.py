@@ -181,6 +181,10 @@ PROD_BRANCH = os.getenv("ARC_PROD_BRANCH", "main")
 PR_REVIEWERS = int(os.getenv("ARC_PR_REVIEWERS", "2"))
 # How many times a PR may go back to the implementer before the task fails.
 PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "3"))
+# Retries of a review that reached NO verdict (every reviewer crashed).
+# Separate from PR_MAX_ROUNDS on purpose: an infrastructure failure must
+# not consume the rounds reserved for real disagreement about the code.
+PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "3"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")

@@ -576,3 +576,98 @@ class EveryTaskEventNamesItsTask(unittest.TestCase):
                           if not any(k.arg == "task" for k in node.keywords)})
         self.assertEqual(missing, [],
                          f"emitted without a task= field: {missing}")
+
+
+class AReviewerThatCrashedDidNotReview(unittest.TestCase):
+    """A crashed reviewer is an inconclusive round, not a rejection.
+
+    Observed on PR #12: both reviewers died on opencode contention, and the
+    crash was posted to a PUBLIC pull request as "changes requested: reviewer
+    crashed", then sent the implementer back to fix issues that did not exist.
+    Three infrastructure blips would have failed a perfectly good task, because
+    each one consumed one of three PR rounds.
+    """
+
+    def _outcomes(self, *pairs):
+        """Replicates pr_review's aggregation over reviewer outcomes."""
+        issues, approvals, crashed = [], [], []
+        for model, v in pairs:
+            if v.get("crashed"):
+                crashed.append(model)
+            elif v["approve"]:
+                approvals.append(model)
+            else:
+                issues.extend(f"[{model}] {i}" for i in v["issues"])
+        approved = bool(pairs) and len(approvals) == len(pairs)
+        return {"approved": approved, "issues": issues, "crashed": crashed,
+                "inconclusive": bool(crashed) and not issues}
+
+    CRASH = {"approve": False, "crashed": True, "issues": ["boom"]}
+    OK = {"approve": True, "issues": []}
+    NO = {"approve": False, "issues": ["real problem"]}
+
+    def test_all_reviewers_crashing_is_inconclusive_not_a_rejection(self):
+        r = self._outcomes(("A", self.CRASH), ("B", self.CRASH))
+        self.assertTrue(r["inconclusive"])
+        self.assertFalse(r["approved"])
+        self.assertEqual(r["issues"], [])
+
+    def test_one_crash_and_one_approval_is_inconclusive(self):
+        # Unanimity is required and cannot be established, so retry the review.
+        r = self._outcomes(("A", self.CRASH), ("B", self.OK))
+        self.assertTrue(r["inconclusive"])
+
+    def test_a_real_objection_beats_a_crash(self):
+        r = self._outcomes(("A", self.CRASH), ("B", self.NO))
+        self.assertFalse(r["inconclusive"])
+        self.assertEqual(r["issues"], ["[B] real problem"])
+
+    def test_unanimous_approval_still_merges(self):
+        r = self._outcomes(("A", self.OK), ("B", self.OK))
+        self.assertTrue(r["approved"])
+        self.assertFalse(r["inconclusive"])
+
+    def test_a_normal_rejection_is_unchanged(self):
+        r = self._outcomes(("A", self.OK), ("B", self.NO))
+        self.assertFalse(r["approved"])
+        self.assertFalse(r["inconclusive"])
+        self.assertEqual(r["issues"], ["[B] real problem"])
+
+    def test_the_inconclusive_budget_is_separate_from_the_round_budget(self):
+        self.assertGreater(config.PR_MAX_INCONCLUSIVE, 0)
+        self.assertGreater(config.PR_MAX_ROUNDS, 0)
+
+
+class InconclusiveReviewRouting(unittest.TestCase):
+    """Where an inconclusive round sends the task."""
+
+    def _edges(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        return [e for e in g.edges if e.src == "pr_review_t1"]
+
+    def _fires(self, dst, result):
+        for e in self._edges():
+            if e.dst == dst and (e.when is None or e.when(result, {})):
+                return True
+        return False
+
+    def test_an_inconclusive_round_retries_the_review(self):
+        r = {"approved": False, "inconclusive": True, "inconclusive_n": 1}
+        self.assertTrue(self._fires("pr_review_t1", r))
+        self.assertFalse(self._fires("implement_t1", r))
+
+    def test_it_stops_retrying_once_the_budget_is_spent(self):
+        r = {"approved": False, "inconclusive": True,
+             "inconclusive_n": config.PR_MAX_INCONCLUSIVE}
+        self.assertFalse(self._fires("pr_review_t1", r))
+        self.assertTrue(self._fires("fail_t1", r))
+
+    def test_a_real_rejection_still_goes_to_the_implementer(self):
+        r = {"approved": False, "inconclusive": False, "issues": ["x"]}
+        self.assertTrue(self._fires("implement_t1", r))
+        self.assertFalse(self._fires("pr_review_t1", r))
+
+    def test_approval_still_merges(self):
+        self.assertTrue(self._fires("pr_merge_t1", {"approved": True}))

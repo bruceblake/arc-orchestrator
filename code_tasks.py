@@ -780,7 +780,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         await worktree(ctx),
                         task_id=f"{tid}-pr{round_n}")
                 except (DriverError, ValueError) as exc:
-                    return model, {"approve": False,
+                    # A reviewer that crashed did NOT review. Reporting that as
+                    # a rejection posted "changes requested: reviewer crashed"
+                    # to a public PR and sent the implementer back to fix
+                    # issues that did not exist — and burned one of three PR
+                    # rounds doing it, so three infrastructure blips failed a
+                    # perfectly good task.
+                    return model, {"approve": False, "crashed": True,
                                    "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
                 verdict = _parse_approval(res.text)
                 store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
@@ -789,36 +795,53 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return model, verdict
 
             outcomes = await asyncio.gather(*[one(m) for m in chosen])
-            issues, approvals = [], []
+            issues, approvals, crashed = [], [], []
             for model, v in outcomes:
-                if v["approve"]:
+                if v.get("crashed"):
+                    crashed.append(model)
+                elif v["approve"]:
                     approvals.append(model)
                 else:
                     issues.extend(f"[{model}] {i}" for i in v["issues"])
-            approved = len(approvals) == len(chosen)
+            approved = bool(chosen) and len(approvals) == len(chosen)
+            # Nobody actually objected, but a reviewer never ran: this round
+            # reached no verdict. That is a review to RETRY, not a change to
+            # request — the diff has not been read.
+            inconclusive = bool(crashed) and not issues
+            prior_incon = (prior_r or {}).get("inconclusive_n", 0)
+            inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
-                        reviewers=chosen, n_issues=len(issues))
+                        reviewers=chosen, n_issues=len(issues),
+                        crashed=crashed, inconclusive=inconclusive)
             # Post each verdict AS A GITHUB REVIEW, not just internally. The
             # approvals existed only in our event log, so a PR merged by two
             # AI reviewers showed "0 reviews" on GitHub — the trail was
             # invisible exactly where a human would look for it.
             for model, v in outcomes:
-                body = (f"**{model}** (round {round_n}) — "
-                        + ("approved." if v["approve"] else "changes requested:\n\n"
-                           + "\n".join(f"- {i}" for i in v["issues"][:20])))
+                if v.get("crashed"):
+                    # A neutral note, never a formal rejection: this reviewer
+                    # never read the diff and must not appear to have judged it.
+                    body = (f"**{model}** (round {round_n}) — review could not "
+                            f"run: {'; '.join(v['issues'])[:400]}")
+                else:
+                    body = (f"**{model}** (round {round_n}) — "
+                            + ("approved." if v["approve"] else "changes requested:\n\n"
+                               + "\n".join(f"- {i}" for i in v["issues"][:20])))
                 # A bot cannot formally approve its own repo's PR, so an
                 # approval is posted as a comment and a rejection uses
                 # --request-changes where permitted; both fall back to a plain
                 # comment so the verdict is never lost.
-                rc, _, _ = await gitstore._gh(
-                    ["pr", "review", str(number),
-                     "--approve" if v["approve"] else "--request-changes",
-                     "--body", body], cwd=repo)
+                rc = 1
+                if not v.get("crashed"):
+                    rc, _, _ = await gitstore._gh(
+                        ["pr", "review", str(number),
+                         "--approve" if v["approve"] else "--request-changes",
+                         "--body", body], cwd=repo)
                 if rc != 0:
                     await gitstore._gh(["pr", "comment", str(number),
                                         "--body", body], cwd=repo)
-            if not approved:
+            if not approved and not inconclusive:
                 await gitstore._gh(
                     ["pr", "comment", str(number), "--body",
                      "**Changes requested** (round %d) — returning to the "
@@ -827,6 +850,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     cwd=repo)
             return {"approved": approved, "issues": issues,
                     "approvals": approvals, "reviewers": chosen,
+                    "crashed": crashed, "inconclusive": inconclusive,
+                    "inconclusive_n": inconclusive_n,
                     "pr": number, "round": round_n}
 
         async def pr_merge(ctx):
@@ -899,12 +924,23 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                when=lambda r, c: bool(r.get("published")), on_drain=True)
         g.edge(f"pr_review_{tid}", f"pr_merge_{tid}",
                when=lambda r, c: bool(r.get("approved")), on_drain=True)
+        # An inconclusive round reached no verdict: every reviewer crashed and
+        # nobody read the diff. Retry the REVIEW — sending the implementer back
+        # to fix issues that do not exist wastes a model and burns a real round.
+        # on_drain, because the PR is already open and this is still landing it.
+        g.edge(f"pr_review_{tid}", f"pr_review_{tid}",
+               when=lambda r, c: r.get("inconclusive")
+               and r.get("inconclusive_n", 0) < config.PR_MAX_INCONCLUSIVE,
+               on_drain=True)
         g.edge(f"pr_review_{tid}", f"implement_{tid}",
                when=lambda r, c: not r.get("approved")
+               and not r.get("inconclusive")
                and pr_rounds(c) < config.PR_MAX_ROUNDS)
         g.edge(f"pr_review_{tid}", f"fail_{tid}",
                when=lambda r, c: not r.get("approved")
-               and pr_rounds(c) >= config.PR_MAX_ROUNDS)
+               and (r.get("inconclusive_n", 0) >= config.PR_MAX_INCONCLUSIVE
+                    if r.get("inconclusive")
+                    else pr_rounds(c) >= config.PR_MAX_ROUNDS))
         for src in ("gate", "review"):
             key = "passed" if src == "gate" else "pass"
             g.edge(f"{src}_{tid}", f"implement_{tid}",
