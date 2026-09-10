@@ -212,7 +212,7 @@ probe taskfile first, then the real one.
  "pattern": "router",
  "tasks": [{"id": "locate", "model": "DeepSeek-V4-Flash", "reviewer": "kimi",
    "prompt": "Locate the fault; land a FAILING reproduction test only.",
-   "verify_cmd": "./check.sh; ! ./py -m pytest tests/test_repro.py",
+   "verify_cmd": "! ./py -m unittest discover -s tests -t tests -k Repro",
    "deps": []}]}}
 ```
 

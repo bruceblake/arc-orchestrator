@@ -155,6 +155,12 @@ class TestDocsTruthArcEnvVars(unittest.TestCase):
         for prefix in ("ARC_LIMIT_", "ARC_DRIVER_LIMIT_"):
             for family in ("GPT_OSS", "GLM", "KIMI", "DEEPSEEK"):
                 defined.add(prefix + family)
+        # config.harness_limit builds its override name the same way
+        # driver_limit does — os.getenv(f"ARC_HARNESS_LIMIT_{harness.upper()}")
+        # — so the literal never appears in config.py and the scan cannot see
+        # it. Expanded here exactly like the two prefixes above.
+        for harness in ("OPENCODE", "KIMI"):
+            defined.add("ARC_HARNESS_LIMIT_" + harness)
         cls.defined = defined
         cls.mentioned = set(re.findall(r"ARC_[A-Z0-9_]+", DOC_TEXT))
 

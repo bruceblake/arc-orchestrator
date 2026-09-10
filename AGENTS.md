@@ -217,8 +217,8 @@ PR** in the life of the repo.
   as `--request-changes`, the task goes back to `pr_review` rather than to the
   implementer, and the retry comes from `config.PR_MAX_INCONCLUSIVE` — kept
   separate from `PR_MAX_ROUNDS` so infrastructure failures cannot eat the
-  rounds reserved for real disagreement about the code. A genuine objection
-  still beats a crash. Before this, a crash was posted to a public PR as
+  rounds reserved for real disagreement about the code (`ARC_PR_MAX_INCONCLUSIVE`,
+  default 3). A genuine objection still beats a crash. Before this, a crash was posted to a public PR as
   "changes requested: reviewer crashed" and sent the implementer to fix issues
   that did not exist.
 - **A conflicting PR is resynced, not abandoned.** `pr_merge` merges the
@@ -226,7 +226,7 @@ PR** in the life of the repo.
   on failure so a genuine overlap never leaves a half-merged worktree for the
   next publish to commit), pushes, and routes back to `pr_review` — the diff
   changed, so the approval it already has no longer covers it. Bounded by
-  `config.PR_MAX_RESYNCS` (default 2). A real textual conflict still stops,
+  `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 2). A real textual conflict still stops,
   recording which files disagree.
 - **Resuming a task whose PR is open re-attaches to it.** `in_review` and
   `conflict` tasks restart at `publish`, which finds the existing worktree and
@@ -336,9 +336,10 @@ processes and move git refs on the same terms.
 - Do NOT add a route that widens this — nothing that takes a path, a command,
   or a git ref from the request body without an allowlist.
 - If the trust assumption ever stops holding, the two mechanisms already
-  designed for it are: bind `127.0.0.1` (an `ARC_DASHBOARD_BIND` env var), and
-  require a shared-secret header on POST only, so read-only access from
-  `phone.html` keeps working. Neither is implemented.
+  designed for it are: bind the loopback address instead of `0.0.0.0` (which
+  would need a new bind-address setting in `main.py serve`), and require a
+  shared-secret header on POST only, so read-only access from `phone.html`
+  keeps working. **Neither exists** — do not go looking for an env var.
 
 ### Rule 7 — Evidence is mandatory: every agent run leaves a live transcript and events
 

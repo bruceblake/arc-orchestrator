@@ -68,8 +68,15 @@ contention looked like a provider outage. 42 such errors in half an hour.
 
 `config.harness_limit(harness)` caps it (opencode 5, kimi 3), enforced by
 `drivers._harness_gate` in-process and by a `harness:<name>` row in the same
-`driver_leases` table across processes. Override with
-`ARC_HARNESS_LIMIT_OPENCODE`.
+`driver_leases` table across processes.
+
+| Harness | Cap | Override |
+|---|---|---|
+| opencode (GLM, DeepSeek, gpt-oss) | 5 | `ARC_HARNESS_LIMIT_OPENCODE` |
+| kimi (Kimi-K3 only) | 3 | `ARC_HARNESS_LIMIT_KIMI` |
+
+The kimi CLI keeps no shared store, so its cap is simply Kimi-K3's own and
+raising it buys nothing.
 
 Acquisition order is **model gate → model lease → harness gate → harness
 lease**, always. One global order means no circular wait, and the scarce
