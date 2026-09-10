@@ -742,6 +742,10 @@ function friendly(e) {
     case "task.conflict": return `<span class="warn">⚠ merge conflict · ${task}${e.reason || e.error ? ": " + cut(e.reason || e.error, 120) : ""}</span>`;
     case "task.failed": return `<span class="bad">✗ ${task} failed${e.reason ? ": " + cut(e.reason, 120) : ""}</span>`;
     case "task.merged": return `<span class="good">⬢ ${task} merged</span>`;
+    case "task.budget": {
+      const a = e.implement_attempts || 0, x = e.escalations || 0, k = e.total_tokens || 0;
+      return `<span class="hint">⛁ ${task} cost ${a} attempt${a === 1 ? "" : "s"}, ${x} escalation${x === 1 ? "" : "s"}, ${tick(e.total_driver_seconds)}, ${k >= 1000 ? Math.round(k / 1000) + "k" : k} tok</span>`;
+    }
     case "task.pr_opened": return `<span class="good">⇪ PR opened · ${task} ${cut(e.url, 80)}</span>`;
     case "task.pr_skipped": return `<span class="hint">PR skipped · ${task}: ${cut(e.reason, 100)}</span>`;
     case "run.resume": return `↻ resumed: skipped ${(e.skipped_merged || []).length} merged, retried ${(e.retried || []).length}`;
