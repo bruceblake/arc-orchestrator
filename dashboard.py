@@ -1005,12 +1005,17 @@ def _projects(store):
         rows = [r for r in rows_all if r.get("taskfile")
                 and (r["taskfile"] == str(f) or r["taskfile"].endswith("/" + f.name))]
         statuses = {}
+        orphan_rows = 0
         last = None
         per_task = {}
         for r in rows:
+            if r.get("id") not in idset:
+                # history for ids the taskfile no longer declares — real, but
+                # not this project's current state; tally separately
+                orphan_rows += 1
+                continue
             statuses[r["status"]] = statuses.get(r["status"], 0) + 1
-            if r.get("id") in ids:
-                per_task[r["id"]] = r.get("status") or "pending"
+            per_task[r["id"]] = r.get("status") or "pending"
             for k in ("created_at", "finished_at"):
                 v = r.get(k)
                 if v and (last is None or v > last):
@@ -1059,6 +1064,7 @@ def _projects(store):
                     "models": sorted({t.get("model") for t in tdefs if t.get("model")}),
                     "reviewers": sorted({t.get("reviewer") for t in tdefs if t.get("reviewer")}),
                     "statuses": statuses,
+                    "orphan_rows": orphan_rows,
                     "dag": {"nodes": nodes, "edges": edges},
                     "progress": {"done": merged_n, "total": len(ids)},
                     "tokens": tok_total + live_tok, "seconds": round(sec_total + live_sec, 1),
