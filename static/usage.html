@@ -371,6 +371,11 @@ function updateUI(u, fleet) {
 
 async function load() {
   try {
+    // NOTE: /api/usage omits `series` unless ?series=1 — checked every caller in
+    // static/*.html: this page never reads u.series (it renders daily/models/
+    // totals only, no svg/canvas for series), index.html never fetches
+    // /api/usage, and phone.html (the one series consumer) requests
+    // ?series=1 itself — so no series=1 is needed here.
     const u = await jget("/api/usage?range=" + RANGE);
     if (!u) throw new Error("usage unavailable");
     const fleet = await fetchFleet();

@@ -490,8 +490,12 @@ def _collect_inflight(now, store=None):
     return rows, kimi
 
 
-def _usage(store=None, range_key=None):
-    """Usage aggregates for /api/usage. Default (no range) keeps the historical shape."""
+def _usage(store=None, range_key=None, include_series=False):
+    """Usage aggregates for /api/usage. Default (no range) keeps the historical shape.
+
+    `series` (the per-family time buckets, ~90% of the payload) is opt-in via
+    include_series=True — nothing in static/*.html draws it except phone.html,
+    which requests ?series=1."""
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
 
@@ -694,18 +698,20 @@ def _usage(store=None, range_key=None):
     recent_driver.reverse()
 
     start, bucket, n = _series_window(range_key, now, min((p[0] for p in pts), default=None))
-    series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
-              for f in config.FAMILY_ORDER}
-    for ts, family, req, tok, _tr in pts:
-        if not ts or ts < start:
-            continue
-        idx = int((ts - start) // bucket)
-        if idx >= n:
-            continue
-        pts_list = series.setdefault(family, [{"t": start + i * bucket, "requests": 0,
-                                               "tokens": 0} for i in range(n)])
-        pts_list[idx]["requests"] += req
-        pts_list[idx]["tokens"] += tok
+    series = None
+    if include_series:
+        series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
+                  for f in config.FAMILY_ORDER}
+        for ts, family, req, tok, _tr in pts:
+            if not ts or ts < start:
+                continue
+            idx = int((ts - start) // bucket)
+            if idx >= n:
+                continue
+            pts_list = series.setdefault(family, [{"t": start + i * bucket, "requests": 0,
+                                                   "tokens": 0} for i in range(n)])
+            pts_list[idx]["requests"] += req
+            pts_list[idx]["tokens"] += tok
 
     day0 = int(now // 86400)
     daily = []
@@ -741,10 +747,13 @@ def _usage(store=None, range_key=None):
     families = [by_family[f] for f in config.FAMILY_ORDER]
     families += [v for k, v in sorted(by_family.items()) if k not in config.FAMILY_ORDER]
 
-    return {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
-            "models": models, "families": families, "inflight": inflight,
-            "recent_driver_events": recent_driver,
-            "totals": totals, "series": series}
+    res = {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
+           "models": models, "families": families, "inflight": inflight,
+           "recent_driver_events": recent_driver,
+           "totals": totals}
+    if include_series:
+        res["series"] = series
+    return res
 
 
 _fleet_cache = {"key": 0.0, "models": [], "totals": {}}  # refreshed at most every ~2s
@@ -1711,7 +1720,8 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/usage":
                 q = parse_qs(u.query)
                 range_key = q.get("range", ["1h"])[0]
-                return self._json(_usage(Handler.store, range_key))
+                include_series = q.get("series", ["0"])[0] == "1"
+                return self._json(_usage(Handler.store, range_key, include_series))
             if u.path == "/api/fleet":
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/projects":
