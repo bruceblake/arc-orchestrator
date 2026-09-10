@@ -23,6 +23,7 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 | `/api/agents` | none | In-flight agent runs plus dashboard-launched processes from the launch registry |
 | `/api/transcript` | `file` = `<task>-<role>-<attempt>.jsonl`, `tail` = 1..1000 (default 200) | Last N lines of a harness transcript in `logs/harness/` |
 | `/api/summary` | none | Research/build stats, critique matrix, family limits, event-log and build-dir paths |
+| `/api/metrics` | none | Per-model run/token/stall rollup plus a code-task status rollup — see [Metrics endpoint](#metrics-endpoint) |
 | `/api/events` | `after` = 0-based line offset into `logs/events.jsonl` | Batch of parsed events plus `next` offset and `reset` flag |
 | `/api/graphs` | none | Static node/edge topology of the research-round and build graphs |
 | `/api/code` | `file` = path relative to the build output dir | Contents of one generated build file (404 outside the build dir) |
@@ -33,6 +34,47 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 |---|---|---|
 | `/api/projects/create` | `repo` (required, absolute path under `/home/proxyie/`), plus either `goal` (3..2000 chars, Kimi-K3 plans it) or `title` + `tasks` list; optional `overwrite` | `mode: plan` with pid/log/taskfile, or `mode: tasks` with written file name |
 | `/api/projects/run` | `file` = taskfile name, optional `dry_run` | Spawns `main.py code run [--dry-run]`; pid, log name, `dry_run` flag; 409 if already running |
+
+## Metrics endpoint
+
+`GET /api/metrics` (no params) rolls up all `harness_runs` rows and the
+`driver.stalled` / `driver.timeout` events in `logs/events.jsonl` per model,
+plus a status rollup over `code_tasks`. Fields:
+
+- `now` — server time (epoch seconds).
+- `models[]` — one entry per model, sorted by `runs` descending:
+  `model` / `pretty` (raw and display name), `runs`, `ok`, `failed`
+  (split by exit code), `avg_seconds` (mean run duration),
+  `total_tokens` and `avg_tokens_per_run` (parsed from the run transcripts),
+  `stall_count` (`driver.stalled` events — idle-timeout kills),
+  `termination_count` (`driver.timeout` events — total-runtime kills).
+- `tasks` — `{total, merged, failed, conflict, merge_rate}` over all
+  `code_tasks` rows; `merge_rate` is `merged / total`, rounded to 4 places.
+
+```console
+$ curl -s localhost:8787/api/metrics | python3 -m json.tool
+{
+    "now": 1789000000.42,
+    "models": [
+        {
+            "model": "GLM-5.3",
+            "pretty": "GLM-5.3",
+            "runs": 41,
+            "ok": 38,
+            "failed": 3,
+            "avg_seconds": 512.407,
+            "total_tokens": 1834200,
+            "avg_tokens_per_run": 44736.6,
+            "stall_count": 1,
+            "termination_count": 0
+        },
+        ...
+    ],
+    "tasks": {"total": 57, "merged": 49, "failed": 5, "conflict": 3, "merge_rate": 0.8596}
+}
+```
+
+(sample trimmed to one model row.)
 
 ## Notes
 
