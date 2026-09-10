@@ -179,3 +179,35 @@ class KimiPlanMode(unittest.TestCase):
         self.assertFalse(config.kimi_plan_mode_on(),
                          "kimi default_plan_mode is true — fleet agents will "
                          "plan instead of edit")
+
+
+class DriverCapsMatchMeasuredReality(unittest.TestCase):
+    """Driver caps must equal what ARC actually serves, not a guess.
+
+    Measured 2026-09-10 by ramping concurrent requests until rejection, with
+    the fleet's own usage counted in: gpt-oss 5, DeepSeek 5, GLM 4, Kimi 3.
+    The config claimed 10 account / 8 drivers for gpt-oss and DeepSeek, so the
+    fleet over-subscribed by 3 and generated its own 400s under load — then
+    the capacity backoff blamed the provider. GLM and Kimi were under by one
+    slot each, wasting capacity the operator had paid for.
+    """
+
+    def test_no_model_is_over_subscribed(self):
+        for model, family in config.MODEL_FAMILY.items():
+            self.assertLessEqual(
+                config.driver_limit(model), config.family_limit(family),
+                f"{model}: more drivers than the account can serve — the fleet "
+                f"would generate its own 400s")
+
+    def test_account_caps_match_the_measurement(self):
+        for model, measured in config._MEASURED_CONCURRENCY.items():
+            self.assertEqual(
+                config.family_limit(config.MODEL_FAMILY[model]), measured,
+                f"{model}: family limit disagrees with the measured ceiling")
+
+    def test_headroom_reserves_slots_without_starving(self):
+        """ARC_DRIVER_HEADROOM trades fleet throughput for interactive use."""
+        for model, measured in config._MEASURED_CONCURRENCY.items():
+            self.assertGreaterEqual(config.driver_limit(model), 1,
+                                    f"{model}: headroom must never reach zero drivers")
+            self.assertLessEqual(config.driver_limit(model), measured)

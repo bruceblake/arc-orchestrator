@@ -25,7 +25,7 @@ class Family:
 FAMILIES = {
     "gpt-oss": Family(
         "gpt-oss",
-        10,
+        5,
         {
             "default": "gpt-oss-120b",
             "low": "gpt-oss-120b-thinking-low",
@@ -54,7 +54,7 @@ FAMILIES = {
     ),
     "deepseek": Family(
         "deepseek",
-        10,
+        5,
         {
             "default": "DeepSeek-V4-Flash",
             "low": "DeepSeek-V4-Flash-thinking-low",
@@ -301,7 +301,26 @@ MODEL_FAMILY = {
     "GLM-5.3": "glm",
     "Kimi-K3": "kimi",
 }
-_MODEL_DRIVER_CAP = {"Kimi-K3": 2, "GLM-5.3": 3, "gpt-oss-120b": 8, "DeepSeek-V4-Flash": 8}
+# Measured 2026-09-10 by ramping concurrent requests until ARC rejected, with
+# the fleet's own usage counted in:
+#
+#     gpt-oss-120b       5 concurrent   (was configured 10 account / 8 drivers)
+#     DeepSeek-V4-Flash  5 concurrent   (was configured 10 account / 8 drivers)
+#     GLM-5.3            4 concurrent
+#     Kimi-K3            3 concurrent
+#
+# gpt-oss and DeepSeek were OVER-subscribed: 8 drivers against a real ceiling
+# of 5, so the fleet generated its own 400s under load and blamed the provider.
+# GLM and Kimi were UNDER-subscribed by one slot each.
+#
+# Driver caps now equal the measured ceiling. ARC_DRIVER_HEADROOM reserves
+# slots for interactive use of the same account — set it to 1 if you want to
+# run an interactive `kimi` alongside the fleet without contending.
+_MEASURED_CONCURRENCY = {"Kimi-K3": 3, "GLM-5.3": 4,
+                         "gpt-oss-120b": 5, "DeepSeek-V4-Flash": 5}
+DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
+_MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
+                     for m, n in _MEASURED_CONCURRENCY.items()}
 
 
 def driver_limit(model):

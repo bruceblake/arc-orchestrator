@@ -16,6 +16,37 @@ The two are not the same number on purpose. The account caps are the hard
 ceiling the API will reject you for exceeding. The driver semaphores are what
 this process actually enforces, and they sit **below** the account caps.
 
+## Measured caps (2026-09-10)
+
+The configured limits were a guess and two of them were wrong. Measured by
+ramping concurrent requests per model until ARC rejected, counting the fleet's
+own in-flight usage:
+
+| model | measured concurrent | was configured | verdict |
+| --- | --- | --- | --- |
+| gpt-oss-120b | **5** | 10 account / 8 drivers | over-subscribed by 3 |
+| DeepSeek-V4-Flash | **5** | 10 account / 8 drivers | over-subscribed by 3 |
+| GLM-5.3 | **4** | 4 account / 3 drivers | one slot wasted |
+| Kimi-K3 | **3** | 3 account / 2 drivers | one slot wasted |
+
+Over-subscription is not harmless: the fleet generated its own
+`400 concurrent session limit reached`, and the capacity backoff then treated
+it as the provider being busy. Under-subscription silently wasted capacity.
+
+`config._MEASURED_CONCURRENCY` now holds these numbers and both the account
+limit and the driver cap derive from them, so they cannot drift apart again.
+`tests/test_config.py` fails if any model's driver cap exceeds its account cap.
+
+**`ARC_DRIVER_HEADROOM`** (default 0) reserves slots per model for interactive
+use of the same ARC account. Set it to `1` if you want to run an interactive
+`kimi` alongside the fleet without contending; at 0 the fleet uses everything
+and an interactive session competes with it — a rejection there is retried on
+the capacity backoff, not fatal, but it will feel slow.
+
+To re-measure after a plan change, ramp concurrency per model and find where
+`400 concurrent session limit reached` starts.
+
+
 ## 1. Two layers of limits
 
 ### Layer 1 — per-account API caps (`config.FAMILIES`)
