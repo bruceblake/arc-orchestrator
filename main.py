@@ -840,6 +840,14 @@ def main():
                         help=f"agent model (default {config.GH_MODEL})")
         gp.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
+    chat_p = sub.add_parser(
+        "chat", help="conversational planning with the fleet's planner")
+    chat_p.add_argument("--session", required=True,
+                        help="session id, ^[a-z0-9][a-z0-9-]{0,39}$")
+    chat_p.add_argument("--repo", required=True,
+                        help="absolute repo path under /home/proxyie")
+    chat_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+
     args = ap.parse_args()
     setup_logging(getattr(args, "verbose", False))
 
@@ -867,6 +875,9 @@ def main():
         cmd_doctor(args)
     elif args.cmd == "bench":
         cmd_bench(args)
+    elif args.cmd == "chat":
+        import orchchat
+        sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))
 
 
 if __name__ == "__main__":
