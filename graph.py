@@ -41,9 +41,14 @@ class Edge:
 
 
 class Graph:
-    def __init__(self, name, max_steps=500, drain_timeout=1200):
+    def __init__(self, name, max_steps=500, drain_timeout=1200, max_in_flight=None):
         self.name = name
         self.max_steps = max_steps
+        # Bounded admission: at most this many node fns execute at once; the
+        # rest wait on their per-node queues. None (default) is the old
+        # unbounded behaviour, where every ready node starts immediately and
+        # contention is pushed down into the drivers.
+        self.max_in_flight = max_in_flight
         # After a node fails, sibling nodes already running are allowed to
         # finish (see _Execution) rather than being cancelled mid-flight. This
         # bounds that wait so one wedged node cannot hang the whole run.
@@ -104,6 +109,15 @@ class _Execution:
         self.gather_pending = {}
         self.gathered = {}
         self.in_flight = 0
+        # Admission gate. Only a node fn holds a slot, and only while it runs:
+        # a queued item still counts in in_flight (so _settle's bookkeeping is
+        # untouched), and a gather waiting on sources holds NO slot. The one
+        # deadlock shape to avoid — a gather holding a slot while the sources
+        # it waits on sit behind a full limit — is therefore impossible: slots
+        # turn over as running fns finish, and no fn waits on another node
+        # being scheduled.
+        self.admission = (
+            asyncio.Semaphore(self.g.max_in_flight) if self.g.max_in_flight else None)
         self.done = asyncio.Event()
         self.error = None
         self.firings = 0
@@ -212,8 +226,24 @@ class _Execution:
                     ctx = self._merge(list(self.gathered[node.name].values()))
                     self.gathered[node.name] = {}
                     self.gather_pending[node.name] = self._sources_of(node.name)
-                events.emit("node_start", graph=self.g.name, node=node.name)
-                result = await node.fn(ctx)
+                if self.admission is not None:
+                    await self.admission.acquire()
+                    try:
+                        # The drain check above ran BEFORE waiting for a slot;
+                        # a failure may have started the drain in between.
+                        # Landing work (on_drain) must still get in — its whole
+                        # purpose is landing work that is already paid for —
+                        # everything else drops the moment it is admitted.
+                        if self.error is not None and not on_drain:
+                            self._settle()  # dequeued before the drain, dropped on admission
+                            continue
+                        events.emit("node_start", graph=self.g.name, node=node.name)
+                        result = await node.fn(ctx)
+                    finally:
+                        self.admission.release()
+                else:
+                    events.emit("node_start", graph=self.g.name, node=node.name)
+                    result = await node.fn(ctx)
             except Exception as exc:
                 # str(exc)[:300] was ALL that survived a node failure: no file,
                 # no line, no frame. errors.capture keeps the traceback and

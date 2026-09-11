@@ -89,6 +89,20 @@ model alone sent reviews to GLM and DeepSeek while the opencode pool they
 share sat at 5/5 with seven reviewers queued behind it — and the kimi harness
 idle at 1/3.
 
+Graph admission — bounding fanout WITHIN a run
+----------------------------------------------
+
+The caps above bound each model and harness, but nothing used to stop one run
+from STARTING more work than they could serve: the graph engine began every
+root node at once, and the excess queued inside `drivers._lease_acquire`
+holding a worktree and a DB row while doing nothing. `Graph(max_in_flight=...)`
+bounds how many nodes execute concurrently within one run; the rest wait on
+their per-node queues holding no driver slot. `code_tasks.build_code_graph`
+sets it from `config.max_tasks_in_flight()` — default the total harness
+capacity (opencode 5 + kimi 3 = 8), override **`ARC_MAX_TASKS_IN_FLIGHT`**.
+The default exceeds the root count of every taskfile measured so far, so
+unconfigured runs behave exactly as before.
+
 ## 1. Two layers of limits
 
 ### Layer 1 — per-account API caps (`config.FAMILIES`)

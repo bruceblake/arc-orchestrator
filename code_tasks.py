@@ -594,7 +594,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     mfr = (pol or {}).get("max_fix_rounds", config.MAX_FIX_ROUNDS)
     review_on = (pol or {}).get("review", True)
     escalate_on = (pol or {}).get("escalate", True)
-    g = Graph("code-tasks", max_steps=config.MAX_GRAPH_STEPS)
+    g = Graph("code-tasks", max_steps=config.MAX_GRAPH_STEPS,
+              max_in_flight=config.max_tasks_in_flight())
     # Task nodes with no in-task deps ("heads") start the graph — directly
     # when there is no `after`, else behind the chain_wait gate.
     heads = []
