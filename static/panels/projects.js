@@ -332,10 +332,14 @@ async function pollProjects() {
 }
 
 
-// ---- orchestration graph topologies (static /api/graphs) ----
-// Same taskDag renderer as the project DAGs, in topo mode: static workload
-// shapes with no per-run state. Dashed edge = conditional (when= gate);
-// amber dashed = loop-back (back edge, excluded from layering).
+// ---- the pipeline shape (static /api/graphs) ----
+// ONE diagram: the code-tasks pipeline every project runs through, generated
+// by the server from the same code that builds the live graph. It used to be
+// two diagrams of workloads nobody had run in days. Dashed edge = conditional
+// (when= gate); amber dashed = a loop back — fix rounds, escalation, a PR sent
+// back by its reviewers, a resync after the base moved, a crashed reviewer
+// retrying. Those loops are the point: the happy path is obvious, the loops
+// are not, and they are where a task actually spends its time.
 let TOPOS = null;
 async function pollTopos() {
   try {
@@ -347,8 +351,16 @@ async function pollTopos() {
 function renderTopos() {
   const tops = Object.values(TOPOS || {}).filter(t => t && Array.isArray(t.nodes));
   if (!tops.length) { $("#topo").innerHTML = '<div class="empty">no graphs available</div>'; return; }
-  $("#topo-meta").textContent = `${tops.length} workload graphs · dashed = conditional edge`;
-  $("#topo-meta").title = "amber dashed = loop back (cycle), drawn beneath the graph";
+  // A loop is an edge that goes BACKWARD in pipeline order (or to itself).
+  // Counting "any edge into a node that can be a loop target" was wrong: it
+  // called alloc->implement a loop because implement is where fix rounds land.
+  const ORDER = ["alloc", "implement", "gate", "review", "escalate", "publish",
+                 "pr_review", "pr_merge", "fail"];
+  const pos = n => { const i = ORDER.indexOf(n); return i < 0 ? 99 : i; };
+  const loops = tops.reduce((n, t) => n + (t.edges || [])
+    .filter(e => e.src === e.dst || pos(e.dst) < pos(e.src)).length, 0);
+  $("#topo-meta").textContent = `dashed = conditional · amber = loop back (${loops} of them)`;
+  $("#topo-meta").title = "Generated from the code that builds the live graph — this cannot drift from what runs.";
   $("#topo").innerHTML = tops.map(t => {
     const g = {
       starts: t.starts || [],
