@@ -131,6 +131,10 @@ PYEOF
     if ! node tests/ui_render.test.mjs; then
         echo "FAIL: dashboard render functions misbehave"; rc=1
     fi
+    # Same contract for the small-screen page.
+    if ! node tests/phone_render.test.mjs; then
+        echo "FAIL: phone page render functions misbehave"; rc=1
+    fi
 else
     echo "(node not installed — skipping JavaScript checks)"
 fi
