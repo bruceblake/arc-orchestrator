@@ -130,12 +130,18 @@ _MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
                      for m, n in _MEASURED_CONCURRENCY.items()}
 ```
 
-| Model | Driver semaphore cap |
-|---|---|
-| gpt-oss-120b | 5 |
-| DeepSeek-V4-Flash | 5 |
-| GLM-5.3 | 4 |
-| Kimi-K3 | 3 |
+| Model | ARC sessions | Sessions per process | Driver cap |
+|---|---|---|---|
+| gpt-oss-120b | 5 | 2 (opencode) | 2 |
+| DeepSeek-V4-Flash | 5 | 2 (opencode) | 2 |
+| GLM-5.3 | 4 | 2 (opencode) | 2 |
+| Kimi-K3 | 3 | 1 (kimi CLI) | 3 |
+
+A harness PROCESS is not an ARC SESSION. An opencode run issues parallel tool
+calls and holds about two sessions at once, so a driver cap equal to the
+session limit asks for twice the budget. Measured over four hours: 23 capacity
+rejections, GLM-5.3 refused with as few as TWO drivers live against a ceiling
+of four.
 
 Remember the harness pool above sits UNDER these: the three opencode models
 share five slots between them, so their per-model caps are reached only when

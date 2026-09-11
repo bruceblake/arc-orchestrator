@@ -289,11 +289,17 @@ merged work.
 | Layer | Where | gpt-oss | deepseek | glm | kimi | Override |
 |---|---|---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
-| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` via `drivers._gate` → `config.driver_limit`, and `store.driver_leases` across processes | 5 | 5 | 4 | 3 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 2 | 2 | 2 | 3 | `ARC_DRIVER_LIMIT_<FAMILY>` |
 | **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode: **5** total | ← shared | ← shared | kimi: 3 | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
-The driver numbers are the ceilings MEASURED on this fleet (2026-09-10), not
-guesses. gpt-oss and DeepSeek were previously configured at 8 against a real
+**A harness process is not one ARC session.** The session ceilings measured
+on this fleet are gpt-oss 5, DeepSeek 5, GLM 4, Kimi 3 — but an opencode run
+issues parallel tool calls and holds about TWO sessions at once, so a driver
+cap set equal to the session limit over-subscribes by that factor. Measured
+from the event log: 23 capacity rejections in four hours, GLM-5.3 refused with
+as few as TWO of our drivers live against a ceiling of four. Driver caps are
+therefore sessions // sessions-per-process; the kimi CLI holds one, opencode
+two. gpt-oss and DeepSeek were previously configured at 8 against a real
 ceiling of 5, so the fleet generated its own 400s under load and blamed the
 provider.
 

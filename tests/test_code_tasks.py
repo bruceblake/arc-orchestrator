@@ -649,9 +649,27 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         self.assertEqual(picked[0], "DeepSeek-V4-Flash")
 
     def test_saturation_is_relative_to_each_cap_not_absolute(self):
-        """4 GLM of 4 is full; 4 DeepSeek of 5 is not."""
-        picked = self._pick({"GLM-5.3": 4, "DeepSeek-V4-Flash": 4, "Kimi-K3": 3})
-        self.assertEqual(picked[0], "DeepSeek-V4-Flash")
+        """The same absolute count means different things at different caps.
+
+        Written against the real caps rather than hard-coded numbers: those
+        moved when driver caps became sessions-divided-by-sessions-per-process,
+        and a test that only passes for one particular set of caps is testing
+        the constants, not the rule.
+        """
+        caps = {m: config.driver_limit(m)
+                for m in ("GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3")}
+        busiest = max(caps, key=lambda m: caps[m])
+        # Everything at ONE in use: the model with the largest cap is the least
+        # contended and must be picked first.
+        picked = self._pick({m: 1 for m in caps})
+        self.assertEqual(picked[0], busiest)
+
+    def test_a_model_at_its_cap_is_never_preferred_to_an_idle_one(self):
+        caps = {m: config.driver_limit(m)
+                for m in ("GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3")}
+        full, idle = "GLM-5.3", "Kimi-K3"
+        picked = self._pick({full: caps[full], idle: 0})
+        self.assertEqual(picked[0], idle)
 
     def test_the_implementers_family_is_never_chosen(self):
         for fam in ("kimi", "glm", "deepseek"):

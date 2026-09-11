@@ -348,9 +348,35 @@ MODEL_FAMILY = {
 # run an interactive `kimi` alongside the fleet without contending.
 _MEASURED_CONCURRENCY = {"Kimi-K3": 3, "GLM-5.3": 4,
                          "gpt-oss-120b": 5, "DeepSeek-V4-Flash": 5}
+
+# ONE HARNESS PROCESS IS NOT ONE ARC SESSION.
+#
+# The numbers above are what ARC allows IN FLIGHT, and they were measured by
+# ramping simple prompts — one request at a time per process. Real tasks are
+# not like that: an opencode run issues parallel tool calls, so a single
+# process holds MORE THAN ONE session at once, and a driver cap set equal to
+# the account limit over-subscribes by that factor.
+#
+# Measured from the event log over four hours (23 capacity rejections):
+# GLM-5.3 was refused with as few as TWO of our drivers live, against an ARC
+# ceiling of four in flight. Two processes reaching four sessions is two
+# sessions per process, so a cap of 4 was really asking for ~8.
+#
+# GLM was the only model to show it because it is the most-used opencode model
+# and the only one whose account limit (4) is small enough for the doubling to
+# bite before the harness pool (5) binds first. The factor is a property of the
+# HARNESS, not of the model, so it applies to all three opencode models.
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1}
+
+
+def _harness_of_model(model):
+    return "kimi" if model == "Kimi-K3" else "opencode"
+
+
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
-_MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
-                     for m, n in _MEASURED_CONCURRENCY.items()}
+_MODEL_DRIVER_CAP = {
+    m: max(1, n // _SESSIONS_PER_PROCESS[_harness_of_model(m)] - DRIVER_HEADROOM)
+    for m, n in _MEASURED_CONCURRENCY.items()}
 
 
 # The per-MODEL caps above are the ARC API's ceiling. They are not the only

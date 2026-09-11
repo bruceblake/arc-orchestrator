@@ -68,11 +68,33 @@ class RoutingInvariants(unittest.TestCase):
                 "a harness slot and any task routed to it would stall")
 
     def test_escalation_path_runs_weakest_to_strongest(self):
-        """Escalation only makes sense if later tiers are scarcer/stronger."""
-        caps = [config.driver_limit(m) for m in config.ESCALATION_PATH]
+        """Escalation only makes sense if later tiers are scarcer/stronger.
+
+        Asserted on SESSIONS, not processes. A driver cap is sessions divided
+        by how many an opencode process holds at once, and that divisor differs
+        between harnesses — so in process terms Kimi (3, via the kimi CLI at
+        one session each) now outnumbers GLM (2, via opencode at two each)
+        without being any less scarce. Sessions are the resource ARC rations
+        and therefore the unit this invariant is about.
+        """
+        caps = [config._MEASURED_CONCURRENCY[m] for m in config.ESCALATION_PATH]
         self.assertEqual(caps, sorted(caps, reverse=True),
                          f"escalation path {config.ESCALATION_PATH} should move "
-                         f"toward scarcer models, got caps {caps}")
+                         f"toward scarcer models, got session caps {caps}")
+
+    def test_a_driver_cap_never_over_subscribes_its_session_budget(self):
+        """The bug this unit change fixes: caps set equal to the session limit.
+
+        An opencode process holds ~2 sessions, so a cap of 4 processes was
+        really asking for 8 against a ceiling of 4 — measured as 23 capacity
+        rejections in four hours, GLM refused with as few as two drivers live.
+        """
+        for model, sessions in config._MEASURED_CONCURRENCY.items():
+            per_proc = config._SESSIONS_PER_PROCESS[config._harness_of_model(model)]
+            self.assertLessEqual(
+                config.driver_limit(model) * per_proc, sessions,
+                f"{model}: {config.driver_limit(model)} drivers x {per_proc} "
+                f"sessions each exceeds its {sessions}-session budget")
 
     def test_driver_caps_leave_headroom_under_the_account_cap(self):
         """Driver caps must reserve room for interactive use of the account."""
