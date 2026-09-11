@@ -126,6 +126,9 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   <h1>ARC · Usage</h1>
   <div id="ranges" style="display:flex;gap:4px">
     <button class="seg" data-r="1h">1h</button>
+    <button class="seg" data-r="3h">3h</button>
+    <button class="seg" data-r="6h">6h</button>
+    <button class="seg" data-r="today">today</button>
     <button class="seg" data-r="24h">24h</button>
     <button class="seg" data-r="7d">7d</button>
     <button class="seg" data-r="all">all</button>
@@ -453,11 +456,38 @@ window.addEventListener("hashchange", () => applyRange(location.hash.replace("#"
 function refresh() {
   load().finally(() => { nextAt = Date.now() + AUTO; });
 }
-setInterval(() => {
+
+// A background tab kept polling /api/usage every five seconds forever, keeping
+// the machine awake for a page nobody is reading.
+//
+// The tick body is named and referenced from both places on purpose. PR #9
+// attempted this by pasting the same six lines into the visibilitychange
+// handler, and a reviewer objected four times; two copies drift, and the copy
+// that drifts is the one nobody is looking at.
+let tickTimer = null;
+function tickCountdown() {
   const left = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
   $("#count").textContent = left + "s";
   if (Date.now() >= nextAt) refresh();
-}, 1000);
+}
+function startTicking() {
+  // Guard against stacking: visibilitychange can fire more than once for one
+  // transition, and an unguarded start leaves a second interval running
+  // forever — a "fix" that polls twice as fast as before.
+  if (tickTimer === null) tickTimer = setInterval(tickCountdown, 1000);
+}
+function stopTicking() {
+  clearInterval(tickTimer);
+  tickTimer = null;
+}
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) { stopTicking(); return; }
+  // Coming back: the data on screen is as stale as the time away, so refresh
+  // at once rather than showing it until the next tick.
+  nextAt = Date.now();
+  startTicking();
+});
+if (!document.hidden) startTicking();
 window.addEventListener("resize", () => { if (USAGE) updateUI(USAGE, FLEET); });
 
 const initRange = location.hash.replace("#", "");
