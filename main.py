@@ -175,7 +175,8 @@ def cmd_code(args):
     import json
     import events
     from store import Store
-    from code_tasks import build_code_graph, describe, load_taskfile, plan_tasks
+    from code_tasks import (build_code_graph, chain_status, describe,
+                        load_taskfile, pending_chains, plan_tasks)
 
     if args.code_cmd == "status":
         store = Store(args.db or config.DB_PATH)
@@ -183,6 +184,7 @@ def cmd_code(args):
             n = store.reset_stale_code_tasks()
             print(f"reset {n} stale 'running' task(s) -> failed")
         out = store.code_status()
+        out["chains"] = pending_chains(store)
         print(json.dumps(out, indent=2, default=str))
         return
     if args.code_cmd == "bench":
@@ -232,6 +234,30 @@ def cmd_code(args):
             sys.exit(f"repo not found: {taskset['repo']}")
         store = Store(db_path(args, False))
         tf = str(Path(args.taskfile).resolve())
+        # --no-wait: a read-only pre-flight of the chain gate. Instead of
+        # sitting in chain_wait until the upstream projects merge, fail fast
+        # with exit code 2 — the signal a queue/CI wrapper uses to requeue.
+        # Placed before the live-run guard on purpose: it mutates no rows
+        # (the check only reads the deps' code_tasks rows), so it is safe
+        # to run even while another process owns this file.
+        if args.no_wait and taskset.get("after"):
+            st = chain_status(store, taskset["after"])
+            if not st["ok"]:
+                bits = []
+                for d in st["deps"]:
+                    n = Path(d["taskfile"]).name
+                    if d["failed"]:
+                        bits.append(f"{n}: failed {', '.join(d['failed'])}")
+                    elif not d["readable"]:
+                        bits.append(f"{n}: taskfile not on disk yet")
+                    elif d["n_tasks"]:
+                        bits.append(f"{n}: {d['merged']}/{d['n_tasks']} merged")
+                    else:
+                        bits.append(f"{n}: no rows yet")
+                print(f"chain not ready ({'; '.join(bits)}); "
+                      "run again without --no-wait to wait for it",
+                      file=sys.stderr)
+                sys.exit(2)
         # Two processes on the SAME task file would share task ids, worktrees
         # and branches and fight over them; the stale-reset each performs at
         # startup would also clobber the other's live rows. Driver leases keep
@@ -326,6 +352,13 @@ def cmd_code(args):
         merged = sorted(k for k, v in results.items()
                         if k.startswith("publish_") and isinstance(v, dict) and v.get("merged"))
         log.info("done — merged: %s", ", ".join(merged) or "none")
+        # The chain gate failing is a clean graph end, not an exception —
+        # surface it as a non-zero exit so wrappers can tell it apart from
+        # success. (1 = chain blocked/timed out at runtime; --no-wait uses 2.)
+        cw = results.get("chain_wait")
+        if isinstance(cw, dict) and not cw.get("ok"):
+            log.error("chain blocked: %s", cw.get("reason", "unknown"))
+            sys.exit(1)
 
     try:
         asyncio.run(run())
@@ -449,6 +482,42 @@ def cmd_code_bench(args):
         asyncio.run(go())
     except KeyboardInterrupt:
         pass
+
+
+def cmd_audit(args):
+    """Daily audit. Exit code is the alarm: 2 if anything critical, else 0.
+
+    A non-zero exit is what lets this be scheduled without anybody reading it
+    on a quiet day — cron mails only on failure, and 'critical' is defined
+    narrowly enough that a mail means something.
+    """
+    import audit
+    import store as _store
+    st = None
+    try:
+        st = _store.Store(config.DB_PATH)
+    except Exception:
+        pass
+    if args.fix:
+        # reconcile() is async and its reporter is format_report — guessed
+        # wrong once and the scheduled audit crashed on its first real run.
+        import asyncio
+        import reconcile
+        if st is None:
+            print("--fix needs the database; skipping cleanup")
+        elif reconcile.live_runs():
+            # Reaping worktrees and leases out from under a LIVE run is how a
+            # cleanup becomes an outage. The audit still reports; it just does
+            # not touch anything while the fleet is working.
+            print("--fix skipped: runs are in flight")
+        else:
+            print(reconcile.format_report(
+                asyncio.run(reconcile.reconcile(st, apply=True))))
+    report = audit.run(st, since_s=args.since, with_health=not args.no_health,
+                       snapshot=args.fix)
+    print(json.dumps(report, indent=2, default=str) if args.json
+          else audit.render(report))
+    return 2 if report["counts"]["critical"] else 0
 
 
 def cmd_gh(args):
@@ -663,6 +732,9 @@ def main():
     cr_p.add_argument("--dry-run", action="store_true", help="print the resolved DAG, no models, no git")
     cr_p.add_argument("--force", action="store_true",
                       help="run even if another process is already running this task file")
+    cr_p.add_argument("--no-wait", action="store_true",
+                      help="exit code 2 instead of waiting when the task file's "
+                           "`after` dependencies are not all merged yet")
     cr_p.add_argument("--db", default=None, help="sqlite database path")
     cr_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cp_p = code_sub.add_parser("plan", help="ask Kimi-K3 to draft a task file for a goal")
@@ -738,6 +810,15 @@ def main():
     bun_p.add_argument("--dry-run", action="store_true", help="simulate all model calls")
     bun_p.add_argument("--db", default=None, help="sqlite database path")
     bun_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    au_p = sub.add_parser("audit", help="daily audit: triage defects + check the codebase")
+    au_p.add_argument("--since", type=float, default=86400,
+                      help="seconds of error history to triage (default 24h)")
+    au_p.add_argument("--json", action="store_true", help="emit the report as JSON")
+    au_p.add_argument("--no-health", action="store_true",
+                      help="skip running check.sh (it is the slow part)")
+    au_p.add_argument("--fix", action="store_true",
+                      help="also run the reversible cleanups (reconcile --apply)")
+
     gh_p = sub.add_parser("gh", help="GitHub ops agents (gh CLI): triage, issue, pr-review")
     gh_sub = gh_p.add_subparsers(dest="gh_cmd", required=True)
     gt_p = gh_sub.add_parser("triage", help="classify open issues; writes a taskfile to ~/tasks")
@@ -774,6 +855,10 @@ def main():
         cmd_build(args)
     elif args.cmd == "code":
         cmd_code(args)
+    elif args.cmd == "audit":
+        # The exit code IS the alarm. Without propagating it, a scheduled audit
+        # exits 0 no matter what it found and cron never says a word.
+        sys.exit(cmd_audit(args))
     elif args.cmd == "gh":
         cmd_gh(args)
     elif args.cmd == "serve":

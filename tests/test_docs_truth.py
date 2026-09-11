@@ -148,9 +148,15 @@ class TestDocsTruthArcEnvVars(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
+        # config.py is not the only thing that reads ARC_* — the shell
+        # entrypoints do too (ARC_QUEUE_PARALLEL is read by run-queue.sh and
+        # appears nowhere in config.py). Scanning config.py alone reported a
+        # real, working env var as a documentation lie.
         src = ""
-        with open(os.path.join(ROOT, "config.py"), encoding="utf-8") as fh:
-            src = fh.read()
+        for rel in ["config.py"] + sorted(
+                os.path.basename(p) for p in glob.glob(os.path.join(ROOT, "*.sh"))):
+            with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
+                src += fh.read() + "\n"
         defined = set(re.findall(r"ARC_[A-Z0-9_]+", src))
         for prefix in ("ARC_LIMIT_", "ARC_DRIVER_LIMIT_"):
             for family in ("GPT_OSS", "GLM", "KIMI", "DEEPSEEK"):

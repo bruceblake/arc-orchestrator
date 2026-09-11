@@ -196,6 +196,13 @@ REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false"
 
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
+# Project chaining (code workload): a taskfile that declares `after` waits for
+# every task in those upstream taskfiles to reach 'merged' before any of its
+# worktrees allocate. Upstream projects can legitimately take hours (fix
+# loops, PR review rounds, escalation tiers), so the wait budget is hours,
+# not minutes. A chain that never settles must eventually fail loudly rather
+# than sit on the dashboard forever.
+CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
 
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the

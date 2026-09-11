@@ -21,6 +21,12 @@ import events  # noqa: E402
 # reported them to the operator as real fleet problems.
 _EVENT_DIR = tempfile.mkdtemp(prefix="arc-tests-events-")
 config.EVENTS_LOG = str(pathlib.Path(_EVENT_DIR) / "events.jsonl")
+# The same reasoning now applies to the DATABASE. errors.capture() writes to
+# config.DB_PATH, and the suite deliberately drives failure paths — without
+# this, every test run injected dozens of synthetic defects into the operator's
+# triage list, where they are indistinguishable from real ones. Verified: a
+# single run put 43 test exceptions into the production error table.
+config.DB_PATH = str(pathlib.Path(_EVENT_DIR) / "test.db")
 atexit.register(lambda: shutil.rmtree(_EVENT_DIR, ignore_errors=True))
 
 # Several tests deliberately drive failure paths (node crashes, driver retry
@@ -63,12 +69,17 @@ class capture_events:
 class FakeStore:
     """Enough of store.Store for build_code_graph and the node coroutines."""
 
-    def __init__(self, prior=None):
+    def __init__(self, prior=None, by_taskfile=None):
         self._prior = list(prior or [])
+        # Chaining tests need `code_tasks_for` to answer per taskfile key;
+        # everything else keeps the old flat-list behavior.
+        self._by_taskfile = dict(by_taskfile or {})
         self.upserts = []
         self.harness_runs = []
 
     def code_tasks_for(self, taskfile):
+        if taskfile in self._by_taskfile:
+            return list(self._by_taskfile[taskfile])
         return list(self._prior)
 
     def upsert_code_task(self, taskfile, tid, title, model, reviewer, status, **kw):

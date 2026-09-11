@@ -138,13 +138,26 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   rejected work and never leaks into a retry (Rules 4–5).
 - Tasks with no `deps` are graph start nodes and run in parallel; a dependent
   task is wired `publish_<last-dep> -> alloc_<tid>` (code_tasks.py:267) so it
-  allocates only after its dependency has merged.
+  allocates only after its dependency has merged. The same ordering holds
+  **between projects**: a taskfile declaring `project.after` allocates **no
+  worktree at all** until its whole chain is merged (Rule 9) — while it
+  waits, no branch, worktree, or task row exists.
 - **The orchestrator is the only git actor** (gitstore.py docstring). Harnesses
   only write files inside their worktree; the implementation prompt
   (code_tasks.py:107) tells every implementer: *"do not git-commit (the
   orchestrator handles git); keep changes minimal and working."* The same
   applies to you: **NEVER `git commit`, `git merge`, or `git push` in a task
   worktree** — publish/merge is done for you by Rule 5.
+- **This worktree discipline is universal: ALL multi-agent work in this
+  ecosystem — code, docs, and these very governance files (AGENTS.md,
+  `docs/`) — goes through per-task git worktrees** at
+  `~/worktrees/<project>/<task-id>` on `task/<task-id>` branches, never
+  direct edits on `main` (or any shared branch) by harnesses. A task that
+  edits documentation is planned, routed, gated, reviewed and merged exactly
+  like one that edits code — the pipeline is path-agnostic, and every
+  implementer harness runs with cwd = its worktree (drivers.py:484), so
+  there is no "too small for a worktree" path, not even for a one-line doc
+  fix.
 
 ### Rule 4 — Every task MUST define an honest `verify_cmd` gate, run before review
 
@@ -356,7 +369,8 @@ processes and move git refs on the same terms.
   `driver.error`, `worktree.alloc`, `task.gate`, `task.reviewed`,
   `task.merged`, `task.conflict`, `task.failed`, `task.escalated`
   (Rule 4), `task.pr_opened` / `task.pr_skipped` (Rule 5), and `run.resume`
-  (Rule 5 resume plan).
+  (Rule 5 resume plan); project chains add `chain.wait` / `chain.ready` /
+  `chain.blocked` (Rule 9).
 - The dashboard Projects DAG view renders the loops: fix-loop attempts as
   dashed amber self-arcs with xN counts, `conflict` nodes in **orange**
   (distinct from `failed` red), and the last review verdict on each node.
@@ -383,6 +397,48 @@ processes and move git refs on the same terms.
 - If you cannot show a transcript or an event for a claim about a run, do not
   make the claim.
 
+### Rule 7b — Never discard an exception; capture it
+
+`str(exc)[:300]` was all that survived a failure anywhere in this repo — no
+file, no line, no frame. Debugging meant guessing which of several call paths
+produced a message like `opencode exited 1:`.
+
+- **Catch sites call `errors.capture(exc, task=..., model=..., node=...)`** and
+  put the returned fingerprint on the event. The event stays short; the
+  traceback, the exception chain and the caller's context go to `error_events`.
+- **Errors are grouped by FINGERPRINT, not by message.** The fingerprint is the
+  exception type plus the names of the frames inside this repo — deliberately
+  not line numbers (they shift on every edit) and not the message (it carries
+  worktree paths, task ids and durations that make every occurrence unique).
+  A hundred occurrences of one bug must count as one bug.
+- **`errors.capture` never raises.** It runs inside `except` and `finally`
+  blocks, and instrumentation that can turn a handled error into an unhandled
+  one is worse than none.
+- **Capacity errors are not captured.** They are expected weather and would
+  swamp the triage list; they already have their own events.
+- **Every event carries a `run_id`** so one run can be reassembled afterwards
+  from events spread across the run process, its drivers and the dashboard.
+
+Tests must never write to the operator's error table — `tests/helpers.py`
+redirects `config.DB_PATH` for the same reason it redirects `EVENTS_LOG`. One
+unguarded suite run put 43 synthetic defects into the production triage list.
+
+### Rule 7c — The daily audit
+
+`main.py audit` answers two questions a green dashboard cannot: what broke
+(distinct defects, worst first) and what is rotting (work stranded in a
+non-terminal state, worktrees and branches left by dead runs, leases pinning
+capacity for processes that no longer exist, log growth, and whether
+`check.sh` still passes).
+
+- Every finding carries a severity AND a concrete next action.
+- **The exit code is the alarm**: 2 when anything is critical, else 0. That is
+  what makes `daily-audit.sh` schedulable — cron mails only on a non-zero exit,
+  so a mail means something.
+- `--fix` performs only the reversible cleanups `reconcile` already implements,
+  and **skips entirely while any run is in flight**: reaping worktrees and
+  leases out from under a live run turns a cleanup into an outage.
+
 ### Rule 8 — Dry-run before every run
 
 - Before executing a taskfile for real, run
@@ -394,11 +450,44 @@ processes and move git refs on the same terms.
   read it. A dry-run that surprises you is a taskfile bug; fix the taskfile,
   not the dry-run.
 
+### Rule 9 — Project chains gate on whole-DAG completion
+
+`deps` orders tasks **within** a taskfile. When one *project* needs another
+project's merged output, the taskfile declares `project.after`: a list of
+upstream taskfile paths (bare filenames resolve under `~/tasks`). Never use
+`after` inside one taskfile — that is what `deps` is for.
+
+- `code_tasks.load_taskfile` (code_tasks.py:28) validates the shape: a list
+  of non-empty strings, deduped, never the taskfile itself; an `after` cycle
+  is rejected with `ValueError` at graph build (`_after_cycle`,
+  code_tasks.py:222). A dep taskfile that does not exist yet is legal — it
+  is simply waited on, so a chain may be declared before the upstream is
+  planned.
+- `code_tasks.build_code_graph` (code_tasks.py:471) prefixes the whole DAG
+  with a single `chain_wait` node (`_make_chain_wait`, code_tasks.py:256):
+  it is the only start node, and every head (first task, or the skip/repair
+  stub of a merged/conflicted one) hangs off it, gated `when r.get("ok")`.
+- The gate releases only when **every task id of every upstream taskfile,
+  parsed from the file on disk, has a `merged` row** (`chain_status`,
+  code_tasks.py:172). A killed upstream run with 3 of 4 tasks merged is
+  therefore *not* done — rows alone can't prove a DAG finished, because a
+  killed run never writes rows for the rest. Waiting costs nothing: no
+  worktree, branch, or task row exists until the chain is ready.
+- A `failed`/`conflict` upstream row blocks the chain; the
+  `ARC_CHAIN_TIMEOUT` budget (default **6 h**, poll every 10 s) bounds the
+  wait. Either ends the run with exit code 1 and a `chain.blocked` event
+  (`chain.wait`/`chain.ready` bracket the gate — Rule 7).
+- CLI surface: `main.py code run <taskfile> --no-wait` pre-flights the
+  chain and exits **2** when not ready (0 when ready) so queue wrappers can
+  requeue instead of blocking a slot; `main.py code status` reports per-file
+  chain readiness under `chains`. Full semantics:
+  [docs/taskfile-schema.md](docs/taskfile-schema.md) § "Project chaining".
+
 ### Benchmarking exception — the bench `policy` escape hatch
 
 `code_tasks.load_taskfile` / `code_tasks.build_code_graph` accept an optional
 `policy` dict that widens the rules above **for benchmark variant runs
-only**. The default (`policy=None`) enforces Rules 1–8 byte-for-byte, and
+only**. The default (`policy=None`) enforces Rules 1–9 byte-for-byte, and
 every normal path (`code plan`, `code run`, dashboard project runs) passes
 no policy.
 
@@ -474,7 +563,7 @@ Top-level Python modules (one role each):
 |---|---|
 | `build_work.py` | Minecraft-style browser-game build workload: planner → 6 parallel module producers (each an implement → syntax gate → contract check → cross-model review → fix gauntlet) → assemble → bounded integration-review cycle |
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
-| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, resume of re-run taskfiles, serialized merge lock |
+| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles, serialized merge lock |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
@@ -528,7 +617,10 @@ The full operator runbook, with troubleshooting, is
 3. **Dry-run** — `.venv/bin/python main.py code run <taskfile> --dry-run`
    (validates everything; no models, no git — Rule 8).
 4. **Run** — `.venv/bin/python main.py code run <taskfile>`; check
-   `main.py code status` for task and harness-run stats. **Re-running the
+   `main.py code status` for task and harness-run stats. A taskfile with
+   `project.after` holds at the chain gate until its upstream projects are
+   merged (Rule 9); `--no-wait` pre-flights and exits 2 when not ready.
+   **Re-running the
    same command is also the retry/resume path** (Rule 5): merged tasks are
    skipped, failed tasks resume one escalation tier up, conflicts try
    repair — never write a reduced taskfile to retry a subset.

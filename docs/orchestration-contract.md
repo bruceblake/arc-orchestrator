@@ -37,6 +37,10 @@ rules, enforced by `code_tasks.load_taskfile`).
 7. **Collision avoidance** — `files_hint` must be disjoint across
    dep-independent tasks; two parallel agents editing the same file is the
    main cause of `conflict` failures at merge time.
+8. **Project chaining** — `project.after`: whole taskfiles that must be
+   fully merged before this taskfile starts. Use it when this project's
+   tasks read another project's merged output; never inside one taskfile
+   (`deps` does that, per task).
 
 ## What the runner guarantees
 
@@ -50,6 +54,14 @@ rules, enforced by `code_tasks.load_taskfile`).
 - **Concurrency caps** (`drivers.py` semaphores): see
   [concurrency-limits.md](concurrency-limits.md). Queued tasks wait
   politely — they never push an account over its ARC limit.
+- **Chain gating** (`code_tasks._make_chain_wait`): a taskfile declaring
+  `after` holds at the `chain_wait` graph node — before **any** worktree
+  alloc — until every task id of every upstream taskfile (parsed from the
+  file on disk, not from rows) has a `merged` row. While it waits, nothing
+  exists: no branch, no worktree, no task rows. A `failed`/`conflict`
+  upstream row or the `ARC_CHAIN_TIMEOUT` (6 h) budget ends the run
+  (exit 1, `chain.blocked`); a missing upstream file is simply waited on.
+  `chain_wait` → every head node, edge gated on `{"ok": true}`.
 - **Retry safety** (`gitstore.alloc`, `gitstore.merge_to_main`): alloc always
   resets branch `task/<tid>` to the base ref on (re)alloc, so a failed
   attempt's rejected work never leaks into a retry; merges tolerate a dirty
@@ -90,6 +102,17 @@ alloc → implement → gate ──pass──▶ review ──pass──▶ publ
 Statuses recorded in `code_tasks`: `pending → running → merged |
 conflict | failed`. `conflict` = merge collision; `failed` = fix rounds
 exhausted on the final escalation tier.
+
+## Project chains (before the per-task pipeline)
+
+A taskfile with `project.after` prefixes the whole shape above with one
+gate: `chain_wait` is the graph's only start node, and every head (first
+task of the chain, or the skip/repair stub of a merged/conflicted one)
+waits on it. The gate releases only when every upstream taskfile's every
+task is merged — so a dependent project branches from a base that already
+contains the code it depends on, the same invariant `deps` provides
+inside a file. Full semantics, exit codes, and events:
+[taskfile-schema.md](taskfile-schema.md) § "Project chaining".
 
 ## The pull-request gate
 
