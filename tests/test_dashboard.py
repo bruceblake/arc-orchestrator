@@ -643,3 +643,95 @@ class StrandedPullRequests(unittest.TestCase):
     def test_the_task_is_recovered_from_the_branch_name(self):
         pr = self._pr(task=None, headRefName="task/t1")
         self.assertTrue(dashboard._pr_is_stranded(pr, self._owner(), set()))
+
+
+class UsageRangesAndTimeline(unittest.TestCase):
+    """Finer windows, a calendar day, and failures that show on the timeline."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.log = Path(self.dir) / "events.jsonl"
+        self._orig = config.EVENTS_LOG
+        config.EVENTS_LOG = str(self.log)
+        dashboard._lines_cache["key"] = None
+        # _usage also merges kimi-code CLI sessions read from the real
+        # ~/.kimi-code/sessions, which made this fixture report 194 requests
+        # instead of 1. Stubbed because these tests are about the EVENT-LOG
+        # window; the kimi merge has its own range coverage in
+        # tests/test_usage_range.py, and stubbing it THERE is what let a
+        # windowing bug through once already.
+        self._orig_kimi = dashboard._kimi_code_usage
+        dashboard._kimi_code_usage = lambda *a, **k: {
+            "models": [], "inflight": [], "points": [], "turns": []}
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        config.EVENTS_LOG = self._orig
+        dashboard._kimi_code_usage = self._orig_kimi
+        dashboard._lines_cache["key"] = None
+
+    def _write(self, *rows):
+        self.log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        dashboard._lines_cache["key"] = None
+
+    def _done(self, age_s, tokens=100, model="GLM-5.3"):
+        return {"type": "driver.done", "model": model, "harness": "opencode",
+                "ts": time.time() - age_s, "tokens": tokens, "seconds": 1}
+
+    def _err(self, age_s, model="GLM-5.3"):
+        return {"type": "driver.error", "model": model, "harness": "opencode",
+                "ts": time.time() - age_s, "error": "concurrent session limit"}
+
+    def test_the_finer_windows_exist(self):
+        for r in ("1h", "3h", "6h", "today", "24h", "7d", "all"):
+            self.assertIn(r, dashboard.RANGES)
+
+    def test_three_hours_excludes_a_four_hour_old_request(self):
+        self._write(self._done(4 * 3600), self._done(60))
+        self.assertEqual(dashboard._usage(None, "3h")["totals"]["requests"], 1)
+        self.assertEqual(dashboard._usage(None, "6h")["totals"]["requests"], 2)
+
+    def test_today_is_a_calendar_day_not_a_rolling_one(self):
+        """At 09:00 a rolling day is mostly yesterday.
+
+        'What has the fleet done today' is the question an operator asks, and
+        a 24h window answers a different one.
+        """
+        now = time.time()
+        start = dashboard._range_cutoff("today", now)
+        lt = time.localtime(start)
+        self.assertEqual((lt.tm_hour, lt.tm_min, lt.tm_sec), (0, 0, 0))
+        self.assertLessEqual(start, now)
+        self.assertGreaterEqual(start, now - 86400)
+
+    def test_today_never_reaches_further_back_than_24h(self):
+        self._write(self._done(30 * 3600), self._done(60))
+        today = dashboard._usage(None, "today")["totals"]["requests"]
+        day = dashboard._usage(None, "24h")["totals"]["requests"]
+        self.assertLessEqual(today, day)
+
+    def test_a_failed_driver_attempt_reaches_the_timeline(self):
+        # It used to increment a counter and `continue`, so an hour of capacity
+        # rejections rendered as a QUIET hour rather than a bad one.
+        self._write(self._err(60), self._err(120), self._done(90))
+        u = dashboard._usage(None, "1h", include_series=True)
+        in_series = sum(p["errors"] for v in u["series"].values() for p in v)
+        self.assertEqual(in_series, 2)
+        self.assertEqual(u["totals"]["failed_attempts"], 2)
+
+    def test_the_timeline_reconciles_with_the_totals(self):
+        self._write(*[self._err(i * 30) for i in range(1, 8)])
+        u = dashboard._usage(None, "1h", include_series=True)
+        self.assertEqual(sum(p["errors"] for v in u["series"].values() for p in v),
+                         u["totals"]["failed_attempts"])
+
+    def test_every_series_bucket_has_an_errors_key(self):
+        self._write(self._done(60))
+        u = dashboard._usage(None, "1h", include_series=True)
+        for fam, pts in u["series"].items():
+            for p in pts:
+                self.assertIn("errors", p, f"{fam} bucket missing errors")
+
+    def test_an_unknown_range_still_falls_back_to_an_hour(self):
+        self._write(self._done(4 * 3600), self._done(60))
+        self.assertEqual(dashboard._usage(None, "nonsense")["range"], "1h")

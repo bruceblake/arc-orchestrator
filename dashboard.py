@@ -38,7 +38,21 @@ MAX_EVENTS_PER_RESPONSE = 3000
 PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
           "DeepSeek-V4-Flash": "DeepSeek V4 Flash"}
 
-RANGES = ["1h", "24h", "7d", "all"]
+# Rolling windows plus one calendar window. "today" is deliberately not a
+# synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
+# the fleet done today" is the question an operator actually asks.
+RANGES = ["1h", "3h", "6h", "today", "24h", "7d", "all"]
+_RANGE_SECONDS = {"1h": 3600, "3h": 3 * 3600, "6h": 6 * 3600,
+                  "24h": 86400, "7d": 7 * 86400}
+
+
+def _range_cutoff(range_key, now):
+    """Epoch seconds the window starts at, or None for 'all'."""
+    if range_key == "today":
+        lt = time.localtime(now)
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0,
+                            lt.tm_wday, lt.tm_yday, lt.tm_isdst))
+    return None if range_key == "all" else now - _RANGE_SECONDS[range_key]
 
 _launch_registry = {}  # abspath taskfile -> {"pid", "log", "started", "dry_run"}
 
@@ -302,6 +316,12 @@ def _kimi_code_usage(now, fleet_names=frozenset()):
 
 def _series_window(range_key, now, min_ts):
     """(start_epoch, bucket_secs, n_points) — 1h axis stays exactly as it always was."""
+    if range_key in ("3h", "6h"):
+        span = _RANGE_SECONDS[range_key]
+        return int((now - span) // 300) * 300, 300, span // 300 + 1
+    if range_key == "today":
+        start = int(_range_cutoff("today", now) // 300) * 300
+        return start, 300, max(2, int((now - start) // 300) + 2)
     if range_key == "24h":
         return int((now - 86400) // 300) * 300, 300, 289
     if range_key == "7d":
@@ -555,17 +575,17 @@ def _window_kimi_models(turns, cutoff):
 def _usage(store=None, range_key=None, include_series=False):
     """Usage aggregates for /api/usage, honoring the requested range.
 
-    `range_key` selects the aggregation window: 1h/24h/7d/all. A missing or
-    unrecognized key (including None) falls back to "1h" — the usage page's
-    default. "all" is the historical view: nothing is dropped. A windowed range
+    `range_key` selects the aggregation window: 1h/3h/6h/today/24h/7d/all. A
+    missing or unrecognized key (including None) falls back to "1h" — the usage
+    page's default. "today" is a CALENDAR day, not a rolling 24 hours: at 09:00
+    a rolling day is mostly yesterday, and "what has the fleet done today" is
+    the question an operator actually asks. "all" is the historical view: nothing is dropped. A windowed range
     bounds totals, per-model/family rows, and the series points, while the
     in-flight list is never trimmed — a live agent is current by definition.
     """
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
-    cutoff = None
-    if range_key != "all":
-        cutoff = now - {"1h": 3600, "24h": 86400, "7d": 7 * 86400}[range_key]
+    cutoff = _range_cutoff(range_key, now)
 
     def new_model(model, family, source):
         return {"model": model, "pretty": _pretty(model), "family": family, "source": source,
@@ -614,6 +634,14 @@ def _usage(store=None, range_key=None, include_series=False):
                 mod["failed_attempts"] += 1
                 fam["failed_attempts"] += 1
                 totals["failed_attempts"] += 1
+                # A failed driver attempt produced no series point, so the code
+                # fleet's failures were invisible on the timeline: an hour of
+                # capacity rejections rendered as a quiet hour rather than a bad
+                # one. Capacity is tracked separately because it is the
+                # provider refusing, not the work being wrong.
+                ts = _ts(e.get("ts"))
+                if ts:
+                    pts.append((ts, family, 0, 0, 0, 1))
                 continue
             mod["requests"] += 1
             mod["ok"] += 1
@@ -640,7 +668,7 @@ def _usage(store=None, range_key=None, include_series=False):
                 totals["prompt_tokens"] += ptoks
                 totals["completion_tokens"] += ctoks
             if ts:
-                pts.append((ts, family, 1, toks, 1))
+                pts.append((ts, family, 1, toks, 1, 0))
             continue
         if etype not in ("request", "request_start", "request_end"):
             continue
@@ -678,11 +706,16 @@ def _usage(store=None, range_key=None, include_series=False):
             if isinstance(lat, (int, float)):
                 mod["latency_total_ms"] += lat
             if ts:
-                pts.append((ts, family, 1, tokens, 0))
+                pts.append((ts, family, 1, tokens, 0, 0))
         else:
             mod["errors"] += 1
             fam["errors"] += 1
             totals["errors"] += 1
+            # A failed request produced NO point at all, so the timeline showed
+            # traffic dipping during an outage rather than errors spiking — the
+            # shape that makes a bad hour look like a quiet one.
+            if ts:
+                pts.append((ts, family, 1, 0, 0, 1))
 
     # Backfill opencode tokens from transcripts for pre-plumbing runs.
     for ts, model, toks, ptoks, ctoks in _opencode_token_backfill(store, done_tok_keys):
@@ -702,13 +735,13 @@ def _usage(store=None, range_key=None, include_series=False):
         totals["completion_tokens"] += ctoks
         if mod["last_ts"] is None or ts > mod["last_ts"]:
             mod["last_ts"] = ts
-        pts.append((ts, family, 0, toks, 0))
+        pts.append((ts, family, 0, toks, 0, 0))
 
     # Merge kimi-code CLI sessions so the dashboard also shows interactive traffic,
     # which goes straight to llm-api.arc.vt.edu and never touches the event log.
     # A windowed range narrows kimi's per-model totals from its per-turn log; the
     # all-time `models` stays the historical view for range=all.
-    pts.extend((ts, "kimi-code", req, tok, 0) for ts, req, tok in kimi["points"]
+    pts.extend((ts, "kimi-code", req, tok, 0, 0) for ts, req, tok in kimi["points"]
                if cutoff is None or (ts is not None and ts >= cutoff))
     kimi_models = kimi["models"] if cutoff is None else _window_kimi_models(kimi.get("turns", []), cutoff)
     if kimi_models:
@@ -777,18 +810,21 @@ def _usage(store=None, range_key=None, include_series=False):
     start, bucket, n = _series_window(range_key, now, min((p[0] for p in pts), default=None))
     series = None
     if include_series:
-        series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
+        series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0,
+                       "errors": 0} for i in range(n)]
                   for f in config.FAMILY_ORDER}
-        for ts, family, req, tok, _tr in pts:
+        for ts, family, req, tok, _tr, err in pts:
             if not ts or ts < start:
                 continue
             idx = int((ts - start) // bucket)
             if idx >= n:
                 continue
             pts_list = series.setdefault(family, [{"t": start + i * bucket, "requests": 0,
-                                                   "tokens": 0} for i in range(n)])
+                                                   "tokens": 0, "errors": 0}
+                                                  for i in range(n)])
             pts_list[idx]["requests"] += req
             pts_list[idx]["tokens"] += tok
+            pts_list[idx]["errors"] += err
 
     day0 = int(now // 86400)
     daily = []
@@ -799,7 +835,7 @@ def _usage(store=None, range_key=None, include_series=False):
                "requests": 0, "tokens": 0, "task_runs": 0, "families": {}}
         day_idx[d] = rec
         daily.append(rec)
-    for ts, family, req, tok, tr in pts:
+    for ts, family, req, tok, tr, _err in pts:
         if not ts:
             continue
         rec = day_idx.get(int(ts // 86400))
