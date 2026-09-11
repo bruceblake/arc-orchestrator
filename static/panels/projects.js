@@ -101,8 +101,10 @@ function bindDagClicks(sel, runsCache) {
 
 // ---- projects list ----
 function card(p, i) {
-  const nodes = (p.dag && p.dag.nodes) || [];
-  const dots = nodes.map(n => `<i class="dot ${n.live || n.status === "running" ? "live" : ""}" style="background:${STATUSC[n.status] || STATUSC.pending}" title="${attr(n.id)} · ${attr(n.status)}${n.live ? " (live)" : ""}${attr(n.title && n.title !== n.id ? " · " + n.title : "")}"></i>`).join("");
+  // One line of signal: repo, title, LIVE, merged/failed chips, activity,
+  // archive. Per-task status dots and token stats are gone from the card —
+  // the chips already count failures, the mini DAG colors nodes for 3+ task
+  // projects, and tokens live in the detail meta line.
   const tot = (p.progress && p.progress.total) || p.n_tasks || 1;
   const done = (p.progress && p.progress.done) || 0;
   const failed = ((p.statuses && p.statuses.failed) || 0) + ((p.statuses && p.statuses.conflict) || 0);
@@ -112,9 +114,7 @@ function card(p, i) {
       <span class="chev">▶</span>
       <span class="pc" title="${attr(p.repo || "")}">${esc(repoShort(p.repo))}</span>
       <span class="pt"><b>${esc(p.title)}</b> ${liveBadge(p)}${p.archived ? ' <span class="chip pending" title="archived — hidden from the active list">archived</span>' : ""}</span>
-      <span class="dots">${dots}</span>
       <span class="pc"><span class="chip merged">${done}/${tot} merged</span>${failed ? ` <span class="chip failed">${failed} failed</span>` : ""}</span>
-      <span class="pc" style="color:var(--warn)">⛁ ${fmtK(p.tokens)}</span>
       <span class="pc">${fmtT(p.last_activity)}</span>
       <span><button class="act seg" data-arch="${attr(p.file)}" data-on="${p.archived ? 1 : 0}">${p.archived ? "restore" : "archive"}</button></span>
     </div>
