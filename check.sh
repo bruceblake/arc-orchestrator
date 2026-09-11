@@ -80,6 +80,13 @@ if command -v node >/dev/null 2>&1; then
             echo "FAIL: $f has a JavaScript syntax error"; rc=1
         fi
     done
+    # index.html's inline script now lives in per-panel files under
+    # static/panels/ — check them directly, the pages no longer hold it.
+    for f in static/panels/*.js; do
+        if ! node --check "$f" 2>&1; then
+            echo "FAIL: $f has a JavaScript syntax error"; rc=1
+        fi
+    done
     # A call to a function that does not exist is valid syntax and fails at
     # RUNTIME, on click — node --check cannot see it, and neither could the
     # DOM-reference check below. loadProjects() shipped that way.
@@ -104,6 +111,8 @@ for p in sorted(pathlib.Path("static").glob("*.html")):
     s = p.read_text()
     ids = set(re.findall(r'\bid="([\w-]+)"', s))
     script = s[s.find("<script"):]
+    if p.name == "index.html":  # its JS lives in static/panels/*.js now
+        script += "\n".join(q.read_text() for q in sorted(pathlib.Path("static/panels").glob("*.js")))
     refs = set(re.findall(r'\$\(["\']#([\w-]+)["\']\)', script))
     refs |= set(re.findall(r'getElementById\(["\']([\w-]+)["\']\)', script))
     missing = sorted(refs - ids)

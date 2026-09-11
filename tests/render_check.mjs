@@ -299,6 +299,12 @@ const tsvg = api.taskDag({starts: ["a"], nodes: [{id: "a"}, {id: "b", gather: tr
   edges: [{src: "a", dst: "b", conditional: true}]}, {size: "full", topo: true});
 ok("taskDag topo mode", tsvg.startsWith("<svg") && tsvg.includes('class="node topo"') && tsvg.includes('stroke-dasharray="4 3"'));
 
+// The page's JavaScript lives in static/panels/*.js now; the inline block that
+// remains (staggered-poll boot) must stay tiny so the file cannot silently
+// re-absorb the code and return to being the fleet's merge-conflict magnet.
+ok("no inline script block over 20 lines",
+  [...src.matchAll(/<script>([\s\S]*?)<\/script>/g)].every(m => m[1].trim().split("\n").length <= 20));
+
 console.log(`ui checks: ${good} passed, ${bad.length} failed`);
 if (!out.includes("<img src=x") && !out.includes("<script>x") && !bad.length) {
   console.log("render_check: PASS");
