@@ -115,12 +115,48 @@ def triage_tasks(store):
 
 # ---- 2. what is rotting --------------------------------------------------
 
+def _worktree_holds_work(repo, name):
+    """Why this worktree must not be reaped, or "" if it is genuinely spent.
+
+    The status column is not sufficient and never was: a task can be `failed`
+    while its branch carries commits behind an OPEN pull request. Ask git and
+    GitHub, not the database.
+    """
+    branch = f"task/{name}"
+    rc, out, _ = _sh("git", "rev-list", "--count",
+                     f"origin/{config.BASE_BRANCH}..{branch}", cwd=repo)
+    ahead = int(out.strip()) if rc == 0 and out.strip().isdigit() else 0
+    reasons = []
+    if ahead:
+        reasons.append(f"{ahead} unmerged commit(s) on {branch}")
+    rc, out, _ = _sh("gh", "pr", "list", "--head", branch, "--state", "open",
+                     "--json", "number", cwd=repo, timeout=20)
+    if rc == 0 and out.strip() and out.strip() != "[]":
+        try:
+            n = json.loads(out)[0]["number"]
+            reasons.append(f"pull request #{n} is open")
+        except (ValueError, IndexError, KeyError):
+            reasons.append("a pull request is open")
+    wt = Path(config.WORKTREE_ROOT) / Path(repo).name / name
+    rc, out, _ = _sh("git", "status", "--porcelain", cwd=wt)
+    n_dirty = len([ln for ln in out.splitlines() if ln.strip()])
+    if n_dirty:
+        reasons.append(f"{n_dirty} uncommitted change(s)")
+    return "; ".join(reasons)
+
+
 def audit_git(repo=None, store=None):
     repo = Path(repo or config.ROOT)
     out = []
     rc, wt, _ = _sh("git", "worktree", "list", "--porcelain", cwd=repo)
     trees = [ln.split(" ", 1)[1] for ln in wt.splitlines() if ln.startswith("worktree ")]
-    allocated = [t for t in trees if Path(t).resolve() != repo.resolve()]
+    # Only worktrees WE allocated. opencode makes its own under /tmp/opencode
+    # for snapshotting; they are detached HEADs, they are not tasks, and
+    # reaping one could break a harness that is mid-run.
+    root = Path(config.WORKTREE_ROOT).resolve()
+    allocated = [t for t in trees
+                 if Path(t).resolve() != repo.resolve()
+                 and str(Path(t).resolve()).startswith(str(root))]
     # A worktree belonging to a task that is STILL WORKING is not a leak, it is
     # the task working. The first version counted all of them and reported
     # "8 worktrees — CRITICAL" while four of them were in active use. An audit
@@ -133,7 +169,23 @@ def audit_git(repo=None, store=None):
                     if r.get("status") in ("running", "in_review", "conflict")}
         except Exception:
             live = set()
-    orphan = [t for t in allocated if Path(t).name not in live]
+    orphan, risky = [], []
+    for t in allocated:
+        if Path(t).name in live:
+            continue
+        why = _worktree_holds_work(repo, Path(t).name)
+        (risky if why else orphan).append((t, why))
+    for t, why in risky:
+        # A terminal task row does NOT mean the branch is disposable.
+        # pause-when-hidden is `failed` AND three commits ahead behind open
+        # PR #9 — reaping it on the strength of the status column alone would
+        # have destroyed reviewable work.
+        out.append(_finding(
+            "warning", "git",
+            f"{Path(t).name}: task is not running but the branch holds work",
+            why, "do NOT reap it — resolve or close the PR first, or merge "
+                 "the branch; reaping destroys commits"))
+    orphan = [t for t, _ in orphan]
     in_use = len(allocated) - len(orphan)
     if orphan:
         out.append(_finding(

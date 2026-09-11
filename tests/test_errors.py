@@ -360,13 +360,14 @@ class TheAuditMustNotCryWolf(unittest.TestCase):
     def test_a_worktree_belonging_to_a_live_task_is_not_orphaned(self):
         import audit
         store = self._Store([{"id": "alive", "status": "running", "taskfile": "/t/a.json"}])
-        orig = audit._sh
+        orig, orig_root = audit._sh, config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = "/wt"
         audit._sh = self._fake_git(
-            "worktree /repo\nworktree /wt/alive\nworktree /wt/dead\n")
+            "worktree /repo\nworktree /wt/repo/alive\nworktree /wt/repo/dead\n")
         try:
             findings = audit.audit_git(repo="/repo", store=store)
         finally:
-            audit._sh = orig
+            audit._sh, config.WORKTREE_ROOT = orig, orig_root
         wt = [f for f in findings if "orphan" in f["what"]]
         self.assertEqual(len(wt), 1)
         self.assertIn("dead", wt[0]["detail"])
@@ -375,12 +376,13 @@ class TheAuditMustNotCryWolf(unittest.TestCase):
     def test_no_orphans_is_not_a_warning(self):
         import audit
         store = self._Store([{"id": "alive", "status": "running", "taskfile": "/t/a.json"}])
-        orig = audit._sh
-        audit._sh = self._fake_git("worktree /repo\nworktree /wt/alive\n")
+        orig, orig_root = audit._sh, config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = "/wt"
+        audit._sh = self._fake_git("worktree /repo\nworktree /wt/repo/alive\n")
         try:
             findings = audit.audit_git(repo="/repo", store=store)
         finally:
-            audit._sh = orig
+            audit._sh, config.WORKTREE_ROOT = orig, orig_root
         self.assertTrue(all(f["severity"] == "info" for f in findings),
                         "a fleet working normally must raise nothing above info")
 
@@ -537,3 +539,78 @@ class TaskfileSnapshots(unittest.TestCase):
         import audit
         r = audit.audit_tasks_backup(tasks_dir=self.tasks, snapshot=True)
         self.assertIn("logs", r[0]["detail"])
+
+
+class ReapingMustNotDestroyWork(unittest.TestCase):
+    """A terminal task row does NOT mean its branch is disposable.
+
+    pause-when-hidden is `failed` AND three commits ahead behind OPEN pull
+    request #9. The first version of this audit called it orphaned on the
+    strength of the status column alone, and acting on that would have
+    destroyed reviewable work.
+    """
+
+    class _Store:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def code_tasks_all(self):
+            return self._rows
+
+    @staticmethod
+    def _git(worktrees, ahead=0, prs="[]", dirty=""):
+        def run(*args, **kwargs):
+            argv = list(args)
+            if "worktree" in argv:
+                return 0, worktrees, ""
+            if "rev-list" in argv:
+                return 0, str(ahead), ""
+            if argv and argv[0] == "gh":
+                return 0, prs, ""
+            if "status" in argv:
+                return 0, dirty, ""
+            return 0, "", ""
+        return run
+
+    def _findings(self, **kw):
+        import audit
+        orig_sh, orig_root = audit._sh, config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = "/wt"
+        audit._sh = self._git(
+            "worktree /repo\nworktree /wt/repo/spent\n", **kw)
+        try:
+            return audit.audit_git(repo="/repo", store=self._Store([]))
+        finally:
+            audit._sh, config.WORKTREE_ROOT = orig_sh, orig_root
+
+    def test_unmerged_commits_block_reaping(self):
+        f = self._findings(ahead=3)
+        self.assertTrue(any("holds work" in x["what"] for x in f))
+        self.assertFalse(any("orphaned" in x["what"] for x in f))
+
+    def test_an_open_pull_request_blocks_reaping(self):
+        f = self._findings(prs='[{"number": 9}]')
+        held = [x for x in f if "holds work" in x["what"]]
+        self.assertTrue(held)
+        self.assertIn("#9", held[0]["detail"])
+
+    def test_uncommitted_changes_block_reaping(self):
+        f = self._findings(dirty=" M static/index.html\n")
+        self.assertTrue(any("holds work" in x["what"] for x in f))
+
+    def test_a_genuinely_spent_worktree_is_reported_orphaned(self):
+        f = self._findings()
+        self.assertTrue(any("orphaned" in x["what"] for x in f))
+
+    def test_opencode_scratch_worktrees_are_not_ours_to_touch(self):
+        # opencode makes detached worktrees under /tmp/opencode for snapshots.
+        # They are not tasks and reaping one could break a live harness.
+        import audit
+        orig_sh, orig_root = audit._sh, config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = "/wt"
+        audit._sh = self._git("worktree /repo\nworktree /tmp/opencode/pr-review\n")
+        try:
+            f = audit.audit_git(repo="/repo", store=self._Store([]))
+        finally:
+            audit._sh, config.WORKTREE_ROOT = orig_sh, orig_root
+        self.assertFalse(any("pr-review" in str(x.get("detail")) for x in f))
