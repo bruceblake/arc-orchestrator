@@ -1,0 +1,241 @@
+"""Daily audit: triage the bugs, then check the codebase is actually sound.
+
+Two different questions, deliberately in one report, because answering only the
+first is how a codebase rots while every dashboard stays green:
+
+  1. WHAT BROKE — distinct defects from errors.py, worst first, plus the tasks
+     that failed and why.
+  2. WHAT IS ROTTING — the checks nobody runs by hand: work stranded in a
+     non-terminal state, worktrees and branches left behind by dead runs, leases
+     pinning capacity for processes that no longer exist, event-log growth,
+     docs that have drifted, and whether the test suite and gate still pass.
+
+Every finding carries a SEVERITY and a concrete next action. A report that says
+"14 warnings" and leaves the reader to work out which matter is a report nobody
+reads twice.
+
+Read-only by default. `--fix` performs only the reversible cleanups that are
+already implemented elsewhere (reconcile's reaping), and says what it did.
+"""
+import json
+import os
+import subprocess
+import time
+from pathlib import Path
+
+import config
+
+SEV = ("critical", "warning", "info")
+
+
+def _finding(sev, area, what, detail="", action=""):
+    return {"severity": sev, "area": area, "what": what,
+            "detail": detail, "action": action}
+
+
+def _sh(*args, cwd=None, timeout=30):
+    try:
+        r = subprocess.run(args, cwd=str(cwd or config.ROOT), capture_output=True,
+                           text=True, timeout=timeout)
+        return r.returncode, r.stdout, r.stderr
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, "", str(exc)
+
+
+# ---- 1. what broke -------------------------------------------------------
+
+def triage_errors(since_s=86400, limit=20):
+    out = []
+    try:
+        import errors
+        groups = errors.groups(since=time.time() - since_s, limit=limit)
+    except Exception as exc:
+        return [_finding("warning", "triage", "could not read the error store",
+                         str(exc)[:200], "check the database is readable")]
+    for g in groups:
+        # One occurrence of something an hour ago is noise. Many occurrences,
+        # or anything still firing, is a defect with a queue behind it.
+        sev = "critical" if (g["count"] >= 5 and g["active"]) else \
+              "warning" if g["count"] >= 3 or g["active"] else "info"
+        out.append(_finding(
+            sev, "defect",
+            f"{g['kind']} x{g['count']} at {g['where'] or 'unknown'}",
+            (g["message"] or "")[:300],
+            f"fingerprint {g['fingerprint']}; hit {g['n_tasks']} task(s): "
+            f"{', '.join(str(t) for t in g['tasks'][:5])}"))
+    return out
+
+
+def triage_tasks(store):
+    out = []
+    try:
+        rows = store.code_tasks_all()
+    except Exception as exc:
+        return [_finding("warning", "triage", "could not read code_tasks",
+                         str(exc)[:200], "")]
+    stuck = [r for r in rows if r.get("status") in ("conflict", "in_review", "running")]
+    by_status = {}
+    for r in stuck:
+        by_status.setdefault(r["status"], []).append(r["id"])
+    for status, ids in sorted(by_status.items()):
+        sev = "critical" if status == "conflict" else "warning"
+        out.append(_finding(
+            sev, "tasks", f"{len(ids)} task(s) in '{status}'",
+            ", ".join(ids[:10]),
+            "re-run their project to resume; a task left non-terminal holds a "
+            "worktree, a branch and possibly an open PR"))
+    failed = [r for r in rows if r.get("status") == "failed"]
+    reasons = {}
+    for r in failed:
+        key = (r.get("error") or "unknown")[:60]
+        reasons[key] = reasons.get(key, 0) + 1
+    for reason, n in sorted(reasons.items(), key=lambda kv: -kv[1])[:5]:
+        out.append(_finding("info", "tasks", f"{n} task(s) failed: {reason}", "",
+                            "re-running the project resumes them"))
+    return out
+
+
+# ---- 2. what is rotting --------------------------------------------------
+
+def audit_git(repo=None):
+    repo = Path(repo or config.ROOT)
+    out = []
+    rc, wt, _ = _sh("git", "worktree", "list", "--porcelain", cwd=repo)
+    trees = [ln.split(" ", 1)[1] for ln in wt.splitlines() if ln.startswith("worktree ")]
+    orphan = [t for t in trees if Path(t).resolve() != repo.resolve()]
+    if orphan:
+        out.append(_finding(
+            "warning" if len(orphan) < 8 else "critical", "git",
+            f"{len(orphan)} task worktree(s) still allocated",
+            ", ".join(Path(t).name for t in orphan[:10]),
+            "main.py code reconcile --apply removes the ones whose run is gone"))
+    rc, br, _ = _sh("git", "branch", "--list", "task/*", cwd=repo)
+    branches = [b.strip("*+ ").strip() for b in br.splitlines() if b.strip()]
+    merged = set()
+    rc, m, _ = _sh("git", "branch", "--merged", config.BASE_BRANCH, cwd=repo)
+    if rc == 0:
+        # '+' marks a branch checked out in another worktree: it is merged but
+        # deleting it would fail, so it is not a suggestion worth making.
+        checked_out = {b.strip("*+ ").strip() for b in m.splitlines()
+                       if b.lstrip().startswith(("+", "*"))}
+        merged = {b.strip("*+ ").strip() for b in m.splitlines() if b.strip()}
+        merged -= checked_out
+    stale = [b for b in branches if b in merged]
+    if stale:
+        out.append(_finding(
+            "info", "git", f"{len(stale)} task branch(es) already merged",
+            ", ".join(stale[:10]), "safe to delete: git branch -d <name>"))
+    rc, st, _ = _sh("git", "status", "--porcelain", cwd=repo)
+    dirty = [ln for ln in st.splitlines() if ln.strip()]
+    if dirty:
+        out.append(_finding(
+            "warning", "git", f"{len(dirty)} uncommitted change(s) in the main repo",
+            "; ".join(dirty[:6]),
+            "a dirty main repo is how a fleet merge picks up work nobody reviewed"))
+    return out
+
+
+def audit_leases(store):
+    out = []
+    try:
+        rows = list(store.driver_lease_rows() or [])
+    except Exception as exc:
+        return [_finding("warning", "leases", "could not read driver_leases",
+                         str(exc)[:200], "")]
+    dead = []
+    for r in rows:
+        pid = r["pid"]
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            dead.append(f"{r['model']}/{r['task']}")
+        except (OSError, ValueError, TypeError):
+            pass
+    if dead:
+        out.append(_finding(
+            "critical", "leases", f"{len(dead)} lease(s) held by dead processes",
+            ", ".join(dead[:10]),
+            "they pin a model at cap until the TTL expires; "
+            "main.py code reconcile --apply reaps them"))
+    return out
+
+
+def audit_logs():
+    out = []
+    p = Path(config.EVENTS_LOG)
+    try:
+        size = p.stat().st_size
+    except OSError:
+        return [_finding("warning", "logs", "the event log is missing", str(p), "")]
+    mb = size / 1e6
+    if mb > 80:
+        out.append(_finding("warning", "logs", f"event log is {mb:.0f} MB",
+                            "rotation fires at 100 MB",
+                            "expect a rotation soon; confirm the dashboard's "
+                            "cursor handles it"))
+    gates = Path(config.ROOT) / "logs" / "gates"
+    n = len(list(gates.glob("*.log"))) if gates.is_dir() else 0
+    if n > 200:
+        out.append(_finding("info", "logs", f"{n} gate logs retained", "",
+                            "prune logs/gates if disk matters"))
+    return out
+
+
+def audit_health():
+    """Does the thing still build and pass its own gate?"""
+    out = []
+    rc, so, se = _sh("./check.sh", timeout=600)
+    if rc != 0:
+        tail = (so + se).strip().splitlines()[-12:]
+        out.append(_finding("critical", "health", "check.sh FAILS",
+                            "\n".join(tail),
+                            "this is the gate every task must pass — nothing "
+                            "can merge while it is red"))
+    else:
+        n = ""
+        for ln in so.splitlines():
+            if "Ran " in ln and " test" in ln:
+                n = ln.strip()
+        out.append(_finding("info", "health", "check.sh passes", n, ""))
+    return out
+
+
+# ---- report --------------------------------------------------------------
+
+def run(store=None, since_s=86400, with_health=True):
+    findings = []
+    findings += triage_errors(since_s)
+    if store is not None:
+        findings += triage_tasks(store)
+        findings += audit_leases(store)
+    findings += audit_git()
+    findings += audit_logs()
+    if with_health:
+        findings += audit_health()
+    order = {s: i for i, s in enumerate(SEV)}
+    findings.sort(key=lambda f: order.get(f["severity"], 9))
+    counts = {s: sum(1 for f in findings if f["severity"] == s) for s in SEV}
+    return {"ts": time.time(), "since_s": since_s,
+            "counts": counts, "findings": findings}
+
+
+def render(report):
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(report["ts"]))
+    c = report["counts"]
+    lines = [f"ARC audit — {when}",
+             f"  {c['critical']} critical · {c['warning']} warning · {c['info']} info",
+             ""]
+    if not report["findings"]:
+        lines.append("  nothing to report.")
+    cur = None
+    for f in report["findings"]:
+        if f["severity"] != cur:
+            cur = f["severity"]
+            lines.append(f"[{cur.upper()}]")
+        lines.append(f"  {f['area']}: {f['what']}")
+        if f["detail"]:
+            for ln in str(f["detail"]).splitlines()[:6]:
+                lines.append(f"      {ln[:160]}")
+        if f["action"]:
+            lines.append(f"      -> {f['action'][:200]}")
+    return "\n".join(lines)

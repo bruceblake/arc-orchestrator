@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config
+import errors
 import events
 
 log = logging.getLogger("drivers")
@@ -493,9 +494,15 @@ class Driver:
                 # error text carries no 400 — retrying it on the crash ladder
                 # walks straight back into whatever is saturated.
                 capacity = self.is_capacity_error(str(exc)) or "unanswered for" in str(exc)
+                # Capacity errors are expected weather and would swamp triage;
+                # everything else is a defect worth a traceback and a group.
+                fp = None if capacity else errors.capture(
+                    exc, task=task_id, model=self.model, node="driver",
+                    harness=self.harness, attempt=attempt)
                 events.emit("driver.error", harness=self.harness, model=self.model,
                             task=task_id, attempt=attempt, error=str(exc)[:300],
-                            will_resume=bool(sid), capacity=capacity)
+                            will_resume=bool(sid), capacity=capacity,
+                            fingerprint=fp)
                 if attempt > config.MAX_RETRIES:
                     raise
                 if capacity:

@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 
 import config
+import errors
 import events
 import gitstore
 from drivers import DriverError, KimiDriver, OpencodeDriver, transcript_tokens
@@ -668,7 +669,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             else:
                 events.emit("task.pr_skipped", task=tid, reason=note)
         except Exception as exc:  # publish must never fail on the PR hook
-            events.emit("task.pr_skipped", task=tid, reason=f"pr hook: {exc}"[:200])
+            fp = errors.capture(exc, task=tid, node="pr_hook")
+            events.emit("task.pr_skipped", task=tid,
+                        reason=f"pr hook: {exc}"[:200], fingerprint=fp)
 
     def make_skip(t):
         """Merged task: collapse to a stub publish so dependents see it as done."""

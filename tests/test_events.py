@@ -72,12 +72,12 @@ class TestEventsEmit(unittest.TestCase):
         events.set_context(workload="test", round=1, iteration=2, module="mod")
         # Verify context() returns the same mapping.
         ctx = events.context()
-        self.assertEqual(ctx, {
-            "workload": "test",
-            "round": 1,
-            "iteration": 2,
-            "module": "mod",
-        })
+        # The contextvars are what this test is about. Asserting the exact dict
+        # made it fail the moment a correlation id was added alongside them,
+        # which is metadata, not context the caller set.
+        self.assertEqual(
+            {k: ctx[k] for k in ("workload", "round", "iteration", "module")},
+            {"workload": "test", "round": 1, "iteration": 2, "module": "mod"})
         # Emit an event using the real implementation.
         events.emit("ctx_event")
         # Read the emitted line from the temporary log file.
@@ -88,6 +88,21 @@ class TestEventsEmit(unittest.TestCase):
         self.assertEqual(data.get("round"), 1)
         self.assertEqual(data.get("iteration"), 2)
         self.assertEqual(data.get("module"), "mod")
+
+    def test_every_event_carries_a_run_id(self):
+        """Without it there is no way to reassemble one run after the fact.
+
+        A task's events are spread across the run process, its drivers and
+        whatever reads them later; a shared per-process id is what turns a flat
+        log back into "everything that happened in THAT run".
+        """
+        events.emit("a")
+        events.emit("b")
+        with open(config.EVENTS_LOG, encoding="utf-8") as f:
+            rows = [json.loads(ln) for ln in f if ln.strip()]
+        ids = {r.get("run_id") for r in rows}
+        self.assertEqual(len(ids), 1, "events from one process must share a run_id")
+        self.assertTrue(next(iter(ids)))
 
     def test_emit_never_raises_when_log_path_unwritable(self):
         # Create a read‑only directory.
