@@ -588,8 +588,14 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
         status, resp = self._post_json("/api/projects/retry-task",
                                        {"file": "proj.json", "task": "t1"})
         self.assertEqual(status, 200)
-        self.assertEqual(resp, {"file": "proj.json", "task": "t1",
-                                "status": "pending"})
+        self.assertEqual({k: resp[k] for k in ("file", "task", "status")},
+                         {"file": "proj.json", "task": "t1", "status": "pending"})
+        # A retry that only flipped the status was not a retry: nothing
+        # scheduled "the next code run" it relied on, and a task sat pending
+        # for nine hours. With no run holding the file, retry must start one.
+        # (_spawn_logged is stubbed by this suite, so the pid is the stub's.)
+        self.assertIsNotNone(resp.get("launched_pid"),
+                             "retry on an idle project must launch a run")
         rows = {r["id"]: r["status"] for r in store.code_tasks_all()
                 if r["taskfile"] == str(path)}
         self.assertEqual(rows, {"t1": "pending", "t2": "merged"})

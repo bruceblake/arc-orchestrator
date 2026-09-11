@@ -842,3 +842,88 @@ class ProjectTaskModelPricing(unittest.TestCase):
         self.assertEqual(node["tokens"], 2000)
         self.assertEqual(node["tokens_source"], "kimi-wire")
         self.assertEqual(node["cost"], round(config.cost_of("Kimi-K3", 0, 2000), 4))
+
+
+class TheServerKnowsWhenItIsStale(unittest.TestCase):
+    """The fleet merges changes to this server's own source while it runs.
+
+    A running process keeps serving what it loaded, so a merged route 404s and
+    a renamed function takes the page blank — that is how the console went
+    dark once. The UI banner for this has existed since c59a76f, reading a
+    field the server never produced: six merges landed on 09-11 and the banner
+    stayed hidden through every one of them.
+    """
+
+    def setUp(self):
+        self._head, self._cache = dashboard._SERVED_HEAD, dict(dashboard._stale_cache)
+        dashboard._stale_cache.update(key=0.0, files=[])
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        dashboard._SERVED_HEAD = self._head
+        dashboard._stale_cache.update(self._cache)
+
+    def test_a_server_matching_the_repo_reports_nothing_stale(self):
+        dashboard._SERVED_HEAD = dashboard._git_out("rev-parse", "HEAD").strip()
+        dashboard._stale_cache.update(key=0.0)
+        self.assertEqual(dashboard._stale_source(), [])
+
+    def test_a_server_behind_the_repo_names_the_changed_source_files(self):
+        # Pretend we started at the previous commit that touched dashboard.py.
+        older = dashboard._git_out("log", "-2", "--format=%H", "--",
+                                   "dashboard.py").split()
+        if len(older) < 2:
+            self.skipTest("repo has fewer than two commits touching dashboard.py")
+        dashboard._SERVED_HEAD = older[1]
+        dashboard._stale_cache.update(key=0.0)
+        files = dashboard._stale_source()
+        self.assertIn("dashboard.py", files)
+
+    def test_only_source_the_server_executes_or_serves_counts(self):
+        for f in dashboard._stale_source():
+            self.assertTrue(f.startswith(dashboard._SOURCE_PATHS),
+                            f"{f} is not something this process runs or serves")
+
+    def test_no_git_means_nothing_to_be_stale_relative_to(self):
+        dashboard._SERVED_HEAD = None
+        dashboard._stale_cache.update(key=0.0)
+        self.assertEqual(dashboard._stale_source(), [])
+
+    def test_the_answer_is_cached_between_polls(self):
+        dashboard._SERVED_HEAD = "0" * 40  # a sha that will never match HEAD
+        dashboard._stale_cache.update(key=0.0)
+        first = dashboard._stale_source(now=1000.0)
+        dashboard._SERVED_HEAD = dashboard._git_out("rev-parse", "HEAD").strip()
+        self.assertEqual(dashboard._stale_source(now=1005.0), first,
+                         "within the cache window the old answer must be returned")
+
+    def test_health_carries_the_field_the_banner_reads(self):
+        h = dashboard._health(None)
+        self.assertIn("stale_source", h)
+        self.assertIsInstance(h["stale_source"], list)
+        self.assertIn("served_head", h)
+
+
+class RetryActuallyRuns(unittest.TestCase):
+    """Resetting a task to `pending` is not a retry unless something runs it.
+
+    The button relied on "the next `code run`", which nothing schedules. A
+    retry clicked while the fleet was idle changed a label and did nothing
+    else; graph-admission-control sat `pending` for nine hours that way.
+    """
+
+    def test_the_retry_path_launches_when_no_run_holds_the_file(self):
+        src = pathlib.Path(dashboard.__file__).read_text()
+        body = src[src.index("def _retry_task"):]
+        body = body[:body.index("\ndef ", 10)]
+        self.assertIn("_run_project(", body,
+                      "retry must start a run, not only flip a status")
+        self.assertIn("reconcile.live_runs()", body,
+                      "and must not start a second run beside a live one")
+
+    def test_the_response_says_what_happened(self):
+        src = pathlib.Path(dashboard.__file__).read_text()
+        body = src[src.index("def _retry_task"):]
+        body = body[:body.index("\ndef ", 10)]
+        for key in ('"launched_pid"', '"note"'):
+            self.assertIn(key, body)

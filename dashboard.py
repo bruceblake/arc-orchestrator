@@ -2228,6 +2228,51 @@ def _watchdog(store, live_runs):
             "threshold_s": WATCHDOG_STALL_S}
 
 
+# The revision this PROCESS is serving, captured once at import. The fleet
+# edits this server's own source and merges it while the server runs; a running
+# process keeps serving what it loaded, so a newly merged route 404s and a
+# renamed function takes the page blank. The UI has had a banner for this since
+# c59a76f — reading a field no commit ever produced. Half a feature is the
+# same as none, and this is the half that was missing.
+_SERVED_AT = time.time()
+
+
+def _git_out(*args):
+    try:
+        r = subprocess.run(["git", "-C", str(config.ROOT), *args],
+                           capture_output=True, text=True, timeout=5)
+        return r.stdout if r.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+_SERVED_HEAD = _git_out("rev-parse", "HEAD").strip() or None
+_stale_cache = {"key": 0.0, "files": []}
+_SOURCE_PATHS = ("dashboard.py", "static/", "config.py", "store.py", "reconcile.py")
+
+
+def _stale_source(now=None):
+    """Source files that changed in the repo AFTER this process started serving.
+
+    Compares the HEAD captured at import against the repo's HEAD now, over the
+    files this server actually executes or serves. Cached ~10 s: it shells out,
+    and the health endpoint is polled. An empty list when git is unavailable is
+    honest here — with no repo there is nothing to be stale relative to.
+    """
+    now = now if now is not None else time.time()
+    if now - _stale_cache["key"] < 10:
+        return _stale_cache["files"]
+    files = []
+    if _SERVED_HEAD:
+        head = _git_out("rev-parse", "HEAD").strip()
+        if head and head != _SERVED_HEAD:
+            out = _git_out("diff", "--name-only", _SERVED_HEAD, head, "--",
+                           *_SOURCE_PATHS)
+            files = sorted({ln.strip() for ln in out.splitlines() if ln.strip()})
+    _stale_cache.update(key=now, files=files)
+    return files
+
+
 def _health(store):
     """Small, cheap fleet-health payload for the Projects page.
 
@@ -2313,7 +2358,9 @@ def _health(store):
                                          key=lambda m: (-m["account"], m["model"])),
             "agents": inflight, "runs": runs,
             "watchdog": _watchdog(store, runs),
-            "leases": leases, "problems": problems}
+            "leases": leases, "problems": problems,
+            "stale_source": _stale_source(now),
+            "served_head": (_SERVED_HEAD or "")[:12], "served_at": _SERVED_AT}
 
 
 def _metrics(store):
@@ -2454,7 +2501,22 @@ def _retry_task(body):
     Handler.store.upsert_code_task(row["taskfile"], tid, row["title"],
                                    row["model"], row["reviewer"], "pending")
     _emit_event("task.reset", taskfile=str(path), task=tid)
-    return {"file": fname, "task": tid, "status": "pending"}, 200
+    # Resetting to `pending` used to be the whole action, on the theory that
+    # "the next `code run` re-executes it". Nothing schedules that run. A retry
+    # clicked while the fleet was idle changed a label and did nothing else —
+    # graph-admission-control sat `pending` for nine hours that way. If no run
+    # holds this task file, start one; if one does, it will pick the reset up.
+    launched, launch_note = None, "a run already holds this task file"
+    import reconcile
+    if not any(r.get("taskfile") and Path(r["taskfile"]).name == fname
+               for r in reconcile.live_runs()):
+        res, code = _run_project({"file": fname})
+        if code == 200:
+            launched, launch_note = res.get("pid"), "started a run for it"
+        else:
+            launch_note = f"could not start a run: {res.get('error')}"
+    return {"file": fname, "task": tid, "status": "pending",
+            "launched_pid": launched, "note": launch_note}, 200
 
 
 def _stop_project(body):
