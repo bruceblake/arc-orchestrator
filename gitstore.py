@@ -62,10 +62,10 @@ async def _base_ref(repo, base="main"):
     """The ref a task branches from — the LOCAL base, always.
 
     This used to prefer origin/<base> whenever any remote existed. That is
-    wrong for this system: merge_to_main merges into the LOCAL branch and the
-    push is best-effort, so the moment a push is skipped or fails, local main
-    is ahead and every new task would branch from a stale origin — silently
-    reverting merged work the next time it published.
+    wrong for this system: the local base is what pr_merge fast-forwards
+    after each merge, and it can legitimately be ahead of origin (an
+    operator's unpushed commit, a push that failed). Branching from a stale
+    origin would silently revert that work the next time a task published.
 
     origin is a publishing target here, not the source of truth. If origin is
     genuinely ahead (someone pushed elsewhere), that is a real divergence and
@@ -115,8 +115,9 @@ async def alloc(repo, task_id, base="main"):
 
     A re-alloc always resets task/<task_id> to the base: a failed/crashed
     attempt's branch holds rejected work and must not leak into the retry.
-    (The conflict-repair path in code_tasks.publish merges the old branch
-    BEFORE alloc runs, so reviewed commits are never discarded silently.)"""
+    (A resume of a task whose PR is open re-attaches to the existing
+    worktree in code_tasks.publish and never reaches alloc, so reviewed
+    commits are never discarded silently.)"""
     repo = Path(repo).resolve()
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
     if not wt.resolve().is_relative_to(
@@ -187,38 +188,16 @@ async def publish(wt, message, trailers=None):
     return head.strip()
 
 
-async def _dirty_paths(repo):
-    """Paths with uncommitted (tracked or untracked) changes in the repo.
-
-    `--untracked-files=all` matters: plain --porcelain collapses a wholly
-    untracked directory into one entry ("?? logs/"), so a branch adding
-    "logs/harness/x.jsonl" found nothing to stash and the merge then died on
-    "untracked working tree files would be overwritten by merge". In this repo
-    that was 26 reported paths versus 416 actual ones.
-    """
-    _, st, _ = await _git(["status", "--porcelain", "--untracked-files=all"],
-                          cwd=repo)
-    out = set()
-    for line in st.splitlines():
-        if not line:
-            continue
-        p = line[3:]
-        if " -> " in p:
-            p = p.split(" -> ", 1)[1]
-        out.add(p)
-    return out
-
-
 async def branch_ahead(repo, task_id, base=None):
     """True if task/<task_id> exists and has commits `base` does not.
 
-    Defaults to config.BASE_BRANCH, not "main". The fleet merges into
-    development; main is promoted to separately and lags it — 52 commits behind
-    as this was written. Comparing against main meant a branch fully merged into
-    development still counted as unmerged, so reconcile KEPT its worktree
-    forever and the cleanup it exists to perform never happened. Measured:
-    task/graph-admission-control was 0 commits ahead of development and 30
-    ahead of main.
+    Defaults to config.BASE_BRANCH, never a literal "main". When the fleet
+    merged into a separate development branch, comparing against main meant
+    a branch fully merged into development still counted as unmerged, so
+    reconcile KEPT its worktree forever and the cleanup it exists to perform
+    never happened (task/graph-admission-control: 0 commits ahead of
+    development, 30 ahead of main). The two are one branch by default now;
+    the rule stands for anyone who sets ARC_BASE_BRANCH back.
     """
     base = base or config.BASE_BRANCH
     # If the base branch does not resolve, we cannot know whether this branch
@@ -240,109 +219,13 @@ async def branch_ahead(repo, task_id, base=None):
     return rc == 0 and (out.strip() or "0").isdigit() and int(out.strip() or 0) > 0
 
 
-async def merge_to_main(repo, task_id):
-    """Merge --no-ff task branch into main; tolerates a dirty working tree.
-
-    The blessed repo doubles as the operator's working copy, so uncommitted
-    edits may exist. Files the merge needs to update that are locally
-    modified are path-scoped stashed first, then restored after the merge —
-    a merge no longer fails just because someone was editing an unrelated
-    file the branch also touched."""
-    repo = Path(repo).resolve()
-    _, cur, _ = await _git(["branch", "--show-current"], cwd=repo)
-    if cur.strip() != "main":
-        await _git(["checkout", "main"], cwd=repo)
-    branch = f"task/{task_id}"
-    _, names, _ = await _git(["diff", "--name-only", f"main...{branch}"], cwd=repo)
-    changed = {n.strip() for n in names.splitlines() if n.strip()}
-    blocking = sorted(changed & await _dirty_paths(repo))
-    stashed = False
-    if blocking:
-        rc, _, _ = await _git(
-            ["stash", "push", "-q", "-u", "-m", f"arc-pre-merge {task_id}",
-             "--", *blocking], cwd=repo, check=False)
-        stashed = rc == 0
-    rc, _, err = await _git(
-        ["merge", "--no-ff", "-m", f"merge task/{task_id}", branch],
-        cwd=repo, check=False,
-    )
-    if rc != 0:
-        if stashed:
-            await _git(["stash", "pop", "-q"], cwd=repo, check=False)
-        raise GitError(f"merge {branch} failed: {err.strip()[:300]}")
-    if stashed:
-        rc, _, err = await _git(["stash", "pop", "-q"], cwd=repo, check=False)
-        if rc != 0:
-            # The merge LANDED. Failing here marked a successfully merged task
-            # 'conflict', which is a lie — and the common trigger is benign:
-            # the branch adds a path the operator also has as an untracked
-            # local file (a log, a transcript), so git refuses to restore it
-            # over the merged copy. Leave the stash for the operator and say
-            # so; do not fail work that actually succeeded.
-            events.emit("merge.stash_retained", task=task_id, paths=blocking,
-                        error=err.strip()[:200],
-                        note="merge landed; local edits are still in the stash "
-                             "— inspect with `git stash list` / `git stash pop`")
-            log.warning(
-                "merged %s, but local edits to %s stayed in the stash (%s) — "
-                "recover them with `git stash pop`",
-                branch, blocking, err.strip()[:120])
-
-
-async def push_and_open_pr(repo, task_id, title, taskfile=""):
-    """Best-effort GitHub publish: push the branch, open a PR, then push main.
-
-    Never raises; returns (pr_url_or_None, note). With no remote / no gh /
-    no auth it reports a skip note via the events emitted by the caller —
-    local merge has already landed, so this is purely additive."""
-    import shutil
-    repo = Path(repo).resolve()
-    branch = f"task/{task_id}"
-    rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
-    if not remotes.strip():
-        return None, "no git remote configured"
-    if not shutil.which("gh"):
-        return None, "gh CLI not installed"
-    # ORDER MATTERS. The branch goes up first and the PR is opened while
-    # origin/main still LACKS these commits; main is pushed afterwards, which
-    # marks the PR merged. Pushing main first — which is what this did — left
-    # GitHub with nothing between the two refs, so every `gh pr create`
-    # failed with "No commits between main and task/<id>" and this hook had
-    # never once opened a PR.
-    try:
-        await _git(["push", "-u", "origin", branch], cwd=repo)
-    except GitError as exc:
-        return None, f"push failed: {exc}"[:200]
-    proc = await asyncio.create_subprocess_exec(
-        "gh", "pr", "create", "--base", "main", "--head", branch,
-        "--title", f"task({task_id}): {title}",
-        "--body", f"Task `{task_id}` from `{taskfile or '?'}`\n\n"
-        "Merged locally into main by the orchestrator; pushing main marks "
-        "this PR merged.", cwd=str(repo),
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(), 60)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return None, "gh pr create timed out"
-    if proc.returncode != 0:
-        # main still needs publishing even when the PR could not be opened.
-        await _git(["push", "origin", "main"], cwd=repo, check=False)
-        return None, f"gh pr create failed: {err.decode(errors='replace').strip()[:200]}"
-    url = out.decode(errors="replace").strip()
-    # Now publish main; GitHub sees the branch's commits land and marks the PR
-    # merged, leaving a reviewable diff and the review trail behind it.
-    await _git(["push", "origin", "main"], cwd=repo, check=False)
-    return url, "opened"
-
-
 async def github_status(repo):
     """Best-effort GitHub-readiness probe; never raises or hangs.
 
     Returns {'remote': <origin url or None>, 'gh_installed': bool,
     'gh_authed': bool, 'ready': bool, 'reason': <short text or None>}.
-    Explains why push_and_open_pr skipped, e.g. for a pr_skipped event."""
+    The dashboard shows it per project, so an operator sees BEFORE a run
+    why publish would fail to push or open a pull request."""
     import shutil
     repo = Path(repo).resolve()
     info = {"remote": None, "gh_installed": False,

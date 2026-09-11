@@ -286,8 +286,8 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_DRIVER_CAPACITY_BACKOFF_CAP` | 300 | max capacity-backoff sleep on a harness retry (seconds) |
 | `ARC_BASE_URL` | https://llm-api.arc.vt.edu/api/v1 | ARC API base URL |
 | `ARC_MAX_GRAPH_STEPS` | 1500 | max graph steps before a run is aborted |
-| `ARC_BASE_BRANCH` | development | branch the code fleet integrates into |
-| `ARC_PROD_BRANCH` | main | production branch, promoted by hand |
+| `ARC_BASE_BRANCH` | main | branch the fleet's pull requests target and merge into; set it to `development` (keeping `ARC_PROD_BRANCH=main`) for a two-branch flow with `code promote` |
+| `ARC_PROD_BRANCH` | main | production branch; promotion (`code promote`, the dashboard button) exists only while it differs from `ARC_BASE_BRANCH` |
 | `ARC_PR_REVIEWERS` | 2 | independent PR reviewers required to approve before merge |
 | `ARC_PR_MAX_ROUNDS` | 3 | PR review rounds before a task fails |
 | `ARC_REQUIRE_TESTS` | 1 | require changes to ship tests that fail without them |

@@ -186,6 +186,64 @@ class TestDocsTruthArcEnvVars(unittest.TestCase):
         )
 
 
+class TestDocsTruthDefaults(unittest.TestCase):
+    """The README's tuning table must state the default config.py actually uses.
+
+    The table is where an operator learns what happens when they set nothing.
+    It said ``ARC_BASE_BRANCH`` defaulted to ``development`` for a full day
+    after the code moved to ``main`` — the name test above passed, because
+    the variable existed, and the wrong default sat there being read. This
+    compares every row against the literal ``os.getenv(NAME, "default")`` in
+    config.py. Defaults that are computed (a path under ROOT, a derived
+    number) have no literal to compare and are skipped; a row for a
+    templated name (``ARC_LIMIT_<FAMILY>``) likewise.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(ROOT, "config.py"), encoding="utf-8") as fh:
+            tree = ast.parse(fh.read())
+        literal = {}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "getenv" and len(node.args) == 2
+                    and all(isinstance(a, ast.Constant) for a in node.args)):
+                continue
+            name, default = node.args[0].value, node.args[1].value
+            if isinstance(name, str) and name.startswith("ARC_") and isinstance(default, str):
+                literal[name] = default
+        cls.literal = literal
+        with open(os.path.join(ROOT, "README.md"), encoding="utf-8") as fh:
+            readme = fh.read()
+        cls.rows = re.findall(r"^\| `(ARC_[A-Z0-9_<>]+)` \| ([^|]*) \|", readme, re.M)
+
+    @staticmethod
+    def _same(doc, code):
+        doc = doc.strip().strip("`")
+        if doc == code:
+            return True
+        try:
+            return float(doc) == float(code)
+        except ValueError:
+            pass
+        # "(unset)" is how the table says the code default is the empty string
+        return doc.lower() in ("(unset)", "unset", "(none)") and code == ""
+
+    def test_readme_table_has_rows(self):
+        self.assertGreater(len(self.rows), 20, "the README tuning table was not found")
+
+    def test_documented_defaults_match_config(self):
+        wrong = []
+        for name, doc_default in self.rows:
+            if "<" in name or name not in self.literal:
+                continue
+            if not self._same(doc_default, self.literal[name]):
+                wrong.append(f"{name}: README says {doc_default.strip()!r}, "
+                             f"config.py says {self.literal[name]!r}")
+        self.assertEqual(wrong, [], "README tuning table defaults disagree with "
+                                    "config.py:\n  " + "\n  ".join(wrong))
+
+
 class TestDocsTruthConfigNames(unittest.TestCase):
     """Every ``config.NAME`` in prose must exist as a real attribute.
 

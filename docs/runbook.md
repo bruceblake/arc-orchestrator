@@ -211,9 +211,13 @@ Open `http://localhost:8787/` (or the LAN/Tailscale URL `start.sh` prints).
 Clicking a running agent (a `driver:*` row under `/api/agents`) shows its live
 transcript via `/api/transcript`.
 
-### Enabling GitHub PR flow
+### GitHub setup (required)
 
-To have the orchestrator open a GitHub Pull Request after a successful merge, enable the PR flow:
+The pull request IS the pipeline: `publish` pushes `task/<id>` and opens a
+PR, reviewers read that PR's diff, and `pr_merge` merges it on GitHub.
+Without a remote and an authenticated `gh`, every task fails at publish with
+`push failed: no git remote configured` — nothing merges locally. Set it up
+once per project:
 
 1. **Create a GitHub repository** for the project (or use an existing one).
 2. Add the remote to the local blessed clone:
@@ -235,10 +239,8 @@ To have the orchestrator open a GitHub Pull Request after a successful merge, en
    ```bash
    git -C ~/repos/<project> remote -v
    ```
-6. Confirm it is on: the project detail page shows a **PR readiness** hint line on the git block — `PRs on: <remote>` when ready, or `PRs off: <reason>` otherwise.
-7. Run a task as usual. On success, the orchestrator will emit a `task.pr_opened` event and the PR URL appears in the logs. If the remote is missing or the CLI is unauthenticated, the run will emit `task.pr_skipped` but the local merge still lands.
-
-The PR flow is additive — it never blocks the local merge. Enabling it simply adds a best-effort push and PR creation after the merge lock releases.
+6. Confirm it is on: the project detail page shows a **PR readiness** hint line on the git block — `PRs on: <remote>` when ready, or `PRs off: <reason>` otherwise (`gitstore.github_status`).
+7. Run a task as usual. `publish` emits `task.pr_opened` with the PR URL; `pr_merge` emits `task.merged` once the reviewers approve and GitHub merges it.
 
 ## 4. File and log locations
 
@@ -314,12 +316,12 @@ new one:
   failure message names the last model tried (`exhausted escalation up to
   Kimi-K3`).
 - `conflict` tasks are **retried at the same model** (a merge conflict is not
-  a capability signal) and their publish node first tries **conflict repair**:
-  if branch `task/<task-id>` still has commits ahead of `main` — the reviewed,
-  gate-passing commit survived the failed run (`gitstore.branch_ahead`) — it
-  merges that branch directly under the merge lock instead of re-running
-  implement+review. Only if repair fails does the task fall back to full
-  re-execution.
+  a capability signal) and resume at `publish`, re-attached to the existing
+  worktree and PR: the branch is synced with the current base
+  (`gitstore.sync_with_base`), a clean sync goes straight back to review,
+  and a genuine overlap is left in the worktree with its markers for an
+  implementer to resolve. Only when there is no worktree left to re-attach
+  to does the task fall back to full re-execution from alloc.
 - stale `running` rows (crashed-run leftovers) are marked `failed` at
   startup, **scoped to this task file** — it is safe to start a run while
   other projects' rows are idle. The reason recorded is an infrastructure
@@ -596,7 +598,7 @@ it has already seen.
 Every task now ends in a pull request, and the PR is what merges it.
 
 ```
-task/<id>  ──push──►  PR into development  ──2 approvals──►  merged
+task/<id>  ──push──►  PR into main  ──2 approvals──►  merged (squash)
                               │
                               └── rejected → back to the implementer,
                                   same PR, new commits, new round (max 3)
@@ -606,19 +608,25 @@ task/<id>  ──push──►  PR into development  ──2 approvals──► 
   PR. A task sitting at status `in_review` is waiting on reviewers.
 - Reviewers post their blocking issues as a PR comment, so the reasoning is on
   the PR itself, not only in the event log.
-- **Nothing reaches `main`.** When `development` is where you want it:
+- **One branch.** The PR merges into `main` (`config.BASE_BRANCH`) and that
+  is where reviewed work lands; there is no separate promotion step. If you
+  want one — `ARC_BASE_BRANCH=development` in `.env`, keeping
+  `ARC_PROD_BRANCH=main` — the fleet integrates into `development` and, when
+  it is where you want it:
 
 ```bash
 .venv/bin/python main.py code promote
 ```
 
-That opens a `development → main` PR and stops. You merge it.
+That opens a `development → main` PR and stops. You merge it. With one
+branch the command (and the dashboard button) refuse up front rather than
+let GitHub answer "No commits between main and main".
 
 **Setup on a fresh box:** `gh auth login`, then
 `git remote add origin <url>`, then run anything — `ensure_base_branch`
-creates `development` if it is missing. Without a remote, `publish` fails the
-task with `push failed: no git remote configured` rather than pretending to
-merge.
+creates the base branch if it is missing. Without a remote, `publish` fails
+the task with `push failed: no git remote configured` rather than pretending
+to merge.
 
 ### Reaping orphans (`code reconcile`)
 
@@ -663,57 +671,44 @@ same task file** — it resumes (see "Retrying / resuming"): merged tasks are
 skipped and this task restarts one escalation tier higher than its recorded
 model with a fresh fix budget.
 
-### Merge landed but local edits stayed stashed (`merge.stash_retained`)
-
-Not a failure. The blessed repo doubles as the operator's working copy, so
-`merge_to_main` path-scoped stashes any locally-dirty file the merge needs to
-touch, merges, then pops. The pop can fail when the branch **adds** a path the
-operator also has as an untracked local file (a log, a transcript): git will
-not restore it over the merged copy.
-
-The merge has already landed. The event names the paths and the stash is left
-intact — recover with:
-
-```bash
-git -C <repo> stash list
-git -C <repo> stash pop
-```
-
-This used to raise, which marked a **successfully merged task `conflict`**.
-It no longer does; only a genuinely failed merge does that.
-
 ### Task conflict
 
-When a merge collides, `publish` marks the task `conflict` (`error` holds the
-merge error; event `task.conflict` — distinct from `task.failed`). The
-worktree and `task/<task-id>` branch are **left in place**, so the next
-`code run` of the same task file tries **repair** first: if
-`task/<task-id>` still has commits ahead of `main` — the reviewed,
-gate-passing commit survived (`gitstore.branch_ahead`) — the publish node
-merges that branch directly under the merge lock instead of re-running
-implement+review. Only if repair fails does the task fall back to a full
-re-execution (alloc resets the branch to `main`).
+A task ends in `conflict` (event `task.conflict` — distinct from
+`task.failed`) when its branch and the base disagree about the same lines
+and the fleet could not reconcile them: `publish` syncs every branch with
+the current base before opening its PR (`gitstore.sync_with_base`), and
+`pr_merge` resyncs a PR GitHub reports as `CONFLICTING` up to
+`ARC_PR_MAX_RESYNCS` times, each resync costing a fresh review. A merge that
+is only *stale* — the base moved on under a long task — resolves itself
+this way with no model involved.
 
-Merges also tolerate a **dirty blessed-repo working tree** (the blessed repo
-is usually your working copy too): `gitstore.merge_to_main` path-scoped
-`git stash push`'s files that the merge would update and that have
-uncommitted local edits, then `git stash pop`'s them after. If the pop
-conflicts, the merge stays landed and the error tells you to resolve the
-stash (`git stash list` / `git stash show -p`) — no more "Your local
-changes ... would be overwritten" aborts just because someone was mid-edit.
+A genuine overlap is left **in the worktree, with its conflict markers**,
+and handed to an implementer to resolve by editing files; the verify gate
+then catches any marker left behind. The worktree and `task/<task-id>`
+branch are **left in place**, so the next `code run` of the same task file
+resumes at `publish` (re-attaching to the existing worktree and PR) rather
+than at alloc — nothing reviewed is reset away.
 
-You can still resolve on disk:
+Nothing merges locally, so the blessed repo's working tree is never
+touched by a task's merge: `pr_merge` only fast-forwards the local base to
+what GitHub merged (`gitstore.fast_forward_base`), and refuses to do even
+that if the base is checked out with local commits GitHub does not have
+(event `task.base_not_advanced`).
+
+You can still resolve on disk, in the task's own worktree — never by
+merging into the blessed clone yourself:
 
 ```bash
-ls ~/worktrees/<project>/<conflicted-task>     # inspect the worktree
-cd <repo>                                      # the blessed clone named by the task file's project.repo
-git checkout main && git merge task/<conflicted-task>   # finish the merge manually
+cd ~/worktrees/<project>/<conflicted-task>     # the merge is in progress here
+git status                                     # the conflicting paths
+# edit them, then:
+git add -A && git commit -m "resolve conflict with main"
+git push --force-with-lease origin task/<conflicted-task>
 ```
 
-Resolve the conflict, commit the merge, and (optionally) `git worktree remove`
-the worktree and `git branch -d task/<conflicted-task>`. After that, either
-treat the task as done (it now lives on `main`) or delete it from the task
-file before re-running the rest.
+The PR updates itself; re-run the task file and it resumes at `pr_review`
+with the resolved diff. Or resolve it on GitHub in the PR's own conflict
+editor, which does the same thing.
 
 ### Stuck running
 
@@ -738,16 +733,16 @@ dashboard.
   the worktree as-is, and `gitstore.alloc` **resets its `task/<task-id>`
   branch to the base ref** on a re-run, so any manual edit is either clobbered
   or races the agent.
-- **Publish/merge lock (verified in `gitstore.py` + `code_tasks.py`):**
-  `gitstore.py` itself holds **no lock**. The serialization is the in-process
-  `_merge_lock = asyncio.Lock()` in `code_tasks.py`, taken around
-  `gitstore.merge_to_main` + `cleanup`. It serializes merges **within a single
-  orchestrator process only**; two concurrent `main.py code run` processes
-  targeting the same repo do **not** share it and can interleave `git checkout
-  main` / `merge --no-ff`. The dashboard guards only against launching two runs
-  of the **same** task file at once (`/api/projects/run` returns 409 if that
-  task file already has a running process). **Rule: run at most one
-  `main.py code run` against a given repo at a time.**
+- **There is no local merge lock, because there is no local merge.** A
+  task's PR is merged by GitHub (`gh pr merge --squash`), which serializes
+  merges for everyone; the orchestrator then only fast-forwards its local
+  base. What two concurrent `main.py code run` processes against the same
+  repo CAN still do is collide on task ids — the same worktree and branch —
+  which `check.sh` guards against across task files and the dashboard
+  guards against per task file (`/api/projects/run` returns 409 if that
+  task file already has a running process, from any launcher). **Rule: run
+  at most one `main.py code run` per task file, and never two task files
+  that share a task id.**
 - **Dry-run first, always.** `code run --dry-run` is free (no model calls, no
   git) and catches schema/DAG errors before they burn a merge conflict or a fix
   round.

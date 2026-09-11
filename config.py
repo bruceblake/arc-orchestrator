@@ -170,13 +170,11 @@ DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
 # instead of the run silently stalling.
 DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "1800"))
 # --- branch model + PR review ------------------------------------------------
-# Tasks branch from and pull-request INTO development. Nothing reaches main
-# except by a promotion PR a human merges, so the fleet can never touch prod.
-#
 # The pull request is the GATE, not a receipt: the branch is pushed, PR_REVIEWERS
 # reviewers read the actual PR diff, and a merger only merges once every one of
 # them approves. Before this, work was merged locally and the PR opened
 # afterwards — reviewers could object to nothing, because it had already landed.
+#
 # ONE branch by default. The fleet opens its pull requests against BASE_BRANCH
 # and that is where reviewed work lands.
 #

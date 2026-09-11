@@ -62,22 +62,26 @@ rules, enforced by `code_tasks.load_taskfile`).
   upstream row or the `ARC_CHAIN_TIMEOUT` (6 h) budget ends the run
   (exit 1, `chain.blocked`); a missing upstream file is simply waited on.
   `chain_wait` → every head node, edge gated on `{"ok": true}`.
-- **Retry safety** (`gitstore.alloc`, `gitstore.merge_to_main`): alloc always
+- **Retry safety** (`gitstore.alloc`, `code_tasks.publish`): alloc always
   resets branch `task/<tid>` to the base ref on (re)alloc, so a failed
-  attempt's rejected work never leaks into a retry; merges tolerate a dirty
-  blessed-repo working tree (path-scoped `git stash push` of conflicting
-  local edits before the merge, `stash pop` after — the merge stays landed
-  even if the pop conflicts).
-- **Publish hook** (`gitstore.push_and_open_pr`): after a successful local
-  merge, best-effort push of `task/<tid>` + `main` to origin and a GitHub PR
-  via `gh pr create` — emits `task.pr_opened` `{url}` or
-  `task.pr_skipped` `{reason}`, never fails the task.
+  attempt's rejected work never leaks into a retry. A resume of a task whose
+  PR is already open (`in_review`, `conflict`) starts at `publish` and
+  re-attaches to the existing worktree instead — it never reaches alloc, so
+  reviewed commits are never reset away. Nothing merges locally: the blessed
+  repo's working tree is not touched by a merge, only fast-forwarded to what
+  GitHub merged (`gitstore.fast_forward_base`).
+- **Publish** (`code_tasks.publish`, `gitstore.push_task_branch` +
+  `gitstore.open_pr`): commits the worktree, syncs the branch with the base,
+  pushes `task/<tid>` and opens the pull request — `task.pr_opened`
+  `{url, number}`. No remote, a failed push or a refused `gh pr create`
+  FAILS the task (`task.failed` with the reason): there is no local merge
+  to fall back on.
 - **Evidence**: every run lands in `logs/harness/*.jsonl` (streamed live),
   `logs/events.jsonl`, and the SQLite tables `code_tasks` / `harness_runs`.
-  Escalations, conflicts, resume plans, and the publish hook surface as
+  Escalations, conflicts, resume plans and the PR lifecycle surface as
   `task.escalated` / `task.conflict` / `run.resume` / `task.pr_opened` /
-  `task.pr_skipped` events. The dashboard reads all of it — see
-  [runbook.md](runbook.md).
+  `task.pr_reviewed` / `task.resynced` / `task.merged` events. The
+  dashboard reads all of it — see [runbook.md](runbook.md).
 
 ## Task-chain shape (per task)
 
@@ -130,7 +134,7 @@ alloc ─► implement ─► gate ─► review ─► publish ──► pr_rev
 ```
 
 `publish` commits, pushes `task/<id>`, and opens a PR against
-`config.BASE_BRANCH` (`development`). **Nothing has merged at this point.**
+`config.BASE_BRANCH` (`main` by default). **Nothing has merged at this point.**
 
 `pr_review` runs `config.PR_REVIEWERS` (2) reviewers in parallel on the real
 `gh pr diff`. They come from families other than the implementer's and from
@@ -172,9 +176,11 @@ Reviewers are instructed that a code change must ship tests that would fail
 without it (`config.REQUIRE_TESTS`), and to look for regressions in callers of
 the changed code. Documentation-only changes are exempt.
 
-**Branches.** `task/<id>` → `development` → (manual promotion PR) → `main`.
-The fleet never writes to `main`; `main.py code promote` opens the promotion
-PR for a human to merge.
+**Branches.** `task/<id>` → `config.BASE_BRANCH`, which is `main` by
+default: a pull request merged by the fleet is the only way anything lands.
+With `ARC_BASE_BRANCH=development` (and `ARC_PROD_BRANCH=main`) the flow
+becomes `task/<id>` → `development` → (manual promotion PR) → `main`, and
+`main.py code promote` opens that promotion PR for a human to merge.
 
 **Statuses** gain `in_review`: the PR is open and awaiting approvals.
 
@@ -190,11 +196,12 @@ infrastructure reason — the run process was killed, the graph cancelled, the
 harness crashed — re-executes at the **same** tier: being interrupted is no
 evidence the model was too weak, and escalating on it funnels every
 interrupted task onto the scarcest tier at once. Tasks at `conflict`
-re-execute at the **same** model, and their publish node first tries repair:
-if `task/<tid>` is still ahead of `main` (`gitstore.branch_ahead` — the
-reviewed, gate-passing commit survived), it merges that branch directly under
-the merge lock instead of re-running implement+review; only a failed repair
-falls back to full re-execution. Stale `running` rows are marked `failed` at
+re-execute at the **same** model and resume at `publish`, re-attached to
+their existing worktree and PR (`gitstore.existing_worktree`): the branch
+is synced with the current base (`gitstore.sync_with_base`), a clean sync
+goes straight back to `pr_review`, and a genuine overlap is left in the
+worktree with its markers for the implementer to resolve; only when no
+worktree is left to re-attach to does the task fall through to alloc. Stale `running` rows are marked `failed` at
 startup, scoped to that taskfile. Startup prints a resume plan (skipped /
 retried / escalated) and emits `run.resume`
 `{skipped_merged, retried, escalated_on_resume}`, where `escalated_on_resume`

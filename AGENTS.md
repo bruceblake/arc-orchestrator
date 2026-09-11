@@ -25,7 +25,7 @@ builds software — and this repo itself — as a directed graph of small tasks:
 - **Every implementation is gated and cross-reviewed before merge**: a
   deterministic `verify_cmd` gate runs first, then a reviewer model from the
   *other* strong harness reviews the full diff, and only then does the
-  orchestrator (the only git actor) commit, push, and open a pull request against `development` under a
+  orchestrator (the only git actor) commit, push, and open a pull request against `config.BASE_BRANCH` (`main` by default) under a
   process-wide lock.
 
 The code workload is the primary occupant of this repo, but the same
@@ -217,7 +217,7 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
 **No task merges locally. Ever.** `publish` (code_tasks.py) commits the
 worktree on `task/<tid>` with message `task(<tid>): <title>` and trailers
 `Harness`, `Model`, `Reviewer`, `Task-Id`, pushes the branch, and opens a pull
-request against `config.BASE_BRANCH` (default `development`). At that moment
+request against `config.BASE_BRANCH` (default `main`). At that moment
 nothing has landed.
 
 This replaced a flow that merged into `main` and opened the PR afterwards. A
@@ -274,10 +274,16 @@ PR** in the life of the repo.
 open (`pr_merge_<dep> -> alloc_<tid>`) — otherwise it would branch from a base
 that does not yet contain the code it depends on.
 
-**Branch model.** `task/<id>` branches from `development`; `development` is
-where the fleet integrates; `main` is prod and the fleet never writes to it.
-Promotion is manual: `main.py code promote` opens a `development -> main` PR
-for a human to merge.
+**Branch model.** `task/<id>` branches from `config.BASE_BRANCH` and its
+pull request merges back into it. That is ONE branch by default — `main`.
+It was `development` with `main` promoted to by hand, and the split cost
+more than it bought: the operator's checkout, the fleet's base and the
+promotion target were three moving refs, and several bugs came straight out
+of that (`config.py` records them). Nothing was removed: set
+`ARC_BASE_BRANCH=development` (keeping `ARC_PROD_BRANCH=main`) and
+`main.py code promote` opens a `development -> main` PR for a human to
+merge. `config.promotion_configured()` — true only when the two branches
+differ — is what switches the promote command and the dashboard button on.
 
 `gitstore._base_ref` always resolves to the **local** base branch. It once
 preferred `origin/<base>` whenever a remote existed, which meant the first
@@ -387,7 +393,8 @@ processes and move git refs on the same terms.
   100 MiB to `events.jsonl.1`): `driver.start` / `driver.done` /
   `driver.error`, `worktree.alloc`, `task.gate`, `task.reviewed`,
   `task.merged`, `task.conflict`, `task.failed`, `task.escalated`
-  (Rule 4), `task.pr_opened` / `task.pr_skipped` (Rule 5), and `run.resume`
+  (Rule 4), `task.pr_opened` / `task.pr_reviewed` / `task.resynced` (Rule 5),
+  and `run.resume`
   (Rule 5 resume plan); project chains add `chain.wait` / `chain.ready` /
   `chain.blocked` (Rule 9).
 - The dashboard Projects DAG view renders the loops: fix-loop attempts as
@@ -582,13 +589,13 @@ Top-level Python modules (one role each):
 |---|---|
 | `build_work.py` | Minecraft-style browser-game build workload: planner → 6 parallel module producers (each an implement → syntax gate → contract check → cross-model review → fix gauntlet) → assemble → bounded integration-review cycle |
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
-| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles, serialized merge lock |
+| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
-| `gitstore.py` | The only git actor: blessed clone `~/repos/<project>`, worktree `alloc`/`publish`/`merge_to_main`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout) |
+| `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout); nothing merges locally |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), and `code {plan,run,status,bench}` |
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
