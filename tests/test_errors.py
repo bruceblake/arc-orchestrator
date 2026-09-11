@@ -5,6 +5,7 @@ says an error happened and nothing about where â€” no file, no line, no frame â€
 so debugging a fleet failure meant guessing which of several call paths
 produced a message like "opencode exited 1:".
 """
+import json
 import os
 import tempfile
 import unittest
@@ -245,3 +246,77 @@ class TheDailyAudit(unittest.TestCase):
         seen = [order[f["severity"]] for f in
                 audit.run(store=None, with_health=False)["findings"]]
         self.assertEqual(seen, sorted(seen))
+
+
+class FileClashDetection(unittest.TestCase):
+    """Would launching this taskfile collide with work already in flight?
+
+    The subtlety that broke the first version: a taskfile's OTHER tasks may
+    have merged hours ago, and their files are then free. Aggregating every
+    task in any taskfile that had any live task reported a clash on a file
+    whose owner had long since merged, and would have held back a launch for
+    no reason.
+    """
+
+    def setUp(self):
+        import sqlite3
+        self.dir = tempfile.mkdtemp()
+        self.db = os.path.join(self.dir, "t.db")
+        self.tasks = os.path.join(self.dir, "tasks")
+        os.makedirs(self.tasks)
+        con = sqlite3.connect(self.db)
+        con.execute("CREATE TABLE code_tasks(id TEXT, status TEXT, taskfile TEXT)")
+        con.commit()
+        self.con = con
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import shutil
+        self.con.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _taskfile(self, stem, tasks):
+        path = os.path.join(self.tasks, f"{stem}.json")
+        with open(path, "w") as fh:
+            json.dump({"project": {"repo": "/x", "tasks": tasks}}, fh)
+        return path
+
+    def _live(self, task_id, status, taskfile):
+        self.con.execute("INSERT INTO code_tasks VALUES(?,?,?)",
+                         (task_id, status, taskfile))
+        self.con.commit()
+
+    def test_a_live_task_owns_its_files(self):
+        import tools_file_clash as fc
+        tf = self._taskfile("busy", [{"id": "a", "files_hint": ["shared.py"]}])
+        self._live("a", "in_review", tf)
+        self._taskfile("new", [{"id": "b", "files_hint": ["shared.py"]}])
+        clashes, _, _ = fc.check("new", db_path=self.db, tasks_dir=self.tasks)
+        self.assertIn("shared.py", clashes)
+
+    def test_a_merged_siblings_files_are_free(self):
+        # The false positive this exists to prevent.
+        import tools_file_clash as fc
+        tf = self._taskfile("busy", [
+            {"id": "a", "files_hint": ["still-mine.py"]},
+            {"id": "sibling", "files_hint": ["shared.py"]}])
+        self._live("a", "in_review", tf)          # only 'a' is live
+        self._taskfile("new", [{"id": "b", "files_hint": ["shared.py"]}])
+        clashes, _, _ = fc.check("new", db_path=self.db, tasks_dir=self.tasks)
+        self.assertEqual(clashes, {}, "a merged sibling's files must be free")
+
+    def test_disjoint_files_are_safe(self):
+        import tools_file_clash as fc
+        tf = self._taskfile("busy", [{"id": "a", "files_hint": ["one.py"]}])
+        self._live("a", "running", tf)
+        self._taskfile("new", [{"id": "b", "files_hint": ["two.py"]}])
+        clashes, _, _ = fc.check("new", db_path=self.db, tasks_dir=self.tasks)
+        self.assertEqual(clashes, {})
+
+    def test_a_terminal_task_owns_nothing(self):
+        import tools_file_clash as fc
+        tf = self._taskfile("busy", [{"id": "a", "files_hint": ["shared.py"]}])
+        self._live("a", "merged", tf)
+        self._taskfile("new", [{"id": "b", "files_hint": ["shared.py"]}])
+        clashes, _, _ = fc.check("new", db_path=self.db, tasks_dir=self.tasks)
+        self.assertEqual(clashes, {})
