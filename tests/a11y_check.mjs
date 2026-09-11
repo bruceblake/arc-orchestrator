@@ -169,9 +169,27 @@ for (const file of process.argv.slice(2)) {
 // the right dashboard behaviour, and every character binding must be inert while
 // the user is typing in a form control (Escape stays available to clear it).
 const kbPath = new URL("../static/panels/keyboard.js", import.meta.url);
-if (fs.existsSync(kbPath)) {
-  const kbFindings = [];
-  const kbok = (name, cond) => { if (!cond) kbFindings.push(name); };
+const kbFindings = [];
+const kbok = (name, cond) => { if (!cond) kbFindings.push(name); };
+const kbExists = fs.existsSync(kbPath);
+kbok("static/panels/keyboard.js exists", kbExists);
+
+// The feature only exists at runtime if the dashboard page actually loads the
+// script and ships the CSS the selection/overlay depend on. A test that feeds
+// the source straight to new Function().call() cannot catch a forgotten
+// <script src> or a missing .kb-sel/.kb-help rule, so check the real page —
+// UNCONDITIONALLY. If the keyboard file is ever renamed, moved or deleted this
+// must fail, not silently skip the whole binding suite.
+const dashPath = process.argv.slice(2).find(f => /\/index\.html$/.test(f));
+if (dashPath) {
+  const dashHtml = fs.readFileSync(dashPath, "utf8");
+  kbok("index.html loads static/panels/keyboard.js",
+    /<script[^>]*\bsrc="\/panels\/keyboard\.js"/.test(dashHtml));
+  kbok("index.html styles the selection and help overlay (.kb-sel/.kb-help)",
+    /\.kb-sel\b/.test(dashHtml) && /\.kb-help\b/.test(dashHtml));
+}
+
+if (kbExists) {
   const kbSrc = fs.readFileSync(kbPath, "utf8");
   const kels = new Map();
   const mkEl = (tag, id) => {
@@ -259,6 +277,11 @@ if (fs.existsSync(kbPath)) {
   kb.handleKey({ key: "Enter", target: body });
   kbok("Enter opens the selected project detail", opened[opened.length - 1] === "proj0.json");
 
+  const selBeforeCtrl = prows[0].classList.contains("kb-sel");
+  kb.handleKey({ key: "j", target: body, ctrlKey: true });
+  kbok("Ctrl+J is not hijacked and leaves the selection unchanged",
+    prows[0].classList.contains("kb-sel") === selBeforeCtrl && !prows[1].classList.contains("kb-sel"));
+
   qSearch().focused = false;
   qSearch().value = "";
   const inInput = mkEl("input", "");
@@ -271,6 +294,12 @@ if (fs.existsSync(kbPath)) {
   kb.handleKey({ key: "j", target: inInput });
   kb.handleKey({ key: "k", target: inInput });
   kbok("j/k are inert in an input", prows[0].classList.contains("kb-sel") && !prows[2].classList.contains("kb-sel"));
+
+  const inSelect = mkEl("select", "");
+  kb.handleKey({ key: "j", target: inSelect });
+  kb.handleKey({ key: "k", target: inSelect });
+  kbok("j/k are inert in a select", prows[0].classList.contains("kb-sel") && !prows[2].classList.contains("kb-sel"));
+
   const openedBefore = opened.length;
   kb.handleKey({ key: "Enter", target: inInput });
   kbok("Enter is inert in an input", opened.length === openedBefore);
@@ -291,27 +320,14 @@ if (fs.existsSync(kbPath)) {
   kbok("Enter is inert on an interactive element", opened.length === openedBtnBefore);
   kb.handleKey({ key: "j", target: btnRow });
   kbok("j is inert on an interactive element", !prows[1].classList.contains("kb-sel") && prows[0].classList.contains("kb-sel"));
+}
 
-  // The feature only exists at runtime if the dashboard page actually loads the
-  // script and ships the CSS the selection/overlay depend on. A test that feeds
-  // the source straight to new Function().call() cannot catch a forgotten
-  // <script src> or a missing .kb-sel/.kb-help rule, so check the real page.
-  const dashPath = process.argv.slice(2).find(f => /\/index\.html$/.test(f));
-  if (dashPath) {
-    const dashHtml = fs.readFileSync(dashPath, "utf8");
-    kbok("index.html loads static/panels/keyboard.js",
-      /<script[^>]*\bsrc="\/panels\/keyboard\.js"/.test(dashHtml));
-    kbok("index.html styles the selection and help overlay (.kb-sel/.kb-help)",
-      /\.kb-sel\b/.test(dashHtml) && /\.kb-help\b/.test(dashHtml));
-  }
-
-  if (kbFindings.length) {
-    bad = 1;
-    console.log(`FAIL: keyboard shortcuts have ${kbFindings.length} issue(s):`);
-    for (const f of kbFindings) console.log(`      - ${f}`);
-  } else {
-    console.log("OK:   keyboard shortcuts");
-  }
+if (kbFindings.length) {
+  bad = 1;
+  console.log(`FAIL: keyboard shortcuts have ${kbFindings.length} issue(s):`);
+  for (const f of kbFindings) console.log(`      - ${f}`);
+} else {
+  console.log("OK:   keyboard shortcuts");
 }
 
 if (bad) {

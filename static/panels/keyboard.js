@@ -19,7 +19,7 @@ function kbIsInteractive(el) {
   if (kbIsTyping(el)) return true;
   if (!el) return false;
   const tag = el.tagName ? String(el.tagName).toLowerCase() : "";
-  if (tag === "button" || tag === "a") return true;
+  if (tag === "button" || tag === "a" || tag === "select") return true;
   const role = el.getAttribute ? el.getAttribute("role") : null;
   return role === "button";
 }
@@ -52,7 +52,7 @@ function kbJump(key) {
   if (!el) return false;
   if (el.scrollIntoView) el.scrollIntoView({ behavior: "smooth", block: "start" });
   if (el.style) {
-    el.style.boxShadow = "inset 0 0 0 2px #58a6ff";
+    el.style.boxShadow = "inset 0 0 0 2px var(--accent)";
     if (typeof setTimeout === "function") {
       setTimeout(() => { el.style.boxShadow = ""; }, 1200);
     }
@@ -160,6 +160,7 @@ function kbOpenSelected() {
 function kbHandleKey(e) {
   if (!e || !e.key) return false;
   const key = e.key;
+  if (e.ctrlKey || e.metaKey || e.altKey) return false;
   if (key === "Escape") {
     if (e.preventDefault) e.preventDefault();
     kbCloseHelp();
