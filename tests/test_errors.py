@@ -637,3 +637,67 @@ class ReapingMustNotDestroyWork(unittest.TestCase):
         finally:
             audit._sh, config.WORKTREE_ROOT = orig_sh, orig_root
         self.assertFalse(any("pr-review" in str(x.get("detail")) for x in f))
+
+
+class ForeseeablePRConflicts(unittest.TestCase):
+    """An open PR whose files a live task is rewriting will conflict.
+
+    Nothing warned about this: you found out when the merge was refused, after
+    the reviewers had already been spent. PR #9 carried changes to
+    static/phone.html and static/usage.html while phone-shell and
+    usage-informative were rewriting exactly those files.
+    """
+
+    class _Store:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def code_tasks_all(self):
+            return self._rows
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.tf = os.path.join(self.dir, "live.json")
+        with open(self.tf, "w") as fh:
+            json.dump({"project": {"repo": "/x", "tasks": [
+                {"id": "rewriter", "files_hint": ["static/phone.html"]}]}}, fh)
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _run(self, pr_files, pr_branch="task/other", live_status="running"):
+        import audit
+        import reconcile
+        orig_sh, orig_live = audit._sh, reconcile.live_runs
+        reconcile.live_runs = lambda: [{"taskfile": self.tf, "pid": 1}]
+
+        def sh(*args, **kw):
+            argv = list(args)
+            if argv and argv[0] == "gh":
+                return 0, json.dumps([{"number": 9, "headRefName": pr_branch}]), ""
+            if "diff" in argv:
+                return 0, "\n".join(pr_files), ""
+            return 0, "", ""
+        audit._sh = sh
+        try:
+            return audit.audit_pr_collisions(
+                self._Store([{"id": "rewriter", "status": live_status}]), repo="/repo")
+        finally:
+            audit._sh, reconcile.live_runs = orig_sh, orig_live
+
+    def test_an_overlapping_file_is_flagged(self):
+        f = self._run(["static/phone.html"])
+        self.assertEqual(len(f), 1)
+        self.assertIn("#9", f[0]["what"])
+        self.assertIn("rewriter", f[0]["detail"])
+
+    def test_disjoint_files_are_not_flagged(self):
+        self.assertEqual(self._run(["docs/readme.md"]), [])
+
+    def test_a_pr_from_the_very_task_doing_the_rewrite_is_not_a_conflict(self):
+        # Its own branch is where that rewrite is happening.
+        self.assertEqual(
+            self._run(["static/phone.html"], pr_branch="task/rewriter"), [])
+
+    def test_a_task_that_is_not_live_does_not_trigger_it(self):
+        self.assertEqual(
+            self._run(["static/phone.html"], live_status="merged"), [])

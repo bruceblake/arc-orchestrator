@@ -350,6 +350,63 @@ def audit_tasks_backup(tasks_dir=None, snapshot=False):
     return []
 
 
+def audit_pr_collisions(store=None, repo=None):
+    """Open PRs whose files a LIVE task is rewriting — a conflict you can see coming.
+
+    Nothing warns about this today; you find out when the merge is refused,
+    after the reviewers have already been spent. PR #9 carries changes to
+    static/phone.html and static/usage.html while phone-shell and
+    usage-informative are rewriting exactly those two files, so it is certain
+    to conflict and equally certain to have been predictable.
+    """
+    repo = Path(repo or config.ROOT)
+    out = []
+    rc, raw, _ = _sh("gh", "pr", "list", "--state", "open", "--json",
+                     "number,headRefName", cwd=repo, timeout=25)
+    try:
+        prs = json.loads(raw) if rc == 0 and raw.strip() else []
+    except ValueError:
+        prs = []
+    if not prs:
+        return out
+    # What each live task is going to touch, from its taskfile.
+    live_files = {}
+    try:
+        import reconcile
+        live_ids = {r["id"] for r in (store.code_tasks_all() if store else [])
+                    if r.get("status") in ("running", "in_review")}
+        live_tf = {r.get("taskfile") for r in reconcile.live_runs()}
+    except Exception:
+        return out
+    for tf in live_tf:
+        try:
+            proj = json.loads(Path(tf).read_text())["project"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        for t in proj.get("tasks") or []:
+            if t.get("id") in live_ids:
+                for f in t.get("files_hint") or []:
+                    live_files.setdefault(f, set()).add(t["id"])
+    for pr in prs:
+        branch = pr.get("headRefName") or ""
+        tid = branch[5:] if branch.startswith("task/") else None
+        rc, out_files, _ = _sh("git", "diff", "--name-only",
+                               f"origin/{config.BASE_BRANCH}...{branch}", cwd=repo)
+        touched = {ln.strip() for ln in out_files.splitlines() if ln.strip()}
+        hits = {f: sorted(live_files[f]) for f in touched & set(live_files)
+                if tid not in live_files[f]}
+        if hits:
+            detail = "; ".join(f"{f} (being rewritten by {', '.join(who)})"
+                               for f, who in sorted(hits.items())[:4])
+            out.append(_finding(
+                "warning", "prs",
+                f"PR #{pr['number']} will conflict with work in flight",
+                detail,
+                "land or close it before those tasks merge, or expect a "
+                "conflict after the reviewers have already been spent"))
+    return out
+
+
 def audit_logs():
     out = []
     p = Path(config.EVENTS_LOG)
@@ -400,6 +457,7 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
         findings += audit_leases(store)
     findings += audit_git(store=store)
     findings += audit_gates(store)
+    findings += audit_pr_collisions(store)
     findings += audit_tasks_backup(snapshot=snapshot)
     findings += audit_logs()
     if with_health:
