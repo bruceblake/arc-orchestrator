@@ -2389,6 +2389,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(Path(config.ROOT) / "static" / "phone.html", "text/html; charset=utf-8")
             if u.path == "/common.js":
                 return self._file(Path(config.ROOT) / "static" / "common.js", "application/javascript; charset=utf-8")
+            if re.fullmatch(r"/panels/[a-z]+\.js", u.path):
+                return self._file(Path(config.ROOT) / "static" / u.path[1:], "application/javascript; charset=utf-8")
             if u.path == "/api/usage":
                 q = parse_qs(u.query)
                 range_key = q.get("range", ["1h"])[0]
