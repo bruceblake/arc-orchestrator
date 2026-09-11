@@ -598,6 +598,13 @@ async def open_promotion_pr(repo, base=None, prod=None, title=None):
     repo = Path(repo).resolve()
     base = base or config.BASE_BRANCH
     prod = prod or config.PROD_BRANCH
+    if base == prod:
+        # One-branch flow: there is nothing to promote INTO. GitHub rejects a
+        # PR whose head and base are the same ref, and the error it returns
+        # ("No commits between main and main") reads like a bug rather than a
+        # configuration choice.
+        return None, None, (f"promotion is not configured: BASE_BRANCH and "
+                            f"PROD_BRANCH are both {base!r}")
     await _git(["push", "origin", base], cwd=repo, check=False)
     rc, ahead, _ = await _git(["rev-list", "--count", f"{prod}..{base}"],
                               cwd=repo, check=False)

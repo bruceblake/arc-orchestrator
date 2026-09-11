@@ -543,3 +543,53 @@ class BranchAheadUsesTheIntegrationBranch(unittest.TestCase):
     def test_a_missing_branch_is_not_ahead(self):
         config.BASE_BRANCH = "development"
         self.assertFalse(asyncio.run(gitstore.branch_ahead(self.repo, "nope")))
+
+
+class PromotionWithOneBranch(unittest.TestCase):
+    """main -> main is not a pull request GitHub will accept.
+
+    Returning its error ("No commits between main and main") reads like a bug
+    rather than a configuration choice, so the one-branch case is refused up
+    front with a reason that explains itself.
+    """
+
+    def setUp(self):
+        self._base, self._prod = config.BASE_BRANCH, config.PROD_BRANCH
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        config.BASE_BRANCH, config.PROD_BRANCH = self._base, self._prod
+
+    def test_it_refuses_and_says_why(self):
+        config.BASE_BRANCH = config.PROD_BRANCH = "main"
+        n, url, note = asyncio.run(gitstore.open_promotion_pr("/nonexistent"))
+        self.assertIsNone(n)
+        self.assertIsNone(url)
+        self.assertIn("not configured", note)
+        self.assertIn("main", note)
+
+    def test_it_does_not_refuse_when_two_branches_are_configured(self):
+        config.BASE_BRANCH, config.PROD_BRANCH = "development", "main"
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        repo = Path(d) / "r"
+        repo.mkdir()
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                    ["config", "user.name", "t"]):
+            subprocess.run(["git", *cmd], cwd=repo, check=True, capture_output=True)
+        (repo / "f").write_text("x\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "i"], cwd=repo, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "branch", "development"], cwd=repo, check=True,
+                       capture_output=True)
+        # No remote and nothing ahead, so it declines for a DIFFERENT reason.
+        # What matters is that the one-branch guard did not short-circuit it.
+        _, _, note = asyncio.run(gitstore.open_promotion_pr(repo))
+        self.assertNotIn("not configured", note or "")
+
+    def test_config_agrees(self):
+        config.BASE_BRANCH = config.PROD_BRANCH = "main"
+        self.assertFalse(config.promotion_configured())
+        config.BASE_BRANCH = "development"
+        self.assertTrue(config.promotion_configured())

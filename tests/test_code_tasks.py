@@ -379,7 +379,11 @@ class PullRequestIsTheGate(unittest.TestCase):
         self.assertFalse(e.when({"published": False, "reason": "push failed"}, {}))
 
     def test_tasks_branch_from_the_integration_branch_not_prod(self):
-        self.assertNotEqual(config.BASE_BRANCH, config.PROD_BRANCH)
+        # Tasks branch from BASE_BRANCH, whatever it is. When BASE and PROD
+        # are the same branch that is the single-branch flow, not a bug; the
+        # thing that must never happen is a task branching from something the
+        # fleet does not merge into.
+        self.assertTrue(config.BASE_BRANCH)
         src = pathlib.Path("code_tasks.py").read_text()
         self.assertIn("base = config.BASE_BRANCH", src)
         self.assertNotIn('base = "main"', src)

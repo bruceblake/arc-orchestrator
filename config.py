@@ -176,8 +176,30 @@ DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "1800"))
 # reviewers read the actual PR diff, and a merger only merges once every one of
 # them approves. Before this, work was merged locally and the PR opened
 # afterwards — reviewers could object to nothing, because it had already landed.
-BASE_BRANCH = os.getenv("ARC_BASE_BRANCH", "development")
+# ONE branch by default. The fleet opens its pull requests against BASE_BRANCH
+# and that is where reviewed work lands.
+#
+# This was development -> main with a manual promotion PR between them. The
+# split cost more than it bought here: the operator's checkout, the fleet's
+# base and the promotion target were three different moving refs, and several
+# bugs came straight out of that — reconcile compared task branches against
+# main while the fleet merged into development, so its cleanup never ran; and a
+# day's work sat on an unpushed local main while every task branched from a
+# development that did not contain it.
+#
+# Set ARC_BASE_BRANCH=development (and keep PROD_BRANCH=main) to restore the
+# two-branch flow with `main.py code promote`; nothing about it was removed.
+BASE_BRANCH = os.getenv("ARC_BASE_BRANCH", "main")
 PROD_BRANCH = os.getenv("ARC_PROD_BRANCH", "main")
+
+
+def promotion_configured():
+    """True when there is a separate branch to promote INTO.
+
+    With one branch, a promotion PR would be main -> main: GitHub rejects it,
+    and offering the button implies a gate that does not exist.
+    """
+    return BASE_BRANCH != PROD_BRANCH
 PR_REVIEWERS = int(os.getenv("ARC_PR_REVIEWERS", "2"))
 # How many times a PR may go back to the implementer before the task fails.
 PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "3"))
