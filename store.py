@@ -154,6 +154,14 @@ CREATE TABLE IF NOT EXISTS driver_leases(
   task TEXT,
   acquired_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS graph_state(
+  graph TEXT NOT NULL,
+  node TEXT NOT NULL,
+  result TEXT NOT NULL,
+  runs INTEGER NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY (graph, node)
+);
 """
 
 
@@ -705,3 +713,29 @@ class Store:
             "seeds_unused": seeds_unused,
             "recent_topics": recent,
         }
+
+    def save_graph_state(self, graph, node, result_json, runs):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO graph_state(graph, node, result, runs, updated_at) "
+                "VALUES (?,?,?,?,?) ON CONFLICT(graph, node) DO UPDATE SET "
+                "result=excluded.result, runs=excluded.runs, "
+                "updated_at=excluded.updated_at",
+                (graph, node, result_json, runs, time.time()),
+            )
+            self.conn.commit()
+
+    def graph_state_rows(self, graph):
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT node, result, runs, updated_at FROM graph_state "
+                    "WHERE graph=?", (graph,)).fetchall()
+            ]
+
+    def clear_graph_state(self, graph):
+        with self.lock:
+            cur = self.conn.execute("DELETE FROM graph_state WHERE graph=?", (graph,))
+            self.conn.commit()
+            return cur.rowcount

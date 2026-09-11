@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import time
 
@@ -40,8 +41,42 @@ class Edge:
         self.on_drain = on_drain
 
 
+# How long a persisted node result is trusted on resume. A row older than
+# this is ignored (and left for the next clear): a day-old verdict may no
+# longer describe the code it was recorded against.
+STATE_TTL = 24 * 3600
+
+
+class Persist:
+    """Opt-in handle naming the nodes whose results survive a killed run.
+
+    Give one to ``Graph(..., persist=Persist(store, nodes=[...]))`` and every
+    named node's result is written to the store's ``graph_state`` table as it
+    completes; a later ``_Execution`` of a graph with the SAME name seeds its
+    ctx from those rows and fires their downstream edges, so a run killed
+    mid-graph resumes downstream of finished work instead of repeating it.
+
+    Name only nodes whose result is a pure verdict the graph routes on (a
+    review verdict, a gate pass) — never a node whose fn has external side
+    effects (alloc, publish, merge): seeding trusts the recorded result
+    WITHOUT re-running the fn, so an effect that never happened would be
+    believed on resume.
+
+    Double-fire hazard: if a seeded node runs again anyway (its upstream
+    re-fired), its downstream edges fire a second time. Shape a resume graph
+    to route AROUND persisted nodes — close their incoming edges with
+    ``when=lambda r, ctx: False`` — the way code_tasks stubs merged tasks.
+    """
+
+    def __init__(self, store, nodes, ttl=None):
+        self.store = store
+        self.nodes = frozenset(nodes)
+        self.ttl = STATE_TTL if ttl is None else ttl
+
+
 class Graph:
-    def __init__(self, name, max_steps=500, drain_timeout=1200, max_in_flight=None):
+    def __init__(self, name, max_steps=500, drain_timeout=1200, max_in_flight=None,
+                 persist=None):
         self.name = name
         self.max_steps = max_steps
         # Bounded admission: at most this many node fns execute at once; the
@@ -56,6 +91,9 @@ class Graph:
         self.nodes = {}
         self.edges = []
         self.starts = []
+        # Opt-in resumable state (see Persist). None (the default, and every
+        # existing caller) keeps runs exactly as ephemeral as before.
+        self.persist = persist
 
     def node(self, name, fn=None, *, gather=False):
         def register(f):
@@ -122,6 +160,85 @@ class _Execution:
         self.error = None
         self.firings = 0
         self.drain_deadline = None
+        # Nodes whose results were seeded from the store; run() fires their
+        # outgoing edges so a resume continues downstream of finished work.
+        self.seeded = []
+        self._seed_from_store()
+
+    def _seed_from_store(self):
+        """Fill ctx['results']/ctx['runs'] from persisted rows (fill-if-absent:
+        a value the caller already put in ctx wins). A row is trusted only if
+        its node is still named by the persist handle, still exists in this
+        graph, and is inside the TTL; anything else is ignored so the node
+        simply re-executes. Store failures fail open for the same reason —
+        persistence must never make a run LESS runnable."""
+        p = self.g.persist
+        if p is None or not p.nodes:
+            return
+        try:
+            rows = p.store.graph_state_rows(self.g.name)
+        except Exception as exc:
+            self.log.warning("graph '%s': cannot read persisted state: %s",
+                             self.g.name, exc)
+            return
+        now = time.time()
+        results = self.ctx.setdefault("results", {})
+        runs = self.ctx.setdefault("runs", {})
+        for row in rows:
+            name = row["node"]
+            if name not in p.nodes or name not in self.g.nodes:
+                continue
+            if row["updated_at"] < now - p.ttl:
+                continue  # stale: re-run the node instead of trusting it
+            try:
+                value = json.loads(row["result"])
+            except (TypeError, ValueError):
+                continue
+            if name not in results:
+                results[name] = value
+                self.seeded.append(name)
+            if name not in runs:
+                runs[name] = row["runs"]
+        if self.seeded:
+            self.log.info("graph '%s': resuming with persisted results for %s",
+                          self.g.name, sorted(self.seeded))
+            events.emit("graph.resume", graph=self.g.name,
+                        nodes=sorted(self.seeded))
+
+    def _fire_seeded(self):
+        """Fire the outgoing edges of store-seeded nodes so a resumed graph
+        continues DOWNSTREAM of finished work. ``when`` predicates see the
+        seeded ctx exactly as they would after a real firing; one that raises
+        fails the run rather than routing the resume on a guess."""
+        if not self.seeded:
+            return
+        for name in self.seeded:
+            result = self.ctx["results"][name]
+            for e in self.g.edges:
+                if e.src != name:
+                    continue
+                if e.when is None or e.when(result, self.ctx):
+                    self._put(e.dst, name, self.ctx, e.on_drain)
+
+    def _save_state(self, name, result, runs):
+        """Persist one named node's result (best effort). A result that cannot
+        be JSON-encoded (a Path, an exception instance, ...) skips the write
+        entirely — there is no honest smaller value to record, and leaving an
+        older row untouched is better than lying. Never raises into the run:
+        on a store error the run continues, merely un-persisted."""
+        p = self.g.persist
+        if p is None or name not in p.nodes:
+            return
+        try:
+            blob = json.dumps(result)
+        except (TypeError, ValueError):
+            self.log.warning("node '%s': result not JSON-serialisable; not persisted", name)
+            return
+        try:
+            p.store.save_graph_state(self.g.name, name, blob, runs)
+        except Exception as exc:
+            self.log.warning("graph '%s': cannot persist node '%s': %s",
+                             self.g.name, name, exc)
 
     def _sources_of(self, name):
         return {e.src for e in self.g.edges if e.dst == name}
@@ -178,6 +295,10 @@ class _Execution:
         try:
             for s in self.g.starts:
                 self._put(s, "__start__", self.ctx)
+            # Seed firings happen after the start puts but before the first
+            # await: everything so far is synchronous, so a seeded edge and a
+            # start put can never interleave with a worker.
+            self._fire_seeded()
             while not self.done.is_set():
                 try:
                     await asyncio.wait_for(self.done.wait(), timeout=5)
@@ -195,6 +316,14 @@ class _Execution:
             await asyncio.gather(*workers, return_exceptions=True)
         if self.error is not None:
             raise self.error
+        if self.g.persist is not None:
+            # Success: there is nothing left to resume. Best effort — a
+            # failed clear only leaves rows the next run will re-clear.
+            try:
+                self.g.persist.store.clear_graph_state(self.g.name)
+            except Exception as exc:
+                self.log.warning("graph '%s': cannot clear persisted state: %s",
+                                 self.g.name, exc)
         return self.last_ctx
 
     async def _worker(self, node):
@@ -268,6 +397,7 @@ class _Execution:
             runs = ctx.setdefault("runs", {})
             runs[node.name] = runs.get(node.name, 0) + 1
             ctx.setdefault("results", {})[node.name] = result
+            self._save_state(node.name, result, runs[node.name])
             self.last_ctx = ctx
             events.emit("node_end", graph=self.g.name, node=node.name, run=runs[node.name],
                         seconds=round(time.monotonic() - t0, 3))
