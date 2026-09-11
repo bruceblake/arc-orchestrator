@@ -19,6 +19,14 @@ def git(repo, *args):
 
 class RepoFixture(unittest.TestCase):
     def setUp(self):
+        # These fixtures build main-only repos. branch_ahead now defaults to
+        # config.BASE_BRANCH (development), so the base must be named here or
+        # there is no ref to compare against — and with no ref it correctly
+        # reports "ahead", because a check that cannot vouch for a branch must
+        # not let reconcile delete its worktree.
+        self._orig_base = config.BASE_BRANCH
+        config.BASE_BRANCH = "main"
+        self.addCleanup(setattr, config, "BASE_BRANCH", self._orig_base)
         self._dir = tempfile.TemporaryDirectory()
         base = Path(self._dir.name)
         self.repo = base / "proj"
@@ -462,3 +470,76 @@ class AdvancingTheLocalBaseBranch(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("fast-forward", note.lower())
         self.assertTrue((self.repo / "mine.txt").exists())
+
+
+class BranchAheadUsesTheIntegrationBranch(unittest.TestCase):
+    """Comparing against main disabled reconcile's cleanup entirely.
+
+    The fleet merges into development; main is promoted to separately and lags
+    it — 52 commits behind when this was written. A branch fully merged into
+    development still had commits main lacked, so reconcile classified it
+    "ahead", kept its worktree, and the cleanup it exists to perform never
+    happened. Measured: task/graph-admission-control, 0 ahead of development
+    and 30 ahead of main.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.repo = Path(self.dir) / "repo"
+        self.repo.mkdir()
+        self._orig_base = config.BASE_BRANCH
+        self._orig_root = config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = str(Path(self.dir) / "wt")
+        self.addCleanup(self._restore)
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                    ["config", "user.name", "t"]):
+            subprocess.run(["git", *cmd], cwd=self.repo, check=True, capture_output=True)
+        (self.repo / "f.txt").write_text("one\n")
+        self._commit("init")
+        subprocess.run(["git", "branch", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+
+    def _restore(self):
+        config.BASE_BRANCH = self._orig_base
+        config.WORKTREE_ROOT = self._orig_root
+
+    def _commit(self, msg):
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", msg], cwd=self.repo, check=True,
+                       capture_output=True)
+
+    def _advance(self, branch, text):
+        subprocess.run(["git", "checkout", "-q", branch], cwd=self.repo, check=True,
+                       capture_output=True)
+        (self.repo / "f.txt").write_text(text)
+        self._commit(f"advance {branch}")
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True,
+                       capture_output=True)
+
+    def test_a_branch_level_with_development_is_not_ahead(self):
+        config.BASE_BRANCH = "development"
+        self._advance("development", "dev moved on\n")
+        subprocess.run(["git", "branch", "task/t1", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+        self.assertFalse(asyncio.run(gitstore.branch_ahead(self.repo, "t1")))
+
+    def test_the_same_branch_looks_ahead_of_a_lagging_main(self):
+        # The bug, stated directly: main lags, so the identical branch reads
+        # as unmerged and its worktree is kept forever.
+        config.BASE_BRANCH = "development"
+        self._advance("development", "dev moved on\n")
+        subprocess.run(["git", "branch", "task/t1", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+        self.assertTrue(asyncio.run(gitstore.branch_ahead(self.repo, "t1", base="main")))
+
+    def test_real_unmerged_work_is_still_ahead(self):
+        config.BASE_BRANCH = "development"
+        subprocess.run(["git", "branch", "task/t1", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+        self._advance("task/t1", "task work\n")
+        self.assertTrue(asyncio.run(gitstore.branch_ahead(self.repo, "t1")))
+
+    def test_a_missing_branch_is_not_ahead(self):
+        config.BASE_BRANCH = "development"
+        self.assertFalse(asyncio.run(gitstore.branch_ahead(self.repo, "nope")))
