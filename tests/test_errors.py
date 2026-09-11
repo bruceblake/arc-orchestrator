@@ -320,3 +320,98 @@ class FileClashDetection(unittest.TestCase):
         self._taskfile("new", [{"id": "b", "files_hint": ["shared.py"]}])
         clashes, _, _ = fc.check("new", db_path=self.db, tasks_dir=self.tasks)
         self.assertEqual(clashes, {})
+
+
+class TheAuditMustNotCryWolf(unittest.TestCase):
+    """An audit that raises alarms during normal operation is one nobody reads.
+
+    Both of these fired on the audit's first real use: it reported "8 task
+    worktrees — CRITICAL" while four of them were in active use, and told the
+    operator to "re-run their project to resume" two tasks that were running at
+    that moment.
+    """
+
+    class _Store:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def code_tasks_all(self):
+            return self._rows
+
+    @staticmethod
+    def _fake_git(worktrees):
+        """audit_git shells out four times; answer each one for what it asked.
+
+        A stub that returns the same text for every call made `git status
+        --porcelain` return the worktree listing, so the repo read as dirty and
+        the test failed for a reason that existed only in the test.
+        """
+        def run(*args, **kwargs):
+            argv = list(args)
+            if "worktree" in argv:
+                return 0, worktrees, ""
+            if "status" in argv:
+                return 0, "", ""
+            if "branch" in argv:
+                return 0, "", ""
+            return 0, "", ""
+        return run
+
+    def test_a_worktree_belonging_to_a_live_task_is_not_orphaned(self):
+        import audit
+        store = self._Store([{"id": "alive", "status": "running", "taskfile": "/t/a.json"}])
+        orig = audit._sh
+        audit._sh = self._fake_git(
+            "worktree /repo\nworktree /wt/alive\nworktree /wt/dead\n")
+        try:
+            findings = audit.audit_git(repo="/repo", store=store)
+        finally:
+            audit._sh = orig
+        wt = [f for f in findings if "orphan" in f["what"]]
+        self.assertEqual(len(wt), 1)
+        self.assertIn("dead", wt[0]["detail"])
+        self.assertNotIn("alive", wt[0]["detail"])
+
+    def test_no_orphans_is_not_a_warning(self):
+        import audit
+        store = self._Store([{"id": "alive", "status": "running", "taskfile": "/t/a.json"}])
+        orig = audit._sh
+        audit._sh = self._fake_git("worktree /repo\nworktree /wt/alive\n")
+        try:
+            findings = audit.audit_git(repo="/repo", store=store)
+        finally:
+            audit._sh = orig
+        self.assertTrue(all(f["severity"] == "info" for f in findings),
+                        "a fleet working normally must raise nothing above info")
+
+    def test_a_task_with_a_live_run_is_in_flight_not_stranded(self):
+        import audit
+        import reconcile
+        store = self._Store([
+            {"id": "busy", "status": "in_review", "taskfile": "/t/live.json"},
+            {"id": "abandoned", "status": "in_review", "taskfile": "/t/dead.json"}])
+        orig = reconcile.live_runs
+        reconcile.live_runs = lambda: [{"taskfile": "/t/live.json", "pid": 1}]
+        try:
+            findings = audit.triage_tasks(store)
+        finally:
+            reconcile.live_runs = orig
+        stranded = [f for f in findings if "stranded" in f["what"]]
+        self.assertEqual(len(stranded), 1)
+        self.assertIn("abandoned", stranded[0]["detail"])
+        self.assertNotIn("busy", stranded[0]["detail"])
+        self.assertTrue(any("in flight" in f["what"] for f in findings))
+
+    def test_everything_in_flight_raises_nothing_above_info(self):
+        import audit
+        import reconcile
+        store = self._Store([
+            {"id": "a", "status": "running", "taskfile": "/t/live.json"},
+            {"id": "b", "status": "in_review", "taskfile": "/t/live.json"}])
+        orig = reconcile.live_runs
+        reconcile.live_runs = lambda: [{"taskfile": "/t/live.json", "pid": 1}]
+        try:
+            findings = audit.triage_tasks(store)
+        finally:
+            reconcile.live_runs = orig
+        self.assertTrue(all(f["severity"] == "info" for f in findings))
