@@ -103,6 +103,7 @@ def _parse_kimi_wire(path):
     """
     models = {}
     recent = []  # (ts_s, req_delta, tok_delta)
+    turn_log = []  # (ts_s, alias, req_delta, prompt_delta, completion_delta, ok_delta)
     alias_real = {}
     last_req = None  # (ts_s, real_model, agent)
     last_done = 0.0
@@ -141,6 +142,7 @@ def _parse_kimi_wire(path):
             if ts:
                 mod["last_ts"] = ts
                 recent.append((ts, 1, 0))
+                turn_log.append((ts, alias, 1, 0, 0, 0))
                 if file_totals["last_ts"] is None or ts > file_totals["last_ts"]:
                     file_totals["last_ts"] = ts
                 if last_req is None or ts >= last_req[0]:
@@ -177,8 +179,10 @@ def _parse_kimi_wire(path):
                 if file_totals["last_ts"] is None or ts > file_totals["last_ts"]:
                     file_totals["last_ts"] = ts
                 recent.append((ts, 0, inp + out))
+                turn_log.append((ts, alias, 0, inp, out, 1))
     return {"models": models, "alias_real": alias_real, "recent": recent,
             "last_req": last_req, "last_done": last_done, "file_totals": file_totals,
+            "turn_log": turn_log,
             "avg_latency_ms": round(latency_total_ms / latency_count) if latency_count else None}
 
 
@@ -237,6 +241,7 @@ def _kimi_code_usage(now, fleet_names=frozenset()):
     agg = {}
     inflight = []
     points = []  # (ts, requests_delta, tokens_delta)
+    turns = []  # (ts, real_model, requests_delta, prompt_delta, completion_delta, ok_delta)
     live = set()
     paths = root.glob("*/*/agents/*/wire.jsonl") if root.is_dir() else []
     for path in paths:
@@ -269,6 +274,13 @@ def _kimi_code_usage(now, fleet_names=frozenset()):
             if m["last_ts"] and (row["last_ts"] is None or m["last_ts"] > row["last_ts"]):
                 row["last_ts"] = m["last_ts"]
         points.extend(data["recent"])
+        for t, alias, rd, pd, cd, ok_delta in data.get("turn_log", []):
+            if t is None:
+                continue
+            real = data["alias_real"].get(alias, alias)
+            if real == "unknown":
+                continue  # internal calls without a model field (titles, cron)
+            turns.append((t, real, rd, pd, cd, ok_delta))
         lr = data["last_req"]
         owner = _session_task(path)
         if owner and owner in fleet_names:
@@ -285,7 +297,7 @@ def _kimi_code_usage(now, fleet_names=frozenset()):
     models = list(agg.values())
     for m in models:
         m["tokens"] = m["prompt_tokens"] + m["completion_tokens"]
-    return {"models": models, "inflight": inflight, "points": points}
+    return {"models": models, "inflight": inflight, "points": points, "turns": turns}
 
 
 def _series_window(range_key, now, min_ts):
@@ -510,14 +522,50 @@ def _collect_inflight(now, store=None):
     return rows, kimi
 
 
-def _usage(store=None, range_key=None, include_series=False):
-    """Usage aggregates for /api/usage. Default (no range) keeps the historical shape.
+def _window_kimi_models(turns, cutoff):
+    """Per-model kimi-code rows restricted to turns at/after `cutoff`.
 
-    `series` (the per-family time buckets, ~90% of the payload) is opt-in via
-    include_series=True — nothing in static/*.html draws it except phone.html,
-    which requests ?series=1."""
+    `_kimi_code_usage` returns the all-time `models` plus a per-turn `turns`
+    log; `_usage` re-sums only the turns inside the window so a narrow range
+    shows less traffic and `last_ts` reflects the last event WITHIN the range,
+    not overall.
+    """
+    agg = {}
+    for ts, real, req_delta, prompt_delta, completion_delta, ok_delta in turns:
+        if ts is None or ts < cutoff:
+            continue
+        row = agg.setdefault(real, {"model": real, "pretty": _pretty(real),
+                                    "family": "kimi-code", "source": "kimi-code",
+                                    "requests": 0, "ok": 0, "errors": 0,
+                                    "failed_attempts": 0, "tokens": 0,
+                                    "prompt_tokens": 0, "completion_tokens": 0,
+                                    "avg_latency_ms": None, "last_ts": None})
+        row["requests"] += req_delta
+        row["ok"] += ok_delta
+        row["prompt_tokens"] += prompt_delta
+        row["completion_tokens"] += completion_delta
+        if row["last_ts"] is None or ts > row["last_ts"]:
+            row["last_ts"] = ts
+    models = list(agg.values())
+    for m in models:
+        m["tokens"] = m["prompt_tokens"] + m["completion_tokens"]
+    return models
+
+
+def _usage(store=None, range_key=None, include_series=False):
+    """Usage aggregates for /api/usage, honoring the requested range.
+
+    `range_key` selects the aggregation window: 1h/24h/7d/all. A missing or
+    unrecognized key (including None) falls back to "1h" — the usage page's
+    default. "all" is the historical view: nothing is dropped. A windowed range
+    bounds totals, per-model/family rows, and the series points, while the
+    in-flight list is never trimmed — a live agent is current by definition.
+    """
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
+    cutoff = None
+    if range_key != "all":
+        cutoff = now - {"1h": 3600, "24h": 86400, "7d": 7 * 86400}[range_key]
 
     def new_model(model, family, source):
         return {"model": model, "pretty": _pretty(model), "family": family, "source": source,
@@ -544,7 +592,10 @@ def _usage(store=None, range_key=None, include_series=False):
     inflight, kimi = _collect_inflight(now, store)
 
     ev_lines = _load_event_lines()
-    for line in ev_lines:
+    lines = ev_lines
+    if cutoff is not None:
+        lines = ev_lines[_first_event_at_or_after(ev_lines, cutoff):]
+    for line in lines:
         try:
             e = json.loads(line)
         except Exception:
@@ -635,6 +686,8 @@ def _usage(store=None, range_key=None, include_series=False):
 
     # Backfill opencode tokens from transcripts for pre-plumbing runs.
     for ts, model, toks, ptoks, ctoks in _opencode_token_backfill(store, done_tok_keys):
+        if cutoff is not None and (ts is None or ts < cutoff):
+            continue
         family = config.MODEL_FAMILY.get(model, "harness")
         mod = by_model.setdefault((family, model, "driver:opencode"),
                                   new_model(model, family, "driver:opencode"))
@@ -653,10 +706,14 @@ def _usage(store=None, range_key=None, include_series=False):
 
     # Merge kimi-code CLI sessions so the dashboard also shows interactive traffic,
     # which goes straight to llm-api.arc.vt.edu and never touches the event log.
-    pts.extend((ts, "kimi-code", req, tok, 0) for ts, req, tok in kimi["points"])
-    if kimi["models"]:
+    # A windowed range narrows kimi's per-model totals from its per-turn log; the
+    # all-time `models` stays the historical view for range=all.
+    pts.extend((ts, "kimi-code", req, tok, 0) for ts, req, tok in kimi["points"]
+               if cutoff is None or (ts is not None and ts >= cutoff))
+    kimi_models = kimi["models"] if cutoff is None else _window_kimi_models(kimi.get("turns", []), cutoff)
+    if kimi_models:
         fam = new_family("kimi-code")
-        for row in kimi["models"]:
+        for row in kimi_models:
             fam["requests"] += row["requests"]
             fam["ok"] += row["ok"]
             fam["tokens"] += row["tokens"]
@@ -666,7 +723,7 @@ def _usage(store=None, range_key=None, include_series=False):
             totals["prompt_tokens"] += row["prompt_tokens"]
             totals["completion_tokens"] += row["completion_tokens"]
         by_family["kimi-code"] = fam
-        by_model.update({(r["family"], r["model"], r["source"]): r for r in kimi["models"]})
+        by_model.update({(r["family"], r["model"], r["source"]): r for r in kimi_models})
 
     for row in inflight:
         fam = by_family.get(row["family"])
