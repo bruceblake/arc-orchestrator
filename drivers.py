@@ -15,6 +15,7 @@ import os
 import pathlib
 import random
 import re
+import signal
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -392,17 +393,54 @@ def opencode_fleet_config():
 
 
 async def _terminate(proc):
-    """Kill a harness process if it is still running; safe to call twice."""
+    """Kill a harness and everything it spawned; safe to call twice.
+
+    A harness is a process GROUP, not a process. opencode runs the shell
+    commands the agent asks for, language servers, test runners; a gate that
+    starts with ./check.sh runs a whole unittest suite under it. Killing only
+    the direct child — which this did — left all of that alive: still
+    writing into the worktree, still holding pipes, and for anything mid
+    request, still holding an ARC slot. Every harness is spawned as its own
+    session leader (start_new_session=True in spawn()), so its pid is also
+    its process-group id and the whole tree can be signalled at once.
+
+    Only while the child is unreaped, though: once proc.wait() has collected
+    it the pid may belong to anyone, and killpg on a recycled pid would take
+    out an unrelated process group. A harness that exited on its own is
+    expected to have cleaned up its own children.
+    """
     if proc.returncode is not None:
         return
     try:
-        proc.kill()
+        os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         return
+    except PermissionError:
+        # Not ours to signal as a group (should not happen for a child we
+        # spawned); fall back to the process itself.
+        try:
+            proc.kill()
+        except ProcessLookupError:
+            return
     try:
         await asyncio.wait_for(proc.wait(), 10)
     except asyncio.TimeoutError:
         log.warning("harness pid %s did not exit after SIGKILL", proc.pid)
+
+
+async def spawn(argv, *, cwd, env=None, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE):
+    """Start a harness (or a gate) the way _terminate expects to find it.
+
+    Its own session, so the process group is ours to kill as one (see
+    _terminate); stdin from /dev/null, because nothing here ever answers a
+    prompt — every harness takes its instructions on argv — and a child that
+    inherits a terminal's stdin and then reads it stops the whole run on a
+    tty read nobody will see.
+    """
+    return await asyncio.create_subprocess_exec(
+        *argv, cwd=str(cwd), env=env, stdin=asyncio.subprocess.DEVNULL,
+        stdout=stdout, stderr=stderr, start_new_session=True)
 
 
 def _dig(obj, texts, sid_holder):
@@ -629,10 +667,7 @@ class Driver:
                 env["OPENCODE_CONFIG"] = cfg
         TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
         tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
-        proc = await asyncio.create_subprocess_exec(
-            *argv, cwd=str(worktree), env=env,
-            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        )
+        proc = await spawn(argv, cwd=worktree, env=env)
         # Stream stdout to the transcript file as it arrives so the dashboard
         # can tail a live agent mid-run; stderr drains concurrently so a big
         # stderr never deadlocks the child on a full pipe.
