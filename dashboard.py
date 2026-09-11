@@ -2122,6 +2122,111 @@ _HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
                     "driver.cap_wait", "inflight.over_cap", "task.failed",
                     "task.conflict", "graph.draining", "run.interrupted")
 
+# A heartbeat (driver.progress, cap_wait) proves the fleet is ALIVE, not that
+# it is MOVING. Only these events mean a unit of work actually advanced.
+_PROGRESS_EVENTS = ("node_end", "task.gate", "task.merged", "driver.done")
+
+# Nothing legitimate goes quiet for longer than one driver attempt plus gate
+# and retry slack: DRIVER_TIMEOUT bounds a single harness run, so a threshold
+# below it flags every long implement node as stalled — the false alarm that
+# gets a watchdog ignored. Override with ARC_STALL_THRESHOLD_S.
+WATCHDOG_STALL_S = float(os.getenv(
+    "ARC_STALL_THRESHOLD_S", str(int(config.DRIVER_TIMEOUT) + 900)))
+
+
+def _stall_diagnosis(q, live_runs, running_rows, stalled_for_s):
+    """Name the resource a stalled fleet is stuck behind, from queue evidence.
+
+    Ordered most-specific first; every branch is something the operator can
+    click through in the same dashboard (queue view, health strip, task list).
+    """
+    totals = q["totals"]
+    # Dead run: nothing running, nothing waiting, no live process — but the
+    # store still has rows marked running. Those tasks never move again on
+    # their own; the fix is resuming the taskfile, not raising any cap.
+    if not live_runs and not totals["running"] and not totals["waiting"]:
+        return (f"the run process is dead: {running_rows} task(s) still "
+                f"marked running but no run process is alive")
+    # One saturated harness with model slots free: the shared harness process
+    # pool is the binding ceiling, not any model's cap — the layer people
+    # forget (Rule 6). Raising model caps here fixes nothing.
+    for h in q["harnesses"]:
+        if h["waiting"] and h["running"] >= h["cap"] \
+                and any(m["waiting"] and m["free"] for m in q["models"]):
+            return (f"the {h['harness']} harness is saturated "
+                    f"({h['running']}/{h['cap']}) while model slots are free")
+    # Every model that has queued work is at its own cap: fleet saturation.
+    queued = [m for m in q["models"] if m["waiting"]]
+    if queued and all(m["running"] >= m["cap"] for m in queued):
+        return (f"every model with queued work is at its cap "
+                f"({sum(m['waiting'] for m in queued)} waiting)")
+    # Drivers queued with none started and no cap full: the queue itself.
+    if not totals["running"] and totals["waiting"]:
+        return f"all {totals['waiting']} driver(s) are queued and none has started"
+    return (f"no node has finished for {int(stalled_for_s)}s with "
+            f"{totals['running']} driver(s) running")
+
+
+def _watchdog(store, live_runs):
+    """Is the fleet advancing, and if not, what is it stuck behind?
+
+    The queue view (who holds what, who waits) shows a fleet that can look
+    busy while every driver sits queued behind a saturated cap. This adds
+    the time dimension: when did a unit of work last actually COMPLETE, is
+    that longer ago than WATCHDOG_STALL_S, and if so, the single most
+    likely resource it is stuck behind.
+
+    `progress` is the ts of the newest _PROGRESS_EVENTS entry; if the log
+    records no advance at all, the log's oldest event bounds it from below —
+    a wedged fleet must not read as "unknown". IDLE is not STALLED: an empty
+    fleet with no work is healthy, and calling it a stall is the false alarm
+    that gets a watchdog ignored.
+    """
+    now = time.time()
+    q = _queue(store)
+    totals = q["totals"]
+    try:
+        running_rows = len(list(store.running_code_tasks() or [])) if store else 0
+    except Exception:
+        running_rows = 0
+
+    last = None
+    for line in reversed(_load_event_lines()):
+        if not any(f'"{t}"' in line for t in _PROGRESS_EVENTS):
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("type") in _PROGRESS_EVENTS:
+            last = _ts(e.get("ts"))
+            if last:
+                break
+    if last is None:
+        lines = _load_event_lines()
+        if lines:
+            try:
+                last = _ts(json.loads(lines[0]).get("ts"))
+            except (ValueError, TypeError, AttributeError):
+                last = None
+
+    stalled_for_s = round(now - last, 1) if last else None
+    has_work = bool(totals["running"] or totals["waiting"] or live_runs
+                    or running_rows)
+    stalled = bool(has_work and stalled_for_s is not None
+                   and stalled_for_s >= WATCHDOG_STALL_S)
+
+    if not has_work:
+        state, diagnosis = "idle", "nothing to do: no work in flight"
+    elif stalled:
+        state, diagnosis = "stalled", _stall_diagnosis(
+            q, live_runs, running_rows, stalled_for_s)
+    else:
+        state, diagnosis = "moving", ""
+    return {"progress": last, "stalled_for_s": stalled_for_s,
+            "stalled": stalled, "state": state, "diagnosis": diagnosis,
+            "threshold_s": WATCHDOG_STALL_S}
+
 
 def _health(store):
     """Small, cheap fleet-health payload for the Projects page.
@@ -2203,9 +2308,11 @@ def _health(store):
         leases = store.driver_lease_rows() if store else []
     except Exception:
         leases = []
+    runs = reconcile.live_runs()
     return {"now": now, "models": sorted(per_model.values(),
                                          key=lambda m: (-m["account"], m["model"])),
-            "agents": inflight, "runs": reconcile.live_runs(),
+            "agents": inflight, "runs": runs,
+            "watchdog": _watchdog(store, runs),
             "leases": leases, "problems": problems}
 
 
