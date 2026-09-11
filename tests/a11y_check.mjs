@@ -292,13 +292,15 @@ if (kbExists) {
   kb.handleKey({ key: "g", target: inInput });
   kbok("g is inert in an input", kb.chordArmed() === false);
   kb.handleKey({ key: "j", target: inInput });
-  kb.handleKey({ key: "k", target: inInput });
-  kbok("j/k are inert in an input", prows[0].classList.contains("kb-sel") && !prows[2].classList.contains("kb-sel"));
+  kb.handleKey({ key: "j", target: inInput });
+  kbok("j is inert in an input (two j presses must not move the selection)",
+    prows[0].classList.contains("kb-sel") && !prows[2].classList.contains("kb-sel"));
 
   const inSelect = mkEl("select", "");
   kb.handleKey({ key: "j", target: inSelect });
-  kb.handleKey({ key: "k", target: inSelect });
-  kbok("j/k are inert in a select", prows[0].classList.contains("kb-sel") && !prows[2].classList.contains("kb-sel"));
+  kb.handleKey({ key: "j", target: inSelect });
+  kbok("j is inert in a select (two j presses must not move the selection)",
+    prows[0].classList.contains("kb-sel") && !prows[2].classList.contains("kb-sel"));
 
   const openedBefore = opened.length;
   kb.handleKey({ key: "Enter", target: inInput });
