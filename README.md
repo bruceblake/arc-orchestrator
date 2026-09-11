@@ -302,8 +302,6 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_MAX_INTEGRATION_ROUNDS` | 3 | wiring_fix ⇄ integration_review cycles |
 | `ARC_REVIEW_PASS_SCORE` | 6.5 | cross-model review score required to ship |
 | `ARC_DASHBOARD_PORT` | 8787 | dashboard port |
-| `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
-| `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
 | `ARC_DRIVER_LEASE_WAIT` | 1800 | max seconds a task waits for a driver lease before failing on capacity |
 | `ARC_DRIVER_CAPACITY_BACKOFF_CAP` | 300 | max capacity-backoff sleep on a harness retry (seconds) |
 | `ARC_BASE_URL` | https://llm-api.arc.vt.edu/api/v1 | ARC API base URL |
@@ -313,6 +311,8 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_PR_REVIEWERS` | 2 | independent PR reviewers required to approve before merge |
 | `ARC_PR_MAX_ROUNDS` | 3 | PR review rounds before a task fails |
 | `ARC_REQUIRE_TESTS` | 1 | require changes to ship tests that fail without them |
+| `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
+| `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
 
 A round makes roughly `13 x questions` model calls. Defaults are polite; the
 per-model semaphores are the hard guarantee that you never exceed ARC's
