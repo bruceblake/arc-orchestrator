@@ -582,6 +582,11 @@ def _usage(store=None, range_key=None, include_series=False):
     the question an operator actually asks. "all" is the historical view: nothing is dropped. A windowed range
     bounds totals, per-model/family rows, and the series points, while the
     in-flight list is never trimmed — a live agent is current by definition.
+
+    Per-model `cost` prices prompt/completion tokens at each model's rate via
+    `config.cost_of`. Where an event reports a token count but no prompt/
+    completion breakdown, the excess is priced at the completion rate, so the
+    figure is an UPPER bound rather than an under-count.
     """
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
@@ -854,8 +859,17 @@ def _usage(store=None, range_key=None, include_series=False):
         lat = mod.pop("latency_total_ms", 0) or 0
         if mod["ok"] and lat:
             mod["avg_latency_ms"] = round(lat / mod["ok"])
+        # Price the split prompt/completion at their own rates, then price any
+        # excess `tokens` a split cannot account for (an event that reported a
+        # token count but no prompt/completion breakdown) at the completion
+        # rate — an upper bound, same guidance as _projects and config.cost_of.
+        # Without it the figure is a LOWER bound, which is not honest.
         mod["cost"] = round(config.cost_of(mod["model"], mod["prompt_tokens"],
-                                           mod["completion_tokens"]), 4)
+                                           mod["completion_tokens"])
+                            + config.cost_of(mod["model"], 0,
+                                             max(0, mod["tokens"]
+                                                 - mod["prompt_tokens"]
+                                                 - mod["completion_tokens"])), 4)
         models.append(mod)
     models.sort(key=lambda m: -m["requests"])
     totals["cost"] = round(sum(m["cost"] for m in models), 4)
