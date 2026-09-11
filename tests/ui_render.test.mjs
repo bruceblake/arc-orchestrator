@@ -1,7 +1,8 @@
 // Behavioural unit tests for the dashboard render functions. No framework,
 // no server: `node tests/ui_render.test.mjs`; exits non-zero on any failure.
 // Same harness as tests/render_check.mjs — DOM stub + concatenated
-// static/common.js + index.html's inline script evaluated with new Function.
+// static/common.js + each page's inline script (index.html, usage.html)
+// evaluated with new Function.
 import fs from "node:fs";
 const els = new Map();
 // innerHTML and textContent are LINKED in a real DOM: setting markup updates
@@ -172,6 +173,101 @@ for (const e of events) {
   ok(typeof out === "string" && out.length > 0 && !out.includes("undefined"),
      `friendly(${e.type}): readable line without 'undefined'`);
 }
+
+// ---- usage.html: success rate, waste, direction, alarming sort -------------
+// Same DOM stub; usage.html's fillTotal() reads module-scope `let DAILY` for
+// the direction arrows, so expose a setter from inside the module (the
+// __setGH trick again).
+const usrc = fs.readFileSync(new URL("../static/usage.html", import.meta.url), "utf8");
+const ujs = usrc.slice(usrc.indexOf("<script>") + 8, usrc.lastIndexOf("</script>"));
+const uext = [...usrc.matchAll(/<script[^>]+src="([^"]+)"/g)]
+  .map(m => "static/" + m[1].replace(/^\//, ""))
+  .filter(f => fs.existsSync(f))
+  .map(f => fs.readFileSync(f, "utf8"))
+  .join("\n");
+const umod = new Function(uext + "\n" + ujs
+  + "\nglobalThis.__setDaily = v => { DAILY = v; };"
+  + "\nreturn {updateUI, fillTotal, updateModels, updateDaily, updateDriverEvents};");
+const uapi = umod();
+
+// Fixture: one model at 60% (ok 3 / err 1 / failed 1 of 5 requests), one at
+// 100%; totals ok 12 / err 1 / failed 1 of 14 → 85.7% and waste ≈ 4000 tok.
+const usage = {
+  range: "24h",
+  totals: { requests: 14, ok: 12, errors: 1, failed_attempts: 1, tokens: 48000,
+            prompt_tokens: 30000, completion_tokens: 18000 },
+  models: [
+    { model: "steady-1", pretty: "Steady", family: "glm", source: "arc-pool",
+      requests: 9, ok: 9, errors: 0, failed_attempts: 0, tokens: 30000,
+      prompt_tokens: 20000, completion_tokens: 10000, avg_latency_ms: 1500, last_ts: null },
+    { model: "wobbly-1", pretty: "Wobbly", family: "kimi", source: "driver:opencode",
+      requests: 5, ok: 3, errors: 1, failed_attempts: 1, tokens: 18000,
+      prompt_tokens: 10000, completion_tokens: 8000, avg_latency_ms: 900, last_ts: null },
+  ],
+  families: [
+    { family: "glm", limit: 4, requests: 9, ok: 9, errors: 0, failed_attempts: 0, tokens: 30000, inflight: 1 },
+    { family: "kimi", limit: 3, requests: 5, ok: 3, errors: 1, failed_attempts: 1, tokens: 18000, inflight: 2 },
+  ],
+  recent_driver_events: [ { type: "driver.error", model: "wobbly-1", task: "t1", error: "boom", ts: null } ],
+};
+__setDaily([
+  { date: "2026-09-09", requests: 100, tokens: 1000, task_runs: 10 },
+  { date: "2026-09-10", requests: 50, tokens: 2000, task_runs: 5 },
+]);
+uapi.updateUI(usage, { caps: {}, totals: null });
+
+const grid = () => document.querySelector("#modelgrid").innerHTML;
+ok(grid().includes("60%") && grid().includes("100%"), "usage: per-model success rate rendered");
+ok(grid().includes('v-failed">1</b>'), "usage: failure count sits beside the rate");
+ok(grid().includes("waste") && grid().includes("≈6.0k tok"), "usage: per-model waste figure rendered");
+ok(count(grid(), "waste") === 1, "usage: no waste row for a clean model");
+ok(grid().indexOf("Wobbly") < grid().indexOf("Steady"), "usage: alarm sort puts the 60% model first");
+ok(document.querySelector("#sort-note").textContent.includes("success rate"), "usage: sort note explains alarm order");
+ok(document.querySelector("#total-srate").textContent === "85.7%", "usage: total success rate rendered");
+ok(document.querySelector("#total-srate-sub").textContent === "12 ok · 1 err · 1 failed", "usage: total rate breakdown rendered");
+ok(document.querySelector("#total-waste").textContent === "1 failed · ≈4.0k tok", "usage: total waste figure rendered");
+ok(document.querySelector("#total-tok").textContent === "48.0k", "usage: total tokens still rendered");
+ok(document.querySelector("#split-prompt").style.width === "62.5%", "usage: prompt/completion split still rendered");
+ok(document.querySelector("#range-label").textContent === "24H", "usage: range label rendered");
+ok(document.querySelector("#dir-tok").textContent === "▲ +100%", "usage: token direction vs yesterday up");
+ok(document.querySelector("#dir-req").textContent === "▼ -50%", "usage: request direction vs yesterday down");
+ok(document.querySelector("#dir-tok").className === "dir up" && document.querySelector("#dir-req").className === "dir down",
+   "usage: direction arrows carry up/down colour class");
+const drows = document.querySelector("#daily-body").innerHTML;
+ok(drows.includes("2026-09-10") && drows.indexOf("2026-09-10") < drows.indexOf("2026-09-09"),
+   "usage: daily breakdown rendered, newest first");
+ok(document.querySelector("#fam-body").innerHTML.includes("kimi"), "usage: family chips still rendered");
+ok(document.querySelector("#drv-events").innerHTML.includes("boom"), "usage: driver events feed still rendered");
+uapi.updateDaily([]);
+ok(document.querySelector("#daily-box").style.display === "none", "usage: daily box hidden when no days");
+
+// A range with no comparable preceding window shows no arrow, not a fake one.
+uapi.fillTotal({ range: "1h", totals: usage.totals });
+ok(document.querySelector("#dir-tok").textContent === "" && document.querySelector("#dir-req").textContent === "",
+   "usage: 1h range has no direction arrow");
+
+// Nothing below 90% → back to token order.
+uapi.updateModels([
+  { model: "small-1", pretty: "Small", family: "glm", source: "arc-pool",
+    requests: 10, ok: 10, errors: 0, failed_attempts: 0, tokens: 9000,
+    prompt_tokens: 6000, completion_tokens: 3000, avg_latency_ms: 100, last_ts: null },
+  { model: "big-1", pretty: "Big", family: "kimi", source: "arc-pool",
+    requests: 2, ok: 2, errors: 0, failed_attempts: 0, tokens: 50000,
+    prompt_tokens: 30000, completion_tokens: 20000, avg_latency_ms: 100, last_ts: null },
+], {}, 59000);
+ok(grid().indexOf("Big") < grid().indexOf("Small"), "usage: healthy fleet sorts by tokens");
+ok(document.querySelector("#sort-note").textContent.includes("tokens"), "usage: sort note explains token order");
+
+// Escaping: model and driver-event fields are event-log data.
+uapi.updateModels([
+  { model: EVIL, pretty: EVIL, family: EVIL, source: EVIL,
+    requests: 1, ok: 1, errors: 0, failed_attempts: 0, tokens: 100,
+    prompt_tokens: 50, completion_tokens: 50, avg_latency_ms: null, last_ts: null },
+], {}, 100);
+ok(clean(grid()), "usage: model name markup does not reach the DOM as markup");
+ok(grid().includes("&lt;img"), "usage: hostile model name rendered escaped, not dropped");
+uapi.updateDriverEvents([ { type: EVIL, model: EVIL, role: EVIL, error: EVIL, ts: null } ]);
+ok(clean(document.querySelector("#drv-events").innerHTML), "usage: driver-event fields escaped");
 
 if (failures.length) {
   console.error(`ui_render: FAIL — ${failures.length}/${n} checks failed:`);
