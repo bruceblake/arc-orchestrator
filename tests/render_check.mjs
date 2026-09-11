@@ -261,9 +261,11 @@ ok("hint counts", document.querySelector("#f-hint").textContent === "3 of 3 proj
 ok("meta counts", document.querySelector("#proj-meta").textContent === "(3)");
 ok("phase groups", pr().includes("phasehead running") && pr().includes("phasehead in_review") && pr().includes("phasehead done"));
 ok("done collapsed by default", !pr().includes('data-file="bench.json"') && pr().includes('data-toggle="done"'));
-ok("card dots", (pr().match(/class="dot /g) || []).length === 4);
-ok("live dot + LIVE badge", pr().includes('class="dot live"') && pr().includes(">LIVE<"));
-ok("tokens formatted", pr().includes("⛁"));
+// Card slimming: per-task dots and token stats are off the card (the chips
+// count, the mini DAG colors 3+ task projects, tokens live in the detail meta).
+ok("no per-task status dots on cards", !pr().includes('class="dot'));
+ok("LIVE badge without live dot", pr().includes(">LIVE<") && !pr().includes('class="dot live"'));
+ok("no token stats on cards", !pr().includes("⛁"));
 
 const filter = hash => { location.hash = hash; api.loadHash(); api.renderProjects(); };
 filter("#q=game");
@@ -284,6 +286,7 @@ await api.openDetail("ui.json");
 ok("detail opens inline", document.querySelector("#view-detail").style.display === "" && pr().includes("pwrap open"));
 ok("detail title", document.querySelector("#d-title").textContent === "game UI polish");
 ok("detail meta", document.querySelector("#d-meta").innerHTML.includes("<b>2</b> tasks") && document.querySelector("#d-meta").innerHTML.includes("<b>1</b> harness runs"));
+ok("tokens moved to detail meta", document.querySelector("#d-meta").innerHTML.includes("⛁") && document.querySelector("#d-meta").innerHTML.includes("4.2k"));
 ok("detail dag svg", document.querySelector("#dag").innerHTML.startsWith("<svg"));
 api.closeDetail();
 ok("detail closes", document.querySelector("#view-detail").style.display === "none" && !pr().includes("pwrap open"));

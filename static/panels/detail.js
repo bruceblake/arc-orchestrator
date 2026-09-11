@@ -35,8 +35,13 @@ async function refreshDetail() {
   $("#btn-stop").style.display = CUR_PID ? "" : "none";
   $("#btn-stop").title = CUR_PID ? `stop run process ${CUR_PID}` : "";
   $("#btn-run").disabled = !!CUR_PID;
+  // Tokens come from the /api/projects snapshot (PROJECTS), not this
+  // response: /api/project has no tokens field, and the card no longer
+  // shows them — this line is where they live now.
+  const snap = (PROJECTS || []).find(p => p.file === CUR);
   $("#d-meta").innerHTML = `<span>repo <b>${esc(d.repo)}</b></span><span>file <b>${esc(d.file)}</b></span>
     <span><b>${(d.tasks || []).length}</b> tasks</span><span><b>${(d.runs || []).length}</b> harness runs</span>
+    ${snap && snap.tokens ? `<span>⛁ <b>${fmtK(snap.tokens)}</b></span>` : ""}
     ${CUR_PID ? `<span>run pid <b>${CUR_PID}</b></span>` : ""}`;
   const g = d.git || {};
   $("#d-git").innerHTML = g.error ? `<span class="hint">${esc(g.error)}</span>` : `<div class="kv">
