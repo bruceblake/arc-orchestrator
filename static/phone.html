@@ -306,7 +306,8 @@ function agentCard(a) {
       "</div>";
   }
   return '<div class="card' + (open ? " open" : "") + '">' +
-    '<button type="button" class="card-head tap" data-key="' + esc(a.req_id) + '">' +
+    '<button type="button" class="card-head tap" data-key="' + esc(a.req_id) +
+    '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="dot" style="background:' + (a.stalled ? "#f85149" : color) + '"></span>' +
     '<span class="c-title">' + esc(short(a.model)) + " · " + esc(role) + "</span>" +
     '<span class="c-sub">' + esc(task) + (a.stalled ? " · STALLED" : "") + "</span></span>" +
@@ -373,7 +374,7 @@ function projectCard(p) {
   var total = (p.progress && p.progress.total) || 0;
   var pct = total > 0 ? Math.round((done / total) * 100) : 0;
   var act = p.last_activity ? tick(ageSec(p.last_activity)) + " ago" : "no activity";
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="c-title">' + esc(p.title || p.file) + "</span>" +
     '<span class="c-sub">' + esc(p.file) + " · " + done + "/" + total +
     (p.active ? " · running" : " · " + act) + "</span></span>" +
@@ -415,7 +416,7 @@ function prCard(p) {
   var state = esc(String(p.state || "OPEN").toUpperCase());
   var color = state === "MERGED" ? "var(--purple)" : (state === "CLOSED" ? "var(--grey)" : "var(--accent)");
   var ap = (p.approvals || []).length;
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="dot" style="background:' + color + '"></span>' +
     '<span class="c-title">' + esc(p.title) + "</span>" +
     '<span class="c-sub">#' + esc(key) + " · " + state + (p.isDraft ? " · draft" : "") +
@@ -450,7 +451,7 @@ function modelCard(m) {
   var key = m.model;
   var open = S.open.fleet === key;
   var color = COLORS[familyOf(m)] || "";
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="dot" style="background:' + color + '"></span>' +
     '<span class="c-title">' + esc(m.pretty || m.model) + "</span>" +
     '<span class="c-sub">' + m.running + " running · " + m.waiting + " waiting · cap " + m.cap + "</span></span>" +
@@ -468,7 +469,7 @@ function modelCard(m) {
 function harnessCard(h) {
   var key = "h:" + h.harness;
   var open = S.open.fleet === key;
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="c-title">' + esc(h.harness) + " harness</span>" +
     '<span class="c-sub">' + h.running + " running · " + h.waiting + " waiting · cap " + h.cap + "</span></span>" +
     '<span class="chev" aria-hidden="true">›</span></button>';
@@ -481,7 +482,7 @@ function harnessCard(h) {
 
 function limitsCard(sm) {
   var open = S.open.fleet === "limits";
-  var head = '<button type="button" class="card-head tap" data-key="limits">' +
+  var head = '<button type="button" class="card-head tap" data-key="limits" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="c-title">Account API caps</span>' +
     '<span class="c-sub">per-key concurrency limits</span></span>' +
     '<span class="chev" aria-hidden="true">›</span></button>';
@@ -526,7 +527,7 @@ function renderNow() {
     // /api/agents returns runs as a LIST of run dicts, not a count; the old
     // `runs + "..."` printed "[object Object]" the moment a run launched.
     var runs = (S.agents && S.agents.runs) || [];
-    sub.textContent = runs.length + " harness runs today · auto-refresh 5s";
+    sub.textContent = runs.length + " harness runs today · auto-refresh 5s · paused while hidden";
   }
   wire("#agents", "now");
 }

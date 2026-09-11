@@ -171,6 +171,7 @@ ok(el("figs").innerHTML.includes('fl">merged today</span>'), "ready github label
 ok(el("agents").innerHTML.includes("GLM 5.3 · implementer"), "agent card shows model and role");
 ok(el("agents").innerHTML.includes("t2 · STALLED"), "stalled agent is flagged");
 ok(el("nowsub").textContent.includes("2 harness runs today"), "harness-run count in the sub line");
+ok(el("nowsub").textContent.includes("paused while hidden"), "sub line keeps the battery hint after render");
 ok(el("alert").innerHTML.includes("Kimi K3 stalled on t2"), "stall surfaces in the alert line");
 ok(el("alert").style.display === "block", "alert is visible while red lines exist");
 ok(el("projects").innerHTML.includes("Demo project"), "project card shows title");
@@ -188,6 +189,7 @@ ok(el("stale").style.display === "none", "stale badge hidden while fresh");
 // ---- 2. progressive disclosure ---------------------------------------------
 run(() => api.toggle("projects", "demo.json"), "toggle() opens a project");
 ok(el("projects").innerHTML.includes('class="card open"'), "open project gets .open");
+ok(el("projects").innerHTML.includes('aria-expanded="true"'), "open card is announced expanded");
 ok(el("projects").innerHTML.includes('class="pbar"'), "open project shows the progress bar");
 ok(el("projects").innerHTML.includes("harness time"), "open project shows harness time");
 ok(el("projects").innerHTML.includes("gate timeout"), "error entries render their error text");
@@ -195,6 +197,7 @@ ok(!el("projects").innerHTML.includes("[object Object]"), "error dicts never str
 ok(el("projects").innerHTML.includes("merged") && el("projects").innerHTML.includes("live"), "open project lists dag nodes");
 run(() => api.toggle("projects", "demo.json"), "toggle() closes the project again");
 ok(!el("projects").innerHTML.includes('class="card open"'), "closed project loses .open");
+ok(el("projects").innerHTML.includes('aria-expanded="false"') && !el("projects").innerHTML.includes('aria-expanded="true"'), "closed card is announced collapsed");
 run(() => api.toggle("now", REQ1), "toggle() opens an agent");
 ok(el("agents").innerHTML.includes("heartbeat"), "open agent shows heartbeat");
 ok(el("agents").innerHTML.includes("t1-implementer-1.jsonl"), "open agent names its transcript file");
