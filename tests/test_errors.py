@@ -701,3 +701,43 @@ class ForeseeablePRConflicts(unittest.TestCase):
     def test_a_task_that_is_not_live_does_not_trigger_it(self):
         self.assertEqual(
             self._run(["static/phone.html"], live_status="merged"), [])
+
+
+class UnknownIsNotAllClear(unittest.TestCase):
+    """A check that cannot run must say so, not report nothing.
+
+    An exception reading the task list left `live` as an empty set, which makes
+    every worktree look not-in-use — including one allocated seconds ago — and
+    with --fix that is a reap of work in progress. "We could not tell" and
+    "there is nothing wrong" are different answers.
+    """
+
+    class _BrokenStore:
+        def code_tasks_all(self):
+            raise RuntimeError("database is locked")
+
+    def test_an_unreadable_task_list_skips_the_orphan_check(self):
+        import audit
+        orig_sh, orig_root = audit._sh, config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = "/wt"
+        audit._sh = lambda *a, **k: (0, "worktree /repo\nworktree /wt/repo/x\n", "")
+        try:
+            f = audit.audit_git(repo="/repo", store=self._BrokenStore())
+        finally:
+            audit._sh, config.WORKTREE_ROOT = orig_sh, orig_root
+        self.assertTrue(any("cannot tell" in x["what"] for x in f))
+        self.assertFalse(any("orphan" in x["what"] for x in f),
+                         "must not call anything orphaned when it cannot tell")
+
+    def test_a_failing_gh_does_not_report_zero_collisions(self):
+        import audit
+        import reconcile
+        orig_sh, orig_live = audit._sh, reconcile.live_runs
+        reconcile.live_runs = lambda: []
+        audit._sh = lambda *a, **k: (1, "", "gh: not authenticated")
+        try:
+            f = audit.audit_pr_collisions(store=None, repo="/repo")
+        finally:
+            audit._sh, reconcile.live_runs = orig_sh, orig_live
+        self.assertTrue(f, "a failed gh must be reported, not silently empty")
+        self.assertIn("could not list", f[0]["what"])

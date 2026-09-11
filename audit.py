@@ -162,13 +162,24 @@ def audit_git(repo=None, store=None):
     # "8 worktrees — CRITICAL" while four of them were in active use. An audit
     # that raises a critical alarm during normal operation is one nobody reads
     # twice, which is the failure this module exists to avoid.
-    live = set()
+    # `live` unknown and `live` empty are NOT the same thing. An exception here
+    # used to yield an empty set, which makes every worktree look not-live —
+    # including one a task allocated seconds ago — and with --fix that is a
+    # reap of work in progress. When we cannot tell, we say so and report
+    # nothing rather than reporting everything.
+    live, live_known = set(), store is not None
     if store is not None:
         try:
             live = {r["id"] for r in store.code_tasks_all()
                     if r.get("status") in ("running", "in_review", "conflict")}
-        except Exception:
-            live = set()
+        except Exception as exc:
+            live_known = False
+            out.append(_finding(
+                "warning", "git", "cannot tell which worktrees are in use",
+                str(exc)[:200],
+                "skipping the orphan check rather than risk reaping live work"))
+    if not live_known:
+        return out
     orphan, risky = [], []
     for t in allocated:
         if Path(t).name in live:
@@ -363,8 +374,15 @@ def audit_pr_collisions(store=None, repo=None):
     out = []
     rc, raw, _ = _sh("gh", "pr", "list", "--state", "open", "--json",
                      "number,headRefName", cwd=repo, timeout=25)
+    if rc != 0:
+        # `gh` failed. Reporting no collisions would be an all-clear we did not
+        # earn, and this check exists precisely to warn before a merge is
+        # refused.
+        return [_finding("info", "prs", "could not list pull requests",
+                         "gh exited non-zero",
+                         "collision warnings are unavailable until gh works")]
     try:
-        prs = json.loads(raw) if rc == 0 and raw.strip() else []
+        prs = json.loads(raw) if raw.strip() else []
     except ValueError:
         prs = []
     if not prs:
