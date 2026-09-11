@@ -35,7 +35,10 @@ function mk(id) {
   const subs = new Map();
   return {
     id: id, className: "", style: {}, onclick: null,
-    set innerHTML(v) { html = String(v); }, get innerHTML() { return html; },
+    // A real innerHTML swap destroys every descendant, so invalidate cached
+    // querySelector results: post-render queries must return fresh elements.
+    set innerHTML(v) { html = String(v); subs.clear(); },
+    get innerHTML() { return html; },
     get textContent() { return html.replace(/<[^>]*>/g, ""); },
     set textContent(v) { html = String(v); },
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
