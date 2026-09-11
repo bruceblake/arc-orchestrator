@@ -1051,8 +1051,24 @@ class ResumingAConflictedTask(unittest.TestCase):
         src = pathlib.Path(code_tasks.__file__).read_text()
         pub = src[src.index("async def publish(ctx):\n            \"\"\"Commit"):]
         pub = pub[:pub.index("async def pr_review")]
-        self.assertIn("if alloc_res is None:", pub)
+        # The sync is now UNCONDITIONAL. Gating it on a resume was already a
+        # narrowing of gating it on the status column, and both were wrong for
+        # the same reason: a task's branch drifts from base whether or not this
+        # run happens to be a resume.
+        self.assertIn("sync_with_base", pub)
+        self.assertNotIn("if alloc_res is None:\n                ok, conflicts", pub)
         self.assertNotIn('prior_status == "conflict" and alloc_res is None', pub)
+
+    def test_the_sync_happens_after_the_commit_not_before(self):
+        """`git merge` refuses to run over local modifications it would
+        overwrite, and at publish time the agent's entire output is still
+        uncommitted in the worktree. Committing second would abort every sync
+        on any task that actually wrote something."""
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        pub = src[src.index("async def publish(ctx):\n            \"\"\"Commit"):]
+        pub = pub[:pub.index("async def pr_review")]
+        self.assertLess(pub.index("head = await gitstore.publish"),
+                        pub.index("await gitstore.sync_with_base"))
 
 
 class ResolvingARealMergeConflict(unittest.TestCase):

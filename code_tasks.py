@@ -952,38 +952,44 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)
-            # A conflict resume already KNOWS the branch does not merge, so
-            # resync here rather than discovering it at pr_merge. Otherwise two
-            # reviewers read a diff and approve it, pr_merge then finds the
-            # conflict, resyncs, and sends the CHANGED diff back for two more
-            # reviewers — four scarce reviewer slots to land one task.
-            # Gated on RESUMING, not on the recorded status. Gating it on
-            # `conflict` looked right and was not: the first resume re-attaches
-            # to the PR and marks the task in_review, so the second resume no
-            # longer remembers it conflicts and sails past the check into a
-            # review of a diff that still cannot merge. Whether a branch merges
-            # is a fact about the branch — ask git, do not consult a status
-            # field that another node overwrote.
-            resynced = False
-            if alloc_res is None:
-                ok, conflicts, note = await gitstore.sync_with_base(
-                    wt, base, keep_conflicts=True)
-                resynced = ok
-                events.emit("task.resynced" if ok else "task.resync_failed",
-                            task=tid, base=base, note=note, files=conflicts[:20])
-                if not ok and conflicts:
-                    # The merge is left in progress with its markers. Hand it to
-                    # an implementer to resolve by editing files; re-attaching
-                    # instead would spend two reviewers on a diff that cannot
-                    # merge, and then land back here unchanged.
-                    return {"published": False, "resolve": True,
-                            "conflicts": conflicts, "base": base}
             impl = results.get(f"implement_{tid}", {})
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
+            # COMMIT FIRST, then sync. `git merge` refuses to run over local
+            # modifications it would overwrite, and at this point the agent's
+            # entire output is uncommitted in the worktree.
             head = await gitstore.publish(
                 wt, f"task({tid}): {t['title']}",
                 {"Harness": impl.get("harness", "?"), "Model": model,
                  "Reviewer": rev, "Task-Id": tid})
+
+            # Sync with the base on EVERY publish, not only on a resume.
+            #
+            # A task branches from base at alloc and opens its PR a median of
+            # 101 minutes later — 13.5 hours at the extreme, measured over this
+            # fleet. Other tasks merge throughout. Nothing reconciled the two
+            # until GitHub refused the merge, by which point two reviewers had
+            # already read a diff against a base that no longer existed.
+            #
+            # Syncing here means the PR is opened against the CURRENT base, so
+            # drift alone can no longer cause a conflict, and a genuine overlap
+            # surfaces before any reviewer is spent on it.
+            ok, conflicts, note = await gitstore.sync_with_base(
+                wt, base, keep_conflicts=True)
+            resynced = ok and bool(note and "already" not in note.lower())
+            if not ok and conflicts:
+                # The merge is left in progress with its markers. Hand it to an
+                # implementer to resolve by editing files; publishing anyway
+                # would spend two reviewers on a diff that cannot merge and
+                # then land back here unchanged.
+                events.emit("task.resync_failed", task=tid, base=base,
+                            note=note, files=conflicts[:20])
+                return {"published": False, "resolve": True,
+                        "conflicts": conflicts, "base": base}
+            if resynced:
+                events.emit("task.resynced", task=tid, base=base, note=note)
+                # The merge commit is new work: re-read HEAD so the push below
+                # sends it even when the agent itself changed nothing.
+                head = head or await gitstore.head(wt)
             if head is None:
                 # No new commit. On a RESUME the branch is already pushed and
                 # its PR already open, so re-attach rather than re-implementing

@@ -593,3 +593,84 @@ class PromotionWithOneBranch(unittest.TestCase):
         self.assertFalse(config.promotion_configured())
         config.BASE_BRANCH = "development"
         self.assertTrue(config.promotion_configured())
+
+
+class DriftConflictsArePreventable(unittest.TestCase):
+    """The conflict class that syncing at publish removes.
+
+    A task branches from base and opens its PR a median of 101 minutes later —
+    13.5 hours at the extreme, measured over this fleet. Other tasks merge into
+    base throughout. If nothing reconciles the two until GitHub refuses the
+    merge, a task whose changes never overlapped anyone's still fails, after
+    two reviewers have read a diff against a base that no longer exists.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.repo = Path(self.dir) / "repo"
+        self.repo.mkdir()
+        self._orig_root, self._orig_base = config.WORKTREE_ROOT, config.BASE_BRANCH
+        config.WORKTREE_ROOT = str(Path(self.dir) / "wt")
+        config.BASE_BRANCH = "main"
+        self.addCleanup(self._restore)
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                    ["config", "user.name", "t"]):
+            subprocess.run(["git", *cmd], cwd=self.repo, check=True, capture_output=True)
+        (self.repo / "theirs.txt").write_text("base line\n")
+        (self.repo / "mine.txt").write_text("original\n")
+        self._commit("init")
+
+    def _restore(self):
+        config.WORKTREE_ROOT, config.BASE_BRANCH = self._orig_root, self._orig_base
+
+    def _commit(self, msg, cwd=None):
+        cwd = cwd or self.repo
+        subprocess.run(["git", "add", "-A"], cwd=cwd, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", msg], cwd=cwd, check=True,
+                       capture_output=True)
+
+    def test_a_task_that_never_overlapped_merges_cleanly_after_a_sync(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        # base moves on in a file the task never touches
+        (self.repo / "theirs.txt").write_text("base line\nsomeone else\n")
+        self._commit("base moved on")
+        # the task edits its own file and commits
+        (wt / "mine.txt").write_text("my work\n")
+        self._commit("task work", cwd=wt)
+        ok, conflicts, _ = asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertTrue(ok)
+        self.assertEqual(conflicts, [])
+        # both changes are present: drift resolved without anyone's help
+        self.assertIn("someone else", (wt / "theirs.txt").read_text())
+        self.assertIn("my work", (wt / "mine.txt").read_text())
+
+    def test_a_genuine_overlap_is_still_reported_not_hidden(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (self.repo / "mine.txt").write_text("base rewrote it\n")
+        self._commit("base touched the same file")
+        (wt / "mine.txt").write_text("task rewrote it\n")
+        self._commit("task work", cwd=wt)
+        ok, conflicts, _ = asyncio.run(
+            gitstore.sync_with_base(wt, "main", keep_conflicts=True))
+        self.assertFalse(ok)
+        self.assertEqual(conflicts, ["mine.txt"])
+
+    def test_head_moves_when_the_sync_creates_a_merge_commit(self):
+        # publish pushes `head`; if the sync's merge commit did not update it,
+        # the reconciled branch would never leave the machine.
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (self.repo / "theirs.txt").write_text("moved\n")
+        self._commit("base moved on")
+        (wt / "mine.txt").write_text("my work\n")
+        self._commit("task work", cwd=wt)
+        before = asyncio.run(gitstore.head(wt))
+        asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertNotEqual(asyncio.run(gitstore.head(wt)), before)
+
+    def test_head_is_readable_and_stable_when_nothing_changed(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        before = asyncio.run(gitstore.head(wt))
+        self.assertTrue(before)
+        asyncio.run(gitstore.sync_with_base(wt, "main"))
+        self.assertEqual(asyncio.run(gitstore.head(wt)), before)

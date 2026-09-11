@@ -472,6 +472,12 @@ async def merge_in_progress(wt):
     return True, [ln.strip() for ln in un.splitlines() if ln.strip()]
 
 
+async def head(wt):
+    """The worktree's current HEAD sha, or None."""
+    rc, out, _ = await _git(["rev-parse", "HEAD"], cwd=Path(wt), check=False)
+    return out.strip() if rc == 0 and out.strip() else None
+
+
 async def sync_with_base(wt, base=None, keep_conflicts=False):
     """Merge the current base into this task's branch, inside its worktree.
 
