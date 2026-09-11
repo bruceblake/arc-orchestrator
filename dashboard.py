@@ -518,6 +518,9 @@ def _usage(store=None, range_key=None, include_series=False):
     which requests ?series=1."""
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
+    cutoff = None
+    if range_key != "all":
+        cutoff = now - {"1h": 3600, "24h": 86400, "7d": 7 * 86400}[range_key]
 
     def new_model(model, family, source):
         return {"model": model, "pretty": _pretty(model), "family": family, "source": source,
@@ -544,7 +547,10 @@ def _usage(store=None, range_key=None, include_series=False):
     inflight, kimi = _collect_inflight(now, store)
 
     ev_lines = _load_event_lines()
-    for line in ev_lines:
+    lines = ev_lines
+    if cutoff is not None:
+        lines = ev_lines[_first_event_at_or_after(ev_lines, cutoff):]
+    for line in lines:
         try:
             e = json.loads(line)
         except Exception:
@@ -635,6 +641,8 @@ def _usage(store=None, range_key=None, include_series=False):
 
     # Backfill opencode tokens from transcripts for pre-plumbing runs.
     for ts, model, toks, ptoks, ctoks in _opencode_token_backfill(store, done_tok_keys):
+        if cutoff is not None and (ts is None or ts < cutoff):
+            continue
         family = config.MODEL_FAMILY.get(model, "harness")
         mod = by_model.setdefault((family, model, "driver:opencode"),
                                   new_model(model, family, "driver:opencode"))
