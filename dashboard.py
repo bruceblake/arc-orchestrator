@@ -2118,6 +2118,143 @@ def _run_project(body):
     return {"pid": proc.pid, "log": log_name, "dry_run": dry_run}, 200
 
 
+# --- Orchestrator chat + repo listing -------------------------------------
+# Rule 6b: the dashboard is unauthenticated, so these routes are deliberately
+# narrow — /api/chat/start accepts a repo ONLY as a byte-identical member of
+# the /api/repos allowlist and spawns one fixed argv; the message text goes
+# into the session jsonl and the model prompt, never into a shell string.
+
+_SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")       # orchchat.SESSION_RE
+_REPO_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+
+
+def _chat_dir():
+    """$ARC_CHAT_DIR, default logs/chat — resolved at call time, same rule
+    as orchchat.chat_dir, so both processes always see the same sessions."""
+    return Path(os.getenv("ARC_CHAT_DIR") or Path.cwd() / "logs" / "chat")
+
+
+def _repos_dir():
+    """$ARC_REPOS_DIR, default ~/repos — the root GET /api/repos scans."""
+    return Path(os.getenv("ARC_REPOS_DIR") or str(Path.home() / "repos")).expanduser()
+
+
+def _git_quick(path, *args):
+    """git stdout with a hard 2 s cap, None on any failure — one wedged or
+    half-built repo must never slow down the whole scan."""
+    try:
+        r = subprocess.run(["git", "-C", str(path), *args],
+                           capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _repo_entry(name, path):
+    branch = _git_quick(path, "rev-parse", "--abbrev-ref", "HEAD")
+    remotes = _git_quick(path, "remote")
+    return {"name": name, "path": str(path),
+            "branch": (branch or "").strip(),
+            "remote": bool((remotes or "").strip())}
+
+
+def _list_repos():
+    """The repo allowlist: this repo first, then every git checkout directly
+    under ARC_REPOS_DIR, sorted by name."""
+    repos = [_repo_entry("arc-orchestrator", config.ROOT)]
+    try:
+        children = sorted((c for c in _repos_dir().iterdir() if c.is_dir()),
+                          key=lambda c: c.name)
+    except OSError:
+        children = []
+    for c in children:
+        if (c / ".git").exists():
+            repos.append(_repo_entry(c.name, c))
+    return repos
+
+
+def _create_repo(body):
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    name = body.get("name")
+    if not isinstance(name, str) or not _REPO_NAME_RE.fullmatch(name):
+        return {"error": "bad repo name (expected ^[a-z0-9][a-z0-9-]{0,40}$)"}, 400
+    path = _repos_dir() / name
+    if path.exists():
+        return {"error": f"{path} already exists", "exists": True}, 409
+    # Local only: git init + one initial commit. No GitHub remote, no push.
+    try:
+        path.mkdir(parents=True)
+        (path / "README.md").write_text(f"# {name}\n", encoding="utf-8")
+        for argv in (["git", "init", "-q", "-b", "main"],
+                     ["git", "add", "README.md"],
+                     ["git", "-c", "user.name=arc-orchestrator",
+                      "-c", "user.email=arc-orchestrator@localhost",
+                      "commit", "-q", "-m", "init"]):
+            r = subprocess.run(argv, cwd=path, capture_output=True, text=True,
+                               timeout=30)
+            if r.returncode != 0:
+                raise RuntimeError(f"{' '.join(argv[:2])} failed: {r.stderr.strip()}")
+    except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)  # a failed repo retries by name
+        return {"error": f"git setup failed: {exc}"}, 500
+    return {"name": name, "path": str(path)}, 200
+
+
+def _chat_key(session):
+    return f"chat:{session}"
+
+
+def _chat_running(session):
+    _prune_registry()  # reaps dead pids, chat entries included
+    return _chat_key(session) in _launch_registry
+
+
+def _chat_start(body):
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    session = body.get("session")
+    if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
+        return {"error": "bad session id (expected ^[a-z0-9][a-z0-9-]{0,39}$)"}, 400
+    message = body.get("message")
+    if not isinstance(message, str) or not 1 <= len(message) <= 8000:
+        return {"error": "message must be a string of 1..8000 characters"}, 400
+    repo = body.get("repo")
+    allowed = {r["path"] for r in _list_repos()}
+    if not isinstance(repo, str) or repo not in allowed:
+        return {"error": "repo is not one of the /api/repos entries"}, 400
+    path = _chat_dir() / f"{session}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"role": "user", "ts": time.time(),
+                            "text": message}) + "\n")
+    if _chat_running(session):
+        return {"error": "a chat turn is already running for this session"}, 409
+    argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py",
+            "chat", "--session", session, "--repo", repo]
+    proc, log_name = _spawn_logged(argv, f"chat-{session}.log")
+    _launch_registry[_chat_key(session)] = {
+        "pid": proc.pid, "log": log_name, "started": time.time(), "kind": "chat"}
+    return {"pid": proc.pid}, 200
+
+
+def _chat_poll(session, since):
+    path = _chat_dir() / f"{session}.jsonl"
+    turns = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line:
+                turns.append(json.loads(line))
+    except (OSError, ValueError):
+        turns = []
+    taskfile = next((t["taskfile"] for t in reversed(turns)
+                     if t.get("role") == "assistant" and t.get("taskfile")), None)
+    return {"turns": turns[since:], "running": _chat_running(session),
+            "taskfile": taskfile}
+
+
 _HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
                     "driver.cap_wait", "inflight.over_cap", "task.failed",
                     "task.conflict", "graph.draining", "run.interrupted")
@@ -2653,6 +2790,18 @@ class Handler(BaseHTTPRequestHandler):
                                           int(q.get("limit", ["40"])[0])))
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
+            if u.path == "/api/repos":
+                return self._json({"repos": _list_repos()})
+            if u.path == "/api/chat/poll":
+                q = parse_qs(u.query)
+                session = q.get("session", [""])[0]
+                if not _SESSION_RE.fullmatch(session):
+                    return self._json({"error": "bad session id"}, 400)
+                try:
+                    since = max(int(q.get("since", ["0"])[0]), 0)
+                except ValueError:
+                    since = 0
+                return self._json(_chat_poll(session, since))
             if u.path == "/api/project":
                 q = parse_qs(u.query)
                 obj, code = _project_detail(Handler.store, q.get("file", [""])[0])
@@ -2776,6 +2925,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/projects/run":
                 obj, code = _run_project(body)
+                return self._json(obj, code)
+            if u.path == "/api/repos/create":
+                obj, code = _create_repo(body)
+                return self._json(obj, code)
+            if u.path == "/api/chat/start":
+                obj, code = _chat_start(body)
                 return self._json(obj, code)
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)
