@@ -197,6 +197,60 @@ def audit_leases(store):
     return out
 
 
+def audit_gates(store=None, tasks_dir=None, repo=None):
+    """Gates that pass WITHOUT the work being done.
+
+    AGENTS.md Rule 4 requires a verify_cmd that fails when the work is wrong. A
+    gate built from `grep -q '<string>' <file>` fails that rule whenever the
+    string is already in the file: the implementer runs, sees nothing to prove,
+    writes nothing, and the task dies as "no changes to publish" — which is
+    exactly how archived-attention failed twice.
+
+    A MERGED task's assertions passing is correct and expected, so those are
+    excluded. Checking them anyway turns 4 real findings into 43 meaningless
+    ones, which is its own kind of lie.
+    """
+    import re
+    root = Path(repo or config.ROOT)
+    tdir = Path(tasks_dir or config.TASKS_DIR)
+    done = set()
+    if store is not None:
+        try:
+            done = {r["id"] for r in store.code_tasks_all()
+                    if r.get("status") == "merged"}
+        except Exception:
+            done = set()
+    out = []
+    for f in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
+        try:
+            proj = json.loads(f.read_text())["project"]
+        except (OSError, ValueError, KeyError):
+            continue
+        if str(root.name) not in str(proj.get("repo", "")):
+            continue
+        for t in proj.get("tasks") or []:
+            if t.get("id") in done:
+                continue
+            cmd = (t.get("verify_cmd") or "").strip()
+            greps = re.findall(r"grep -q[i]* '([^']+)' ([^\s;&|]+)", cmd)
+            checked = [(pat, path) for pat, path in greps if (root / path).exists()]
+            if not checked:
+                continue
+            flag = "-qi" if "grep -qi" in cmd else "-q"
+            passing = [f"{pat} in {path}" for pat, path in checked
+                       if subprocess.run(["grep", flag, pat, str(root / path)],
+                                         capture_output=True).returncode == 0]
+            if len(passing) == len(checked):
+                out.append(_finding(
+                    "warning", "gates",
+                    f"{f.name}::{t['id']} gate passes without the work",
+                    "; ".join(passing[:3]),
+                    "every grep in this verify_cmd already matches the "
+                    "untouched file, so the gate cannot fail — give it an "
+                    "assertion that is FALSE until the task is done"))
+    return out
+
+
 def audit_logs():
     out = []
     p = Path(config.EVENTS_LOG)
@@ -246,6 +300,7 @@ def run(store=None, since_s=86400, with_health=True):
         findings += triage_tasks(store)
         findings += audit_leases(store)
     findings += audit_git(store=store)
+    findings += audit_gates(store)
     findings += audit_logs()
     if with_health:
         findings += audit_health()

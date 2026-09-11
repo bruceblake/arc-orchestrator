@@ -415,3 +415,71 @@ class TheAuditMustNotCryWolf(unittest.TestCase):
         finally:
             reconcile.live_runs = orig
         self.assertTrue(all(f["severity"] == "info" for f in findings))
+
+
+class WeakGateDetection(unittest.TestCase):
+    """A verify_cmd that greps for a string already in the file proves nothing.
+
+    AGENTS.md Rule 4 requires a gate that FAILS when the work is wrong. A gate
+    built from `grep -q '<string>' <file>` fails that rule whenever the string
+    is already present: the implementer sees nothing to prove, writes nothing,
+    and the task dies as "no changes to publish". archived-attention failed
+    exactly that way, twice.
+    """
+
+    class _Store:
+        def __init__(self, merged):
+            self.merged = merged
+
+        def code_tasks_all(self):
+            return [{"id": i, "status": "merged"} for i in self.merged]
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.repo = os.path.join(self.dir, "arc-orchestrator")
+        self.tasks = os.path.join(self.dir, "tasks")
+        os.makedirs(self.repo)
+        os.makedirs(self.tasks)
+        with open(os.path.join(self.repo, "app.py"), "w") as fh:
+            fh.write("def already_here():\n    return 1\n")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+
+    def _taskfile(self, stem, tid, verify):
+        with open(os.path.join(self.tasks, f"{stem}.json"), "w") as fh:
+            json.dump({"project": {"repo": self.repo, "tasks": [
+                {"id": tid, "verify_cmd": verify}]}}, fh)
+
+    def _run(self, merged=()):
+        import audit
+        return audit.audit_gates(self._Store(merged), tasks_dir=self.tasks,
+                                 repo=self.repo)
+
+    def test_a_grep_that_already_matches_is_flagged(self):
+        self._taskfile("p", "t1", "grep -q 'already_here' app.py")
+        f = self._run()
+        self.assertEqual(len(f), 1)
+        self.assertIn("passes without the work", f[0]["what"])
+
+    def test_a_grep_that_does_not_match_yet_is_fine(self):
+        self._taskfile("p", "t1", "grep -q 'not_written_yet' app.py")
+        self.assertEqual(self._run(), [])
+
+    def test_a_merged_tasks_gate_is_not_flagged(self):
+        # Its assertions SHOULD pass now. Flagging them anyway turned 4 real
+        # findings into 43 meaningless ones.
+        self._taskfile("p", "t1", "grep -q 'already_here' app.py")
+        self.assertEqual(self._run(merged={"t1"}), [])
+
+    def test_a_gate_that_runs_tests_is_not_flagged(self):
+        self._taskfile("p", "t1", "./check.sh")
+        self.assertEqual(self._run(), [])
+
+    def test_one_unmatched_grep_is_enough_to_make_the_gate_real(self):
+        self._taskfile("p", "t1",
+                       "grep -q 'already_here' app.py && grep -q 'future' app.py")
+        self.assertEqual(self._run(), [])
+
+    def test_a_grep_against_a_missing_file_is_not_judged(self):
+        self._taskfile("p", "t1", "grep -q 'x' does_not_exist.py")
+        self.assertEqual(self._run(), [])
