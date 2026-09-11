@@ -12,6 +12,7 @@ Usage layers (why a model can appear under more than one source):
 """
 import asyncio
 import errno
+import hmac
 import json
 import logging
 import os
@@ -2674,9 +2675,51 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def _refuse_post(self):
+        """Why this POST must not be acted on, as (status, error) — or None.
+
+        Every POST changes state: it writes a task file, starts or stops a
+        fleet run, opens a pull request. The server listens on every
+        interface and has no login, so what is checked here is the whole of
+        the distance between a browser tab on the wrong website — or any
+        device on the wifi — and a fleet run that pushes to GitHub.
+
+        1. Content-Type must be application/json. A cross-origin request that
+           carries it is not a CORS "simple request": the browser asks this
+           server for permission first (a preflight), this server never
+           grants cross-origin access, so the browser refuses to send it.
+           Without the check a text/plain POST from any page the operator
+           had open went straight through — the body was parsed as JSON no
+           matter what it claimed to be.
+        2. If the browser names an Origin, it must be this server. The
+           dashboard's own pages send their origin, which is the Host they
+           were served from; a page on another site cannot forge that.
+        3. When ARC_DASHBOARD_TOKEN is set, the request must carry it. This
+           is what stands between every other device on the network and the
+           run button.
+        """
+        ctype = (self.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+        if ctype != "application/json":
+            return 415, "POST bodies must be application/json"
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            host = (self.headers.get("Host") or "").strip().lower()
+            if not host or urlparse(origin).netloc.lower() != host:
+                return 403, "cross-origin request refused"
+        token = config.DASHBOARD_TOKEN
+        if token:
+            auth = (self.headers.get("Authorization") or "").strip()
+            given = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+            if not given or not hmac.compare_digest(given.encode(), token.encode()):
+                return 401, "this dashboard requires a token for actions (ARC_DASHBOARD_TOKEN)"
+        return None
+
     def do_POST(self):
         u = urlparse(self.path)
         try:
+            refused = self._refuse_post()
+            if refused:
+                return self._json({"error": refused[1]}, refused[0])
             try:
                 length = int(self.headers.get("Content-Length") or 0)
             except ValueError:
@@ -2765,18 +2808,26 @@ def serve(port=None, db_path=None):
     port = port or config.DASHBOARD_PORT
     db_path = db_path or config.DB_PATH
     Handler.store = Store(db_path)
+    bind = config.DASHBOARD_BIND
     try:
-        httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
+        httpd = ThreadingHTTPServer((bind, port), Handler)
     except OSError as exc:
         if exc.errno == errno.EADDRINUSE:
             print(f"port {port} is already in use -- the dashboard is probably already running.")
             print(f"just open http://localhost:{port} in a browser (or run ./stop.sh, then start it again).")
             raise SystemExit(1)
         raise
-    log.info("dashboard on http://0.0.0.0:%d (db=%s, events=%s)", port, db_path, config.EVENTS_LOG)
+    log.info("dashboard on http://%s:%d (db=%s, events=%s)", bind, port, db_path, config.EVENTS_LOG)
     print(f"dashboard: http://localhost:{port}", flush=True)
-    for ip in _lan_addresses():
+    # Bound to one address: that is the only one worth printing. Bound to
+    # all of them: list the LAN ones, which is what a phone needs.
+    for ip in ([bind] if bind not in ("0.0.0.0", "", "::") else _lan_addresses()):
+        if ip.startswith("127."):
+            continue
         print(f"  from your laptop/phone: http://{ip}:{port}  (small screens: http://{ip}:{port}/phone.html)", flush=True)
+    if not config.DASHBOARD_TOKEN:
+        print("  note: no ARC_DASHBOARD_TOKEN is set — anyone who can reach this address can "
+              "start and stop fleet runs. See README: Who can reach the dashboard.", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

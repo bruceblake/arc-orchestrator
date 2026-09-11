@@ -74,8 +74,28 @@ Server log: `logs/server.log`. Live activity feed the dashboard reads:
 | `/phone.html` | The important bits, laid out for a phone screen |
 | `/usage.html` | Token/request usage per model |
 
-The dashboard is read-only — it only reads `orchestrator.db` and the event log,
-and never touches the model API.
+The pages read `orchestrator.db` and the event log and never touch the model
+API themselves — but the dashboard is **not read-only**. Its buttons create
+task files, start and stop fleet runs, archive projects and open promotion
+PRs, and a fleet run edits repositories and pushes to GitHub.
+
+## Who can reach the dashboard
+
+It listens on **every interface** (so your phone can open it) and has **no
+login**. Out of the box, anyone who can reach the port — every device on the
+wifi, everyone on your Tailscale network — can view everything *and* press
+every button. Two settings in `.env` narrow that:
+
+| Setting | Effect |
+|---|---|
+| `ARC_DASHBOARD_TOKEN=<long random string>` | Every action (POST) must carry the token. The dashboard asks for it once, the first time you press a button, and keeps it in that browser. Viewing stays open. |
+| `ARC_DASHBOARD_BIND=<address>` | Listen on one address only: `127.0.0.1` for this machine alone, or your Tailscale IP (the `100.x.y.z` one `start.sh` prints) so only your own devices can reach it at all. |
+
+Set the token if the machine is on a network you do not fully control; set
+both if it is ever exposed beyond that. Cross-site requests from other
+websites you have open are refused regardless (the server accepts only
+`application/json` from its own origin), so a malicious page cannot press the
+buttons for you — but that protects against a web page, not a neighbour.
 
 ## The research graph
 
@@ -282,6 +302,8 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_MAX_INTEGRATION_ROUNDS` | 3 | wiring_fix ⇄ integration_review cycles |
 | `ARC_REVIEW_PASS_SCORE` | 6.5 | cross-model review score required to ship |
 | `ARC_DASHBOARD_PORT` | 8787 | dashboard port |
+| `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
+| `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
 | `ARC_DRIVER_LEASE_WAIT` | 1800 | max seconds a task waits for a driver lease before failing on capacity |
 | `ARC_DRIVER_CAPACITY_BACKOFF_CAP` | 300 | max capacity-backoff sleep on a harness retry (seconds) |
 | `ARC_BASE_URL` | https://llm-api.arc.vt.edu/api/v1 | ARC API base URL |
@@ -352,7 +374,7 @@ the service evolves. Only `config.py`, `work.py`, and `.env` ever need touching.
 | `store.py` | SQLite persistence: rounds, items, answers, critiques, seeds, builds |
 | `build_work.py` | the Minecraft build graph + verification gauntlet |
 | `events.py` | append-only JSONL event log (contextvars-tagged) |
-| `dashboard.py` + `static/` | read-only live dashboard (desktop, phone, usage pages) |
+| `dashboard.py` + `static/` | live dashboard (desktop, phone, usage pages) and its action endpoints — see *Who can reach the dashboard* |
 | `main.py` | CLI: run / once / build / serve / status / graph / bench / code |
 | `bench.py` | benchmark runner: solvers, scoring (pass@k), report tables |
 | `bench_data.py` | 31-task dataset (humaneval / original / package suites) |

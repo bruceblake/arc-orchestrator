@@ -15,7 +15,27 @@ const AGO = ts => { if (!ts) return ""; const d = Date.now()/1000 - ts;
 // esc() (common.js) does not escape quotes; attr() is the attribute-safe variant
 const attr = s => esc(s).replace(/"/g, "&quot;");
 async function jget(u) { const r = await fetch(u, {cache:"no-store"}); return r.json(); }
-async function jpost(u, body) { const r = await fetch(u, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)}); return {code: r.status, body: await r.json()}; }
+// Every POST changes state (a run starts, a task file is written). When the
+// server is configured with ARC_DASHBOARD_TOKEN it answers 401 until the
+// request carries the token; it is asked for once and kept in this browser.
+const TOKEN_KEY = "arc.dashboard.token";
+function authHeaders() {
+  let t = null;
+  try { t = localStorage.getItem(TOKEN_KEY); } catch (e) { /* storage blocked: ask each time */ }
+  return t ? {"Authorization": "Bearer " + t} : {};
+}
+async function jpost(u, body) {
+  const send = () => fetch(u, {method:"POST", headers:{"Content-Type":"application/json", ...authHeaders()}, body: JSON.stringify(body)});
+  let r = await send();
+  if (r.status === 401) {
+    const t = prompt("This dashboard requires a token for actions (ARC_DASHBOARD_TOKEN):");
+    if (t && t.trim()) {
+      try { localStorage.setItem(TOKEN_KEY, t.trim()); } catch (e) { /* ignore */ }
+      r = await send();
+    }
+  }
+  return {code: r.status, body: await r.json()};
+}
 function chip(status, n) { return `<span class="chip ${status}">${status} ${n}</span>`; }
 const repoShort = r => !r ? "(no repo)" : r.split("/").filter(Boolean).slice(-2).join("/");
 

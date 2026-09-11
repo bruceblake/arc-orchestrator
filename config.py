@@ -81,6 +81,22 @@ SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "30"))
 EVENTS_LOG = os.getenv("ARC_EVENTS_LOG") or str(ROOT / "logs" / "events.jsonl")
 BUILD_OUTPUT_DIR = os.getenv("ARC_BUILD_OUTPUT_DIR") or str(ROOT / "production" / "minecraft")
 DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
+# --- dashboard exposure -----------------------------------------------------
+# The dashboard listens on every interface so a phone on the same wifi can
+# open it; that is the point of it. It has NO login. Every GET is open to
+# whoever can reach the port, and so was every POST — and a POST is not a
+# view: it writes a task file, starts or stops a fleet run, opens a pull
+# request. /api/projects/create takes a verify_cmd the gate later runs as a
+# shell command, and /api/projects/run launches agents that push to GitHub.
+#
+# Two knobs. BIND narrows who can reach the port at all (127.0.0.1 for this
+# machine only; a Tailscale address for your own devices anywhere). TOKEN
+# gates every POST: when set, a request must carry
+# "Authorization: Bearer <token>"; the dashboard asks for it once and keeps
+# it in the browser. GETs stay open either way — the pages are meant to be
+# glanced at from a phone without a login step.
+DASHBOARD_BIND = os.getenv("ARC_DASHBOARD_BIND", "0.0.0.0")
+DASHBOARD_TOKEN = os.getenv("ARC_DASHBOARD_TOKEN", "")
 MAX_MODULE_RETRIES = int(os.getenv("ARC_MAX_MODULE_RETRIES", "3"))
 MAX_INTEGRATION_ROUNDS = int(os.getenv("ARC_MAX_INTEGRATION_ROUNDS", "3"))
 REVIEW_PASS_SCORE = float(os.getenv("ARC_REVIEW_PASS_SCORE", "6.5"))
