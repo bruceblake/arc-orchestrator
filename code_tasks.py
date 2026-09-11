@@ -1168,16 +1168,53 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             return {"merged": True, "pr": number}
 
         async def fail(ctx):
-            reason = ctx.get("results", {}).get(f"gate_{tid}", {})
+            """Terminal failure. Must say WHY, because several paths land here.
+
+            It used to report "exhausted escalation up to <model>" no matter how
+            it was reached. A task that ran out of PR REVIEW ROUNDS was
+            therefore filed as an escalation failure — and pause-when-hidden
+            was recorded as "exhausted escalation up to DeepSeek-V4-Flash" with
+            ZERO escalations, two still permitted and a next tier available.
+            That message sent the reader to audit the escalation config for a
+            bug that was never there.
+            """
+            results = ctx.get("results", {})
+            gate_res = results.get(f"gate_{tid}") or {}
+            rev_res = results.get(f"review_{tid}") or {}
+            pr_res = results.get(f"pr_review_{tid}") or {}
             last = cur_model(ctx)
+            escalations = esc_n(ctx)
+            attempts = ctx.get("runs", {}).get(f"implement_{tid}", 0)
+
+            if pr_res and not pr_res.get("approved"):
+                if pr_res.get("inconclusive"):
+                    why = (f"PR #{pr_res.get('pr')} never reached a verdict: "
+                           f"{config.PR_MAX_INCONCLUSIVE} inconclusive round(s), "
+                           f"reviewers kept crashing")
+                else:
+                    why = (f"PR #{pr_res.get('pr')} rejected after "
+                           f"{config.PR_MAX_ROUNDS} review round(s); last had "
+                           f"{len(pr_res.get('issues') or [])} unresolved issue(s)")
+            elif not gate_res.get("passed", True):
+                why = (f"verify gate still failing after {attempts} attempt(s) "
+                       f"on {last}")
+            elif rev_res and not rev_res.get("pass", True):
+                why = f"pre-merge review still rejecting after {attempts} attempt(s)"
+            elif escalations:
+                why = (f"exhausted escalation: {escalations} escalation(s), "
+                       f"ended on {last}")
+            else:
+                why = (f"no path forward on {last} after {attempts} attempt(s) "
+                       f"(no escalation was taken)")
+
             store.upsert_code_task(taskfile, tid, t["title"], last,
                                    reviewer_for(t, last), "failed",
-                                   error=f"exhausted escalation up to {last}",
-                                   finished=True)
-            events.emit("task.failed", task=tid,
-                        reason=f"exhausted escalation up to {last}")
+                                   error=why[:400], finished=True)
+            events.emit("task.failed", task=tid, reason=why[:400],
+                        model=last, escalations=escalations,
+                        implement_attempts=attempts)
             emit_budget(ctx)
-            return {"failed": True, "gate": reason}
+            return {"failed": True, "gate": gate_res, "reason": why}
 
         chain = {"alloc": alloc, "implement": implement, "gate": gate,
                  "review": review, "escalate": escalate, "publish": publish,
