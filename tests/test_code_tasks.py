@@ -854,3 +854,66 @@ class ResolvingARealMergeConflict(unittest.TestCase):
     def test_a_normal_publish_contributes_no_conflict_feedback(self):
         self.assertEqual(
             code_tasks._rework_feedback("t1", {"publish_t1": {"published": True}}), "")
+
+
+class TerminalFailuresSayWhy(unittest.TestCase):
+    """Several paths reach `fail`, and it reported only one of them.
+
+    pause-when-hidden was recorded as "exhausted escalation up to
+    DeepSeek-V4-Flash" with ZERO escalations taken, two still permitted and a
+    next tier available. It had actually run out of PR review rounds. The
+    message sent the reader to audit the escalation config for a bug that was
+    never there.
+    """
+
+    def _why(self, results, runs=None, escalations=0):
+        """Mirrors fail()'s reason selection over a results dict."""
+        gate_res = results.get("gate_t1") or {}
+        rev_res = results.get("review_t1") or {}
+        pr_res = results.get("pr_review_t1") or {}
+        attempts = (runs or {}).get("implement_t1", 0)
+        if pr_res and not pr_res.get("approved"):
+            if pr_res.get("inconclusive"):
+                return "inconclusive"
+            return "pr-rejected"
+        if not gate_res.get("passed", True):
+            return "gate"
+        if rev_res and not rev_res.get("pass", True):
+            return "review"
+        if escalations:
+            return "escalation"
+        return "no-path"
+
+    def test_running_out_of_pr_rounds_is_not_called_an_escalation_failure(self):
+        self.assertEqual(
+            self._why({"pr_review_t1": {"approved": False, "pr": 9, "issues": ["x"]}}),
+            "pr-rejected")
+
+    def test_reviewers_that_kept_crashing_are_reported_as_inconclusive(self):
+        self.assertEqual(
+            self._why({"pr_review_t1": {"approved": False, "inconclusive": True}}),
+            "inconclusive")
+
+    def test_a_failing_gate_is_reported_as_a_gate_failure(self):
+        self.assertEqual(self._why({"gate_t1": {"passed": False}}), "gate")
+
+    def test_a_rejecting_reviewer_is_reported_as_a_review_failure(self):
+        self.assertEqual(
+            self._why({"gate_t1": {"passed": True}, "review_t1": {"pass": False}}),
+            "review")
+
+    def test_a_genuine_escalation_failure_still_says_so(self):
+        self.assertEqual(self._why({}, escalations=2), "escalation")
+
+    def test_no_escalation_taken_is_not_described_as_exhausting_one(self):
+        # The exact misreport: zero escalations must never read as "exhausted".
+        self.assertEqual(self._why({}, escalations=0), "no-path")
+
+    def test_the_real_fail_node_carries_the_counts(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def fail(ctx):"):]
+        body = body[:body.index("chain = {")]
+        for field in ("escalations=escalations", "implement_attempts=attempts"):
+            self.assertIn(field, body,
+                          "the event must carry the numbers that make the "
+                          "reason checkable")
