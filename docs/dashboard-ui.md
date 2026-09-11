@@ -33,7 +33,7 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 
 | Route | Body | Returns |
 |---|---|---|
-| `/api/projects/create` | `repo` (required, absolute path under `/home/proxyie/`), plus either `goal` (3..2000 chars, Kimi-K3 plans it) or `title` + `tasks` list; optional `overwrite` | `mode: plan` with pid/log/taskfile, or `mode: tasks` with written file name |
+| `/api/projects/create` | `repo` (required, absolute path under `ARC_REPO_ROOT`, default the operator home), plus either `goal` (3..2000 chars, Kimi-K3 plans it) or `title` + `tasks` list; optional `overwrite` | `mode: plan` with pid/log/taskfile, or `mode: tasks` with written file name |
 | `/api/projects/run` | `file` = taskfile name, optional `dry_run` | Spawns `main.py code run [--dry-run]`; pid, log name, `dry_run` flag; 409 if already running |
 
 ## Metrics endpoint

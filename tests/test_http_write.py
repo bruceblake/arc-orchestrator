@@ -86,8 +86,15 @@ class _PostCase(unittest.TestCase):
         self.tmp = Path(self._dir.name)
         self._orig_tasks = config.TASKS_DIR
         self._orig_log = config.EVENTS_LOG
+        self._orig_repo_root = config.REPO_ROOT
         config.TASKS_DIR = str(self.tmp / "tasks")
         config.EVENTS_LOG = str(self.tmp / "events.jsonl")
+        # The fence the dashboard accepts repos from. Pointing it at the
+        # per-test dir is what lets these tests run on any machine: it was
+        # the operator's literal home directory, and the suite could not
+        # pass anywhere else — CI included.
+        config.REPO_ROOT = str(self.tmp / "repos")
+        Path(config.REPO_ROOT).mkdir(parents=True)
         Path(config.TASKS_DIR).mkdir(parents=True)
         self._orig_registry = dict(dashboard._launch_registry)
         dashboard._launch_registry.clear()
@@ -110,6 +117,7 @@ class _PostCase(unittest.TestCase):
             store.conn.close()
         config.TASKS_DIR = self._orig_tasks
         config.EVENTS_LOG = self._orig_log
+        config.REPO_ROOT = self._orig_repo_root
         self._dir.cleanup()
 
     def _fake_spawn(self, argv, log_name):
@@ -140,10 +148,10 @@ class _PostCase(unittest.TestCase):
         return resp
 
     def _make_repo(self, commits=True):
-        """A throwaway repo under /home/proxyie — the only prefix the
+        """A throwaway repo under config.REPO_ROOT — the only prefix the
         dashboard's _valid_repo accepts, so repo validation is exercised
         for real (local git only, never a network remote)."""
-        repo = Path(tempfile.mkdtemp(prefix="arc-qa-http-", dir="/home/proxyie"))
+        repo = Path(tempfile.mkdtemp(prefix="arc-qa-http-", dir=config.REPO_ROOT))
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repo, check=True)
         if commits:
@@ -170,7 +178,7 @@ class HttpWriteCreateEndpoint(_PostCase):
     """/api/projects/create — the only way new work enters the queue.
 
     create validates at POST time on purpose: a bad repo (not under
-    /home/proxyie, not a git repo, no commits on main) would otherwise be
+    REPO_ROOT, not a git repo, no commits on main) would otherwise be
     discovered minutes later inside gitstore.alloc — after Kimi-K3 has
     already spent a full planning run on it. These tests pin that the
     checks fire HERE with actionable messages, and that both modes hand
@@ -245,18 +253,28 @@ class HttpWriteCreateEndpoint(_PostCase):
         self.assertEqual(status, 200)
 
     def test_rejects_repo_outside_the_home_prefix(self):
-        # only /home/proxyie/... is accepted, so a path the dashboard can
-        # never manage is refused instead of failing later in alloc
-        for bad_repo in (None, "/tmp/definitely-not", "relative/repo"):
+        # only config.REPO_ROOT/... is accepted, so a path the dashboard can
+        # never manage is refused instead of failing later in alloc. The
+        # fence is a PATH, not a string prefix: a sibling directory whose
+        # name merely starts with the root's, a traversal back out of it,
+        # and the root itself are all outside.
+        outside = Path(tempfile.mkdtemp(prefix="arc-qa-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        sibling = Path(config.REPO_ROOT + "-evil")
+        sibling.mkdir()
+        self.addCleanup(shutil.rmtree, sibling, ignore_errors=True)
+        for bad_repo in (None, str(outside), "relative/repo", str(sibling),
+                         config.REPO_ROOT,
+                         str(Path(config.REPO_ROOT) / ".." / outside.name)):
             with self.subTest(repo=bad_repo):
                 self._assert_rejected("/api/projects/create", json.dumps({
                     "repo": bad_repo, "title": "T",
                     "tasks": [{"id": "t1", "title": "one", "prompt": "x"}]
                 }).encode("utf-8"),
-                    needle="repo must be an existing absolute path under /home/proxyie")
+                    needle=f"repo must be an existing absolute path under {config.REPO_ROOT}")
 
     def test_rejects_repo_that_is_not_a_git_repository(self):
-        plain = Path(tempfile.mkdtemp(prefix="arc-qa-http-", dir="/home/proxyie"))
+        plain = Path(tempfile.mkdtemp(prefix="arc-qa-http-", dir=config.REPO_ROOT))
         self.addCleanup(shutil.rmtree, plain, ignore_errors=True)
         resp = self._assert_rejected("/api/projects/create", json.dumps({
             "repo": str(plain), "title": "T",

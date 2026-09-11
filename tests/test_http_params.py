@@ -15,7 +15,6 @@ The tests drive dashboard.Handler.do_GET directly on a socket-less request
 so the whole handler path runs without a server.
 """
 import json
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -182,12 +181,16 @@ class HttpParamsTaskDiff(EndpointCase):
     def setUp(self):
         super().setUp()
         Path(config.TASKS_DIR).mkdir(parents=True)
-        # _valid_repo only passes repos under the operator home, so the
-        # throwaway repo lives there (cleaned up on exit) to exercise the
-        # real git lookup.
+        # _valid_repo only passes repos under config.REPO_ROOT, so the fence
+        # is pointed at this test's temp dir and the throwaway repo lives
+        # inside it, to exercise the real git lookup. (It used to live under
+        # the operator's home and these tests skipped on every other machine.)
+        orig_root = config.REPO_ROOT
+        config.REPO_ROOT = str(self.tmp / "repos")
+        Path(config.REPO_ROOT).mkdir(parents=True)
+        self.addCleanup(setattr, config, "REPO_ROOT", orig_root)
         self.repo = Path(tempfile.mkdtemp(prefix="qa-http-params-repo-",
-                                          dir=str(Path.home())))
-        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+                                          dir=config.REPO_ROOT))
         (Path(config.TASKS_DIR) / "proj.json").write_text(json.dumps(
             {"project": {"repo": str(self.repo), "tasks": []}}),
             encoding="utf-8")
@@ -204,14 +207,9 @@ class HttpParamsTaskDiff(EndpointCase):
         self._git("add", "-A")
         self._git("commit", "-q", "-m", "task(t1): add f.txt")
 
-    def _require_fleet_home(self):
-        if not str(self.repo).startswith("/home/proxyie/"):
-            self.skipTest("_valid_repo only accepts repos under /home/proxyie")
-
     def test_merged_task_returns_its_deliverable(self):
         """publish tags commits "task(<id>):" — the diff endpoint is that
         commit's files and summary."""
-        self._require_fleet_home()
         self._commit_task()
         req = self.get("/api/task-diff?file=proj.json&task=t1")
         self.assertEqual(req.status, 200)
@@ -225,7 +223,6 @@ class HttpParamsTaskDiff(EndpointCase):
     def test_task_without_a_commit_reports_not_found_shape(self):
         """A task that never reached publish answers found:false with a
         reason, not a 404 — the drawer shows the reason inline."""
-        self._require_fleet_home()
         self._commit_task()
         req = self.get("/api/task-diff?file=proj.json&task=ghost")
         self.assertEqual(req.status, 200)
@@ -235,7 +232,6 @@ class HttpParamsTaskDiff(EndpointCase):
 
     def test_missing_task_param_is_an_error_not_a_crash(self):
         """No ?task= reaches the lookup as '' — must stay JSON, not a 500."""
-        self._require_fleet_home()
         self._commit_task()
         req = self.get("/api/task-diff?file=proj.json")
         self.assertNotEqual(req.status, 500)
