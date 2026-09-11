@@ -772,6 +772,16 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         async def implement(ctx):
             results = ctx.get("results", {})
+            # Status is set to "running" at alloc and at escalate — and NOWHERE
+            # else. A task that resumes at publish (conflict repair, or
+            # in_review with a PR open) and lands here still reads as
+            # "conflict" in the database while an agent is actively editing its
+            # worktree. That cost me a near-miss: the status said conflict, the
+            # task was mid-rework, and acting on the status would have raced a
+            # live agent through the same merge.
+            store.upsert_code_task(taskfile, tid, t["title"], cur_model(ctx),
+                                   reviewer_for(t, cur_model(ctx)), "running",
+                                   branch=f"task/{tid}")
             feedback = _rework_feedback(tid, results)
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
             model = cur_model(ctx)

@@ -1184,3 +1184,35 @@ class EveryErrorPathCaptures(unittest.TestCase):
         for marker in ('node=f"implement_{tid}"', 'node=f"review_{tid}"'):
             self.assertIn(marker, src,
                           "the crash path must capture with its node name")
+
+
+class StatusMustReflectRealityDuringRework(unittest.TestCase):
+    """A task being actively worked must not read as `conflict`.
+
+    Status was written "running" at alloc and at escalate and nowhere else. A
+    task resuming at publish — conflict repair, or in_review with a PR open —
+    goes straight to implement, so the database still said `conflict` while an
+    agent was editing its worktree. Acting on that status races the agent: it
+    nearly had me resolving the same merge conflict underneath one.
+    """
+
+    def test_implement_marks_the_task_running(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def implement(ctx):"):]
+        body = body[:body.index("async def gate(ctx):")]
+        self.assertIn('"running"', body,
+                      "implement must record that work is happening")
+        self.assertIn("upsert_code_task", body)
+
+    def test_it_records_the_branch_too(self):
+        # A resumed task's row may predate the branch it is now working on.
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def implement(ctx):"):]
+        body = body[:body.index("async def gate(ctx):")]
+        self.assertIn('branch=f"task/{tid}"', body)
+
+    def test_alloc_still_marks_it_running(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def alloc(ctx):"):]
+        body = body[:body.index("async def implement(ctx):")]
+        self.assertIn('"running"', body)
