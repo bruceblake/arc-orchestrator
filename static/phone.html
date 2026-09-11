@@ -2,311 +2,677 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>ARC Phone</title>
+<title>ARC · phone</title>
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0d1117" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f6f8fa" media="(prefers-color-scheme: light)">
 <style>
+/* Palette tokens are the repo's canonical set (same as index.html). */
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
   --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
   --err: #f85149; --purple: #bc8cff; --grey: #484f58;
+  color-scheme: dark light;
+}
+/* Respect the viewer's colour scheme: same tokens, light values. */
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f6f8fa; --panel: #ffffff; --border: #d0d7de; --text: #1f2328;
+    --dim: #57606a; --grey: #8c959f; --accent: #0969da; --ok: #1a7f37;
+    --warn: #9a6700; --err: #cf222e; --purple: #8250df;
+  }
 }
 * { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font: 12.5px/1.4 "SF Mono", "Cascadia Code", Consolas, ui-monospace, monospace;
+  font: 13px/1.5 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
 }
-.strip {
-  position: sticky; top: 0; z-index: 10; background: var(--bg);
-  border-bottom: 1px solid var(--border); max-width: 720px; margin: 0 auto;
-  padding: 7px 10px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
+main { max-width: 640px; margin: 0 auto; padding: 12px 12px 8px; }
+h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
+h1 .stale { display: none; margin-left: 8px; color: var(--warn); font-size: 10px; }
+.sub { color: var(--dim); font-size: 11px; margin: 2px 0 10px; }
+.sec {
+  font-size: 11px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .08em; margin: 14px 0 6px; font-weight: 600;
 }
-.nav { display: flex; flex-basis: 100%; gap: 14px; align-items: center; padding: 2px 0 8px; }
-.nav a { color: var(--dim); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: .3px; white-space: nowrap; }
-.nav a:hover { color: var(--accent); }
-.nav a.on { color: var(--accent); text-decoration: underline; pointer-events: none; cursor: default; }
-.strip .s-group { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
-.strip .s-label { font-size: 9.5px; color: var(--dim); text-transform: uppercase; letter-spacing: .04em; }
-.strip b { font-weight: 700; font-size: 13px; }
-.strip b.g { color: var(--ok); } .strip b.b { color: var(--err); } .strip b.w { color: var(--warn); }
+
+/* Views: one visible at a time, switched by the bottom nav. */
+.view { display: none; }
+.view.on { display: block; }
+
+/* Bottom navigation — the primary phone control. Every hit area is at
+   least 44x44px (see .tap); buttons stretch to fill. */
+.bnav {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 30;
+  display: flex; background: var(--panel); border-top: 1px solid var(--border);
+  padding: 4px 0 calc(4px + env(safe-area-inset-bottom, 0px));
+}
+.bnav button {
+  flex: 1 1 0; margin: 0 4px; border-radius: 10px;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 3px; min-width: 44px; min-height: 48px;
+  background: none; border: 0; color: var(--dim); font: inherit;
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.bnav button .ic { font-size: 16px; line-height: 1; }
+.bnav button.on { color: var(--accent); }
+
+/* Canonical tap-target floor: anything tappable carries class="tap". */
+.tap { min-width: 44px; min-height: 44px; }
+
+/* Now view: figure cards, label above value, value carries the colour. */
+.figs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 0 0 10px; }
+.fig { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px 8px; }
+.fig .fl { display: block; font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
+.fig .fv { font-size: 26px; font-weight: 700; line-height: 1.25; }
+
+/* Red-state banner. */
+.alert {
+  display: none; border: 1px solid var(--err); color: var(--err);
+  background: var(--panel); border-radius: 12px; padding: 8px 12px;
+  font-size: 11.5px; margin: 0 0 10px;
+}
+.alert div { overflow-wrap: anywhere; }
+
+/* Cards: stacked full-width, one expanded at a time (progressive
+   disclosure). The head is a real <button> so it is focusable and named. */
+.stack { display: grid; gap: 8px; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.card-head {
+  display: flex; width: 100%; align-items: center; gap: 8px;
+  padding: 9px 12px; min-width: 44px; min-height: 48px;
+  background: none; border: 0; color: var(--text); font: inherit;
+  text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
+}
+.card-head .cmain { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
+.c-title { font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-sub { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chev { flex: 0 0 auto; color: var(--dim); font-size: 14px; transition: transform .15s ease; }
+.card.open .chev { transform: rotate(90deg); }
+.card-body { display: none; border-top: 1px solid var(--border); padding: 10px 12px 12px; font-size: 12px; }
+.card.open .card-body { display: grid; gap: 6px; }
+.kv { display: flex; gap: 8px; align-items: baseline; }
+.kv .k { flex: 0 0 92px; color: var(--dim); }
+.kv .v { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* Live transcript tail inside an expanded agent card. */
+.tx {
+  margin: 0; padding: 6px 0 0; max-height: 160px; overflow: auto;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font: 10.5px/1.4 inherit; color: var(--dim);
+}
+
+/* Bits inside cards. */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .chip {
-  display: inline-block; font-size: 10px; padding: 0 6px; border-radius: 7px;
-  border: 1px solid; line-height: 16px; margin: 0 2px;
+  display: inline-block; border: 1px solid var(--border); border-radius: 999px;
+  padding: 0 8px; font-size: 10.5px; color: var(--dim); margin-right: 4px;
 }
-#s-stale {
-  font-size: 10px; color: var(--err); border: 1px solid var(--err);
-  border-radius: 7px; padding: 0 6px; line-height: 16px;
-}
-main { padding: 8px; display: grid; gap: 8px; max-width: 720px; margin: 0 auto; }
-.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
-.panel h2 {
-  font-size: 10px; margin: 0; padding: 8px 12px; color: var(--dim);
-  text-transform: uppercase; letter-spacing: .06em; border-bottom: 1px solid var(--border);
-  display: flex; align-items: center; gap: 6px;
-}
-.panel h2 .cnt { margin-left: auto; color: var(--text); }
-.empty { color: var(--dim); font-size: 11.5px; padding: 10px 12px; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; }
-@keyframes pulse { 50% { opacity: .3; } }
-
-.agent { border-bottom: 1px solid var(--border); }
-.agent:last-child { border-bottom: none; }
-.a-head {
-  display: flex; align-items: center; gap: 6px; padding: 9px 10px;
-  min-height: 38px; cursor: pointer; -webkit-tap-highlight-color: transparent;
-}
-.a-head:hover { background: #1c2128; }
-.a-head .m { font-weight: 700; font-size: 12px; flex: 0 0 auto; }
-.a-head .role { color: var(--dim); font-size: 10.5px; flex: 0 0 auto; }
-.a-head .task { color: var(--accent); font-size: 11px; overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
-.a-head .att { color: var(--warn); font-size: 10.5px; flex: 0 0 auto; }
-.a-head .stall { color: var(--err); border: 1px solid var(--err); font-size: 9px; font-weight: 700; padding: 0 3px; border-radius: 3px; flex: 0 0 auto; }
-.a-head .hb { color: var(--dim); font-size: 10.5px; flex: 0 0 auto; }
-.a-head .elp { color: var(--dim); font-size: 11px; flex: 0 0 auto; }
-.a-head .chev { color: var(--dim); font-size: 11px; flex: 0 0 auto; }
-.a-tx { background: #0d1117; border-top: 1px solid var(--border); }
-.a-tx .tx-meta { font-size: 10px; color: var(--dim); padding: 5px 10px 0; }
-.a-tx .tx-body {
-  margin: 0; padding: 6px 10px 10px; font-size: 10.5px; white-space: pre-wrap;
-  word-break: break-all; max-height: 220px; overflow: auto; color: var(--text);
+.chip.hot { color: var(--err); border-color: var(--err); }
+.pbar { height: 6px; border-radius: 3px; background: var(--grey); overflow: hidden; margin: 2px 0 4px; }
+.pbar i { display: block; height: 100%; background: var(--ok); }
+a { color: var(--accent); text-decoration: none; }
+.empty {
+  color: var(--dim); font-size: 12px; text-align: center;
+  border: 1px dashed var(--border); border-radius: 12px; padding: 14px 8px;
 }
 
-.task {
-  display: flex; align-items: center; gap: 7px; padding: 8px 10px;
-  min-height: 36px; border-bottom: 1px solid var(--border);
-}
-.task:last-child { border-bottom: none; }
-.task .tname { font-size: 11.5px; color: var(--accent); overflow: hidden; text-overflow: ellipsis; flex: 1 1 auto; min-width: 0; }
-.task .tmodel { font-size: 10px; flex: 0 0 auto; }
-.task .tstate { font-size: 9.5px; text-transform: uppercase; flex: 0 0 auto; }
-.foot { color: var(--dim); font-size: 10px; text-align: center; padding: 6px; }
-.foot a { color: var(--accent); text-decoration: none; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Keyboard users must be able to see focus. */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
 <body>
-<header class="strip">
-  <nav class="nav">
-    <a href="/">Projects</a>
-    <a href="/usage.html">Usage</a>
-    <a class="on" href="/phone.html">Phone</a>
-  </nav>
-  <div class="s-group"><span class="s-label">agents</span><b id="s-agents">0</b></div>
-  <span id="s-chips"></span>
-  <div class="s-group"><span class="s-label">tok/1h</span><b id="s-tok">–</b></div>
-  <span id="s-fleet" hidden></span>
-  <div class="s-group"><span class="s-label">merged</span><b id="s-merged" class="g">0</b></div>
-  <div class="s-group"><span class="s-label">failed</span><b id="s-failed" class="b">0</b></div>
-  <span id="s-stale" hidden>stale</span>
-</header>
 <main>
-  <section class="panel">
-    <h2>Agents running now <span class="cnt" id="ag-cnt"></span></h2>
-    <div id="agents"><div class="empty">loading…</div></div>
-  </section>
-  <section class="panel">
-    <h2>Tasks <span class="cnt" id="task-cnt"></span></h2>
-    <div id="tasks"><div class="empty">loading…</div></div>
-  </section>
-  <div class="foot">auto-refresh 5s · <a href="/">flows</a> · <a href="/usage.html">usage</a></div>
+
+<section id="view-now" class="view on" aria-label="Now">
+  <h1>Now <span id="stale" class="stale">stale data</span></h1>
+  <p class="sub" id="nowsub">auto-refresh 5s · paused while hidden</p>
+  <div class="figs" id="figs"></div>
+  <div class="alert" id="alert" role="status"></div>
+  <h2 class="sec">Agents</h2>
+  <div class="stack" id="agents"></div>
+</section>
+
+<section id="view-projects" class="view" aria-label="Projects">
+  <h1>Projects</h1>
+  <p class="sub" id="projsub">tap a project to expand · one open at a time</p>
+  <div class="stack" id="projects"></div>
+</section>
+
+<section id="view-prs" class="view" aria-label="Pull requests">
+  <h1>Pull requests</h1>
+  <p class="sub" id="prssub">github status unavailable</p>
+  <div class="stack" id="prs"></div>
+</section>
+
+<section id="view-fleet" class="view" aria-label="Fleet">
+  <h1>Fleet</h1>
+  <p class="sub" id="fleetsub">queue status unavailable</p>
+  <div class="stack" id="fleet"></div>
+</section>
+
 </main>
+
+<nav class="bnav" aria-label="Primary">
+  <button type="button" id="nav-now" class="tap on"><span class="ic" aria-hidden="true">◉</span>Now</button>
+  <button type="button" id="nav-projects" class="tap"><span class="ic" aria-hidden="true">▦</span>Projects</button>
+  <button type="button" id="nav-prs" class="tap"><span class="ic" aria-hidden="true">⇄</span>PRs</button>
+  <button type="button" id="nav-fleet" class="tap"><span class="ic" aria-hidden="true">☰</span>Fleet</button>
+</nav>
 
 <script src="/common.js"></script>
 <script>
 "use strict";
-const $ = s => document.getElementById(s);
-function familyOf(model) {
-  const m = String(model || '').toLowerCase();
-  if (m.includes('kimi')) return 'kimi';
-  if (m.includes('glm')) return 'glm';
-  if (m.includes('gpt-oss')) return 'gpt-oss';
-  if (m.includes('deepseek')) return 'deepseek';
-  return 'harness';
+// phone.html - small-screen monitoring surface for the ARC orchestrator.
+// Reads only the five existing JSON endpoints; polling pauses while the
+// tab is hidden; one card expanded per view; tappables are >= 44x44 px.
+
+var POLL_MS = 5000;
+
+// Transcript tail cache: req_id -> {text, total}, filled by pollTx().
+var TX = {};
+
+// Scroll offset of each open transcript pane, req_id -> px. The 5s poll
+// rebuilds the agents stack wholesale; without saving and restoring
+// scrollTop, every cycle throws a reader of a live tail back to the top.
+var txScroll = {};
+
+var S = {
+  view: "now",
+  agents: null,
+  projects: null,
+  gh: null,
+  queue: null,
+  summary: null,
+  stale: false,
+  open: { now: "", projects: "", prs: "", fleet: "" }
+};
+
+var VIEWIDS = ["now", "projects", "prs", "fleet"];
+
+function $(s) {
+  return document.getElementById(s.startsWith("#") ? s.slice(1) : s);
 }
-const colorOf = a => COLORS[a.family] || COLORS[familyOf(a.model)] || COLORS.harness;
-const baseOf = t => (t || '').replace(/-x\d+$/, '');
-const attOf = t => { const m = (t || '').match(/-x(\d+)$/); return m ? +m[1] : null; };
 
-const state = {agents: [], projects: [], tok1h: 0, fleet: null, fleetTried: false,
-               expanded: null, tx: {}, txScroll: {}, stale: false};
-const akey = a => a.req_id || (a.model + '|' + a.role + '|' + a.task);
-const agentByKey = k => state.agents.find(a => akey(a) === k);
+function familyOf(x) {
+  if (!x) return "";
+  if (x.family) return x.family;
+  var m = String(x.model || "").toLowerCase();
+  if (m.indexOf("kimi") >= 0) return "kimi";
+  if (m.indexOf("glm") >= 0) return "glm";
+  if (m.indexOf("gpt-oss") >= 0) return "gpt-oss";
+  if (m.indexOf("deepseek") >= 0) return "deepseek";
+  return "";
+}
 
-async function j(url) {
-  const r = await fetch(url, {cache: 'no-store'});
-  if (!r.ok) throw new Error(r.status);
-  return r.json();
+function nowOf() {
+  var n = S.gh && S.gh.now;
+  return n ? n * 1000 : Date.now();
+}
+
+function ageSec(ts) {
+  if (!ts) return 0;
+  var ms = nowOf() - new Date(ts).getTime();
+  return ms > 0 ? ms / 1000 : 0;
 }
 
 function allNodes() {
-  const out = [];
-  for (const p of state.projects)
-    for (const n of ((p.dag && p.dag.nodes) || []))
-      out.push({id: n.id, title: n.title || n.id, model: n.model, status: n.status, live: !!n.live});
+  var out = [];
+  var ps = S.projects || [];
+  for (var i = 0; i < ps.length; i++) {
+    var ns = (ps[i].dag && ps[i].dag.nodes) || [];
+    for (var j = 0; j < ns.length; j++) out.push(ns[j]);
+  }
   return out;
 }
-function rank(n) {
-  if (n.status === 'running' || n.live) return 0;
-  if (n.status === 'pending') return 1;
-  if (n.status === 'conflict') return 2;
-  if (n.status === 'failed') return 3;
-  return 4;
-}
 
-function agentChips() {
-  const seen = {};
-  for (const a of state.agents) { const m = short(a.pretty || a.model); if (!seen[m]) seen[m] = colorOf(a); }
-  return Object.entries(seen).map(([m, c]) => `<span class="chip" style="color:${c};border-color:${c}">${esc(m)}</span>`).join('');
-}
-
-function renderStrip() {
-  $('s-agents').textContent = state.agents.length;
-  $('s-chips').innerHTML = agentChips();
-  $('s-tok').textContent = fmt(state.tok1h);
-  let merged = 0, failed = 0;
-  for (const n of allNodes()) {
-    if (n.status === 'merged') merged++;
-    else if (n.status === 'failed' || n.status === 'conflict') failed++;
+function mergedToday() {
+  if (S.gh && S.gh.ready) {
+    var prs = S.gh.prs || [];
+    var d = new Date();
+    d.setHours(0, 0, 0, 0);
+    var n = 0;
+    for (var i = 0; i < prs.length; i++) {
+      if (prs[i].mergedAt && new Date(prs[i].mergedAt).getTime() >= d.getTime()) n++;
+    }
+    return n;
   }
-  $('s-merged').textContent = merged;
-  $('s-failed').textContent = failed;
-  const fl = $('s-fleet');
-  if (state.fleet && state.fleet.totals && state.fleet.totals.tokens != null) {
-    fl.hidden = false;
-    fl.innerHTML = `<div class="s-group"><span class="s-label">alltime</span><b>${fmt(state.fleet.totals.tokens)}</b></div>`;
-  } else fl.hidden = true;
-  $('s-stale').hidden = !state.stale;
+  var ns = allNodes();
+  var m = 0;
+  for (var k = 0; k < ns.length; k++) {
+    if (ns[k].status === "merged") m++;
+  }
+  return m;
 }
 
-function renderAgents() {
-  const list = $('agents');
-  if (state.expanded && !agentByKey(state.expanded)) state.expanded = null;
-  $('ag-cnt').textContent = state.agents.length ? '(' + state.agents.length + ')' : '';
-  if (!state.agents.length) { list.innerHTML = '<div class="empty">nothing running</div>'; return; }
-  list.innerHTML = state.agents.map(a => {
-    const k = akey(a);
-    const open = state.expanded === k;
-    const c = colorOf(a);
-    const att = attOf(a.task);
-    return `<div class="agent" data-key="${esc(k)}">
-      <div class="a-head">
-        <span class="dot" style="background:${c}${open ? ';animation:pulse 1.2s infinite' : ''}"></span>
-        <span class="m" style="color:${c}">${esc(short(a.pretty || a.model))}</span>
-        <span class="role">${esc(a.role || a.purpose || '')}</span>
-        <span class="task" title="${esc(a.task || '')}">${esc(baseOf(a.task))}</span>
-        ${att ? `<span class="att">×${att}</span>` : ''}
-        ${a.stalled ? '<span class="stall">STALLED</span>' : ''}
-        <span class="hb">${a.last_event_s != null ? 'hb ' + tick(a.last_event_s) : 'starting'}</span>
-        <span class="elp">${(a.elapsed_s || 0).toFixed(0)}s</span>
-        <span class="chev">${open ? '▾' : '▸'}</span>
-      </div>
-      <div class="a-tx" hidden>
-        <div class="tx-meta"></div>
-        <pre class="tx-body"></pre>
-      </div>
-    </div>`;
-  }).join('');
-  list.querySelectorAll('.agent').forEach(el => {
-    el.querySelector('.a-head').onclick = () => toggleAgent(el.dataset.key);
-  });
-  if (state.expanded) renderExpanded(state.expanded);
+function failedCount() {
+  var ns = allNodes();
+  var n = 0;
+  for (var i = 0; i < ns.length; i++) {
+    var st = ns[i].status;
+    if (st === "failed" || st === "conflict") n++;
+  }
+  return n;
 }
 
-function toggleAgent(k) {
-  state.expanded = state.expanded === k ? null : k;
-  renderAgents();
-  if (state.expanded) pollTranscript(state.expanded);
+function redLines() {
+  var out = [];
+  if (S.stale) out.push("data stale - refresh failing");
+  var ag = (S.agents && S.agents.agents) || [];
+  for (var i = 0; i < ag.length; i++) {
+    if (ag[i].stalled) out.push(short(ag[i].model) + " stalled on " + (ag[i].task || "?"));
+  }
+  var f = failedCount();
+  if (f > 0) out.push(f + " failed/conflict node" + (f > 1 ? "s" : ""));
+  if (S.gh && S.gh.ready) {
+    var prs = S.gh.prs || [];
+    for (var j = 0; j < prs.length; j++) {
+      if (prs[j].stranded) out.push("PR #" + prs[j].number + " stranded");
+    }
+  }
+  if (out.length > 6) out = out.slice(0, 6);
+  return out;
 }
 
-function fmtLines(lines) {
-  return lines.map(l => {
+function kv(k, v) {
+  var val = v == null ? "-" : v;
+  return '<div class="kv"><span class="k">' + esc(k) + '</span><span class="v">' + val + "</span></div>";
+}
+
+function fig(label, value, color) {
+  return '<div class="fig"><span class="fl">' + esc(label) + '</span><span class="fv" style="color:' +
+    (color || "") + '">' + value + "</span></div>";
+}
+
+function agentCard(a) {
+  var fam = familyOf(a);
+  var color = COLORS[fam] || "";
+  var role = a.role || "";
+  var task = a.task || "";
+  var hb = a.last_event_s != null ? tick(a.last_event_s) + " ago" : "starting";
+  var el = a.elapsed_s != null ? tick(a.elapsed_s) : "";
+  var open = S.open.now === a.req_id;
+  var body = "";
+  if (open) {
+    body = '<div class="card-body">' +
+      kv("role", esc(role)) +
+      kv("task", esc(task)) +
+      kv("elapsed", el) +
+      kv("heartbeat", hb) +
+      kv("transcript", a.transcript ? esc(a.transcript) : "-") +
+      (open && a.transcript ? txTail(a) : "") +
+      "</div>";
+  }
+  return '<div class="card' + (open ? " open" : "") + '">' +
+    '<button type="button" class="card-head tap" data-key="' + esc(a.req_id) +
+    '" aria-expanded="' + open + '">' +
+    '<span class="cmain"><span class="dot" style="background:' + (a.stalled ? "#f85149" : color) + '"></span>' +
+    '<span class="c-title">' + esc(short(a.model)) + " · " + esc(role) + "</span>" +
+    '<span class="c-sub">' + esc(task) + (a.stalled ? " · STALLED" : "") + "</span></span>" +
+    '<span class="chev" aria-hidden="true">›</span></button>' + body + "</div>";
+}
+
+// Transcript lines arrive as JSONL harness records; render the readable bits.
+function fmtTxLines(lines) {
+  var out = [];
+  for (var i = 0; i < lines.length; i++) {
+    var l = lines[i];
     try {
-      const o = JSON.parse(l);
-      if (o.type === 'text') return (o.part && o.part.text) || '';
-      if (o.type === 'step_finish') return '— step (' + ((o.part && o.part.tokens && o.part.tokens.total) || '?') + ' tok)';
-      if (o.type === 'tool_use') return '🔧 ' + ((o.part && o.part.tool) || 'tool');
-      return o.type;
-    } catch (e) { return l.slice(0, 300); }
-  }).join('\n');
-}
-
-function renderExpanded(k) {
-  let row = null;
-  document.querySelectorAll('#agents .agent').forEach(el => { if (el.dataset.key === k) row = el; });
-  if (!row) return;
-  const open = state.expanded === k;
-  const tx = row.querySelector('.a-tx');
-  tx.hidden = !open;
-  row.querySelector('.chev').textContent = open ? '▾' : '▸';
-  if (!open) return;
-  const cached = state.tx[k];
-  const meta = row.querySelector('.tx-meta');
-  const body = row.querySelector('.tx-body');
-  if (cached) {
-    meta.textContent = cached.lines + ' lines';
-    body.textContent = cached.text;
-    body.scrollTop = state.txScroll[k] || 0;
+      var o = JSON.parse(l);
+      if (o.type === "text") out.push((o.part && o.part.text) || "");
+      else if (o.type === "step_finish") out.push("- step (" + ((o.part && o.part.tokens && o.part.tokens.total) || "?") + " tok)");
+      else if (o.type === "tool_use") out.push("tool: " + ((o.part && o.part.tool) || "tool"));
+      else out.push(String(o.type));
+    } catch (e) { out.push(String(l).slice(0, 300)); }
   }
-  body.onscroll = () => { state.txScroll[k] = body.scrollTop; };
+  return out.join("\n");
 }
 
-async function pollTranscript(k) {
-  const a = agentByKey(k);
-  if (!a || !a.transcript) return;
+function txTail(a) {
+  var t = TX[a.req_id];
+  return '<pre class="tx">' + esc(t ? t.text : "loading transcript...") + "</pre>";
+}
+
+// Run fn() (the agents-stack rebuild) without losing the open transcript
+// pane's scroll position: capture before the innerHTML swap, restore after.
+function keepTxScroll(fn) {
+  var open = S.open.now;
+  var box = $("#agents");
+  var pre = open && box ? box.querySelector(".card.open .tx") : null;
+  if (pre) txScroll[open] = pre.scrollTop;
+  fn();
+  var post = open && box ? box.querySelector(".card.open .tx") : null;
+  if (post && txScroll[open]) post.scrollTop = txScroll[open];
+}
+
+// The dashboard serves transcripts only via /api/transcript - fetch the tail
+// inline rather than linking the bare filename (which 404s).
+async function pollTx(a) {
+  var key = a.req_id;
   try {
-    const d = await j('/api/transcript?file=' + encodeURIComponent(a.transcript) + '&tail=60');
-    state.tx[k] = {text: fmtLines(d.lines || []), lines: d.total_lines};
-    renderExpanded(k);
-  } catch (e) {}
+    var d = await j("/api/transcript?file=" + encodeURIComponent(a.transcript) + "&tail=40");
+    TX[key] = { text: fmtTxLines(d.lines || []), total: d.total_lines || 0 };
+  } catch (e) {
+    TX[key] = { text: "transcript unavailable", total: 0 };
+  }
+  if (S.open.now === key) renderNow();
 }
 
-function renderTasks() {
-  const list = $('tasks');
-  const rows = allNodes().sort((a, b) => rank(a) - rank(b) || String(a.id).localeCompare(String(b.id))).slice(0, 80);
-  $('task-cnt').textContent = rows.length ? '(' + rows.length + ')' : '';
-  if (!rows.length) { list.innerHTML = '<div class="empty">no tasks yet</div>'; return; }
-  list.innerHTML = rows.map(t => {
-    const c = STATUSC[t.status] || STATUSC.pending;
-    return `<div class="task" title="${esc(t.title)}">
-      <span class="dot" style="background:${c}${(t.status === 'running' || t.live) ? ';animation:pulse 1.2s infinite' : ''}"></span>
-      <span class="tname">${esc(t.id)}</span>
-      ${t.model ? `<span class="tmodel" style="color:${COLORS[familyOf(t.model)] || 'var(--dim)'}">${esc(short(t.model))}</span>` : ''}
-      <span class="tstate" style="color:${c}">${esc(t.status)}</span>
-    </div>`;
-  }).join('');
+function refreshTx() {
+  var ag = (S.agents && S.agents.agents) || [];
+  for (var i = 0; i < ag.length; i++) {
+    if (ag[i].req_id === S.open.now && ag[i].transcript) pollTx(ag[i]);
+  }
 }
 
-async function tryFleet() {
-  state.fleetTried = true;
-  try {
-    const d = await j('/api/fleet');
-    if (d && d.totals && d.totals.tokens != null) { state.fleet = d; renderStrip(); }
-  } catch (e) {}
+function projectCard(p) {
+  var key = p.file;
+  var open = S.open.projects === key;
+  var done = (p.progress && p.progress.done) || 0;
+  var total = (p.progress && p.progress.total) || 0;
+  var pct = total > 0 ? Math.round((done / total) * 100) : 0;
+  var act = p.last_activity ? tick(ageSec(p.last_activity)) + " ago" : "no activity";
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+    '<span class="cmain"><span class="c-title">' + esc(p.title || p.file) + "</span>" +
+    '<span class="c-sub">' + esc(p.file) + " · " + done + "/" + total +
+    (p.active ? " · running" : " · " + act) + "</span></span>" +
+    '<span class="chev" aria-hidden="true">›</span></button>';
+  var body = "";
+  if (open) {
+    var st = p.statuses || {};
+    var chips = Object.keys(st).map(function (k) {
+      var hot = k === "failed" || k === "conflict";
+      return '<span class="chip' + (hot ? " hot" : "") + '">' + esc(k) + " " + st[k] + "</span>";
+    }).join("");
+    var ns = (p.dag && p.dag.nodes) || [];
+    var rows = "";
+    for (var i = 0; i < ns.length; i++) {
+      rows += '<div class="kv"><span class="k">' +
+        '<span class="dot" style="background:' + (STATUSC[ns[i].status] || STATUSC.pending) + '"></span>' +
+        esc(ns[i].id) + "</span>" +
+        '<span class="v">' + esc(ns[i].status) + (ns[i].live ? " · live" : "") + "</span></div>";
+    }
+    body = '<div class="card-body">' +
+      kv("progress", done + " / " + total + " (" + pct + "%)") +
+      '<div class="pbar"><i style="width:' + pct + '%"></i></div>' +
+      '<div class="chips">' + chips + "</div>" +
+      rows +
+      kv("models", esc((p.models || []).map(short).join(", "))) +
+      kv("reviewers", esc((p.reviewers || []).join(", "))) +
+      kv("tokens", fmtK(p.tokens)) +
+      kv("harness time", tick(p.seconds)) +
+      (p.errors && p.errors.length ? kv("errors", esc(p.errors.map(function(e) {
+        return e && typeof e === "object" ? (e.error || e.id || e.status || "?") : String(e);
+      }).join(" · "))) : "") +
+      "</div>";
+  }
+  return '<div class="card' + (open ? " open" : "") + '">' + head + body + "</div>";
+}
+function prCard(p) {
+  var key = String(p.number);
+  var open = S.open.prs === key;
+  var state = esc(String(p.state || "OPEN").toUpperCase());
+  var color = state === "MERGED" ? "var(--purple)" : (state === "CLOSED" ? "var(--grey)" : "var(--accent)");
+  var ap = (p.approvals || []).length;
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+    '<span class="cmain"><span class="dot" style="background:' + color + '"></span>' +
+    '<span class="c-title">' + esc(p.title) + "</span>" +
+    '<span class="c-sub">#' + esc(key) + " · " + state + (p.isDraft ? " · draft" : "") +
+    " · +" + fmtK(p.additions) + " -" + fmtK(p.deletions) +
+    (ap ? " · ok " + ap : "") + (p.stranded ? " · stranded" : "") + "</span></span>" +
+    '<span class="chev" aria-hidden="true">›</span></button>';
+  var body = "";
+  if (open) {
+    var rounds = p.rounds || [];
+    var rrows = "";
+    for (var i = 0; i < rounds.length; i++) {
+      var r = rounds[i];
+      var verdict = r.approved ? "approved" : (r.crashed ? "crashed" :
+        (r.inconclusive ? "inconclusive" : "changes requested"));
+      rrows += kv("round " + r.round, verdict +
+        (r.issues > 0 ? " · " + r.issues + " issues" : ""));
+    }
+    body = '<div class="card-body">' +
+      kv("branch", esc(p.headRefName) + " → " + esc(p.baseRefName)) +
+      kv("task", p.task ? esc(p.task) : "-") +
+      kv("approvals", esc((p.approvals || []).join(", "))) +
+      kv("reviewers", esc((p.reviewers || []).join(", "))) +
+      rrows +
+      (p.mergedAt ? kv("merged", tick(ageSec(p.mergedAt)) + " ago") : "") +
+      kv("link", '<a href="' + esc(p.url) + '" target="_blank" rel="noopener">open on github</a>') +
+      "</div>";
+  }
+  return '<div class="card' + (open ? " open" : "") + '">' + head + body + "</div>";
+}
+
+function modelCard(m) {
+  var key = m.model;
+  var open = S.open.fleet === key;
+  var color = COLORS[familyOf(m)] || "";
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+    '<span class="cmain"><span class="dot" style="background:' + color + '"></span>' +
+    '<span class="c-title">' + esc(m.pretty || m.model) + "</span>" +
+    '<span class="c-sub">' + m.running + " running · " + m.waiting + " waiting · cap " + m.cap + "</span></span>" +
+    '<span class="chev" aria-hidden="true">›</span></button>';
+  var body = "";
+  if (open) {
+    body = '<div class="card-body">' +
+      kv("free slots", m.free) +
+      kv("reviewers waiting", m.reviewers_waiting) +
+      "</div>";
+  }
+  return '<div class="card' + (open ? " open" : "") + '">' + head + body + "</div>";
+}
+
+function harnessCard(h) {
+  var key = "h:" + h.harness;
+  var open = S.open.fleet === key;
+  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+    '<span class="cmain"><span class="c-title">' + esc(h.harness) + " harness</span>" +
+    '<span class="c-sub">' + h.running + " running · " + h.waiting + " waiting · cap " + h.cap + "</span></span>" +
+    '<span class="chev" aria-hidden="true">›</span></button>';
+  var body = "";
+  if (open) {
+    body = '<div class="card-body">' + kv("free slots", h.free) + "</div>";
+  }
+  return '<div class="card' + (open ? " open" : "") + '">' + head + body + "</div>";
+}
+
+function limitsCard(sm) {
+  var open = S.open.fleet === "limits";
+  var head = '<button type="button" class="card-head tap" data-key="limits" aria-expanded="' + open + '">' +
+    '<span class="cmain"><span class="c-title">Account API caps</span>' +
+    '<span class="c-sub">per-key concurrency limits</span></span>' +
+    '<span class="chev" aria-hidden="true">›</span></button>';
+  var body = "";
+  if (open) {
+    var rows = "";
+    var ks = Object.keys(sm.limits || {});
+    for (var i = 0; i < ks.length; i++) rows += kv(ks[i], sm.limits[ks[i]]);
+    body = '<div class="card-body">' + rows + "</div>";
+  }
+  return '<div class="card' + (open ? " open" : "") + '">' + head + body + "</div>";
+}
+function renderNow() {
+  var q = S.queue || {};
+  var t = q.totals || {};
+  var ghReady = !!(S.gh && S.gh.ready);
+  var figs = $("#figs");
+  if (figs) {
+    figs.innerHTML =
+      fig("running", fmtK(t.running), "var(--ok)") +
+      fig("queued", fmtK(t.waiting), "var(--warn)") +
+      // Without github, mergedToday() counts every merged node of all time;
+      // calling that "today" would lie, so the figure takes the plain label.
+      fig(ghReady ? "merged today" : "merged", fmtK(mergedToday()), "var(--purple)") +
+      fig("failed", fmtK(failedCount()), failedCount() > 0 ? "var(--err)" : "");
+  }
+  var al = $("#alert");
+  if (al) {
+    var lines = redLines();
+    al.innerHTML = lines.map(esc).join("<br>");
+    al.style.display = lines.length ? "block" : "none";
+  }
+  var ag = (S.agents && S.agents.agents) || [];
+  var box = $("#agents");
+  if (box) {
+    keepTxScroll(function () {
+      box.innerHTML = ag.length ? ag.map(agentCard).join("") : '<div class="empty">no agents running</div>';
+    });
+  }
+  var sub = $("#nowsub");
+  if (sub) {
+    // /api/agents returns runs as a LIST of run dicts, not a count; the old
+    // `runs + "..."` printed "[object Object]" the moment a run launched.
+    var runs = (S.agents && S.agents.runs) || [];
+    sub.textContent = runs.length + " harness runs today · auto-refresh 5s · paused while hidden";
+  }
+  wire("#agents", "now");
+}
+
+function renderProjects() {
+  var ps = (S.projects || []).filter(function (p) { return !p.archived; });
+  ps.sort(function (a, b) {
+    return (b.active ? 1 : 0) - (a.active ? 1 : 0) ||
+      String(b.last_activity || "").localeCompare(String(a.last_activity || ""));
+  });
+  var box = $("#projects");
+  if (box) box.innerHTML = ps.length ? ps.map(projectCard).join("") : '<div class="empty">no projects yet</div>';
+  wire("#projects", "projects");
+}
+
+function renderPRs() {
+  var prs = (S.gh && S.gh.ready && S.gh.prs) || [];
+  var sub = $("#prssub");
+  if (sub) {
+    sub.textContent = (S.gh && S.gh.ready) ?
+      prs.length + " tracked · base " + String((S.gh && S.gh.base) || "?") :
+      "github status unavailable";
+  }
+  var box = $("#prs");
+  if (box) box.innerHTML = prs.length ? prs.map(prCard).join("") : '<div class="empty">no tracked pull requests</div>';
+  wire("#prs", "prs");
+}
+
+function renderFleet() {
+  var q = S.queue || {};
+  var ms = q.models || [];
+  var hs = q.harnesses || [];
+  var sm = S.summary || {};
+  var box = $("#fleet");
+  if (box) {
+    var html = ms.map(modelCard).join("") + hs.map(harnessCard).join("");
+    if (sm.limits) html += limitsCard(sm);
+    box.innerHTML = html || '<div class="empty">queue status unavailable</div>';
+  }
+  var sub = $("#fleetsub");
+  if (sub) {
+    var t = q.totals || {};
+    sub.textContent = "capacity " + fmtK(t.capacity) + " · " + fmtK(t.running) + " running · " + fmtK(t.waiting) + " waiting";
+  }
+  wire("#fleet", "fleet");
+}
+
+function renderMeta() {
+  var st = $("#stale");
+  if (st) st.style.display = S.stale ? "inline" : "none";
+}
+
+function renderAll() {
+  renderNow();
+  renderProjects();
+  renderPRs();
+  renderFleet();
+  renderMeta();
+}
+
+function wire(sel, view) {
+  var list = document.querySelectorAll(sel + " button.card-head");
+  for (var i = 0; i < list.length; i++) {
+    let btn = list[i];
+    btn.onclick = function () {
+      toggle(view, btn.getAttribute("data-key"));
+    };
+  }
+}
+
+function toggle(view, key) {
+  S.open[view] = S.open[view] === key ? "" : key;
+  refreshTx();
+  renderAll();
+}
+
+function showView(v) {
+  S.view = v;
+  for (var i = 0; i < VIEWIDS.length; i++) {
+    var x = VIEWIDS[i];
+    var sec = $("#view-" + x);
+    var btn = $("#nav-" + x);
+    if (!sec || !btn) continue;
+    var on = x === v ? " on" : "";
+    sec.className = "view" + on;
+    btn.className = "tap" + on;
+  }
+}
+
+async function j(url) {
+  var res = await fetch(url);
+  return res.json();
 }
 
 async function poll() {
-  const before = window.scrollY;
-  let ok = true, u = null, ag = null, pr = null;
-  // phone.html sums u.series for tok1h, so it opts in with ?series=1 (series is
-  // omitted from /api/usage by default; usage.html/index.html never draw it).
-  try { u = await j('/api/usage?range=1h&series=1'); } catch (e) { ok = false; }
-  try { ag = await j('/api/agents'); } catch (e) { ok = false; }
-  try { pr = await j('/api/projects'); } catch (e) { ok = false; }
-  if (u) {
-    state.tok1h = u.series ? (() => { let n = 0; for (const k in u.series) for (const p of u.series[k]) n += (p.tokens || 0); return n; })() : ((u.totals && u.totals.tokens) || 0);
-  }
-  if (ag) state.agents = ag.agents || [];
-  if (pr) state.projects = pr.projects || [];
-  state.stale = !ok;
-  renderStrip();
-  renderAgents();
-  renderTasks();
-  if (!state.fleetTried) tryFleet();
-  window.scrollTo(0, before);
+  var res = await Promise.all([
+    j("/api/summary").catch(function () { return null; }),
+    j("/api/agents").catch(function () { return null; }),
+    j("/api/projects").catch(function () { return null; }),
+    j("/api/github").catch(function () { return null; }),
+    j("/api/queue").catch(function () { return null; })
+  ]);
+  var bad = false;
+  if (res[0]) { S.summary = res[0]; } else { bad = true; }
+  if (res[1]) { S.agents = res[1]; } else { bad = true; }
+  if (res[2]) { S.projects = res[2].projects || []; } else { bad = true; }
+  if (res[3]) { S.gh = res[3]; } else { bad = true; }
+  if (res[4]) { S.queue = res[4]; } else { bad = true; }
+  S.stale = bad;
+  refreshTx();
+  renderAll();
 }
 
-poll();
-setInterval(poll, 5000);
-setInterval(() => { if (state.expanded) pollTranscript(state.expanded); }, 3000);
+var timer = null;
+
+function startTimers() {
+  if (timer === null) timer = setInterval(poll, POLL_MS);
+}
+
+function stopTimers() {
+  if (timer !== null) {
+    clearInterval(timer);
+    timer = null;
+  }
+}
+
+document.addEventListener("visibilitychange", function () {
+  if (document.hidden) {
+    stopTimers();
+  } else {
+    startTimers();
+    poll();
+  }
+});
+
+function init() {
+  $("#nav-now").onclick = function () { showView("now"); };
+  $("#nav-projects").onclick = function () { showView("projects"); };
+  $("#nav-prs").onclick = function () { showView("prs"); };
+  $("#nav-fleet").onclick = function () { showView("fleet"); };
+  startTimers();
+  poll();
+}
+
+init();
 </script>
 </body>
 </html>

@@ -140,6 +140,10 @@ PYEOF
     if ! node tests/ui_render.test.mjs; then
         echo "FAIL: dashboard render functions misbehave"; rc=1
     fi
+    # Same contract for the small-screen page.
+    if ! node tests/phone_render.test.mjs; then
+        echo "FAIL: phone page render functions misbehave"; rc=1
+    fi
     if [ -f tests/usage_visibility.test.mjs ] && ! node tests/usage_visibility.test.mjs; then
         echo "FAIL: usage.html keeps polling a tab nobody is looking at"; rc=1
     fi
