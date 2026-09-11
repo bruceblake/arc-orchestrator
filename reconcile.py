@@ -13,9 +13,7 @@ orphan the next run trips over:
 Worktrees whose branch still has commits main does not are NEVER removed: that
 is reviewed work the conflict-repair path in code_tasks.publish can still land.
 """
-import asyncio
 import os
-import subprocess
 from pathlib import Path
 
 import config

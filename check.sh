@@ -147,6 +147,13 @@ PYEOF
     if [ -f tests/usage_visibility.test.mjs ] && ! node tests/usage_visibility.test.mjs; then
         echo "FAIL: usage.html keeps polling a tab nobody is looking at"; rc=1
     fi
+    # The projects list: compact cards, the filter bar, the URL-hash round
+    # trip, and the workload DAGs. This file landed with the feature (#10)
+    # and was never added here, so it passed on the author's machine and
+    # guarded nothing after that.
+    if ! node tests/projects_ui.test.mjs; then
+        echo "FAIL: projects-list UI misbehaves"; rc=1
+    fi
 else
     echo "(node not installed — skipping JavaScript checks)"
 fi
