@@ -11,7 +11,7 @@ const BUILTINS = new Set([
   "require","fetch","alert","confirm","prompt","setTimeout","setInterval",
   "clearInterval","clearTimeout","parseInt","parseFloat","isNaN","String",
   "Number","Boolean","Array","Object","JSON","Math","Date","Promise","Map",
-  "Set","RegExp","Error","encodeURIComponent","decodeURIComponent","btoa",
+  "Set","RegExp","Error","Event","encodeURIComponent","decodeURIComponent","btoa",
   "atob","structuredClone","queueMicrotask","URLSearchParams","URL","if",
   "for","while","switch","catch","return","typeof","function","await","new",
   "console","document","window","localStorage","history","location",
