@@ -513,7 +513,8 @@ def cmd_audit(args):
         else:
             print(reconcile.format_report(
                 asyncio.run(reconcile.reconcile(st, apply=True))))
-    report = audit.run(st, since_s=args.since, with_health=not args.no_health)
+    report = audit.run(st, since_s=args.since, with_health=not args.no_health,
+                       snapshot=args.fix)
     print(json.dumps(report, indent=2, default=str) if args.json
           else audit.render(report))
     return 2 if report["counts"]["critical"] else 0

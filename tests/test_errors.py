@@ -483,3 +483,57 @@ class WeakGateDetection(unittest.TestCase):
     def test_a_grep_against_a_missing_file_is_not_judged(self):
         self._taskfile("p", "t1", "grep -q 'x' does_not_exist.py")
         self.assertEqual(self._run(), [])
+
+
+class TaskfileSnapshots(unittest.TestCase):
+    """Taskfiles are the design of every project and nothing versions them.
+
+    They live outside the repo, untracked. A taskfile holds the prompt, the
+    decomposition, the model routing and the verify gate, and editing one
+    leaves no record of what it said before.
+    """
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.tasks = os.path.join(self.dir, "tasks")
+        os.makedirs(self.tasks)
+        with open(os.path.join(self.tasks, "p.json"), "w") as fh:
+            json.dump({"project": {"repo": "/x", "tasks": []}}, fh)
+        self._orig_root = config.ROOT
+        config.ROOT = self.dir
+        self.addCleanup(self._restore, shutil)
+
+    def _restore(self, shutil):
+        config.ROOT = self._orig_root
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_never_snapshotted_is_a_warning(self):
+        import audit
+        f = audit.audit_tasks_backup(tasks_dir=self.tasks)
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("never been snapshotted", f[0]["what"])
+
+    def test_snapshotting_copies_every_taskfile(self):
+        import audit
+        audit.audit_tasks_backup(tasks_dir=self.tasks, snapshot=True)
+        import glob
+        copied = glob.glob(os.path.join(self.dir, "logs", "task-snapshots", "*", "*.json"))
+        self.assertEqual(len(copied), 1)
+
+    def test_a_fresh_snapshot_silences_the_warning(self):
+        import audit
+        audit.audit_tasks_backup(tasks_dir=self.tasks, snapshot=True)
+        self.assertEqual(audit.audit_tasks_backup(tasks_dir=self.tasks), [])
+
+    def test_an_empty_tasks_dir_reports_nothing(self):
+        import audit
+        empty = os.path.join(self.dir, "empty")
+        os.makedirs(empty)
+        self.assertEqual(audit.audit_tasks_backup(tasks_dir=empty), [])
+
+    def test_the_snapshot_goes_to_logs_not_into_the_repo(self):
+        # This repo is public. Operator task prompts are not ours to publish.
+        import audit
+        r = audit.audit_tasks_backup(tasks_dir=self.tasks, snapshot=True)
+        self.assertIn("logs", r[0]["detail"])

@@ -251,6 +251,53 @@ def audit_gates(store=None, tasks_dir=None, repo=None):
     return out
 
 
+def audit_tasks_backup(tasks_dir=None, snapshot=False):
+    """Taskfiles are the DESIGN of every project and nothing versions them.
+
+    They live in ~/tasks (config.TASKS_DIR), outside the repo, untracked. A
+    taskfile holds the prompt, the decomposition, the model routing and the
+    verify gate — days of engineering per wave — and an edit to one leaves no
+    record of what it said before. I changed four gates today and could not
+    have shown you the previous text.
+
+    The snapshot goes to logs/ (gitignored), NOT into the repo: this repo is
+    public, and operator task prompts are not mine to publish. Local history is
+    the part that protects against a bad edit or a lost home directory; sharing
+    them is a separate decision that belongs to the operator.
+    """
+    tdir = Path(tasks_dir or config.TASKS_DIR)
+    files = sorted(tdir.glob("*.json")) if tdir.is_dir() else []
+    if not files:
+        return []
+    snaps = Path(config.ROOT) / "logs" / "task-snapshots"
+    today = snaps / time.strftime("%Y-%m-%d")
+    if snapshot:
+        try:
+            today.mkdir(parents=True, exist_ok=True)
+            for f in files:
+                (today / f.name).write_text(f.read_text())
+            return [_finding("info", "taskfiles",
+                             f"snapshotted {len(files)} taskfile(s)",
+                             str(today), "")]
+        except OSError as exc:
+            return [_finding("warning", "taskfiles", "snapshot failed",
+                             str(exc)[:200], "")]
+    have = sorted(p.name for p in snaps.glob("*")) if snaps.is_dir() else []
+    if not have:
+        return [_finding(
+            "warning", "taskfiles",
+            f"{len(files)} taskfile(s) have never been snapshotted",
+            str(tdir),
+            "they are untracked and unversioned — the prompts, gates and "
+            "decomposition of every project exist in exactly one place. "
+            "`main.py audit --fix` snapshots them to logs/task-snapshots/")]
+    if have[-1] != time.strftime("%Y-%m-%d"):
+        return [_finding("info", "taskfiles",
+                         f"last taskfile snapshot: {have[-1]}", "",
+                         "`main.py audit --fix` takes a fresh one")]
+    return []
+
+
 def audit_logs():
     out = []
     p = Path(config.EVENTS_LOG)
@@ -293,7 +340,7 @@ def audit_health():
 
 # ---- report --------------------------------------------------------------
 
-def run(store=None, since_s=86400, with_health=True):
+def run(store=None, since_s=86400, with_health=True, snapshot=False):
     findings = []
     findings += triage_errors(since_s)
     if store is not None:
@@ -301,6 +348,7 @@ def run(store=None, since_s=86400, with_health=True):
         findings += audit_leases(store)
     findings += audit_git(store=store)
     findings += audit_gates(store)
+    findings += audit_tasks_backup(snapshot=snapshot)
     findings += audit_logs()
     if with_health:
         findings += audit_health()
