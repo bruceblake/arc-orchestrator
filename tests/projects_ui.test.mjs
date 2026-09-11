@@ -134,13 +134,14 @@ ok("one compact row per visible project",
    (pr().match(/class="prow"/g) || []).length === 3 && (pr().match(/class="chev"/g) || []).length === 3);
 ok("repo + short repo shown", pr().includes("acme/ui") && pr().includes("acme/other-repo"));
 const cardUi = api.card(FIX.projects[0], 0);
-ok("one status dot per task, colored by status",
-   (cardUi.match(/class="dot /g) || []).length === 2 && cardUi.includes("background:#3fb950")
-   && cardUi.includes("background:#58a6ff") && cardUi.includes('class="dot live"'));
+// Card slimming (task card-slimming): per-task status dots and token stats
+// moved off the card — the chips count, the mini DAG colors 3+ task
+// projects, tokens live in the detail meta line.
+ok("no per-task status dots on the card", !cardUi.includes('class="dot'));
+ok("no token stats on the card", !cardUi.includes("⛁"));
 const cardFlaky = api.card(FIX.projects[2], 2);
-ok("failed/conflict dot colors", cardFlaky.includes("background:#f85149") && cardFlaky.includes("background:#f0883e"));
 ok("merged/failed count chips", cardFlaky.includes("1/3 merged") && cardFlaky.includes("2 failed"));
-ok("tokens + relative time on the row", cardUi.includes("⛁") && cardUi.includes("ago"));
+ok("relative time on the row", cardUi.includes("ago"));
 ok("row is a keyboard-reachable button",
    cardUi.includes('role="button"') && cardUi.includes('aria-expanded="false"')
    && cardUi.includes('aria-label="open project game UI polish"'));
