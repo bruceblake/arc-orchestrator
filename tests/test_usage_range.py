@@ -36,7 +36,7 @@ class UsageRangeBase(unittest.TestCase):
         dashboard._fleet_names_cache.update(key=0.0, names=frozenset())
         self._orig_kimi = dashboard._kimi_code_usage
         dashboard._kimi_code_usage = lambda now, fleet_names=frozenset(): {
-            "models": [], "inflight": [], "points": []}
+            "models": [], "inflight": [], "points": [], "turns": []}
 
     def tearDown(self):
         dashboard._kimi_code_usage = self._orig_kimi
@@ -162,3 +162,70 @@ class UsageRangeInflight(UsageRangeBase):
         res = dashboard._usage(None, "1h")
         self.assertEqual(len(res["inflight"]), 1)
         self.assertEqual(res["inflight"][0]["source"], "arc-pool")
+
+
+class UsageRangeKimi(UsageRangeBase):
+    """kimi-code sessions merge into /api/usage and must obey the range window.
+
+    The base setUp stubs `_kimi_code_usage` to an empty payload, which is why
+    this class overrides it with a synthetic session: one model with one turn
+    two hours old and one turn five minutes old. A 1h window must exclude the
+    old turn from models/families/totals/points; 24h must include it; `all`
+    keeps the full all-time totals (which come from the stubbed all-time
+    `models`, not the per-turn log).
+    """
+
+    def _install_kimi(self, now):
+        old, rec = now - 7200, now - 300
+        dashboard._kimi_code_usage = lambda now, fleet_names=frozenset(): {
+            "models": [{"model": "Kimi-K3", "pretty": "Kimi K3", "family": "kimi-code",
+                        "source": "kimi-code", "requests": 2, "ok": 2, "errors": 0,
+                        "failed_attempts": 0, "tokens": 300, "prompt_tokens": 200,
+                        "completion_tokens": 100, "avg_latency_ms": None, "last_ts": rec}],
+            "inflight": [],
+            "points": [(old, 1, 150), (rec, 1, 150)],
+            "turns": [(old, "Kimi-K3", 1, 100, 50, 1), (rec, "Kimi-K3", 1, 100, 50, 1)],
+        }
+
+    @staticmethod
+    def _kimi_series(res):
+        return sum(p["requests"] for p in res["series"]["kimi-code"])
+
+    def _kimi_family(self, res):
+        return {f["family"]: f for f in res["families"]}["kimi-code"]
+
+    def test_one_hour_excludes_the_old_kimi_turn(self):
+        now = time.time()
+        self._install_kimi(now)
+        res = dashboard._usage(None, "1h", include_series=True)
+        self.assertEqual(res["totals"]["requests"], 1)
+        self.assertEqual(res["totals"]["tokens"], 150)
+        self.assertEqual(len(res["models"]), 1)
+        self.assertEqual(res["models"][0]["model"], "Kimi-K3")
+        self.assertEqual(res["models"][0]["requests"], 1)
+        fam = self._kimi_family(res)
+        self.assertEqual(fam["requests"], 1)
+        self.assertEqual(fam["tokens"], 150)
+        self.assertEqual(self._kimi_series(res), 1)
+
+    def test_twenty_four_hour_includes_the_old_kimi_turn(self):
+        now = time.time()
+        self._install_kimi(now)
+        res = dashboard._usage(None, "24h", include_series=True)
+        self.assertEqual(res["totals"]["requests"], 2)
+        self.assertEqual(res["totals"]["tokens"], 300)
+        self.assertEqual(len(res["models"]), 1)
+        self.assertEqual(res["models"][0]["requests"], 2)
+        self.assertEqual(self._kimi_family(res)["requests"], 2)
+        self.assertEqual(self._kimi_series(res), 2)
+
+    def test_all_keeps_full_kimi_all_time_totals(self):
+        now = time.time()
+        self._install_kimi(now)
+        res = dashboard._usage(None, "all", include_series=True)
+        self.assertEqual(res["totals"]["requests"], 2)
+        self.assertEqual(res["totals"]["tokens"], 300)
+        self.assertEqual(len(res["models"]), 1)
+        self.assertEqual(res["models"][0]["requests"], 2)
+        self.assertEqual(self._kimi_family(res)["requests"], 2)
+        self.assertEqual(self._kimi_series(res), 2)
