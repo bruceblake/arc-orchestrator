@@ -648,3 +648,89 @@ class GitHubOpsRoles(unittest.TestCase):
             self.assertEqual(drivers.KimiDriver(role).role, role)
             self.assertEqual(
                 drivers.OpencodeDriver("GLM-5.3", role).role, role)
+
+
+class TheVpnIsNotACrash(unittest.TestCase):
+    """ARC sits behind the VT campus VPN, which expires every 24 hours.
+
+    When it does, every request 403s with "API access is restricted to the VT
+    Campus VPN". Treating that as a crash burned the whole attempt budget
+    against an endpoint that could not answer — ten kimi runs and thirteen
+    opencode timeouts overnight on 09-11 — and each one was filed as a task
+    failure rather than as what it was: the network was gone.
+    """
+
+    REAL = ("kimi exited 1: error: failed to run prompt: provider.auth_error: 403 "
+            "API access is restricted to the VT Campus VPN. Please connect to the "
+            "VPN and retry.")
+
+    def test_the_real_message_is_recognised(self):
+        self.assertTrue(drivers.Driver.is_vpn_error(self.REAL))
+
+    def test_capacity_and_ordinary_errors_are_not_mistaken_for_it(self):
+        for text in ("concurrent session limit reached for model 'GLM-5.3'",
+                     "opencode exited 1: ", "kimi stalled after 420s idle",
+                     "provider.auth_error: 401 invalid api key"):
+            self.assertFalse(drivers.Driver.is_vpn_error(text), text)
+
+    def test_a_vpn_error_does_not_consume_an_attempt(self):
+        # The retry ladder must retry the SAME attempt number after the VPN
+        # returns; an attempt that never reached the API was not an attempt.
+        import pathlib
+        src = pathlib.Path(drivers.__file__).read_text()
+        body = src[src.index("if self.is_vpn_error(str(exc)):"):]
+        body = body[:body.index("capacity = self.is_capacity_error")]
+        self.assertIn("await wait_for_arc", body)
+        self.assertIn("attempt -= 1", body)
+        self.assertIn("continue", body)
+
+    def test_the_probe_reads_a_vpn_403_as_down(self):
+        import io
+        import urllib.error
+        orig = drivers.urllib_request_urlopen if hasattr(drivers, "urllib_request_urlopen") else None
+        import urllib.request
+        real = urllib.request.urlopen
+
+        def fake(req, timeout=None):
+            raise urllib.error.HTTPError(
+                req.full_url, 403, "Forbidden", {},
+                io.BytesIO(b"API access is restricted to the VT Campus VPN."))
+        urllib.request.urlopen = fake
+        try:
+            up, detail = drivers.arc_reachable()
+        finally:
+            urllib.request.urlopen = real
+        self.assertFalse(up)
+        self.assertIn("VPN", detail)
+
+    def test_the_probe_reads_any_other_http_answer_as_reachable(self):
+        # A 401 or 404 from the API root still proves the network path exists.
+        import io
+        import urllib.error
+        import urllib.request
+        real = urllib.request.urlopen
+
+        def fake(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {},
+                                         io.BytesIO(b"invalid key"))
+        urllib.request.urlopen = fake
+        try:
+            up, _ = drivers.arc_reachable()
+        finally:
+            urllib.request.urlopen = real
+        self.assertTrue(up)
+
+    def test_a_connection_failure_reads_as_down(self):
+        import urllib.error
+        import urllib.request
+        real = urllib.request.urlopen
+
+        def fake(req, timeout=None):
+            raise urllib.error.URLError("Name or service not known")
+        urllib.request.urlopen = fake
+        try:
+            up, detail = drivers.arc_reachable()
+        finally:
+            urllib.request.urlopen = real
+        self.assertFalse(up)
+        self.assertIn("unreachable", detail)

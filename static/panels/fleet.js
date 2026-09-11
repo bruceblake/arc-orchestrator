@@ -12,6 +12,19 @@ function renderHealth(h) {
   // The fleet edits this server's own source. A running process keeps serving
   // what it started with, so a merged route can 404 and take the whole page
   // down with it — that is exactly how the console went blank.
+  // VPN first: when ARC is unreachable every driver is waiting, so the fleet
+  // shows zeros everywhere and looks idle. That is the worst possible way to
+  // find out the VPN expired — say it in red at the top.
+  const arc = h.arc || {};
+  const vpn = $("#vpn-banner");
+  if (vpn) {
+    const down = arc.reachable === false;
+    vpn.style.display = down ? "" : "none";
+    vpn.innerHTML = down
+      ? `⛔ <b>ARC is unreachable</b> — the fleet is paused, not idle. ${esc(arc.detail || "")}
+         <span class="hint">Reconnect the Cisco VPN; drivers resume on their own within ~30s.</span>`
+      : "";
+  }
   const stale = h.stale_source || [];
   const banner = $("#stale-banner");
   if (banner) {

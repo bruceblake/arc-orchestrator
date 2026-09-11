@@ -71,10 +71,17 @@ PIPELINE_ROUNDS = int(os.getenv("ARC_PIPELINE_ROUNDS", "2"))
 MAX_VERIFY_ROUNDS = int(os.getenv("ARC_MAX_VERIFY_ROUNDS", "3"))
 VERIFY_PASS_SCORE = float(os.getenv("ARC_VERIFY_PASS_SCORE", "7.5"))
 REQUEST_TIMEOUT = float(os.getenv("ARC_REQUEST_TIMEOUT", "600"))
-MAX_RETRIES = int(os.getenv("ARC_MAX_RETRIES", "4"))
+# Retry budgets are GENEROUS on purpose. Tokens are not the scarce resource
+# here; a task abandoned one attempt short of working is. Every budget below
+# is still finite, because a task that cannot succeed must eventually stop
+# rather than hold a worktree, a branch and a model slot forever — but the
+# ceilings are set where "gave up" means "genuinely could not", not "ran out
+# of patience". Raised 09-11 from 4/3/3/2/3/3 after graph-admission-control
+# died with a passing gate because its reviewer crashed three times.
+MAX_RETRIES = int(os.getenv("ARC_MAX_RETRIES", "12"))
 ROUND_COOLDOWN = float(os.getenv("ARC_ROUND_COOLDOWN", "5"))
 STATS_INTERVAL = float(os.getenv("ARC_STATS_INTERVAL", "300"))
-MAX_GRAPH_STEPS = int(os.getenv("ARC_MAX_GRAPH_STEPS", "1500"))
+MAX_GRAPH_STEPS = int(os.getenv("ARC_MAX_GRAPH_STEPS", "6000"))
 SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "12"))
 SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "30"))
 
@@ -168,7 +175,7 @@ DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
 # model forever, before its own timeout clock had even started. Exceeding it
 # raises a capacity-classified DriverError, so the retry ladder backs off
 # instead of the run silently stalling.
-DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "1800"))
+DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "5400"))
 # --- branch model + PR review ------------------------------------------------
 # Tasks branch from and pull-request INTO development. Nothing reaches main
 # except by a promotion PR a human merges, so the fleet can never touch prod.
@@ -203,28 +210,28 @@ def promotion_configured():
     return BASE_BRANCH != PROD_BRANCH
 PR_REVIEWERS = int(os.getenv("ARC_PR_REVIEWERS", "2"))
 # How many times a PR may go back to the implementer before the task fails.
-PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "3"))
+PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "8"))
 # Retries of a review that reached NO verdict (every reviewer crashed).
 # Separate from PR_MAX_ROUNDS on purpose: an infrastructure failure must
 # not consume the rounds reserved for real disagreement about the code.
-PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "3"))
+PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "10"))
 
 # How many times a conflicting PR may be resynced with the base before
 # giving up. Each resync rewrites the branch and costs a fresh review,
 # so this is deliberately small.
-PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "2"))
+PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "6"))
 
 # Retries of a PRE-MERGE review that crashed instead of reaching a
 # verdict. Separate from the fix budget on purpose: a reviewer that
 # could not run has not objected to anything, and spending a fix round
 # on it sends the implementer to repair code nobody criticised.
-MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "3"))
+MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "10"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
 
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
-MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
+MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "8"))
 # Project chaining (code workload): a taskfile that declares `after` waits for
 # every task in those upstream taskfiles to reach 'merged' before any of its
 # worktrees allocate. Upstream projects can legitimately take hours (fix
