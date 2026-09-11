@@ -893,6 +893,32 @@ def _first_event_at_or_after(lines, ts):
     return i
 
 
+def _errors(range_key="24h", limit=40):
+    """Distinct DEFECTS for the triage panel, worst first.
+
+    Not an error log — a flat list of occurrences answers "what happened",
+    which is the question you can already answer by reading the feed. This
+    answers "what should I fix", by collapsing every occurrence of one defect
+    into a single row with its count, its span, the tasks it hit, and the
+    traceback that was previously thrown away.
+    """
+    import errors as _errors_mod
+    now = time.time()
+    spans = {"1h": 3600, "24h": 86400, "7d": 604800, "all": None}
+    secs = spans.get(range_key, 86400)
+    since = 0 if secs is None else now - secs
+    try:
+        groups = _errors_mod.groups(since=since, limit=limit)
+    except Exception as exc:
+        return {"ready": False, "reason": str(exc)[:200], "groups": [],
+                "ranges": list(spans), "range": range_key, "ts": now}
+    # age_s / span_s / active come from errors.groups(): a defect seen once an
+    # hour ago is cold, one seen 30 times in the last five minutes is on fire,
+    # and that is a property of the group rather than of this rendering.
+    return {"ready": True, "groups": groups, "total": sum(g["count"] for g in groups),
+            "ranges": list(spans), "range": range_key, "ts": now}
+
+
 def _queue(store):
     """Who is holding a model slot right now, and who is queued behind them.
 
@@ -2279,6 +2305,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/queue":
                 return self._json(_queue(Handler.store))
+            if u.path == "/api/errors":
+                q = parse_qs(u.query)
+                return self._json(_errors(q.get("range", ["24h"])[0],
+                                          int(q.get("limit", ["40"])[0])))
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
             if u.path == "/api/project":

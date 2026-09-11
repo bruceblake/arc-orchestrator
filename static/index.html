@@ -127,6 +127,18 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .prissues div { color: var(--text); padding: 4px 0 4px 10px;
                 border-left: 2px solid var(--border); margin-top: 3px;
                 white-space: pre-wrap; }
+.errrow { border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px;
+          margin-bottom: 6px; font-size: 12px; }
+.errrow.hot { border-color: var(--err); }
+.errhead { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.errhead .n { color: var(--err); font-weight: 600; }
+.errhead code { color: var(--accent); font-size: 11px; }
+.errmsg { color: var(--dim); margin-top: 3px; font-family: ui-monospace, monospace;
+          font-size: 11px; white-space: pre-wrap; }
+.errtb { margin-top: 5px; }
+.errtb summary { cursor: pointer; color: var(--dim); font-size: 11px; }
+.errtb pre { background: #0d1117; border: 1px solid var(--border); border-radius: 5px;
+             padding: 7px; overflow-x: auto; font-size: 11px; margin: 4px 0 0; }
 .slot.harness { background: #12171e; }
 .tagh { font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
         color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0 4px; }
@@ -227,6 +239,15 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       </h2>
       <div class="health" id="health-models"></div>
       <div class="problems" id="health-problems" style="display:none"></div>
+    </div>
+    <div class="panel" id="errs-panel" style="display:none">
+      <h2>Defects <span class="hint" id="errs-meta"></span>
+        <span style="flex:1"></span>
+        <button class="act seg on" id="er-24h" data-er="24h">24h</button>
+        <button class="act seg" id="er-1h" data-er="1h">1h</button>
+        <button class="act seg" id="er-all" data-er="all">all</button>
+      </h2>
+      <div id="errs"></div>
     </div>
     <div class="panel" id="slots-panel">
       <h2>Model slots <span class="hint" id="slots-meta">idle</span>
@@ -921,6 +942,55 @@ async function pollFleet() {
   } catch (e) { markFail("fleet", true); }
 }
 
+// ---- defect triage: distinct bugs, not a wall of occurrences ----
+// A flat error log answers "what happened", which the feed already does. This
+// answers "what should I fix" — every occurrence of one defect collapsed into
+// one row with its count, its span, and the traceback that used to be thrown
+// away entirely (every catch site kept only str(exc)[:300]).
+let ERR_RANGE = "24h";
+
+function errRow(g) {
+  const when = g.active ? '<span class="bad">still firing</span>'
+                        : `<span class="hint">last ${tick(g.age_s)} ago</span>`;
+  const tasks = (g.tasks || []).length
+    ? `<span class="hint">${(g.tasks || []).slice(0, 4).map(esc).join(", ")}</span>` : "";
+  return `<div class="errrow${g.active ? " hot" : ""}">
+    <div class="errhead">
+      <b>${esc(g.kind)}</b> <span class="n">x${esc(g.count)}</span>
+      <code>${esc(g.where || "unknown")}</code> ${when} ${tasks}
+    </div>
+    <div class="errmsg">${esc((g.message || "").slice(0, 300))}</div>
+    ${g.traceback ? `<details class="errtb"><summary>traceback · ${esc(g.fingerprint)}</summary><pre>${esc(g.traceback)}</pre></details>` : ""}
+  </div>`;
+}
+
+function renderErrors(d) {
+  const panel = $("#errs-panel");
+  const groups = (d && d.groups) || [];
+  // Hidden entirely when there is nothing wrong. An empty panel that is always
+  // present trains the eye to skip it, and then it is skipped when it matters.
+  panel.style.display = groups.length ? "" : "none";
+  if (!groups.length) return;
+  const hot = groups.filter(g => g.active).length;
+  $("#errs-meta").innerHTML =
+    `${groups.length} distinct · ${d.total} occurrence${d.total === 1 ? "" : "s"}`
+    + (hot ? ` · <span class="bad">${hot} still firing</span>` : "");
+  $("#errs").innerHTML = groups.map(errRow).join("");
+}
+
+async function pollErrors() {
+  try { renderErrors(await jget("/api/errors?range=" + ERR_RANGE)); markFail("errors", false); }
+  catch (e) { markFail("errors", true); }
+}
+
+for (const b of document.querySelectorAll("[data-er]")) {
+  b.onclick = () => {
+    ERR_RANGE = b.dataset.er;
+    for (const o of document.querySelectorAll("[data-er]")) o.classList.toggle("on", o === b);
+    pollErrors();
+  };
+}
+
 // ---- live model slots: who holds capacity, who is queued behind them ----
 // The reviewer queue is the fleet's real bottleneck (PR_REVIEWERS scarce
 // cross-family models per PR round), so reviewers are given their own colour,
@@ -1447,6 +1517,7 @@ pollProjects();
 initEvents();
 setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
 setTimeout(() => { pollSlots(); setInterval(pollSlots, 3000); }, 400);
+setTimeout(() => { pollErrors(); setInterval(pollErrors, 15000); }, 2000);
 setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
 setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
 setTimeout(() => setInterval(pollEvents, 8000), 1200);

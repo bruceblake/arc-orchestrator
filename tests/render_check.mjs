@@ -54,7 +54,7 @@ const externals = [...src.matchAll(/<script[^>]+src="([^"]+)"/g)]
   .join("\n");
 // setGH: GH is module-scoped inside this evaluated function, so the harness
 // needs a closure to assign it — a global would not reach it.
-const mod = new Function(externals + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects, renderSlots, renderGithub, setGH: v => { GH = v; }};");
+const mod = new Function(externals + "\n" + js + "\nreturn {renderHealth, card, renderTasks, renderDag, renderFeed, taskDag, friendly, esc, renderProjects, renderSlots, renderGithub, renderErrors, setGH: v => { GH = v; }};");
 const api = mod();
 
 const health = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
@@ -130,6 +130,27 @@ if (gh.includes("<img src=x>")) {
   process.exit(1);
 }
 console.log("github rows rendered:", (gh.match(/class="prrow/g) || []).length);
+
+// Defect triage. A traceback is attacker-shaped input twice over: it is
+// generated from an exception whose message can contain anything a model wrote.
+api.renderErrors({ready: true, total: 4, groups: [
+  {fingerprint: "abc123", count: 3, kind: "ValueError", where: "code_tasks.py:publish",
+   age_s: 30, span_s: 600, active: true, tasks: ["t1", "<img src=x>"],
+   message: "boom <script>alert(1)</script>", traceback: "Traceback...\n  <img src=x onerror=1>"},
+]});
+const errHtml = document.querySelector("#errs").innerHTML;
+if (!/errrow hot/.test(errHtml)) {
+  console.error("render_check: FAIL — a still-firing defect is not highlighted"); process.exit(1);
+}
+if (errHtml.includes("<script>alert") || errHtml.includes("<img src=x")) {
+  console.error("render_check: FAIL — a traceback reached the DOM unescaped"); process.exit(1);
+}
+api.renderErrors({ready: true, total: 0, groups: []});
+if (document.querySelector("#errs-panel").style.display !== "none") {
+  console.error("render_check: FAIL — the defects panel shows when there are none");
+  process.exit(1);
+}
+console.log("defect rows rendered + escaped + hidden when empty");
 
 // Model slots. Driven by a synthetic BUSY payload rather than the live one:
 // the fleet is usually idle when check.sh runs, and an all-zeros payload would

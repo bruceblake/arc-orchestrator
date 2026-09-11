@@ -21,6 +21,12 @@ import events  # noqa: E402
 # reported them to the operator as real fleet problems.
 _EVENT_DIR = tempfile.mkdtemp(prefix="arc-tests-events-")
 config.EVENTS_LOG = str(pathlib.Path(_EVENT_DIR) / "events.jsonl")
+# The same reasoning now applies to the DATABASE. errors.capture() writes to
+# config.DB_PATH, and the suite deliberately drives failure paths — without
+# this, every test run injected dozens of synthetic defects into the operator's
+# triage list, where they are indistinguishable from real ones. Verified: a
+# single run put 43 test exceptions into the production error table.
+config.DB_PATH = str(pathlib.Path(_EVENT_DIR) / "test.db")
 atexit.register(lambda: shutil.rmtree(_EVENT_DIR, ignore_errors=True))
 
 # Several tests deliberately drive failure paths (node crashes, driver retry

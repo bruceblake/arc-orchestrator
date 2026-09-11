@@ -383,6 +383,48 @@ processes and move git refs on the same terms.
 - If you cannot show a transcript or an event for a claim about a run, do not
   make the claim.
 
+### Rule 7b — Never discard an exception; capture it
+
+`str(exc)[:300]` was all that survived a failure anywhere in this repo — no
+file, no line, no frame. Debugging meant guessing which of several call paths
+produced a message like `opencode exited 1:`.
+
+- **Catch sites call `errors.capture(exc, task=..., model=..., node=...)`** and
+  put the returned fingerprint on the event. The event stays short; the
+  traceback, the exception chain and the caller's context go to `error_events`.
+- **Errors are grouped by FINGERPRINT, not by message.** The fingerprint is the
+  exception type plus the names of the frames inside this repo — deliberately
+  not line numbers (they shift on every edit) and not the message (it carries
+  worktree paths, task ids and durations that make every occurrence unique).
+  A hundred occurrences of one bug must count as one bug.
+- **`errors.capture` never raises.** It runs inside `except` and `finally`
+  blocks, and instrumentation that can turn a handled error into an unhandled
+  one is worse than none.
+- **Capacity errors are not captured.** They are expected weather and would
+  swamp the triage list; they already have their own events.
+- **Every event carries a `run_id`** so one run can be reassembled afterwards
+  from events spread across the run process, its drivers and the dashboard.
+
+Tests must never write to the operator's error table — `tests/helpers.py`
+redirects `config.DB_PATH` for the same reason it redirects `EVENTS_LOG`. One
+unguarded suite run put 43 synthetic defects into the production triage list.
+
+### Rule 7c — The daily audit
+
+`main.py audit` answers two questions a green dashboard cannot: what broke
+(distinct defects, worst first) and what is rotting (work stranded in a
+non-terminal state, worktrees and branches left by dead runs, leases pinning
+capacity for processes that no longer exist, log growth, and whether
+`check.sh` still passes).
+
+- Every finding carries a severity AND a concrete next action.
+- **The exit code is the alarm**: 2 when anything is critical, else 0. That is
+  what makes `daily-audit.sh` schedulable — cron mails only on a non-zero exit,
+  so a mail means something.
+- `--fix` performs only the reversible cleanups `reconcile` already implements,
+  and **skips entirely while any run is in flight**: reaping worktrees and
+  leases out from under a live run turns a cleanup into an outage.
+
 ### Rule 8 — Dry-run before every run
 
 - Before executing a taskfile for real, run

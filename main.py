@@ -451,6 +451,41 @@ def cmd_code_bench(args):
         pass
 
 
+def cmd_audit(args):
+    """Daily audit. Exit code is the alarm: 2 if anything critical, else 0.
+
+    A non-zero exit is what lets this be scheduled without anybody reading it
+    on a quiet day — cron mails only on failure, and 'critical' is defined
+    narrowly enough that a mail means something.
+    """
+    import audit
+    import store as _store
+    st = None
+    try:
+        st = _store.Store(config.DB_PATH)
+    except Exception:
+        pass
+    if args.fix:
+        # reconcile() is async and its reporter is format_report — guessed
+        # wrong once and the scheduled audit crashed on its first real run.
+        import asyncio
+        import reconcile
+        if st is None:
+            print("--fix needs the database; skipping cleanup")
+        elif reconcile.live_runs():
+            # Reaping worktrees and leases out from under a LIVE run is how a
+            # cleanup becomes an outage. The audit still reports; it just does
+            # not touch anything while the fleet is working.
+            print("--fix skipped: runs are in flight")
+        else:
+            print(reconcile.format_report(
+                asyncio.run(reconcile.reconcile(st, apply=True))))
+    report = audit.run(st, since_s=args.since, with_health=not args.no_health)
+    print(json.dumps(report, indent=2, default=str) if args.json
+          else audit.render(report))
+    return 2 if report["counts"]["critical"] else 0
+
+
 def cmd_gh(args):
     import gh_ops
 
@@ -738,6 +773,15 @@ def main():
     bun_p.add_argument("--dry-run", action="store_true", help="simulate all model calls")
     bun_p.add_argument("--db", default=None, help="sqlite database path")
     bun_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    au_p = sub.add_parser("audit", help="daily audit: triage defects + check the codebase")
+    au_p.add_argument("--since", type=float, default=86400,
+                      help="seconds of error history to triage (default 24h)")
+    au_p.add_argument("--json", action="store_true", help="emit the report as JSON")
+    au_p.add_argument("--no-health", action="store_true",
+                      help="skip running check.sh (it is the slow part)")
+    au_p.add_argument("--fix", action="store_true",
+                      help="also run the reversible cleanups (reconcile --apply)")
+
     gh_p = sub.add_parser("gh", help="GitHub ops agents (gh CLI): triage, issue, pr-review")
     gh_sub = gh_p.add_subparsers(dest="gh_cmd", required=True)
     gt_p = gh_sub.add_parser("triage", help="classify open issues; writes a taskfile to ~/tasks")
@@ -774,6 +818,10 @@ def main():
         cmd_build(args)
     elif args.cmd == "code":
         cmd_code(args)
+    elif args.cmd == "audit":
+        # The exit code IS the alarm. Without propagating it, a scheduled audit
+        # exits 0 no matter what it found and cron never says a word.
+        sys.exit(cmd_audit(args))
     elif args.cmd == "gh":
         cmd_gh(args)
     elif args.cmd == "serve":
