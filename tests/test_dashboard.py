@@ -735,3 +735,110 @@ class UsageRangesAndTimeline(unittest.TestCase):
     def test_an_unknown_range_still_falls_back_to_an_hour(self):
         self._write(self._done(4 * 3600), self._done(60))
         self.assertEqual(dashboard._usage(None, "nonsense")["range"], "1h")
+
+
+class ProjectTaskModelPricing(unittest.TestCase):
+    """Each model's tokens under one task id are priced at that model's own rate.
+
+    A task id carries work from several models at once — a gpt-oss-120b
+    implementer cross-reviewed by GLM-5.3, a task that escalates tiers. Pricing
+    the whole bucket at the taskfile's implementer charges GLM's expensive
+    reviewer tokens at gpt-oss's cheap rate, so the figure was not even an
+    upper bound. The rollup must accumulate per-event at the event's own model.
+    """
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.root = Path(self._dir.name)
+        self._env = {k: v for k, v in os.environ.items() if k.startswith("ARC_PRICE_")}
+        for k in self._env:
+            os.environ.pop(k)
+
+        self._orig_tasks = config.TASKS_DIR
+        config.TASKS_DIR = str(self.root / "tasks")
+        Path(config.TASKS_DIR).mkdir()
+
+        self._orig_log = config.EVENTS_LOG
+        config.EVENTS_LOG = str(self.root / "events.jsonl")
+        dashboard._lines_cache["key"] = None
+        dashboard._kimi_task_tokens_cache.update(key=0.0, map={})
+
+        self._orig_kimi = dashboard._kimi_tokens_by_task
+        dashboard._kimi_tokens_by_task = lambda: {}
+        self._orig_inflight = dashboard._collect_inflight
+        dashboard._collect_inflight = lambda now, store=None: ([], {})
+        self._orig_transcript = dashboard._transcript_toks
+        dashboard._transcript_toks = lambda p: (0, 0, 0)
+
+        import reconcile
+        self._orig_live_runs = reconcile.live_runs
+        reconcile.live_runs = lambda: []
+
+        self.store = __import__("store").Store(str(self.root / "s.db"))
+
+    def tearDown(self):
+        import reconcile
+        reconcile.live_runs = self._orig_live_runs
+        dashboard._transcript_toks = self._orig_transcript
+        dashboard._collect_inflight = self._orig_inflight
+        dashboard._kimi_tokens_by_task = self._orig_kimi
+        dashboard._kimi_task_tokens_cache.update(key=0.0, map={})
+        dashboard._lines_cache["key"] = None
+        config.EVENTS_LOG = self._orig_log
+        config.TASKS_DIR = self._orig_tasks
+        for k in list(os.environ):
+            if k.startswith("ARC_PRICE_") and k not in self._env:
+                os.environ.pop(k)
+        os.environ.update(self._env)
+        self._dir.cleanup()
+
+    def _taskfile(self, model="gpt-oss-120b", reviewer="glm"):
+        tf = Path(config.TASKS_DIR) / "mixed.json"
+        tf.write_text(json.dumps({"project": {"repo": "/x", "title": "mixed", "tasks": [
+            {"id": "t1", "title": "t1", "model": model, "reviewer": reviewer,
+             "verify_cmd": "true", "deps": []}]}}))
+        return tf
+
+    def _events(self, *events_):
+        Path(config.EVENTS_LOG).write_text(
+            "".join(json.dumps(e) + "\n" for e in events_))
+        dashboard._lines_cache["key"] = None
+
+    def _node(self):
+        projects = dashboard._projects(self.store)
+        self.assertEqual(len(projects), 1)
+        for n in projects[0]["dag"]["nodes"]:
+            if n["id"] == "t1":
+                return n
+        self.fail("t1 node not found")
+
+    def test_each_models_tokens_are_priced_at_its_own_rate(self):
+        self._taskfile()
+        self._events(
+            {"type": "driver.done", "task": "t1", "harness": "opencode",
+             "model": "gpt-oss-120b", "role": "implementer",
+             "tokens": 1000, "prompt_tokens": 800, "completion_tokens": 200,
+             "seconds": 60},
+            {"type": "driver.done", "task": "t1", "harness": "opencode",
+             "model": "GLM-5.3", "role": "reviewer",
+             "tokens": 100, "prompt_tokens": 50, "completion_tokens": 50,
+             "seconds": 30},
+        )
+        node = self._node()
+        expected = (config.cost_of("gpt-oss-120b", 800, 200)
+                    + config.cost_of("GLM-5.3", 50, 50))
+        self.assertEqual(node["cost"], round(expected, 4))
+        old = config.cost_of("gpt-oss-120b", 850, 250)
+        self.assertNotEqual(node["cost"], round(old, 4),
+                            "GLM reviewer tokens must not be priced at gpt-oss rates")
+
+    def test_kimi_wire_extra_is_priced_at_kimi_completion_rate(self):
+        self._taskfile(model="Kimi-K3", reviewer="glm")
+        dashboard._kimi_tokens_by_task = lambda: {"t1": 2000}
+        # No driver.done for kimi: the wire log is the only source of its tokens,
+        # and it carries no prompt/completion split.
+        self._events()
+        node = self._node()
+        self.assertEqual(node["tokens"], 2000)
+        self.assertEqual(node["tokens_source"], "kimi-wire")
+        self.assertEqual(node["cost"], round(config.cost_of("Kimi-K3", 0, 2000), 4))

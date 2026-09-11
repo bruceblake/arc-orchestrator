@@ -1422,10 +1422,18 @@ def _projects(store):
             continue
         ev_done_keys.add((e.get("harness"), e.get("model"), e.get("role"), base, xnum))
         s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0,
-                                       "prompt_tokens": 0, "completion_tokens": 0})
+                                       "prompt_tokens": 0, "completion_tokens": 0,
+                                       "cost": 0.0})
         s["tokens"] += e.get("tokens") or 0
         s["prompt_tokens"] += e.get("prompt_tokens") or 0
         s["completion_tokens"] += e.get("completion_tokens") or 0
+        # Price each event at ITS own model. Cross-review (Kimi <-> GLM) and
+        # tier escalation both mix models under one task id; pricing the whole
+        # bucket at the taskfile's implementer mis-charges every reviewer run
+        # (a gpt-oss task reviewed by GLM would price GLM's expensive tokens at
+        # gpt-oss rates, so the figure was not even an upper bound).
+        s["cost"] += config.cost_of(e.get("model"), e.get("prompt_tokens") or 0,
+                                    e.get("completion_tokens") or 0)
         s["seconds"] += e.get("seconds") or 0.0
         s["runs"] += 1
     # Supplement from harness_runs rows whose driver.done fell out of the event
@@ -1444,13 +1452,15 @@ def _projects(store):
         if key in ev_done_keys:
             continue
         s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0,
-                                       "prompt_tokens": 0, "completion_tokens": 0})
+                                       "prompt_tokens": 0, "completion_tokens": 0,
+                                       "cost": 0.0})
         s["seconds"] += row.get("seconds") or 0.0
         s["runs"] += 1
         toks, ptoks, ctoks = _transcript_toks(row.get("transcript"))
         s["tokens"] += toks
         s["prompt_tokens"] += ptoks
         s["completion_tokens"] += ctoks
+        s["cost"] += config.cost_of(row.get("model"), ptoks, ctoks)
     import reconcile
     run_by_file = {}
     for r in reconcile.live_runs():
@@ -1512,15 +1522,16 @@ def _projects(store):
             ptok = ev.get("prompt_tokens", 0)
             ctok = ev.get("completion_tokens", 0)
             tot = max(ev.get("tokens", 0), kimi_tok.get(tid, 0))
-            # kimi-wire tokens (and any tokens a transcript split cannot
-            # account for) carry no prompt/completion split, so price the
-            # excess at the completion rate — an upper bound, not a charge.
+            # Prompts/completions are already priced per-model above — each
+            # driver.done (and each harness_runs row) carries its own model,
+            # and cross-review plus tier escalation mix several under one task
+            # id. Only the excess a split cannot account for — the kimi-wire
+            # tokens, which carry no prompt/completion split — is priced here,
+            # at Kimi's completion rate, since it is kimi's wire log.
             extra = max(0, tot - (ptok + ctok))
-            node_cost = 0.0
-            if node_model:
-                node_cost = config.cost_of(node_model, ptok, ctok)
-                if extra:
-                    node_cost += config.cost_of(node_model, 0, extra)
+            node_cost = ev.get("cost", 0.0)
+            if extra:
+                node_cost += config.cost_of("Kimi-K3", 0, extra)
             node = {"id": tid, "title": t.get("title") or tid,
                     "model": node_model, "reviewer": t.get("reviewer"),
                     "status": per_task.get(tid, "pending"),
