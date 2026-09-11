@@ -8,6 +8,7 @@ requests per model, so per-model semaphores cap concurrent harness instances
 below the account limits (config.driver_limit).
 """
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import config
+import errors
 import events
 
 log = logging.getLogger("drivers")
@@ -100,6 +102,64 @@ async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None):
     shown = report_as or model
     waits = 0
     deadline = time.monotonic() + config.DRIVER_LEASE_WAIT
+    # Push, with the poll kept as the backstop. A slot freed one second after a
+    # poll used to go unnoticed for the rest of the 20s tick, and that lands on
+    # exactly the PR-reviewer handoffs that are the fleet's scarcest resource.
+    # The subscription is best-effort by design: a datagram can be dropped and
+    # a publisher can die between release and notify, so the timeout below is
+    # still what guarantees progress. Push only makes it arrive sooner.
+    sub = _slot_subscription(model)
+    try:
+        return await _lease_wait_loop(model, task_id, emit_ctx, cap, shown,
+                                      deadline, sub)
+    finally:
+        if sub is not None:
+            with contextlib.suppress(Exception):
+                sub.__exit__(None, None, None)
+
+
+_slot_queue = None
+
+
+def _slot_q():
+    """The shared Queue for slot notifications, or None if it cannot be opened.
+
+    Cached deliberately. Constructing one opens a sqlite connection AND re-runs
+    the schema script; doing that per lease release measured 69x the cost of
+    reusing it, on a path that runs on every driver attempt. It is also the
+    difference between one connection and a churn of them.
+    """
+    global _slot_queue
+    # Tests (and `--db`) repoint config.DB_PATH; a handle cached against the
+    # old path would quietly write to the wrong database.
+    if _slot_queue is not None and _slot_queue.db_path != str(config.DB_PATH):
+        _slot_queue = None
+    if _slot_queue is None:
+        try:
+            import workqueue
+            _slot_queue = workqueue.Queue(config.DB_PATH)
+        except Exception:
+            return None
+    return _slot_queue
+
+
+def _slot_subscription(model):
+    """A push subscription for this lease key, or None if unavailable.
+
+    Never fatal: the queue is an optimisation over a working poll loop, and a
+    fleet that cannot open a unix socket should still run, more slowly.
+    """
+    q = _slot_q()
+    if q is None:
+        return None
+    try:
+        return q.subscribe(f"slot:{model}").__enter__()
+    except Exception:
+        return None
+
+
+async def _lease_wait_loop(model, task_id, emit_ctx, cap, shown, deadline, sub):
+    waits = 0
     while True:
         limit = config.driver_limit(model) if cap is None else cap
         in_use = _lease_db().acquire_driver_lease(
@@ -119,11 +179,34 @@ async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None):
             events.emit("driver.cap_wait", model=shown, task=task_id,
                         in_use=in_use, cap=limit, **emit_ctx)
         waits += 1
-        await asyncio.sleep(min(20, max(1, deadline - time.monotonic())))
+        nap = min(20, max(1, deadline - time.monotonic()))
+        if sub is not None:
+            await sub.wait_async(nap)   # returns early the moment a slot frees
+        else:
+            await asyncio.sleep(nap)
 
 
 def _lease_release(model, task_id):
-    _lease_db().release_driver_lease(model, os.getpid(), task_id)
+    """Release a slot. Never raises — this runs in a `finally`.
+
+    An exception from here would REPLACE whatever error the attempt was already
+    unwinding with, turning a readable driver failure into a sqlite traceback
+    from a cleanup path. A release that genuinely fails is recoverable on its
+    own: the lease carries a TTL and reap_driver_leases also drops rows whose
+    pid is gone. Masking the real error is not recoverable.
+    """
+    try:
+        _lease_db().release_driver_lease(model, os.getpid(), task_id)
+    except Exception as exc:
+        log.warning("could not release %s lease for %s (%s); the TTL reaper "
+                    "will clear it", model, task_id, exc)
+    # Tell whoever is queued for this exact key that a slot just opened. Best
+    # effort: a release must never fail because a notification could not be
+    # delivered, so every error here is swallowed deliberately.
+    with contextlib.suppress(Exception):
+        q = _slot_q()
+        if q is not None:
+            q.notify(f"slot:{model}")
 
 
 def proc_snapshot(pid):
@@ -439,9 +522,15 @@ class Driver:
                 # error text carries no 400 — retrying it on the crash ladder
                 # walks straight back into whatever is saturated.
                 capacity = self.is_capacity_error(str(exc)) or "unanswered for" in str(exc)
+                # Capacity errors are expected weather and would swamp triage;
+                # everything else is a defect worth a traceback and a group.
+                fp = None if capacity else errors.capture(
+                    exc, task=task_id, model=self.model, node="driver",
+                    harness=self.harness, attempt=attempt)
                 events.emit("driver.error", harness=self.harness, model=self.model,
                             task=task_id, attempt=attempt, error=str(exc)[:300],
-                            will_resume=bool(sid), capacity=capacity)
+                            will_resume=bool(sid), capacity=capacity,
+                            fingerprint=fp)
                 if attempt > config.MAX_RETRIES:
                     raise
                 if capacity:

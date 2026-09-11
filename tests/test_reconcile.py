@@ -25,6 +25,13 @@ class RepoFixture(unittest.TestCase):
         base = Path(self._dir.name)
         self.repo = base / "proj"
         self.repo.mkdir()
+        # A main-only repo. branch_ahead now defaults to config.BASE_BRANCH
+        # (development), so the base must be named here or the comparison has
+        # no ref to make — and with no ref it correctly reports "ahead" rather
+        # than letting reconcile delete a worktree it cannot vouch for.
+        self._orig_base = config.BASE_BRANCH
+        config.BASE_BRANCH = "main"
+        self.addCleanup(setattr, config, "BASE_BRANCH", self._orig_base)
         git(self.repo, "init", "-q", "-b", "main")
         git(self.repo, "config", "user.email", "t@t")
         git(self.repo, "config", "user.name", "t")

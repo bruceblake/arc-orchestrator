@@ -2,6 +2,7 @@ import asyncio
 import logging
 import time
 
+import errors
 import events
 
 
@@ -214,8 +215,16 @@ class _Execution:
                 events.emit("node_start", graph=self.g.name, node=node.name)
                 result = await node.fn(ctx)
             except Exception as exc:
+                # str(exc)[:300] was ALL that survived a node failure: no file,
+                # no line, no frame. errors.capture keeps the traceback and
+                # returns a fingerprint that groups this defect with its other
+                # occurrences, so the event stays short and the evidence stops
+                # being discarded.
+                fp = errors.capture(exc, node=node.name, graph=self.g.name,
+                                    where=f"graph:{node.name}")
                 events.emit("node_error", graph=self.g.name, node=node.name,
-                            seconds=round(time.monotonic() - t0, 3), error=str(exc)[:300])
+                            seconds=round(time.monotonic() - t0, 3),
+                            error=str(exc)[:300], fingerprint=fp)
                 self._fail(exc, node.name)
                 self._settle()
                 continue

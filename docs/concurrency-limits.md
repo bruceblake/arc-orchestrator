@@ -130,12 +130,18 @@ _MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
                      for m, n in _MEASURED_CONCURRENCY.items()}
 ```
 
-| Model | Driver semaphore cap |
-|---|---|
-| gpt-oss-120b | 5 |
-| DeepSeek-V4-Flash | 5 |
-| GLM-5.3 | 4 |
-| Kimi-K3 | 3 |
+| Model | ARC sessions | Sessions per process | Driver cap |
+|---|---|---|---|
+| gpt-oss-120b | 5 | 2 (opencode) | 2 |
+| DeepSeek-V4-Flash | 5 | 2 (opencode) | 2 |
+| GLM-5.3 | 4 | 2 (opencode) | 2 |
+| Kimi-K3 | 3 | 1 (kimi CLI) | 3 |
+
+A harness PROCESS is not an ARC SESSION. An opencode run issues parallel tool
+calls and holds about two sessions at once, so a driver cap equal to the
+session limit asks for twice the budget. Measured over four hours: 23 capacity
+rejections, GLM-5.3 refused with as few as TWO drivers live against a ceiling
+of four.
 
 Remember the harness pool above sits UNDER these: the three opencode models
 share five slots between them, so their per-model caps are reached only when
@@ -364,3 +370,46 @@ many more hard/review work items than 5.
 - [model-tiers.md](model-tiers.md)
 - [taskfile-schema.md](taskfile-schema.md)
 - [runbook.md](runbook.md)
+
+## 7. Waiting for a slot: push, with the poll as the backstop
+
+`drivers._lease_acquire` used to sleep up to 20 s between attempts. A slot
+freed one second after a poll went unnoticed for the remaining nineteen — and
+because PR reviewers are the scarcest resource in the fleet, that delay landed
+on precisely the handoffs that matter most.
+
+`workqueue.py` adds a push channel. `_lease_release(model, task)` notifies the
+topic `slot:<model>` (and `slot:harness:<name>` for a harness lease, the same
+key the lease itself uses); a waiter subscribes to that topic and its wait
+returns the moment a slot opens. Measured end to end through the real driver
+path: **0.5 s instead of up to 20 s.**
+
+It is deliberately **not** load-bearing. Notification is an AF_UNIX datagram,
+which can be dropped; a subscriber can die without unregistering; a notify can
+race a subscribe. So every wait still takes a timeout, the poll loop is still
+what guarantees progress, and a box where the socket or the database cannot be
+opened runs the fleet exactly as before, only slower. Push makes the answer
+arrive sooner; it is not the thing that makes the answer correct.
+
+Releasing never raises. It runs in a `finally`, and an exception there would
+replace whatever error the attempt was already unwinding with a sqlite
+traceback from a cleanup path. A release that fails is recoverable on its own —
+the lease has a TTL and the reaper also drops rows whose pid is gone.
+
+## 8. The durable work queue (`workqueue.py`)
+
+The same module backs a general queue, used where work must survive the process
+that scheduled it. `run-queue.sh` keeps its pending list in the shell's argv, so
+killing the queue loses every task file that had not started yet.
+
+| Property | How |
+|---|---|
+| Durable | Rows in the same sqlite database as everything else |
+| Idempotent enqueue | `UNIQUE(topic, dedupe_key)` as a **partial** index over `pending`/`claimed` only — live work cannot be enqueued twice, and a finished key is free for a legitimate re-run later |
+| At-least-once delivery | `claim` takes a **lease**; `reclaim` returns expired ones, so a dead worker's item is not lost |
+| Exactly-once *effect* | The caller's job. `complete` returns False if the item was already finished by whoever took over its reclaimed lease, so a superseded worker is told rather than silently accepted |
+| Push | `notify(topic)` / `subscribe(topic)`, with `wait(timeout)` and `wait_async(timeout)` |
+
+Named `workqueue`, not `queue`: this repo's modules live in the root and every
+entrypoint puts that root on `sys.path`, so a `queue.py` here shadows the
+standard library's for the whole process — `concurrent.futures` imports it.

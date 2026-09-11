@@ -127,7 +127,44 @@ cd /home/proxyie/arc-orchestrator
 - `--json` emits the same data as JSON for scripting (e.g. feeding a status
   check into another tool); `--db` points it at a non-default database.
 
-### 2.5 GitHub ops (gh CLI agents)
+### 2.5 Chaining projects (`after`)
+
+When one project's tasks read another project's merged code, declare it
+instead of hoping the upstream finished first — add `after` to the
+downstream taskfile's project block:
+
+```json
+{"project": {"repo": "/home/proxyie/repos/notes", "title": "notes: web UI",
+             "after": ["/home/proxyie/tasks/notes-cli.json"],
+             "tasks": [ ... ]}}
+```
+
+- The run holds at a `chain_wait` gate **before allocating any worktree**,
+  polling every 10 s, until every task of every upstream taskfile is
+  `merged`. A dep taskfile that does not exist yet (or has no rows) is
+  waited on — so you can declare the chain before planning the upstream.
+- Readiness is judged per task id parsed from the upstream file on disk:
+  an upstream run that died after 3 of 4 tasks is **not** done, even
+  though only `merged` rows exist for it.
+- An upstream task with a `failed`/`conflict` row, or the 6-hour budget
+  (`ARC_CHAIN_TIMEOUT`) running out, ends the run with exit code **1** and
+  a `chain.blocked` event. Re-run the same taskfile once the upstream is
+  fixed — nothing was created while waiting, so there is nothing to clean
+  up.
+- Check readiness without running: `.venv/bin/python main.py code status`
+  includes a `chains` section (one entry per taskfile in `~/tasks` that
+  declares `after`, with `ready`, `waiting`, `failed`).
+- **For queue wrappers** (`run-queue.sh`, cron, CI): use
+
+  ```bash
+  .venv/bin/python main.py code run ~/tasks/<taskfile>.json --no-wait
+  ```
+
+  — instead of waiting, it prints why the chain is not ready and exits
+  with code **2** (0 when ready). A wrapper requeues on 2, runs on 0. It
+  is safe to run while another process owns the upstream run.
+
+### 2.6 GitHub ops (gh CLI agents)
 
 Three standalone agents in `gh_ops.py` — outside the governed pipeline (no
 worktree, gate, or publish). Only Kimi-K3 or GLM-5.3 may hold them;
@@ -216,7 +253,7 @@ All paths are under `/home/proxyie/arc-orchestrator` unless shown absolute.
 | `logs/gates/` | Verify‑gate output (`<task>-x<attempt>.log`) kept out of version control. |
 | `logs/server.log` | Dashboard stdout/stderr. |
 | `orchestrator.db` | SQLite store; the code workload lives in tables `code_tasks` and `harness_runs`. |
-| `config.py` | All the knobs: `DRIVER_TIMEOUT`, `GATE_TIMEOUT`, `MAX_FIX_ROUNDS`, `WORKTREE_ROOT`, `TASKS_DIR`, driver/model caps. |
+| `config.py` | All the knobs: `DRIVER_TIMEOUT`, `GATE_TIMEOUT`, `MAX_FIX_ROUNDS`, `CHAIN_TIMEOUT`, `WORKTREE_ROOT`, `TASKS_DIR`, driver/model caps. |
 
 Verify‑gate output is written to `logs/gates/<task>-x<attempt>.log`. These logs capture the stdout/stderr of each gate run and are intentionally excluded from version control via `.gitignore`.
 
@@ -228,6 +265,19 @@ If `code run --dry-run` fails to print `dry-run ok`, the task file is invalid.
 Fix the task file per `docs/taskfile-schema.md` (valid `model`, reviewer
 `kimi`/`glm`, cross-family reviewer, known deps, no cycles), re-run the
 dry-run, then re-run.
+
+### Chain blocked or timed out (`chain.blocked`)
+
+A taskfile with `after` ended with exit code 1. The event (and the log line)
+says which:
+
+- **`dependency failed`** — an upstream task's row is `failed`/`conflict`.
+  Fix that project first (§ "Retrying / resuming"), then re-run this
+  taskfile; nothing was allocated while it waited.
+- **`timeout`** — the upstream did not finish within `ARC_CHAIN_TIMEOUT`
+  (default 6 h). Check the upstream run is actually alive (`code status`,
+  the dashboard), then re-run; raise the budget with `ARC_CHAIN_TIMEOUT`
+  only for genuinely long upstreams.
 
 ### Retrying / resuming
 

@@ -19,6 +19,14 @@ def git(repo, *args):
 
 class RepoFixture(unittest.TestCase):
     def setUp(self):
+        # These fixtures build main-only repos. branch_ahead now defaults to
+        # config.BASE_BRANCH (development), so the base must be named here or
+        # there is no ref to compare against — and with no ref it correctly
+        # reports "ahead", because a check that cannot vouch for a branch must
+        # not let reconcile delete its worktree.
+        self._orig_base = config.BASE_BRANCH
+        config.BASE_BRANCH = "main"
+        self.addCleanup(setattr, config, "BASE_BRANCH", self._orig_base)
         self._dir = tempfile.TemporaryDirectory()
         base = Path(self._dir.name)
         self.repo = base / "proj"
@@ -462,3 +470,126 @@ class AdvancingTheLocalBaseBranch(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("fast-forward", note.lower())
         self.assertTrue((self.repo / "mine.txt").exists())
+
+
+class BranchAheadUsesTheIntegrationBranch(unittest.TestCase):
+    """Comparing against main disabled reconcile's cleanup entirely.
+
+    The fleet merges into development; main is promoted to separately and lags
+    it — 52 commits behind when this was written. A branch fully merged into
+    development still had commits main lacked, so reconcile classified it
+    "ahead", kept its worktree, and the cleanup it exists to perform never
+    happened. Measured: task/graph-admission-control, 0 ahead of development
+    and 30 ahead of main.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.repo = Path(self.dir) / "repo"
+        self.repo.mkdir()
+        self._orig_base = config.BASE_BRANCH
+        self._orig_root = config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = str(Path(self.dir) / "wt")
+        self.addCleanup(self._restore)
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                    ["config", "user.name", "t"]):
+            subprocess.run(["git", *cmd], cwd=self.repo, check=True, capture_output=True)
+        (self.repo / "f.txt").write_text("one\n")
+        self._commit("init")
+        subprocess.run(["git", "branch", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+
+    def _restore(self):
+        config.BASE_BRANCH = self._orig_base
+        config.WORKTREE_ROOT = self._orig_root
+
+    def _commit(self, msg):
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", msg], cwd=self.repo, check=True,
+                       capture_output=True)
+
+    def _advance(self, branch, text):
+        subprocess.run(["git", "checkout", "-q", branch], cwd=self.repo, check=True,
+                       capture_output=True)
+        (self.repo / "f.txt").write_text(text)
+        self._commit(f"advance {branch}")
+        subprocess.run(["git", "checkout", "-q", "main"], cwd=self.repo, check=True,
+                       capture_output=True)
+
+    def test_a_branch_level_with_development_is_not_ahead(self):
+        config.BASE_BRANCH = "development"
+        self._advance("development", "dev moved on\n")
+        subprocess.run(["git", "branch", "task/t1", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+        self.assertFalse(asyncio.run(gitstore.branch_ahead(self.repo, "t1")))
+
+    def test_the_same_branch_looks_ahead_of_a_lagging_main(self):
+        # The bug, stated directly: main lags, so the identical branch reads
+        # as unmerged and its worktree is kept forever.
+        config.BASE_BRANCH = "development"
+        self._advance("development", "dev moved on\n")
+        subprocess.run(["git", "branch", "task/t1", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+        self.assertTrue(asyncio.run(gitstore.branch_ahead(self.repo, "t1", base="main")))
+
+    def test_real_unmerged_work_is_still_ahead(self):
+        config.BASE_BRANCH = "development"
+        subprocess.run(["git", "branch", "task/t1", "development"], cwd=self.repo,
+                       check=True, capture_output=True)
+        self._advance("task/t1", "task work\n")
+        self.assertTrue(asyncio.run(gitstore.branch_ahead(self.repo, "t1")))
+
+    def test_a_missing_branch_is_not_ahead(self):
+        config.BASE_BRANCH = "development"
+        self.assertFalse(asyncio.run(gitstore.branch_ahead(self.repo, "nope")))
+
+
+class PromotionWithOneBranch(unittest.TestCase):
+    """main -> main is not a pull request GitHub will accept.
+
+    Returning its error ("No commits between main and main") reads like a bug
+    rather than a configuration choice, so the one-branch case is refused up
+    front with a reason that explains itself.
+    """
+
+    def setUp(self):
+        self._base, self._prod = config.BASE_BRANCH, config.PROD_BRANCH
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        config.BASE_BRANCH, config.PROD_BRANCH = self._base, self._prod
+
+    def test_it_refuses_and_says_why(self):
+        config.BASE_BRANCH = config.PROD_BRANCH = "main"
+        n, url, note = asyncio.run(gitstore.open_promotion_pr("/nonexistent"))
+        self.assertIsNone(n)
+        self.assertIsNone(url)
+        self.assertIn("not configured", note)
+        self.assertIn("main", note)
+
+    def test_it_does_not_refuse_when_two_branches_are_configured(self):
+        config.BASE_BRANCH, config.PROD_BRANCH = "development", "main"
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        repo = Path(d) / "r"
+        repo.mkdir()
+        for cmd in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                    ["config", "user.name", "t"]):
+            subprocess.run(["git", *cmd], cwd=repo, check=True, capture_output=True)
+        (repo / "f").write_text("x\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "i"], cwd=repo, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "branch", "development"], cwd=repo, check=True,
+                       capture_output=True)
+        # No remote and nothing ahead, so it declines for a DIFFERENT reason.
+        # What matters is that the one-branch guard did not short-circuit it.
+        _, _, note = asyncio.run(gitstore.open_promotion_pr(repo))
+        self.assertNotIn("not configured", note or "")
+
+    def test_config_agrees(self):
+        config.BASE_BRANCH = config.PROD_BRANCH = "main"
+        self.assertFalse(config.promotion_configured())
+        config.BASE_BRANCH = "development"
+        self.assertTrue(config.promotion_configured())

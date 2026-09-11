@@ -135,6 +135,9 @@ PYEOF
     if ! node tests/phone_render.test.mjs; then
         echo "FAIL: phone page render functions misbehave"; rc=1
     fi
+    if [ -f tests/usage_visibility.test.mjs ] && ! node tests/usage_visibility.test.mjs; then
+        echo "FAIL: usage.html keeps polling a tab nobody is looking at"; rc=1
+    fi
 else
     echo "(node not installed — skipping JavaScript checks)"
 fi
@@ -194,6 +197,39 @@ for f in sorted(d.glob("*.json")) if d.is_dir() else []:
             print(f"FAIL: {f.name}:{t['id']} gate uses .venv/bin/python; "
                   f"use ./py (worktrees have no .venv)")
             bad = 1
+sys.exit(bad)
+PYEOF
+
+step "task ids are unique per repo"
+"$PY" - <<'PYEOF' || rc=1
+import collections, json, pathlib, sys
+import config
+
+# A task id is not a label, it is the KEY: branch task/<id>, worktree
+# ~/worktrees/<repo>/<id>, commit trailer Task-Id. The schema only requires it
+# to be unique WITHIN a file, which is not enough — two files sharing an id for
+# one repo share a branch and a directory. gitstore.alloc does
+# `git worktree remove --force` then resets the branch, so running both means
+# one run deletes the directory the other's agent is editing and throws away
+# its commits. Nothing detected that.
+seen = collections.defaultdict(list)
+d = pathlib.Path(config.TASKS_DIR)
+for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+    try:
+        proj = json.loads(f.read_text())["project"]
+    except Exception:
+        continue
+    repo = str(proj.get("repo", ""))
+    for t in proj.get("tasks") or []:
+        if t.get("id"):
+            seen[(repo, t["id"])].append(f.name)
+bad = 0
+for (repo, tid), files in sorted(seen.items()):
+    if len(files) > 1:
+        print(f"FAIL: task id {tid!r} is declared by {len(files)} taskfiles for "
+              f"one repo ({', '.join(sorted(files))}) — they share branch "
+              f"task/{tid} and one worktree, so running both destroys work")
+        bad = 1
 sys.exit(bad)
 PYEOF
 

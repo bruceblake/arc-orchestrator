@@ -43,7 +43,22 @@ def context():
         "round": _round.get(),
         "iteration": _iteration.get(),
         "module": _module.get(),
+        # Stitches one run back together. A task's events are spread across the
+        # run process, its drivers and whatever reads them later; without a
+        # shared id there is no way to ask "everything that happened in THAT
+        # run" once it is over.
+        "run_id": _run_id(),
     }
+
+
+_RUN_ID = None
+
+
+def _run_id():
+    global _RUN_ID
+    if _RUN_ID is None:
+        _RUN_ID = f"{int(time.time())}-{os.getpid()}"
+    return _RUN_ID
 
 
 def emit(type, **fields):

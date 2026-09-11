@@ -38,7 +38,21 @@ MAX_EVENTS_PER_RESPONSE = 3000
 PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
           "DeepSeek-V4-Flash": "DeepSeek V4 Flash"}
 
-RANGES = ["1h", "24h", "7d", "all"]
+# Rolling windows plus one calendar window. "today" is deliberately not a
+# synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
+# the fleet done today" is the question an operator actually asks.
+RANGES = ["1h", "3h", "6h", "today", "24h", "7d", "all"]
+_RANGE_SECONDS = {"1h": 3600, "3h": 3 * 3600, "6h": 6 * 3600,
+                  "24h": 86400, "7d": 7 * 86400}
+
+
+def _range_cutoff(range_key, now):
+    """Epoch seconds the window starts at, or None for 'all'."""
+    if range_key == "today":
+        lt = time.localtime(now)
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0,
+                            lt.tm_wday, lt.tm_yday, lt.tm_isdst))
+    return None if range_key == "all" else now - _RANGE_SECONDS[range_key]
 
 _launch_registry = {}  # abspath taskfile -> {"pid", "log", "started", "dry_run"}
 
@@ -103,6 +117,7 @@ def _parse_kimi_wire(path):
     """
     models = {}
     recent = []  # (ts_s, req_delta, tok_delta)
+    turn_log = []  # (ts_s, alias, req_delta, prompt_delta, completion_delta, ok_delta)
     alias_real = {}
     last_req = None  # (ts_s, real_model, agent)
     last_done = 0.0
@@ -141,6 +156,7 @@ def _parse_kimi_wire(path):
             if ts:
                 mod["last_ts"] = ts
                 recent.append((ts, 1, 0))
+                turn_log.append((ts, alias, 1, 0, 0, 0))
                 if file_totals["last_ts"] is None or ts > file_totals["last_ts"]:
                     file_totals["last_ts"] = ts
                 if last_req is None or ts >= last_req[0]:
@@ -177,8 +193,10 @@ def _parse_kimi_wire(path):
                 if file_totals["last_ts"] is None or ts > file_totals["last_ts"]:
                     file_totals["last_ts"] = ts
                 recent.append((ts, 0, inp + out))
+                turn_log.append((ts, alias, 0, inp, out, 1))
     return {"models": models, "alias_real": alias_real, "recent": recent,
             "last_req": last_req, "last_done": last_done, "file_totals": file_totals,
+            "turn_log": turn_log,
             "avg_latency_ms": round(latency_total_ms / latency_count) if latency_count else None}
 
 
@@ -237,6 +255,7 @@ def _kimi_code_usage(now, fleet_names=frozenset()):
     agg = {}
     inflight = []
     points = []  # (ts, requests_delta, tokens_delta)
+    turns = []  # (ts, real_model, requests_delta, prompt_delta, completion_delta, ok_delta)
     live = set()
     paths = root.glob("*/*/agents/*/wire.jsonl") if root.is_dir() else []
     for path in paths:
@@ -269,6 +288,13 @@ def _kimi_code_usage(now, fleet_names=frozenset()):
             if m["last_ts"] and (row["last_ts"] is None or m["last_ts"] > row["last_ts"]):
                 row["last_ts"] = m["last_ts"]
         points.extend(data["recent"])
+        for t, alias, rd, pd, cd, ok_delta in data.get("turn_log", []):
+            if t is None:
+                continue
+            real = data["alias_real"].get(alias, alias)
+            if real == "unknown":
+                continue  # internal calls without a model field (titles, cron)
+            turns.append((t, real, rd, pd, cd, ok_delta))
         lr = data["last_req"]
         owner = _session_task(path)
         if owner and owner in fleet_names:
@@ -285,11 +311,17 @@ def _kimi_code_usage(now, fleet_names=frozenset()):
     models = list(agg.values())
     for m in models:
         m["tokens"] = m["prompt_tokens"] + m["completion_tokens"]
-    return {"models": models, "inflight": inflight, "points": points}
+    return {"models": models, "inflight": inflight, "points": points, "turns": turns}
 
 
 def _series_window(range_key, now, min_ts):
     """(start_epoch, bucket_secs, n_points) — 1h axis stays exactly as it always was."""
+    if range_key in ("3h", "6h"):
+        span = _RANGE_SECONDS[range_key]
+        return int((now - span) // 300) * 300, 300, span // 300 + 1
+    if range_key == "today":
+        start = int(_range_cutoff("today", now) // 300) * 300
+        return start, 300, max(2, int((now - start) // 300) + 2)
     if range_key == "24h":
         return int((now - 86400) // 300) * 300, 300, 289
     if range_key == "7d":
@@ -510,14 +542,50 @@ def _collect_inflight(now, store=None):
     return rows, kimi
 
 
-def _usage(store=None, range_key=None, include_series=False):
-    """Usage aggregates for /api/usage. Default (no range) keeps the historical shape.
+def _window_kimi_models(turns, cutoff):
+    """Per-model kimi-code rows restricted to turns at/after `cutoff`.
 
-    `series` (the per-family time buckets, ~90% of the payload) is opt-in via
-    include_series=True — nothing in static/*.html draws it except phone.html,
-    which requests ?series=1."""
+    `_kimi_code_usage` returns the all-time `models` plus a per-turn `turns`
+    log; `_usage` re-sums only the turns inside the window so a narrow range
+    shows less traffic and `last_ts` reflects the last event WITHIN the range,
+    not overall.
+    """
+    agg = {}
+    for ts, real, req_delta, prompt_delta, completion_delta, ok_delta in turns:
+        if ts is None or ts < cutoff:
+            continue
+        row = agg.setdefault(real, {"model": real, "pretty": _pretty(real),
+                                    "family": "kimi-code", "source": "kimi-code",
+                                    "requests": 0, "ok": 0, "errors": 0,
+                                    "failed_attempts": 0, "tokens": 0,
+                                    "prompt_tokens": 0, "completion_tokens": 0,
+                                    "avg_latency_ms": None, "last_ts": None})
+        row["requests"] += req_delta
+        row["ok"] += ok_delta
+        row["prompt_tokens"] += prompt_delta
+        row["completion_tokens"] += completion_delta
+        if row["last_ts"] is None or ts > row["last_ts"]:
+            row["last_ts"] = ts
+    models = list(agg.values())
+    for m in models:
+        m["tokens"] = m["prompt_tokens"] + m["completion_tokens"]
+    return models
+
+
+def _usage(store=None, range_key=None, include_series=False):
+    """Usage aggregates for /api/usage, honoring the requested range.
+
+    `range_key` selects the aggregation window: 1h/3h/6h/today/24h/7d/all. A
+    missing or unrecognized key (including None) falls back to "1h" — the usage
+    page's default. "today" is a CALENDAR day, not a rolling 24 hours: at 09:00
+    a rolling day is mostly yesterday, and "what has the fleet done today" is
+    the question an operator actually asks. "all" is the historical view: nothing is dropped. A windowed range
+    bounds totals, per-model/family rows, and the series points, while the
+    in-flight list is never trimmed — a live agent is current by definition.
+    """
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
+    cutoff = _range_cutoff(range_key, now)
 
     def new_model(model, family, source):
         return {"model": model, "pretty": _pretty(model), "family": family, "source": source,
@@ -544,7 +612,10 @@ def _usage(store=None, range_key=None, include_series=False):
     inflight, kimi = _collect_inflight(now, store)
 
     ev_lines = _load_event_lines()
-    for line in ev_lines:
+    lines = ev_lines
+    if cutoff is not None:
+        lines = ev_lines[_first_event_at_or_after(ev_lines, cutoff):]
+    for line in lines:
         try:
             e = json.loads(line)
         except Exception:
@@ -563,6 +634,14 @@ def _usage(store=None, range_key=None, include_series=False):
                 mod["failed_attempts"] += 1
                 fam["failed_attempts"] += 1
                 totals["failed_attempts"] += 1
+                # A failed driver attempt produced no series point, so the code
+                # fleet's failures were invisible on the timeline: an hour of
+                # capacity rejections rendered as a quiet hour rather than a bad
+                # one. Capacity is tracked separately because it is the
+                # provider refusing, not the work being wrong.
+                ts = _ts(e.get("ts"))
+                if ts:
+                    pts.append((ts, family, 0, 0, 0, 1))
                 continue
             mod["requests"] += 1
             mod["ok"] += 1
@@ -589,7 +668,7 @@ def _usage(store=None, range_key=None, include_series=False):
                 totals["prompt_tokens"] += ptoks
                 totals["completion_tokens"] += ctoks
             if ts:
-                pts.append((ts, family, 1, toks, 1))
+                pts.append((ts, family, 1, toks, 1, 0))
             continue
         if etype not in ("request", "request_start", "request_end"):
             continue
@@ -627,14 +706,21 @@ def _usage(store=None, range_key=None, include_series=False):
             if isinstance(lat, (int, float)):
                 mod["latency_total_ms"] += lat
             if ts:
-                pts.append((ts, family, 1, tokens, 0))
+                pts.append((ts, family, 1, tokens, 0, 0))
         else:
             mod["errors"] += 1
             fam["errors"] += 1
             totals["errors"] += 1
+            # A failed request produced NO point at all, so the timeline showed
+            # traffic dipping during an outage rather than errors spiking — the
+            # shape that makes a bad hour look like a quiet one.
+            if ts:
+                pts.append((ts, family, 1, 0, 0, 1))
 
     # Backfill opencode tokens from transcripts for pre-plumbing runs.
     for ts, model, toks, ptoks, ctoks in _opencode_token_backfill(store, done_tok_keys):
+        if cutoff is not None and (ts is None or ts < cutoff):
+            continue
         family = config.MODEL_FAMILY.get(model, "harness")
         mod = by_model.setdefault((family, model, "driver:opencode"),
                                   new_model(model, family, "driver:opencode"))
@@ -649,14 +735,18 @@ def _usage(store=None, range_key=None, include_series=False):
         totals["completion_tokens"] += ctoks
         if mod["last_ts"] is None or ts > mod["last_ts"]:
             mod["last_ts"] = ts
-        pts.append((ts, family, 0, toks, 0))
+        pts.append((ts, family, 0, toks, 0, 0))
 
     # Merge kimi-code CLI sessions so the dashboard also shows interactive traffic,
     # which goes straight to llm-api.arc.vt.edu and never touches the event log.
-    pts.extend((ts, "kimi-code", req, tok, 0) for ts, req, tok in kimi["points"])
-    if kimi["models"]:
+    # A windowed range narrows kimi's per-model totals from its per-turn log; the
+    # all-time `models` stays the historical view for range=all.
+    pts.extend((ts, "kimi-code", req, tok, 0, 0) for ts, req, tok in kimi["points"]
+               if cutoff is None or (ts is not None and ts >= cutoff))
+    kimi_models = kimi["models"] if cutoff is None else _window_kimi_models(kimi.get("turns", []), cutoff)
+    if kimi_models:
         fam = new_family("kimi-code")
-        for row in kimi["models"]:
+        for row in kimi_models:
             fam["requests"] += row["requests"]
             fam["ok"] += row["ok"]
             fam["tokens"] += row["tokens"]
@@ -666,7 +756,7 @@ def _usage(store=None, range_key=None, include_series=False):
             totals["prompt_tokens"] += row["prompt_tokens"]
             totals["completion_tokens"] += row["completion_tokens"]
         by_family["kimi-code"] = fam
-        by_model.update({(r["family"], r["model"], r["source"]): r for r in kimi["models"]})
+        by_model.update({(r["family"], r["model"], r["source"]): r for r in kimi_models})
 
     for row in inflight:
         fam = by_family.get(row["family"])
@@ -720,18 +810,21 @@ def _usage(store=None, range_key=None, include_series=False):
     start, bucket, n = _series_window(range_key, now, min((p[0] for p in pts), default=None))
     series = None
     if include_series:
-        series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0} for i in range(n)]
+        series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0,
+                       "errors": 0} for i in range(n)]
                   for f in config.FAMILY_ORDER}
-        for ts, family, req, tok, _tr in pts:
+        for ts, family, req, tok, _tr, err in pts:
             if not ts or ts < start:
                 continue
             idx = int((ts - start) // bucket)
             if idx >= n:
                 continue
             pts_list = series.setdefault(family, [{"t": start + i * bucket, "requests": 0,
-                                                   "tokens": 0} for i in range(n)])
+                                                   "tokens": 0, "errors": 0}
+                                                  for i in range(n)])
             pts_list[idx]["requests"] += req
             pts_list[idx]["tokens"] += tok
+            pts_list[idx]["errors"] += err
 
     day0 = int(now // 86400)
     daily = []
@@ -742,7 +835,7 @@ def _usage(store=None, range_key=None, include_series=False):
                "requests": 0, "tokens": 0, "task_runs": 0, "families": {}}
         day_idx[d] = rec
         daily.append(rec)
-    for ts, family, req, tok, tr in pts:
+    for ts, family, req, tok, tr, _err in pts:
         if not ts:
             continue
         rec = day_idx.get(int(ts // 86400))
@@ -891,6 +984,32 @@ def _first_event_at_or_after(lines, ts):
             return i
         i = idx
     return i
+
+
+def _errors(range_key="24h", limit=40):
+    """Distinct DEFECTS for the triage panel, worst first.
+
+    Not an error log — a flat list of occurrences answers "what happened",
+    which is the question you can already answer by reading the feed. This
+    answers "what should I fix", by collapsing every occurrence of one defect
+    into a single row with its count, its span, the tasks it hit, and the
+    traceback that was previously thrown away.
+    """
+    import errors as _errors_mod
+    now = time.time()
+    spans = {"1h": 3600, "24h": 86400, "7d": 604800, "all": None}
+    secs = spans.get(range_key, 86400)
+    since = 0 if secs is None else now - secs
+    try:
+        groups = _errors_mod.groups(since=since, limit=limit)
+    except Exception as exc:
+        return {"ready": False, "reason": str(exc)[:200], "groups": [],
+                "ranges": list(spans), "range": range_key, "ts": now}
+    # age_s / span_s / active come from errors.groups(): a defect seen once an
+    # hour ago is cold, one seen 30 times in the last five minutes is on fire,
+    # and that is a property of the group rather than of this rendering.
+    return {"ready": True, "groups": groups, "total": sum(g["count"] for g in groups),
+            "ranges": list(spans), "range": range_key, "ts": now}
 
 
 def _queue(store):
@@ -2279,6 +2398,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/queue":
                 return self._json(_queue(Handler.store))
+            if u.path == "/api/errors":
+                q = parse_qs(u.query)
+                return self._json(_errors(q.get("range", ["24h"])[0],
+                                          int(q.get("limit", ["40"])[0])))
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
             if u.path == "/api/project":

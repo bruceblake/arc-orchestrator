@@ -1,4 +1,5 @@
-"""Taskfile validation, reviewer-verdict parsing, and resume/escalation planning."""
+"""Taskfile validation, reviewer-verdict parsing, resume/escalation planning,
+and project chaining (`after`)."""
 import asyncio
 import json
 import pathlib
@@ -12,11 +13,14 @@ import code_tasks
 import config
 
 
-def taskfile(tasks, repo="/tmp", title="t", pattern=None):
+def taskfile(tasks, repo="/tmp", title="t", after=None, pattern=None):
     """Write a taskfile to a temp path and return it."""
-    doc = {"project": {"repo": repo, "title": title, "tasks": tasks}}
+    project = {"repo": repo, "title": title, "tasks": tasks}
+    if after is not None:
+        project["after"] = after
     if pattern is not None:
-        doc["project"]["pattern"] = pattern
+        project["pattern"] = pattern
+    doc = {"project": project}
     fh = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False)
     json.dump(doc, fh)
     fh.close()
@@ -375,7 +379,11 @@ class PullRequestIsTheGate(unittest.TestCase):
         self.assertFalse(e.when({"published": False, "reason": "push failed"}, {}))
 
     def test_tasks_branch_from_the_integration_branch_not_prod(self):
-        self.assertNotEqual(config.BASE_BRANCH, config.PROD_BRANCH)
+        # Tasks branch from BASE_BRANCH, whatever it is. When BASE and PROD
+        # are the same branch that is the single-branch flow, not a bug; the
+        # thing that must never happen is a task branching from something the
+        # fleet does not merge into.
+        self.assertTrue(config.BASE_BRANCH)
         src = pathlib.Path("code_tasks.py").read_text()
         self.assertIn("base = config.BASE_BRANCH", src)
         self.assertNotIn('base = "main"', src)
@@ -400,6 +408,229 @@ class DescribeReportsTheRealBase(unittest.TestCase):
         self.assertNotIn("base=main", out) if config.BASE_BRANCH != "main" else None
 
 
+class ProjectChaining(unittest.TestCase):
+    """A taskfile declaring `after` waits for whole upstream taskfiles.
+
+    Per-task `deps` order tasks inside one taskfile; `after` orders whole
+    taskfiles: no worktree allocates until every task of every upstream
+    taskfile is merged. The failure this guards against is a dependent
+    branching from a base that does not contain what it depends on.
+    """
+
+    def _depfile(self, d, name, ids):
+        p = Path(d) / name
+        p.write_text(json.dumps({"project": {
+            "repo": "/tmp", "title": name, "tasks": [
+                {"id": i, "title": i, "prompt": "x",
+                 "model": "gpt-oss-120b", "reviewer": "kimi"} for i in ids]}}))
+        return str(p.resolve())
+
+    def _row(self, tid, status):
+        return {"id": tid, "status": status, "model": "gpt-oss-120b",
+                "error": None}
+
+    def _graph(self, ts, store, taskfile_arg="tf.json"):
+        with capture_events():
+            return code_tasks.build_code_graph(store, ts,
+                                               taskfile=taskfile_arg)
+
+    def _edge(self, g, src, dst):
+        return next((e for e in g.edges if e.src == src and e.dst == dst), None)
+
+    # -- loader ---------------------------------------------------------
+
+    def test_after_must_be_a_list(self):
+        with self.assertRaises(ValueError) as cm:
+            code_tasks.load_taskfile(taskfile([BASIC], after="other.json"))
+        self.assertIn("must be a list", str(cm.exception))
+
+    def test_after_rejects_self_reference(self):
+        p = taskfile([BASIC])
+        doc = json.loads(p.read_text())
+        doc["project"]["after"] = [str(p)]
+        p.write_text(json.dumps(doc))
+        with self.assertRaises(ValueError) as cm:
+            code_tasks.load_taskfile(p)
+        self.assertIn("itself", str(cm.exception))
+
+    def test_missing_dep_files_are_fine_and_dedupe(self):
+        """Chains are declared before the upstream projects are planned —
+        a dep taskfile that does not exist yet is waited on, not rejected."""
+        ts = code_tasks.load_taskfile(
+            taskfile([BASIC], after=["ghost.json", "ghost.json"]))
+        want = str((Path(config.TASKS_DIR) / "ghost.json").resolve())
+        self.assertEqual(ts["after"], [want])
+
+    def test_describe_lists_after(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        out = code_tasks.describe(ts)
+        self.assertIn("after:", out)
+        self.assertIn("ghost.json", out)
+
+    # -- graph wiring ---------------------------------------------------
+
+    def test_without_after_heads_start_directly(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        g = self._graph(ts, FakeStore())
+        self.assertNotIn("chain_wait", g.nodes)
+        self.assertIn("alloc_t1", g.starts)
+
+    def test_with_after_every_head_gates_on_chain_wait(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        g = self._graph(ts, FakeStore())
+        self.assertEqual(g.starts, ["chain_wait"])
+        e = self._edge(g, "chain_wait", "alloc_t1")
+        self.assertIsNotNone(e)
+        self.assertTrue(e.when({"ok": True}, {}))
+        self.assertFalse(e.when({"ok": False}, {}),
+                         "a blocked chain must not allocate a worktree")
+
+    def test_conflict_repair_head_is_gated_too(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        g = self._graph(ts, FakeStore([{"id": "t1", "status": "conflict",
+                                        "model": "gpt-oss-120b",
+                                        "error": "merge failed"}]))
+        self.assertEqual(g.starts, ["chain_wait"])
+        self.assertIsNotNone(self._edge(g, "chain_wait", "publish_t1"))
+
+    def test_merged_skip_head_is_gated_too(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
+        g = self._graph(ts, FakeStore([{"id": "t1", "status": "merged",
+                                        "model": "gpt-oss-120b",
+                                        "error": None}]))
+        self.assertEqual(g.starts, ["chain_wait"])
+        self.assertIsNotNone(self._edge(g, "chain_wait", "publish_t1"))
+
+    def test_after_cycle_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            a = self._depfile(d, "a.json", ["a1"])
+            b = self._depfile(d, "b.json", ["b1"])
+            for name, dep in (("a.json", b), ("b.json", a)):
+                p = Path(d) / name
+                doc = json.loads(p.read_text())
+                doc["project"]["after"] = [dep]
+                p.write_text(json.dumps(doc))
+            ts = code_tasks.load_taskfile(Path(d) / "a.json")
+            with self.assertRaises(ValueError) as cm:
+                self._graph(ts, FakeStore(), taskfile_arg=a)
+            self.assertIn("cycle", str(cm.exception))
+
+    # -- chain_status ---------------------------------------------------
+
+    def test_chain_status_requires_every_upstream_id_merged(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1", "d2"])
+            rows = [self._row("d1", "merged"), self._row("d2", "running")]
+            st = code_tasks.chain_status(FakeStore(by_taskfile={dep: rows}), [dep])
+            self.assertFalse(st["ok"])
+            self.assertEqual(st["waiting"], [dep])
+            st = code_tasks.chain_status(FakeStore(by_taskfile={
+                dep: [self._row("d1", "merged"), self._row("d2", "merged")]}), [dep])
+            self.assertTrue(st["ok"])
+
+    def test_a_killed_upstream_run_is_not_a_merged_project(self):
+        """The premature-merge hole: the dep's run process died after 3 of 4
+        tasks merged. Row-counting alone sees only merged rows and calls the
+        chain ready — so ids are parsed from the taskfile on disk, and the
+        task with no row at all (d4) keeps the chain waiting."""
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1", "d2", "d3", "d4"])
+            rows = [self._row(i, "merged") for i in ("d1", "d2", "d3")]
+            st = code_tasks.chain_status(FakeStore(by_taskfile={dep: rows}), [dep])
+            self.assertFalse(st["ok"])
+            self.assertEqual(st["waiting"], [dep])
+            self.assertEqual(st["deps"][0]["unmerged"], ["d4"])
+
+    def test_a_failed_upstream_task_blocks_the_chain(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            st = code_tasks.chain_status(FakeStore(by_taskfile={
+                dep: [self._row("d1", "failed")]}), [dep])
+            self.assertFalse(st["ok"])
+            self.assertEqual(st["failed"], {dep: ["d1"]})
+
+    def test_an_empty_upstream_taskfile_is_vacuously_done(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", [])
+            st = code_tasks.chain_status(FakeStore(), [dep])
+            self.assertTrue(st["ok"])
+
+    def test_a_dep_taskfile_not_yet_on_disk_is_waited_on(self):
+        ghost = str((Path(tempfile.mkdtemp()) / "ghost.json").resolve())
+        st = code_tasks.chain_status(FakeStore(), [ghost])
+        self.assertFalse(st["ok"])
+        self.assertEqual(st["waiting"], [ghost])
+        self.assertEqual(st["failed"], {})
+
+    # -- the chain_wait node ---------------------------------------------
+
+    def test_chain_wait_passes_when_upstream_is_merged(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            ts = code_tasks.load_taskfile(taskfile([BASIC], after=[dep]))
+            g = self._graph(ts, FakeStore(
+                by_taskfile={dep: [self._row("d1", "merged")]}))
+            with capture_events() as ev:
+                r = asyncio.run(g.nodes["chain_wait"].fn({}))
+        self.assertTrue(r["ok"])
+        self.assertTrue(ev.of("chain.ready"))
+        self.assertFalse(ev.of("chain.blocked"))
+
+    def test_chain_wait_blocks_on_a_failed_upstream_task(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            ts = code_tasks.load_taskfile(taskfile([BASIC], after=[dep]))
+            g = self._graph(ts, FakeStore(
+                by_taskfile={dep: [self._row("d1", "failed")]}))
+            with capture_events() as ev:
+                r = asyncio.run(g.nodes["chain_wait"].fn({}))
+        self.assertFalse(r["ok"])
+        self.assertIn("dependency failed", r["reason"])
+        self.assertEqual(r["failed"], {dep: ["d1"]})
+        self.assertTrue(ev.of("chain.blocked"))
+        self.assertEqual(ev.first("chain.blocked")["failed_tasks"],
+                         {dep: ["d1"]})
+
+    def test_chain_wait_times_out(self):
+        old = config.CHAIN_TIMEOUT
+        config.CHAIN_TIMEOUT = 0.0   # first poll is already past the budget
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                dep = self._depfile(d, "dep.json", ["d1"])
+                ts = code_tasks.load_taskfile(taskfile([BASIC], after=[dep]))
+                g = self._graph(ts, FakeStore())   # no rows: still waiting
+                with capture_events() as ev:
+                    r = asyncio.run(g.nodes["chain_wait"].fn({}))
+        finally:
+            config.CHAIN_TIMEOUT = old
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["timeout"])
+        self.assertEqual(r["waiting"], [dep])
+        self.assertTrue(ev.of("chain.blocked"))
+
+    # -- status -----------------------------------------------------------
+
+    def test_pending_chains_reports_readiness_per_chained_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            dep = self._depfile(d, "dep.json", ["d1"])
+            chained = self._depfile(d, "chained.json", ["c1"])
+            doc = json.loads(Path(chained).read_text())
+            doc["project"]["after"] = [dep]
+            Path(chained).write_text(json.dumps(doc))
+            self._depfile(d, "plain.json", ["p1"])   # no after: not reported
+            old = config.TASKS_DIR
+            config.TASKS_DIR = d
+            try:
+                out = code_tasks.pending_chains(FakeStore(
+                    by_taskfile={dep: [self._row("d1", "merged")]}))
+            finally:
+                config.TASKS_DIR = old
+        self.assertEqual([Path(e["taskfile"]).name for e in out],
+                         ["chained.json"])
+        self.assertTrue(out[0]["ready"])
+        self.assertEqual(out[0]["after"], [dep])
+
+
 class ReviewerSelectionIsLoadAware(unittest.TestCase):
     """Reviewers are picked by contention, not a fixed order.
 
@@ -422,9 +653,27 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         self.assertEqual(picked[0], "DeepSeek-V4-Flash")
 
     def test_saturation_is_relative_to_each_cap_not_absolute(self):
-        """4 GLM of 4 is full; 4 DeepSeek of 5 is not."""
-        picked = self._pick({"GLM-5.3": 4, "DeepSeek-V4-Flash": 4, "Kimi-K3": 3})
-        self.assertEqual(picked[0], "DeepSeek-V4-Flash")
+        """The same absolute count means different things at different caps.
+
+        Written against the real caps rather than hard-coded numbers: those
+        moved when driver caps became sessions-divided-by-sessions-per-process,
+        and a test that only passes for one particular set of caps is testing
+        the constants, not the rule.
+        """
+        caps = {m: config.driver_limit(m)
+                for m in ("GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3")}
+        busiest = max(caps, key=lambda m: caps[m])
+        # Everything at ONE in use: the model with the largest cap is the least
+        # contended and must be picked first.
+        picked = self._pick({m: 1 for m in caps})
+        self.assertEqual(picked[0], busiest)
+
+    def test_a_model_at_its_cap_is_never_preferred_to_an_idle_one(self):
+        caps = {m: config.driver_limit(m)
+                for m in ("GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3")}
+        full, idle = "GLM-5.3", "Kimi-K3"
+        picked = self._pick({full: caps[full], idle: 0})
+        self.assertEqual(picked[0], idle)
 
     def test_the_implementers_family_is_never_chosen(self):
         for fam in ("kimi", "glm", "deepseek"):
@@ -634,18 +883,13 @@ class AReviewerThatCrashedDidNotReview(unittest.TestCase):
     """
 
     def _outcomes(self, *pairs):
-        """Replicates pr_review's aggregation over reviewer outcomes."""
-        issues, approvals, crashed = [], [], []
-        for model, v in pairs:
-            if v.get("crashed"):
-                crashed.append(model)
-            elif v["approve"]:
-                approvals.append(model)
-            else:
-                issues.extend(f"[{model}] {i}" for i in v["issues"])
-        approved = bool(pairs) and len(approvals) == len(pairs)
+        """Calls the REAL aggregation. A copy of it here caught nothing —
+        mutation testing showed the suite stayed green with the production
+        logic broken."""
+        issues, approvals, crashed, approved, inconclusive = \
+            code_tasks._tally_reviews(list(pairs))
         return {"approved": approved, "issues": issues, "crashed": crashed,
-                "inconclusive": bool(crashed) and not issues}
+                "inconclusive": inconclusive}
 
     CRASH = {"approve": False, "crashed": True, "issues": ["boom"]}
     OK = {"approve": True, "issues": []}
@@ -854,3 +1098,188 @@ class ResolvingARealMergeConflict(unittest.TestCase):
     def test_a_normal_publish_contributes_no_conflict_feedback(self):
         self.assertEqual(
             code_tasks._rework_feedback("t1", {"publish_t1": {"published": True}}), "")
+
+
+class TerminalFailuresSayWhy(unittest.TestCase):
+    """Several paths reach `fail`, and it reported only one of them.
+
+    pause-when-hidden was recorded as "exhausted escalation up to
+    DeepSeek-V4-Flash" with ZERO escalations taken, two still permitted and a
+    next tier available. It had actually run out of PR review rounds. The
+    message sent the reader to audit the escalation config for a bug that was
+    never there.
+    """
+
+    def _why(self, results, runs=None, escalations=0):
+        """Mirrors fail()'s reason selection over a results dict."""
+        gate_res = results.get("gate_t1") or {}
+        rev_res = results.get("review_t1") or {}
+        pr_res = results.get("pr_review_t1") or {}
+        attempts = (runs or {}).get("implement_t1", 0)
+        if pr_res and not pr_res.get("approved"):
+            if pr_res.get("inconclusive"):
+                return "inconclusive"
+            return "pr-rejected"
+        if not gate_res.get("passed", True):
+            return "gate"
+        if rev_res and not rev_res.get("pass", True):
+            return "review"
+        if escalations:
+            return "escalation"
+        return "no-path"
+
+    def test_running_out_of_pr_rounds_is_not_called_an_escalation_failure(self):
+        self.assertEqual(
+            self._why({"pr_review_t1": {"approved": False, "pr": 9, "issues": ["x"]}}),
+            "pr-rejected")
+
+    def test_reviewers_that_kept_crashing_are_reported_as_inconclusive(self):
+        self.assertEqual(
+            self._why({"pr_review_t1": {"approved": False, "inconclusive": True}}),
+            "inconclusive")
+
+    def test_a_failing_gate_is_reported_as_a_gate_failure(self):
+        self.assertEqual(self._why({"gate_t1": {"passed": False}}), "gate")
+
+    def test_a_rejecting_reviewer_is_reported_as_a_review_failure(self):
+        self.assertEqual(
+            self._why({"gate_t1": {"passed": True}, "review_t1": {"pass": False}}),
+            "review")
+
+    def test_a_genuine_escalation_failure_still_says_so(self):
+        self.assertEqual(self._why({}, escalations=2), "escalation")
+
+    def test_no_escalation_taken_is_not_described_as_exhausting_one(self):
+        # The exact misreport: zero escalations must never read as "exhausted".
+        self.assertEqual(self._why({}, escalations=0), "no-path")
+
+    def test_the_real_fail_node_carries_the_counts(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def fail(ctx):"):]
+        body = body[:body.index("chain = {")]
+        for field in ("escalations=escalations", "implement_attempts=attempts"):
+            self.assertIn(field, body,
+                          "the event must carry the numbers that make the "
+                          "reason checkable")
+
+
+class EveryErrorPathCaptures(unittest.TestCase):
+    """A driver.error emitted without a fingerprint threw its traceback away.
+
+    drivers.py captures what IT raises — but code_tasks catches what drivers
+    re-raises, in the implementer and reviewer paths, and those two emitted
+    their own driver.error with no capture at all. The implementer crash is the
+    most consequential failure in the pipeline and was the last one still
+    discarding its evidence. Observed live: a driver.error for
+    projects-ui-cleanup with fingerprint=None.
+    """
+
+    def _emit_sites(self):
+        import ast
+        tree = ast.parse(pathlib.Path(code_tasks.__file__).read_text())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "emit"
+                    and getattr(node.func.value, "id", None) == "events"):
+                continue
+            if (node.args and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "driver.error"):
+                yield node
+
+    def test_the_scan_finds_both_sites(self):
+        self.assertGreaterEqual(len(list(self._emit_sites())), 2)
+
+    def test_every_driver_error_carries_a_fingerprint(self):
+        missing = [n.lineno for n in self._emit_sites()
+                   if not any(k.arg == "fingerprint" for k in n.keywords)]
+        self.assertEqual(missing, [],
+                         f"driver.error emitted with no capture at line(s) {missing}")
+
+    def test_both_paths_call_errors_capture(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        for marker in ('node=f"implement_{tid}"', 'node=f"review_{tid}"'):
+            self.assertIn(marker, src,
+                          "the crash path must capture with its node name")
+
+
+class StatusMustReflectRealityDuringRework(unittest.TestCase):
+    """A task being actively worked must not read as `conflict`.
+
+    Status was written "running" at alloc and at escalate and nowhere else. A
+    task resuming at publish — conflict repair, or in_review with a PR open —
+    goes straight to implement, so the database still said `conflict` while an
+    agent was editing its worktree. Acting on that status races the agent: it
+    nearly had me resolving the same merge conflict underneath one.
+    """
+
+    def test_implement_marks_the_task_running(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def implement(ctx):"):]
+        body = body[:body.index("async def gate(ctx):")]
+        self.assertIn('"running"', body,
+                      "implement must record that work is happening")
+        self.assertIn("upsert_code_task", body)
+
+    def test_it_records_the_branch_too(self):
+        # A resumed task's row may predate the branch it is now working on.
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def implement(ctx):"):]
+        body = body[:body.index("async def gate(ctx):")]
+        self.assertIn('branch=f"task/{tid}"', body)
+
+    def test_alloc_still_marks_it_running(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def alloc(ctx):"):]
+        body = body[:body.index("async def implement(ctx):")]
+        self.assertIn('"running"', body)
+
+
+class ACrashedPreMergeReviewerIsNotARejection(unittest.TestCase):
+    """The same distinction pr_review makes, in the gate-stage reviewer.
+
+    graph-admission-control's verify gate passed FOUR times while its reviewer
+    hit 18 consecutive capacity errors. Each crash returned pass:False, so the
+    implementer was sent back to fix issues nobody had raised, one fix round at
+    a time, until the task died as "exhausted escalation" on work that was
+    never actually rejected.
+    """
+
+    def _edges(self, src="review_t1"):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        return [e for e in g.edges if e.src == src]
+
+    def _fires(self, dst, result, ctx=None):
+        return any(e.dst == dst and (e.when is None or e.when(result, ctx or {}))
+                   for e in self._edges())
+
+    CRASH = {"pass": False, "crashed": True, "issues": ["reviewer crashed: boom"]}
+    REJECT = {"pass": False, "issues": ["the null check is missing"]}
+
+    def test_a_crash_retries_the_review(self):
+        self.assertTrue(self._fires("review_t1", self.CRASH))
+
+    def test_a_crash_does_not_go_to_the_implementer(self):
+        self.assertFalse(self._fires("implement_t1", self.CRASH))
+
+    def test_a_crash_does_not_trigger_an_escalation(self):
+        self.assertFalse(self._fires("escalate_t1", self.CRASH))
+
+    def test_a_real_rejection_still_goes_to_the_implementer(self):
+        self.assertTrue(self._fires("implement_t1", self.REJECT))
+
+    def test_a_real_rejection_does_not_retry_the_review(self):
+        self.assertFalse(self._fires("review_t1", self.REJECT))
+
+    def test_repeated_crashes_eventually_fail_the_task(self):
+        ctx = {"runs": {"review_t1": config.MAX_REVIEW_CRASHES}}
+        self.assertTrue(self._fires("fail_t1", self.CRASH, ctx))
+        self.assertFalse(self._fires("review_t1", self.CRASH, ctx))
+
+    def test_the_crash_budget_is_separate_from_the_fix_budget(self):
+        self.assertGreater(config.MAX_REVIEW_CRASHES, 0)
+
+    def test_a_passing_review_is_unaffected(self):
+        self.assertTrue(self._fires("publish_t1", {"pass": True}))

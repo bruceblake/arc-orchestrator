@@ -209,8 +209,26 @@ async def _dirty_paths(repo):
     return out
 
 
-async def branch_ahead(repo, task_id, base="main"):
-    """True if task/<task_id> exists and has commits base does not."""
+async def branch_ahead(repo, task_id, base=None):
+    """True if task/<task_id> exists and has commits `base` does not.
+
+    Defaults to config.BASE_BRANCH, not "main". The fleet merges into
+    development; main is promoted to separately and lags it — 52 commits behind
+    as this was written. Comparing against main meant a branch fully merged into
+    development still counted as unmerged, so reconcile KEPT its worktree
+    forever and the cleanup it exists to perform never happened. Measured:
+    task/graph-admission-control was 0 commits ahead of development and 30
+    ahead of main.
+    """
+    base = base or config.BASE_BRANCH
+    # If the base branch does not resolve, we cannot know whether this branch
+    # holds unmerged work — and the caller (reconcile) treats False as "merged,
+    # safe to delete". Unknown must therefore report AHEAD: keeping a worktree
+    # that could have been removed costs disk, deleting one that held commits
+    # costs the work.
+    rc, _, _ = await _git(["rev-parse", "--verify", base], cwd=repo, check=False)
+    if rc != 0:
+        return True
     repo = Path(repo).resolve()
     branch = f"task/{task_id}"
     rc, _, _ = await _git(["rev-parse", "--verify", branch], cwd=repo, check=False)
@@ -580,6 +598,13 @@ async def open_promotion_pr(repo, base=None, prod=None, title=None):
     repo = Path(repo).resolve()
     base = base or config.BASE_BRANCH
     prod = prod or config.PROD_BRANCH
+    if base == prod:
+        # One-branch flow: there is nothing to promote INTO. GitHub rejects a
+        # PR whose head and base are the same ref, and the error it returns
+        # ("No commits between main and main") reads like a bug rather than a
+        # configuration choice.
+        return None, None, (f"promotion is not configured: BASE_BRANCH and "
+                            f"PROD_BRANCH are both {base!r}")
     await _git(["push", "origin", base], cwd=repo, check=False)
     rc, ahead, _ = await _git(["rev-list", "--count", f"{prod}..{base}"],
                               cwd=repo, check=False)

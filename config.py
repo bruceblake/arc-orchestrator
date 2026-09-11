@@ -176,8 +176,30 @@ DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "1800"))
 # reviewers read the actual PR diff, and a merger only merges once every one of
 # them approves. Before this, work was merged locally and the PR opened
 # afterwards — reviewers could object to nothing, because it had already landed.
-BASE_BRANCH = os.getenv("ARC_BASE_BRANCH", "development")
+# ONE branch by default. The fleet opens its pull requests against BASE_BRANCH
+# and that is where reviewed work lands.
+#
+# This was development -> main with a manual promotion PR between them. The
+# split cost more than it bought here: the operator's checkout, the fleet's
+# base and the promotion target were three different moving refs, and several
+# bugs came straight out of that — reconcile compared task branches against
+# main while the fleet merged into development, so its cleanup never ran; and a
+# day's work sat on an unpushed local main while every task branched from a
+# development that did not contain it.
+#
+# Set ARC_BASE_BRANCH=development (and keep PROD_BRANCH=main) to restore the
+# two-branch flow with `main.py code promote`; nothing about it was removed.
+BASE_BRANCH = os.getenv("ARC_BASE_BRANCH", "main")
 PROD_BRANCH = os.getenv("ARC_PROD_BRANCH", "main")
+
+
+def promotion_configured():
+    """True when there is a separate branch to promote INTO.
+
+    With one branch, a promotion PR would be main -> main: GitHub rejects it,
+    and offering the button implies a gate that does not exist.
+    """
+    return BASE_BRANCH != PROD_BRANCH
 PR_REVIEWERS = int(os.getenv("ARC_PR_REVIEWERS", "2"))
 # How many times a PR may go back to the implementer before the task fails.
 PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "3"))
@@ -190,12 +212,25 @@ PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "3"))
 # giving up. Each resync rewrites the branch and costs a fresh review,
 # so this is deliberately small.
 PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "2"))
+
+# Retries of a PRE-MERGE review that crashed instead of reaching a
+# verdict. Separate from the fix budget on purpose: a reviewer that
+# could not run has not objected to anything, and spending a fix round
+# on it sends the implementer to repair code nobody criticised.
+MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "3"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
 
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
+# Project chaining (code workload): a taskfile that declares `after` waits for
+# every task in those upstream taskfiles to reach 'merged' before any of its
+# worktrees allocate. Upstream projects can legitimately take hours (fix
+# loops, PR review rounds, escalation tiers), so the wait budget is hours,
+# not minutes. A chain that never settles must eventually fail loudly rather
+# than sit on the dashboard forever.
+CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
 
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
@@ -335,9 +370,35 @@ MODEL_FAMILY = {
 # run an interactive `kimi` alongside the fleet without contending.
 _MEASURED_CONCURRENCY = {"Kimi-K3": 3, "GLM-5.3": 4,
                          "gpt-oss-120b": 5, "DeepSeek-V4-Flash": 5}
+
+# ONE HARNESS PROCESS IS NOT ONE ARC SESSION.
+#
+# The numbers above are what ARC allows IN FLIGHT, and they were measured by
+# ramping simple prompts — one request at a time per process. Real tasks are
+# not like that: an opencode run issues parallel tool calls, so a single
+# process holds MORE THAN ONE session at once, and a driver cap set equal to
+# the account limit over-subscribes by that factor.
+#
+# Measured from the event log over four hours (23 capacity rejections):
+# GLM-5.3 was refused with as few as TWO of our drivers live, against an ARC
+# ceiling of four in flight. Two processes reaching four sessions is two
+# sessions per process, so a cap of 4 was really asking for ~8.
+#
+# GLM was the only model to show it because it is the most-used opencode model
+# and the only one whose account limit (4) is small enough for the doubling to
+# bite before the harness pool (5) binds first. The factor is a property of the
+# HARNESS, not of the model, so it applies to all three opencode models.
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1}
+
+
+def _harness_of_model(model):
+    return "kimi" if model == "Kimi-K3" else "opencode"
+
+
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
-_MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
-                     for m, n in _MEASURED_CONCURRENCY.items()}
+_MODEL_DRIVER_CAP = {
+    m: max(1, n // _SESSIONS_PER_PROCESS[_harness_of_model(m)] - DRIVER_HEADROOM)
+    for m, n in _MEASURED_CONCURRENCY.items()}
 
 
 # The per-MODEL caps above are the ARC API's ceiling. They are not the only
