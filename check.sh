@@ -87,6 +87,15 @@ if command -v node >/dev/null 2>&1; then
         echo "FAIL: a page calls a function that is never defined"; rc=1
     fi
 
+    # Editing a page can ship a control that is unusable to a keyboard or
+    # screen-reader user while every syntax/ID check still passes: a clickable
+    # div with no role="button", a control with no accessible name, an <img>
+    # with no alt, an <input> with no label, or a page that never draws a
+    # focus outline. The scanner is the gate for those.
+    if ! node tests/a11y_check.mjs static/*.html; then
+        echo "FAIL: a page is missing an accessibility requirement"; rc=1
+    fi
+
     # Every $("#id") the script reaches for must exist in the markup.
     "$PY" - <<'PYEOF' || rc=1
 import re, pathlib, sys
@@ -118,9 +127,46 @@ PYEOF
     else
         echo "(dashboard not running — skipping the live render check)"
     fi
+    # Behavioural unit checks of the render functions; needs no running server.
+    if ! node tests/ui_render.test.mjs; then
+        echo "FAIL: dashboard render functions misbehave"; rc=1
+    fi
 else
     echo "(node not installed — skipping JavaScript checks)"
 fi
+
+step "every imported module is actually tracked"
+"$PY" - <<'PYEOF' || rc=1
+import ast, pathlib, subprocess, sys
+
+# A module that exists on THIS machine but is not committed makes a fresh
+# clone crash on import, and nothing else in this suite would notice: the
+# tests import it happily from the working tree. bench.py, bench_data.py and
+# orchbench.py sat untracked for days while main.py imported all three, so
+# every `main.py code bench ...` command was broken on any fresh checkout.
+root = pathlib.Path(__file__).resolve().parent if "__file__" in dir() else pathlib.Path(".")
+tracked = set(subprocess.run(["git", "ls-files", "*.py"], capture_output=True,
+                             text=True).stdout.split())
+local = {p.name for p in pathlib.Path(".").glob("*.py")}
+bad = 0
+for name in sorted(tracked):
+    try:
+        tree = ast.parse(pathlib.Path(name).read_text())
+    except (OSError, SyntaxError):
+        continue
+    mods = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Import):
+            mods.update(a.name.split(".")[0] for a in n.names)
+        elif isinstance(n, ast.ImportFrom) and n.level == 0 and n.module:
+            mods.add(n.module.split(".")[0])
+    for m in sorted(mods):
+        if f"{m}.py" in local and f"{m}.py" not in tracked:
+            print(f"FAIL: {name} imports {m}, but {m}.py is NOT tracked — "
+                  f"a fresh clone would crash on import")
+            bad = 1
+sys.exit(bad)
+PYEOF
 
 step "task gates are worktree-safe"
 "$PY" - <<'PYEOF' || rc=1

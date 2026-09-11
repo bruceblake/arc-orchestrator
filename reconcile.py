@@ -146,6 +146,8 @@ async def reconcile(store, *, repos=None, apply=True, force=False):
 
 def _find_repo(name):
     """Locate the blessed clone for a worktree directory name."""
+    if not name or Path(name).name != name:
+        return None  # refuse anything but a plain directory name (no traversal)
     for cand in (Path(config.ROOT).parent / name, Path.home() / "repos" / name,
                  Path(config.ROOT) if Path(config.ROOT).name == name else None):
         if cand and (cand / ".git").exists():

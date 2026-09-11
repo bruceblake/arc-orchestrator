@@ -87,6 +87,29 @@ async def _base_ref(repo, base="main"):
     return base
 
 
+def worktree_for(repo, task_id):
+    """Where alloc() puts this task's worktree, whether or not it exists yet."""
+    return Path(config.WORKTREE_ROOT) / Path(repo).resolve().name / task_id
+
+
+async def existing_worktree(repo, task_id):
+    """The task's worktree if it is on disk AND git still tracks it, else None.
+
+    Resuming a task whose PR is already open must reuse the branch that PR was
+    opened from. A bare directory check is not enough: `git worktree remove`
+    leaves nothing behind, but a killed run can leave a directory git no longer
+    lists, and committing in one of those fails in a confusing way later.
+    """
+    wt = worktree_for(repo, task_id)
+    if not (wt / ".git").exists():
+        return None
+    rc, out, _ = await _git(["worktree", "list", "--porcelain"],
+                            cwd=Path(repo).resolve(), check=False)
+    if rc != 0 or str(wt) not in out:
+        return None
+    return wt
+
+
 async def alloc(repo, task_id, base="main"):
     """Create (or recreate, on retry) the task worktree; returns its Path.
 
@@ -96,11 +119,28 @@ async def alloc(repo, task_id, base="main"):
     BEFORE alloc runs, so reviewed commits are never discarded silently.)"""
     repo = Path(repo).resolve()
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
+    if not wt.resolve().is_relative_to(
+            Path(config.WORKTREE_ROOT).resolve() / repo.name):
+        raise ValueError(f"task id {task_id!r} escapes WORKTREE_ROOT")
     branch = f"task/{task_id}"
     await _ensure_identity(repo)
+    base_ref = await _base_ref(repo, base)
+    # Resetting task/<id> to base DISCARDS whatever is on it. That is correct
+    # for a retry of rejected work, and catastrophic for a branch whose PR is
+    # open and reviewed — which is what happened when a resume fell through to
+    # alloc: four reviewed PR branches were reset to base in one run, and only
+    # survived because origin had not been force-pushed over yet. It stays
+    # silent no longer.
+    rc, ahead, _ = await _git(["rev-list", "--count", f"{base_ref}..{branch}"],
+                              cwd=repo, check=False)
+    n = int(ahead.strip()) if rc == 0 and ahead.strip().isdigit() else 0
+    if n:
+        events.emit("task.branch_reset", task=task_id, branch=branch,
+                    commits_discarded=n, base=base_ref)
+        log.warning("alloc %s: resetting %s to %s discards %d commit(s)",
+                    task_id, branch, base_ref, n)
     if wt.exists():
         await _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
-    base_ref = await _base_ref(repo, base)
     await _git(["worktree", "add", "--force", "-B", branch, str(wt), base_ref],
                cwd=repo)
     return wt
@@ -367,6 +407,98 @@ async def ensure_base_branch(repo, base=None, prod=None):
     if remotes.strip():
         await _git(["push", "-u", "origin", base], cwd=repo, check=False)
     return base
+
+
+async def fast_forward_base(repo, base=None):
+    """Move the local base branch to what origin has. Returns (ok, note).
+
+    `git update-ref refs/heads/<base>` is only safe while <base> is NOT the
+    checked-out branch: it moves the pointer without touching the index or
+    working tree, so doing it to the current branch makes every file in the
+    repo appear massively modified or deleted. That was fine while the
+    operator's checkout was always `main` and the base was always
+    `development`, and it becomes a foot-gun the moment anyone works ON the
+    integration branch — which the branch model actively encourages.
+    """
+    repo = Path(repo).resolve()
+    base = base or config.BASE_BRANCH
+    await _git(["fetch", "origin", base], cwd=repo, check=False)
+    rc, cur, _ = await _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, check=False)
+    if rc == 0 and cur.strip() == base:
+        rc, _, err = await _git(["merge", "--ff-only", f"origin/{base}"],
+                                cwd=repo, check=False)
+        if rc == 0:
+            return True, "fast-forwarded the checked-out base"
+        return False, f"base is checked out and not fast-forwardable: {err.strip()[:160]}"
+    rc, _, err = await _git(["update-ref", f"refs/heads/{base}", f"origin/{base}"],
+                            cwd=repo, check=False)
+    return rc == 0, "updated" if rc == 0 else err.strip()[:160]
+
+
+async def merge_in_progress(wt):
+    """(True, unmerged_paths) when this worktree is mid-merge.
+
+    Distinguishes "the agent resolved every conflict and staged them" from
+    "there are still conflicts to fix", which are the same MERGE_HEAD state to
+    git but opposite outcomes for the pipeline.
+    """
+    wt = Path(wt)
+    if not (wt / ".git").exists():
+        return False, []
+    rc, out, _ = await _git(["rev-parse", "--verify", "MERGE_HEAD"],
+                            cwd=wt, check=False)
+    if rc != 0:
+        return False, []
+    _, un, _ = await _git(["diff", "--name-only", "--diff-filter=U"],
+                          cwd=wt, check=False)
+    return True, [ln.strip() for ln in un.splitlines() if ln.strip()]
+
+
+async def sync_with_base(wt, base=None, keep_conflicts=False):
+    """Merge the current base into this task's branch, inside its worktree.
+
+    Returns (ok, conflicts, note). A PR that conflicts with the base branch was
+    a dead end: the task was marked "conflict", finished, and left for a human.
+    With every task merging into one integration branch that is not an edge
+    case, it is the normal cost of parallelism — and most of it is not a real
+    disagreement at all, just a base that moved on under a long-running task.
+    Those merge cleanly with no model involved.
+
+    `conflicts` is the list of paths git could not reconcile; it is empty when
+    ok is True. On failure the merge is ABORTED, so the worktree is left exactly
+    as it was rather than half-merged.
+    """
+    base = base or config.BASE_BRANCH
+    wt = Path(wt)
+    # A merge left in progress by a previous pass is not a new merge to start.
+    # If the agent resolved everything, say so and let publish's commit conclude
+    # it; if conflicts remain, report exactly those.
+    in_merge, unmerged = await merge_in_progress(wt)
+    if in_merge:
+        if unmerged:
+            return False, unmerged, f"{len(unmerged)} conflict(s) still unresolved"
+        return True, [], "merge already resolved — pending commit"
+    await _git(["fetch", "origin", base], cwd=wt, check=False)
+    rc, ref, _ = await _git(["rev-parse", "--verify", f"origin/{base}"],
+                            cwd=wt, check=False)
+    target = f"origin/{base}" if rc == 0 and ref.strip() else base
+    rc, _, err = await _git(
+        ["merge", "--no-edit", "-m", f"merge {base} into task branch", target],
+        cwd=wt, check=False)
+    if rc == 0:
+        return True, [], "merged cleanly"
+    rc2, out, _ = await _git(["diff", "--name-only", "--diff-filter=U"],
+                             cwd=wt, check=False)
+    conflicts = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if keep_conflicts and conflicts:
+        # Leave the merge in progress WITH its markers so an implementer can
+        # resolve it by editing files — the thing agents are actually good at.
+        # publish's `git add -A && git commit` then concludes the merge, and
+        # the verify gate catches any marker left behind (nothing compiles).
+        return False, conflicts, f"{len(conflicts)} conflicting file(s), left for resolution"
+    await _git(["merge", "--abort"], cwd=wt, check=False)
+    return False, conflicts, (f"{len(conflicts)} conflicting file(s)"
+                              if conflicts else f"merge failed: {err.strip()[:200]}")
 
 
 async def push_task_branch(repo, task_id):
