@@ -174,6 +174,11 @@ var POLL_MS = 5000;
 // Transcript tail cache: req_id -> {text, total}, filled by pollTx().
 var TX = {};
 
+// Scroll offset of each open transcript pane, req_id -> px. The 5s poll
+// rebuilds the agents stack wholesale; without saving and restoring
+// scrollTop, every cycle throws a reader of a live tail back to the top.
+var txScroll = {};
+
 var S = {
   view: "now",
   agents: null,
@@ -329,6 +334,18 @@ function txTail(a) {
   return '<pre class="tx">' + esc(t ? t.text : "loading transcript...") + "</pre>";
 }
 
+// Run fn() (the agents-stack rebuild) without losing the open transcript
+// pane's scroll position: capture before the innerHTML swap, restore after.
+function keepTxScroll(fn) {
+  var open = S.open.now;
+  var box = $("#agents");
+  var pre = open && box ? box.querySelector(".card.open .tx") : null;
+  if (pre) txScroll[open] = pre.scrollTop;
+  fn();
+  var post = open && box ? box.querySelector(".card.open .tx") : null;
+  if (post && txScroll[open]) post.scrollTop = txScroll[open];
+}
+
 // The dashboard serves transcripts only via /api/transcript - fetch the tail
 // inline rather than linking the bare filename (which 404s).
 async function pollTx(a) {
@@ -480,12 +497,15 @@ function limitsCard(sm) {
 function renderNow() {
   var q = S.queue || {};
   var t = q.totals || {};
+  var ghReady = !!(S.gh && S.gh.ready);
   var figs = $("#figs");
   if (figs) {
     figs.innerHTML =
       fig("running", fmtK(t.running), "var(--ok)") +
       fig("queued", fmtK(t.waiting), "var(--warn)") +
-      fig("merged today", fmtK(mergedToday()), "var(--purple)") +
+      // Without github, mergedToday() counts every merged node of all time;
+      // calling that "today" would lie, so the figure takes the plain label.
+      fig(ghReady ? "merged today" : "merged", fmtK(mergedToday()), "var(--purple)") +
       fig("failed", fmtK(failedCount()), failedCount() > 0 ? "var(--err)" : "");
   }
   var al = $("#alert");
@@ -496,7 +516,11 @@ function renderNow() {
   }
   var ag = (S.agents && S.agents.agents) || [];
   var box = $("#agents");
-  if (box) box.innerHTML = ag.length ? ag.map(agentCard).join("") : '<div class="empty">no agents running</div>';
+  if (box) {
+    keepTxScroll(function () {
+      box.innerHTML = ag.length ? ag.map(agentCard).join("") : '<div class="empty">no agents running</div>';
+    });
+  }
   var sub = $("#nowsub");
   if (sub) {
     // /api/agents returns runs as a LIST of run dicts, not a count; the old

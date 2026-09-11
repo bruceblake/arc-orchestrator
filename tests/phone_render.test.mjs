@@ -32,6 +32,7 @@ process.on("unhandledRejection", e => {
 const els = new Map();
 function mk(id) {
   let html = "";
+  const subs = new Map();
   return {
     id: id, className: "", style: {}, onclick: null,
     set innerHTML(v) { html = String(v); }, get innerHTML() { return html; },
@@ -40,6 +41,11 @@ function mk(id) {
     classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
     setAttribute() {}, removeAttribute() {}, getAttribute: () => "",
     appendChild() {}, querySelectorAll: () => [],
+    querySelector: s => {
+      if (!subs.has(s)) subs.set(s, mk(id + "/" + s));
+      return subs.get(s);
+    },
+    scrollTop: 0,
   };
 }
 function getEl(id) {
@@ -158,6 +164,7 @@ const FIX = {
 Object.assign(api.S, { view: "now", stale: false, open: { now: "", projects: "", prs: "", fleet: "" } }, FIX);
 run(() => api.renderAll(), "renderAll() on fixture payloads");
 ok(el("figs").innerHTML.split('class="fig"').length - 1 === 4, "figs row renders four figures");
+ok(el("figs").innerHTML.includes('fl">merged today</span>'), "ready github labels the figure 'merged today'");
 ok(el("agents").innerHTML.includes("GLM 5.3 · implementer"), "agent card shows model and role");
 ok(el("agents").innerHTML.includes("t2 · STALLED"), "stalled agent is flagged");
 ok(el("nowsub").textContent.includes("2 harness runs today"), "harness-run count in the sub line");
@@ -190,6 +197,11 @@ ok(el("agents").innerHTML.includes("heartbeat"), "open agent shows heartbeat");
 ok(el("agents").innerHTML.includes("t1-implementer-1.jsonl"), "open agent names its transcript file");
 ok(el("agents").innerHTML.includes('class="tx"'), "open agent renders an inline transcript pane");
 ok(!el("agents").innerHTML.includes('href="t1-implementer'), "transcript is never linked as a bare filename");
+// The 5s poll rebuilds #agents wholesale; a reader's scroll position in the
+// transcript pane must survive that rebuild (the old page preserved it too).
+el("agents").querySelector(".card.open .tx").scrollTop = 120;
+run(() => api.renderNow(), "renderNow() rebuilds the agents stack (poll)");
+ok(el("agents").querySelector(".card.open .tx").scrollTop === 120, "transcript scroll survives the poll rebuild");
 run(() => api.showView("fleet"), "showView() switches view");
 ok(el("view-fleet").className === "view on" && el("nav-fleet").className === "tap on", "fleet view and nav light up");
 ok(el("view-now").className === "view" && el("nav-now").className === "tap", "previous view and nav dim");
@@ -234,6 +246,7 @@ ok(el("prssub").textContent === "github status unavailable", "github-down sub li
 ok(el("agents").innerHTML.includes("no agents running"), "empty agents placeholder");
 ok(el("alert").style.display === "none", "alert hidden without red lines");
 ok(el("fleet").innerHTML.includes("queue status unavailable"), "empty fleet placeholder");
+ok(el("figs").innerHTML.includes('fl">merged</span>') && !el("figs").innerHTML.includes("merged today"), "github-down fallback relabels the figure 'merged'");
 
 // ---- 6. CSS tap-target floor (>= 44x44px) -------------------------------------
 const css = src.slice(src.indexOf("<style>") + 7, src.indexOf("</style>")).replace(/\/\*[\s\S]*?\*\//g, " ");
