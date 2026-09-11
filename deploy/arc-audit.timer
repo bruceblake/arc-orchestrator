@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the ARC audit daily
+
+[Timer]
+OnCalendar=*-*-* 07:17:00
+# Fires on the next boot if the machine was off at 07:17 — a laptop that was
+# asleep must not silently skip its audit.
+Persistent=true
+RandomizedDelaySec=300
+
+[Install]
+WantedBy=timers.target
