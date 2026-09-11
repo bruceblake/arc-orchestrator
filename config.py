@@ -443,6 +443,22 @@ def driver_limit(model):
             pass
     return _MODEL_DRIVER_CAP[model]
 
+# --- graph admission control ------------------------------------------------
+# Bounded admission (graph.py max_in_flight) stops a run from starting every
+# ready task at once: work started past the real ceilings never ran — it
+# queued inside drivers._lease_acquire holding a worktree and a DB row. The
+# default is the total harness capacity, which exceeds the root count of every
+# taskfile seen so far, so unconfigured runs behave exactly as before.
+def max_tasks_in_flight():
+    """Max graph nodes executing at once (ARC_MAX_TASKS_IN_FLIGHT)."""
+    override = os.getenv("ARC_MAX_TASKS_IN_FLIGHT")
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+    return sum(harness_limit(h) for h in _HARNESS_CAP)
+
 # --- token cost attribution -------------------------------------------------
 # OPERATOR-SUPPLIED estimates, USD per MILLION tokens, for attributing a dollar
 # figure to fleet usage. This is not a billing ledger: the numbers are set by

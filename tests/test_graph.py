@@ -423,3 +423,148 @@ class RandomisedGraphStress(unittest.TestCase):
             ran = self._one(seed)
             self.assertLessEqual(ran["retry"], 3,
                                  f"self-edge exceeded its bound (seed {seed})")
+
+
+class BoundedAdmission(unittest.TestCase):
+    """The graph used to start every ready node the instant it was queued.
+
+    run-queue.sh bounds task FILES, nothing bounded tasks within one: the
+    real ~/tasks files have up to 5 root tasks, all starting at once. Work
+    past the per-model/per-harness ceilings never ran — it queued inside
+    drivers._lease_acquire holding a worktree and a DB row, and could time
+    out at ARC_DRIVER_LEASE_WAIT having done nothing. max_in_flight makes the
+    graph itself admit only what the fleet can actually execute.
+    """
+
+    def _fan(self, limit, n=5, held=0.02):
+        g = Graph("admit", max_in_flight=limit)
+        state = {"cur": 0, "peak": 0}
+        ran = []
+
+        async def work(name):
+            state["cur"] += 1
+            state["peak"] = max(state["peak"], state["cur"])
+            await asyncio.sleep(held)
+            state["cur"] -= 1
+            ran.append(name)
+            return {"ok": True}
+
+        for i in range(n):
+            name = f"n{i}"
+
+            async def fn(ctx, _name=name):
+                return await work(_name)
+            g.node(name, fn)
+            g.start(name)
+        run(g)
+        return state, ran
+
+    def test_at_most_the_limit_runs_concurrently(self):
+        state, _ = self._fan(limit=2)
+        self.assertEqual(state["peak"], 2)
+
+    def test_every_ready_node_still_eventually_runs(self):
+        _, ran = self._fan(limit=2)
+        self.assertEqual(sorted(ran), ["n0", "n1", "n2", "n3", "n4"])
+
+    def test_no_limit_means_no_admission_control(self):
+        state, ran = self._fan(limit=None)
+        self.assertEqual(state["peak"], 5)
+        self.assertEqual(len(ran), 5)
+
+
+class GatherAdmissionCannotDeadlock(unittest.TestCase):
+    """The one way an admission limit can hang the graph: a gather holding a
+    slot while the sources it waits on sit queued behind a full limit —
+    nothing runnable, nothing finishing, no drain clock ticking. Admission
+    therefore gates only the node fn: a WAITING gather holds no slot, so its
+    sources are always admitted as earlier fns finish. If that regresses this
+    test does not assert-fail — it hangs until the timeout below.
+    """
+
+    def test_gather_completes_with_five_sources_and_a_limit_of_two(self):
+        g = Graph("g", max_in_flight=2)
+        done = []
+
+        def make_src(i):
+            async def src(ctx):
+                await asyncio.sleep(0.005)
+                return {"v": i}
+            return src
+
+        async def sink(ctx):
+            done.append(sorted(ctx["results"][f"s{i}"]["v"] for i in range(5)))
+            return {"ok": True}
+
+        for i in range(5):
+            g.node(f"s{i}", make_src(i))
+            g.edge(f"s{i}", "sink")
+            g.start(f"s{i}")
+        g.node("sink", sink, gather=True)
+        final = asyncio.run(asyncio.wait_for(g.run({}), timeout=10))
+        self.assertEqual(done, [[0, 1, 2, 3, 4]])
+        self.assertEqual(final["results"]["sink"], {"ok": True})
+
+
+class DrainLandingUnderTheLimit(unittest.TestCase):
+    """An on_drain edge must be schedulable even at the admission limit.
+
+    on_drain exists to land work already paid for — in the code workload, a
+    pushed branch and an open PR. If the limit could starve a landing edge, a
+    sibling's failure would orphan that PR again, this time with the limit as
+    the excuse. And admission adds a new moment an item can meet the failure:
+    dequeued BEFORE the drain began but admitted AFTER it — that item must
+    drop, not start fresh work (the predrain test above, one queue later).
+    """
+
+    def test_landing_edges_fire_with_the_limit_saturated(self):
+        g = Graph("dl", max_in_flight=2)
+        seen = []
+        publishing = asyncio.Event()
+        sibling_died = asyncio.Event()
+
+        async def boom(ctx):
+            await publishing.wait()  # both slots are now held
+            sibling_died.set()
+            raise RuntimeError("sibling task died")
+
+        async def publish(ctx):
+            publishing.set()
+            await sibling_died.wait()  # still in flight as the drain begins
+            seen.append("publish")
+            return {"ok": True}
+
+        for name in ("review", "merge"):
+            async def fn(ctx, n=name):
+                seen.append(n)
+                return {"ok": True}
+            g.node(name, fn)
+        g.node("boom", boom)
+        g.node("publish", publish)
+        g.edge("publish", "review", on_drain=True)
+        g.edge("review", "merge", on_drain=True)
+        g.start("boom")
+        g.start("publish")
+        with self.assertRaises(RuntimeError):
+            run(g)
+        self.assertEqual(seen, ["publish", "review", "merge"])
+
+    def test_work_blocked_on_a_slot_drops_once_the_drain_begins(self):
+        g = Graph("dq", max_in_flight=1)
+        seen = []
+
+        async def slow_then_fail(ctx):
+            await asyncio.sleep(0.05)  # hold the only slot past the dequeue
+            raise RuntimeError("boom")
+
+        async def waiting(ctx):
+            seen.append("waiting")  # dequeued pre-failure, admitted mid-drain
+            return {}
+
+        g.node("slow", slow_then_fail)
+        g.node("waiting", waiting)
+        g.start("slow")
+        g.start("waiting")
+        with self.assertRaises(RuntimeError):
+            run(g)
+        self.assertEqual(seen, [])
