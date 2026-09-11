@@ -165,6 +165,155 @@ for (const file of process.argv.slice(2)) {
     console.log(`OK:   ${page}`);
   }
 }
+// Keyboard access: the /, ?, g-chord and j/k/Enter shortcuts must dispatch to
+// the right dashboard behaviour, and every character binding must be inert while
+// the user is typing in a form control (Escape stays available to clear it).
+const kbPath = new URL("../static/panels/keyboard.js", import.meta.url);
+if (fs.existsSync(kbPath)) {
+  const kbFindings = [];
+  const kbok = (name, cond) => { if (!cond) kbFindings.push(name); };
+  const kbSrc = fs.readFileSync(kbPath, "utf8");
+  const kels = new Map();
+  const mkEl = (tag, id) => {
+    const el = {
+      tagName: String(tag).toUpperCase(), id: id || "", className: "", value: "",
+      style: {}, dataset: {}, children: [], parentNode: null, focused: false,
+      classList: {
+        add(c) { el.className = el.className ? el.className + " " + c : c; },
+        remove(c) { el.className = el.className.split(/\s+/).filter(x => x && x !== c).join(" "); },
+        contains(c) { return el.className.split(/\s+/).includes(c); },
+      },
+      setAttribute(k, v) { el[k] = v; },
+      getAttribute(k) { return el[k] == null ? null : el[k]; },
+      appendChild(c) { c.parentNode = el; el.children.push(c); return c; },
+      removeChild(c) { const i = el.children.indexOf(c); if (i >= 0) el.children.splice(i, 1); c.parentNode = null; return c; },
+      remove() { if (el.parentNode) el.parentNode.removeChild(el); },
+      querySelectorAll() { return []; },
+      scrollIntoView() { el.scrolled = true; },
+      focus() { el.focused = true; },
+      blur() { el.focused = false; },
+      select() { el.selected = true; },
+      dispatchEvent() { return true; },
+    };
+    return el;
+  };
+  const q = sel => { const id = String(sel).replace(/^#/, ""); if (!kels.has(id)) kels.set(id, mkEl("div", id)); return kels.get(id); };
+  globalThis.$ = q;
+  const body = mkEl("body", "body");
+  const prows = [0, 1, 2].map(i => { const r = mkEl("div", "prow" + i); r.setAttribute("data-i", String(i)); return r; });
+  const projPanel = mkEl("div", "proj-panel");
+  const projectsEl = q("#projects");
+  projectsEl.closest = () => projPanel;
+  projectsEl.querySelectorAll = s => (s === ".prow" ? prows : []);
+  const timers = [];
+  globalThis.setTimeout = (fn, ms) => { const id = timers.push({ fn, ms }) - 1; return id; };
+  globalThis.clearTimeout = id => { if (timers[id]) timers[id].fn = null; };
+  globalThis.document = {
+    querySelector: q, querySelectorAll: () => [], createElement: t => mkEl(t),
+    createTextNode: t => ({ nodeType: 3, textContent: t }),
+    addEventListener: () => {}, removeEventListener: () => {}, body,
+  };
+  globalThis.Event = class Event { constructor(type) { this.type = type; } };
+  globalThis.PROJECTS = prows.map((_, i) => ({ file: "proj" + i + ".json" }));
+  globalThis.EXPANDED = "";
+  const opened = [];
+  globalThis.openDetail = f => { opened.push(f); };
+  globalThis.closeDetail = () => {};
+  new Function(kbSrc)();
+  const kb = globalThis.__keyboard;
+  const qSearch = () => q("#f-q");
+
+  kb.handleKey({ key: "/", target: body });
+  kbok("/ focuses the project search box", qSearch().focused === true);
+
+  kb.handleKey({ key: "?", target: body });
+  kbok("? opens the shortcut overlay (one entry per bound key)",
+     body.children.length === 1 && body.children[0].className === "kb-help"
+     && body.children[0].children.filter(c => c.tagName === "UL")[0].children.length === Object.keys(kb.BINDINGS).length);
+  kb.handleKey({ key: "?", target: body });
+  kbok("? closes the shortcut overlay", body.children.length === 0);
+
+  q("#health-panel").scrolled = false;
+  kb.handleKey({ key: "g", target: body });
+  kbok("g arms the two-key chord", kb.chordArmed() === true);
+  kb.handleKey({ key: "f", target: body });
+  kbok("g f jumps to the fleet panel", q("#health-panel").scrolled === true && kb.chordArmed() === false);
+
+  q("#health-panel").scrolled = false;
+  kb.handleKey({ key: "g", target: body });
+  const chordTimer = timers[timers.length - 1];
+  if (chordTimer && chordTimer.fn) chordTimer.fn();
+  kbok("the g chord times out rather than staying armed", kb.chordArmed() === false);
+  kb.handleKey({ key: "f", target: body });
+  kbok("a timed-out g chord no longer jumps", q("#health-panel").scrolled === false);
+
+  kb.handleKey({ key: "g", target: body });
+  kb.handleKey({ key: "p", target: body });
+  kbok("g p jumps to the projects panel via its .panel ancestor", projPanel.scrolled === true && kb.chordArmed() === false);
+
+  kb.handleKey({ key: "j", target: body });
+  kbok("j selects the first project row", prows[0].classList.contains("kb-sel") && !prows[1].classList.contains("kb-sel"));
+  kb.handleKey({ key: "k", target: body });
+  kbok("k wraps the selection to the last row", prows[2].classList.contains("kb-sel") && !prows[0].classList.contains("kb-sel"));
+  kb.handleKey({ key: "j", target: body });
+  kb.handleKey({ key: "Enter", target: body });
+  kbok("Enter opens the selected project detail", opened[opened.length - 1] === "proj0.json");
+
+  qSearch().focused = false;
+  qSearch().value = "";
+  const inInput = mkEl("input", "");
+  kb.handleKey({ key: "/", target: inInput });
+  kbok("/ is inert in an input", qSearch().focused === false);
+  kb.handleKey({ key: "?", target: inInput });
+  kbok("? is inert in an input", body.children.length === 0);
+  kb.handleKey({ key: "g", target: inInput });
+  kbok("g is inert in an input", kb.chordArmed() === false);
+  kb.handleKey({ key: "j", target: inInput });
+  kb.handleKey({ key: "k", target: inInput });
+  kbok("j/k are inert in an input", prows[0].classList.contains("kb-sel") && !prows[2].classList.contains("kb-sel"));
+  const openedBefore = opened.length;
+  kb.handleKey({ key: "Enter", target: inInput });
+  kbok("Enter is inert in an input", opened.length === openedBefore);
+  qSearch().value = "abc";
+  qSearch().focused = true;
+  kb.handleKey({ key: "Escape", target: inInput });
+  kbok("Escape clears the search box and returns focus to the page",
+    qSearch().value === "" && qSearch().focused === false);
+
+  // The Enter binding must stay out of the way of an element that is already
+  // interactive (role="button"): the pre-existing row handler in projects.js
+  // fires its own click(), so the global binding must not also open a detail.
+  const btnRow = mkEl("div", "prow-btn");
+  btnRow.setAttribute("role", "button");
+  btnRow.setAttribute("data-i", "1");
+  const openedBtnBefore = opened.length;
+  kb.handleKey({ key: "Enter", target: btnRow });
+  kbok("Enter is inert on an interactive element", opened.length === openedBtnBefore);
+  kb.handleKey({ key: "j", target: btnRow });
+  kbok("j is inert on an interactive element", !prows[1].classList.contains("kb-sel") && prows[0].classList.contains("kb-sel"));
+
+  // The feature only exists at runtime if the dashboard page actually loads the
+  // script and ships the CSS the selection/overlay depend on. A test that feeds
+  // the source straight to new Function().call() cannot catch a forgotten
+  // <script src> or a missing .kb-sel/.kb-help rule, so check the real page.
+  const dashPath = process.argv.slice(2).find(f => /\/index\.html$/.test(f));
+  if (dashPath) {
+    const dashHtml = fs.readFileSync(dashPath, "utf8");
+    kbok("index.html loads static/panels/keyboard.js",
+      /<script[^>]*\bsrc="\/panels\/keyboard\.js"/.test(dashHtml));
+    kbok("index.html styles the selection and help overlay (.kb-sel/.kb-help)",
+      /\.kb-sel\b/.test(dashHtml) && /\.kb-help\b/.test(dashHtml));
+  }
+
+  if (kbFindings.length) {
+    bad = 1;
+    console.log(`FAIL: keyboard shortcuts have ${kbFindings.length} issue(s):`);
+    for (const f of kbFindings) console.log(`      - ${f}`);
+  } else {
+    console.log("OK:   keyboard shortcuts");
+  }
+}
+
 if (bad) {
   console.log("\nAccessibility checks found issues (see above).");
 } else {
