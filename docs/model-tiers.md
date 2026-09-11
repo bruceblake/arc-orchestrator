@@ -83,6 +83,22 @@ glm so neither idles nor saturates.
 - A planner re-plans (or a hand-authored task file is edited) whenever a task
   crosses a tier boundary; routing is fixed at load time.
 
+## Cost attribution
+
+The dashboard prices each model run from per-million-token rates in
+`config.MODEL_PRICING` (USD). Prompt and completion are priced separately
+`config.cost_of(model, prompt_tokens, completion_tokens)`; a model with no
+entry prices at 0.0 rather than inventing a rate. Because the telemetry does
+not distinguish a cached prompt read from a fresh one, and because
+no-split/live tokens are priced at the completion rate, any figure is an
+upper bound, not an exact charge.
+
+Rates are overridable per model via `ARC_PRICE_<MODEL>_PROMPT` and
+`ARC_PRICE_<MODEL>_COMPLETION`, where `<MODEL>` is the model name uppercased
+with non-alphanumerics turned to `_` — e.g. `ARC_PRICE_KIMI_K3_PROMPT`. A
+partial override replaces only the half it names, falling back to the table
+for the other; a junk override value is ignored rather than crashing.
+
 ## Cross-references
 
 - [../AGENTS.md](../AGENTS.md)

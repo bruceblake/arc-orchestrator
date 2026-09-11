@@ -582,6 +582,11 @@ def _usage(store=None, range_key=None, include_series=False):
     the question an operator actually asks. "all" is the historical view: nothing is dropped. A windowed range
     bounds totals, per-model/family rows, and the series points, while the
     in-flight list is never trimmed — a live agent is current by definition.
+
+    Per-model `cost` prices prompt/completion tokens at each model's rate via
+    `config.cost_of`. Where an event reports a token count but no prompt/
+    completion breakdown, the excess is priced at the completion rate, so the
+    figure is an UPPER bound rather than an under-count.
     """
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
@@ -590,7 +595,7 @@ def _usage(store=None, range_key=None, include_series=False):
     def new_model(model, family, source):
         return {"model": model, "pretty": _pretty(model), "family": family, "source": source,
                 "requests": 0, "ok": 0, "errors": 0, "failed_attempts": 0, "tokens": 0,
-                "prompt_tokens": 0, "completion_tokens": 0,
+                "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0,
                 "latency_total_ms": 0, "avg_latency_ms": None, "last_ts": None}
 
     def new_family(family):
@@ -604,7 +609,7 @@ def _usage(store=None, range_key=None, include_series=False):
     by_model = {}
     by_family = {f: new_family(f) for f in config.FAMILY_ORDER}
     totals = {"requests": 0, "ok": 0, "errors": 0, "failed_attempts": 0, "tokens": 0,
-              "prompt_tokens": 0, "completion_tokens": 0}
+              "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
     pts = []  # (ts, family, req_delta, tok_delta, task_run_delta)
     done_tok_keys = set()
 
@@ -854,8 +859,20 @@ def _usage(store=None, range_key=None, include_series=False):
         lat = mod.pop("latency_total_ms", 0) or 0
         if mod["ok"] and lat:
             mod["avg_latency_ms"] = round(lat / mod["ok"])
+        # Price the split prompt/completion at their own rates, then price any
+        # excess `tokens` a split cannot account for (an event that reported a
+        # token count but no prompt/completion breakdown) at the completion
+        # rate — an upper bound, same guidance as _projects and config.cost_of.
+        # Without it the figure is a LOWER bound, which is not honest.
+        mod["cost"] = round(config.cost_of(mod["model"], mod["prompt_tokens"],
+                                           mod["completion_tokens"])
+                            + config.cost_of(mod["model"], 0,
+                                             max(0, mod["tokens"]
+                                                 - mod["prompt_tokens"]
+                                                 - mod["completion_tokens"])), 4)
         models.append(mod)
     models.sort(key=lambda m: -m["requests"])
+    totals["cost"] = round(sum(m["cost"] for m in models), 4)
 
     families = [by_family[f] for f in config.FAMILY_ORDER]
     families += [v for k, v in sorted(by_family.items()) if k not in config.FAMILY_ORDER]
@@ -1418,8 +1435,19 @@ def _projects(store):
         if not base:
             continue
         ev_done_keys.add((e.get("harness"), e.get("model"), e.get("role"), base, xnum))
-        s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0})
+        s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0,
+                                       "prompt_tokens": 0, "completion_tokens": 0,
+                                       "cost": 0.0})
         s["tokens"] += e.get("tokens") or 0
+        s["prompt_tokens"] += e.get("prompt_tokens") or 0
+        s["completion_tokens"] += e.get("completion_tokens") or 0
+        # Price each event at ITS own model. Cross-review (Kimi <-> GLM) and
+        # tier escalation both mix models under one task id; pricing the whole
+        # bucket at the taskfile's implementer mis-charges every reviewer run
+        # (a gpt-oss task reviewed by GLM would price GLM's expensive tokens at
+        # gpt-oss rates, so the figure was not even an upper bound).
+        s["cost"] += config.cost_of(e.get("model"), e.get("prompt_tokens") or 0,
+                                    e.get("completion_tokens") or 0)
         s["seconds"] += e.get("seconds") or 0.0
         s["runs"] += 1
     # Supplement from harness_runs rows whose driver.done fell out of the event
@@ -1437,10 +1465,16 @@ def _projects(store):
         key = (row.get("harness"), row.get("model"), row.get("role"), base, row.get("attempt"))
         if key in ev_done_keys:
             continue
-        s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0})
+        s = ev_stats.setdefault(base, {"tokens": 0, "seconds": 0.0, "runs": 0,
+                                       "prompt_tokens": 0, "completion_tokens": 0,
+                                       "cost": 0.0})
         s["seconds"] += row.get("seconds") or 0.0
         s["runs"] += 1
-        s["tokens"] += _transcript_toks(row.get("transcript"))[0]
+        toks, ptoks, ctoks = _transcript_toks(row.get("transcript"))
+        s["tokens"] += toks
+        s["prompt_tokens"] += ptoks
+        s["completion_tokens"] += ctoks
+        s["cost"] += config.cost_of(row.get("model"), ptoks, ctoks)
     import reconcile
     run_by_file = {}
     for r in reconcile.live_runs():
@@ -1498,15 +1532,30 @@ def _projects(store):
             ev = ev_stats.get(tid, {})
             lv = live.get(tid, {})
             ls = loop_stats.get(tid, {})
+            node_model = t.get("model")
+            ptok = ev.get("prompt_tokens", 0)
+            ctok = ev.get("completion_tokens", 0)
+            tot = max(ev.get("tokens", 0), kimi_tok.get(tid, 0))
+            # Prompts/completions are already priced per-model above — each
+            # driver.done (and each harness_runs row) carries its own model,
+            # and cross-review plus tier escalation mix several under one task
+            # id. Only the excess a split cannot account for — the kimi-wire
+            # tokens, which carry no prompt/completion split — is priced here,
+            # at Kimi's completion rate, since it is kimi's wire log.
+            extra = max(0, tot - (ptok + ctok))
+            node_cost = ev.get("cost", 0.0)
+            if extra:
+                node_cost += config.cost_of("Kimi-K3", 0, extra)
             node = {"id": tid, "title": t.get("title") or tid,
-                    "model": t.get("model"), "reviewer": t.get("reviewer"),
+                    "model": node_model, "reviewer": t.get("reviewer"),
                     "status": per_task.get(tid, "pending"),
                     "live": tid in live_tasks,
                     # kimi transcripts carry no usage; its wire logs do.
-                    "tokens": max(ev.get("tokens", 0), kimi_tok.get(tid, 0)),
+                    "tokens": tot,
                     "tokens_source": ("kimi-wire" if kimi_tok.get(tid, 0) > ev.get("tokens", 0)
                                       else "transcript"),
                     "seconds": round(ev.get("seconds", 0.0), 1),
+                    "cost": round(node_cost, 4),
                     "live_tokens": lv.get("tokens", 0),
                     "live_seconds": round(lv.get("seconds", 0.0), 1),
                     "attempts": ls.get("attempts", 0),
@@ -1524,6 +1573,11 @@ def _projects(store):
         sec_total = round(sum(n["seconds"] for n in nodes), 1)
         live_tok = sum(n["live_tokens"] for n in nodes)
         live_sec = round(sum(n["live_seconds"] for n in nodes), 1)
+        cost_total = round(sum(n["cost"] for n in nodes), 4)
+        # live tokens have no prompt/completion split; price at the completion
+        # rate (an upper bound) per node model, matching $/usage's guidance.
+        live_cost = round(sum(config.cost_of(n["model"], 0, n["live_tokens"])
+                              for n in nodes if n["live_tokens"]), 4)
         merged_n = sum(1 for n in nodes if n["status"] == "merged")
         errors = [{"id": r["id"], "status": r["status"], "error": r["error"]}
                   for r in rows if r.get("error") and r.get("id") in idset]
@@ -1542,6 +1596,8 @@ def _projects(store):
                     "tokens": tok_total + live_tok, "seconds": round(sec_total + live_sec, 1),
                     "done_tokens": tok_total, "done_seconds": sec_total,
                     "live_tokens": live_tok, "live_seconds": live_sec,
+                    "cost": round(cost_total + live_cost, 4),
+                    "done_cost": cost_total, "live_cost": live_cost,
                     "errors": errors,
                     "archived": str(f) in archived,
                     "archived_at": archived.get(str(f)),

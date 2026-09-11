@@ -1,4 +1,5 @@
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -441,6 +442,84 @@ def driver_limit(model):
         except ValueError:
             pass
     return _MODEL_DRIVER_CAP[model]
+
+# --- token cost attribution -------------------------------------------------
+# OPERATOR-SUPPLIED estimates, USD per MILLION tokens, for attributing a dollar
+# figure to fleet usage. This is not a billing ledger: the numbers are set by
+# whoever runs the fleet and should be updated when the provider's published
+# rates change. A model with no entry contributes 0.0 rather than guessing, and
+# any model may be priced (or re-priced) at runtime via env vars:
+#
+#     ARC_PRICE_<MODEL>_PROMPT, ARC_PRICE_<MODEL>_COMPLETION
+#
+# where <MODEL> is the model name uppercased with non-alphanumerics turned to
+# "_" (e.g. ARC_PRICE_KIMI_K3_PROMPT). A partial override replaces only the
+# half it names, falling back to the table for the other.
+#
+# prompt_per_mtok and completion_per_mtok are priced separately because
+# completion is normally priced higher. Cached-read prompt tokens are charged
+# at the full prompt rate here: the telemetry does not distinguish a cache hit
+# from a fresh prompt token, so any figure derived from it is an UPPER BOUND,
+# not an exact charge.
+MODEL_PRICING = {
+    "gpt-oss-120b": {"prompt_per_mtok": 0.20, "completion_per_mtok": 0.20},
+    "DeepSeek-V4-Flash": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
+    "GLM-5.3": {"prompt_per_mtok": 1.00, "completion_per_mtok": 2.00},
+    "Kimi-K3": {"prompt_per_mtok": 0.50, "completion_per_mtok": 2.00},
+}
+
+
+def _env_float(name):
+    v = os.getenv(name)
+    if not v:
+        return None
+    try:
+        return float(v)
+    except ValueError:
+        return None
+
+
+def _price_for(model):
+    """(prompt_per_mtok, completion_per_mtok) for a model, or None if unpriced.
+
+    Env overrides take precedence over MODEL_PRICING; a junk override value
+    falls back rather than crashing, and a fully-unpriced model is None so
+    callers price it at 0.0 instead of inventing a rate.
+    """
+    key = re.sub(r"[^A-Z0-9]+", "_", (model or "").upper())
+    pr = _env_float(f"ARC_PRICE_{key}_PROMPT")
+    comp = _env_float(f"ARC_PRICE_{key}_COMPLETION")
+    base = MODEL_PRICING.get(model, {})
+    if pr is not None or comp is not None:
+        return (pr if pr is not None else float(base.get("prompt_per_mtok", 0.0)),
+                comp if comp is not None else float(base.get("completion_per_mtok", 0.0)))
+    if not base:
+        return None
+    return (float(base.get("prompt_per_mtok", 0.0)),
+            float(base.get("completion_per_mtok", 0.0)))
+
+
+def cost_of(model, prompt_tokens, completion_tokens):
+    """USD cost of a model run at a given token count, 0.0 if the model is unpriced.
+
+    Prices prompt and completion separately (see MODEL_PRICING). A caller that
+    only knows a total token figure should pass it as completion_tokens and 0
+    prompt_tokens to get an upper bound, since completion is priced at or above
+    prompt; the docstring of the caller should say so. Never raises.
+    """
+    price = _price_for(model)
+    if price is None:
+        return 0.0
+    ppc, cpc = price
+    try:
+        pt = float(prompt_tokens or 0)
+        ct = float(completion_tokens or 0)
+    except (TypeError, ValueError):
+        # A junk count (None is fine, but a non-numeric string or a bad type
+        # must not raise) yields no charge rather than a crash.
+        return 0.0
+    return (pt / 1e6 * ppc + ct / 1e6 * cpc)
+
 
 DEFAULT_SEEDS = [
     "Scaling laws and efficiency trade-offs in mixture-of-experts LLM architectures",
