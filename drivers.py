@@ -86,6 +86,62 @@ def _lease_db():
     return _lease_store
 
 
+def arc_reachable(timeout=6.0):
+    """(reachable, detail). Probes BASE_URL; a 403 naming the VPN is the down state.
+
+    Any HTTP answer that is not that 403 counts as reachable — a 404 or 401 from
+    the API root still proves the network path exists. Only the VPN 403 and a
+    connection failure mean the fleet should wait rather than spend a driver.
+    """
+    import urllib.error
+    import urllib.request
+    url = config.BASE_URL.rstrip("/") + "/models"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "arc-orchestrator"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return True, f"HTTP {r.status}"
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read(400).decode(errors="replace")
+        except Exception:
+            pass
+        if exc.code == 403 and Driver.is_vpn_error(body):
+            return False, "VPN: " + body.strip()[:120]
+        return True, f"HTTP {exc.code}"
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        return False, f"unreachable: {str(exc)[:120]}"
+
+
+_vpn_down_since = None
+
+
+async def wait_for_arc(task_id=None, poll_s=30.0):
+    """Block until ARC is reachable, emitting one event on the way down and up.
+
+    Polls slowly on purpose: the VPN comes back when a human reconnects it,
+    which is minutes to hours, not seconds. Nothing is spent while waiting —
+    no driver, no lease, no attempt.
+    """
+    global _vpn_down_since
+    up, detail = await asyncio.to_thread(arc_reachable)
+    if up:
+        return
+    if _vpn_down_since is None:
+        _vpn_down_since = time.time()
+        events.emit("arc.unreachable", detail=detail, task=task_id)
+        log.error("ARC unreachable (%s) — the fleet is waiting, not retrying", detail)
+    while True:
+        await asyncio.sleep(poll_s)
+        up, detail = await asyncio.to_thread(arc_reachable)
+        if up:
+            down_for = round(time.time() - (_vpn_down_since or time.time()))
+            _vpn_down_since = None
+            events.emit("arc.reachable", after_s=down_for, task=task_id)
+            log.warning("ARC reachable again after %ds — resuming", down_for)
+            return
+
+
 async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None):
     """Wait until this model is below its cross-process cap (store holds the
     lease). Emits driver.cap_wait roughly once a minute while waiting.
@@ -480,6 +536,19 @@ class Driver:
         low = (text or "").lower()
         return any(m in low for m in cls._CAPACITY_MARKERS)
 
+    # ARC sits behind the VT campus VPN, and the VPN session expires every 24h.
+    # When it does, every request 403s with this exact text. That is not a
+    # crash and not capacity — retrying it on either ladder burns the whole
+    # attempt budget against an endpoint that cannot answer, which is how ten
+    # kimi runs and thirteen opencode timeouts were spent overnight on 09-11.
+    _VPN_MARKERS = ("restricted to the vt campus vpn", "connect to the vpn",
+                    "provider.auth_error: 403")
+
+    @classmethod
+    def is_vpn_error(cls, text):
+        low = (text or "").lower()
+        return any(m in low for m in cls._VPN_MARKERS)
+
     async def run(self, prompt, worktree, session_id=None, task_id=None):
         attempt = 0
         sid = session_id
@@ -521,6 +590,16 @@ class Driver:
                 # request outstanding IS a capacity symptom, even though the
                 # error text carries no 400 — retrying it on the crash ladder
                 # walks straight back into whatever is saturated.
+                if self.is_vpn_error(str(exc)):
+                    # Not a crash, not capacity: the network path is gone.
+                    # Wait for it to come back and retry the SAME attempt
+                    # number — an attempt that never reached the API was not
+                    # an attempt.
+                    events.emit("driver.vpn_down", harness=self.harness,
+                                model=self.model, task=task_id, attempt=attempt)
+                    await wait_for_arc(task_id)
+                    attempt -= 1
+                    continue
                 capacity = self.is_capacity_error(str(exc)) or "unanswered for" in str(exc)
                 # Capacity errors are expected weather and would swamp triage;
                 # everything else is a defect worth a traceback and a group.

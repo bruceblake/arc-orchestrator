@@ -993,10 +993,13 @@ class AConflictingPullRequestIsRetried(unittest.TestCase):
         self.assertFalse(self._fires("pr_merge_t1", "pr_review_t1",
                                      {"merged": False, "reason": "conflict"}))
 
-    def test_the_resync_budget_is_small_and_positive(self):
-        # Each resync rewrites the branch and costs a fresh review round.
+    def test_the_resync_budget_is_positive_and_finite(self):
+        # Each resync rewrites the branch and costs a fresh review round, so
+        # it must be bounded — but the operator has said tokens are not the
+        # scarce resource, so the bound is generous rather than tight. What
+        # this test protects is that a task cannot resync FOREVER.
         self.assertGreaterEqual(config.PR_MAX_RESYNCS, 1)
-        self.assertLessEqual(config.PR_MAX_RESYNCS, 3)
+        self.assertLess(config.PR_MAX_RESYNCS, 100)
 
 
 class ResumingAConflictedTask(unittest.TestCase):

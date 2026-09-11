@@ -2273,6 +2273,24 @@ def _stale_source(now=None):
     return files
 
 
+_arc_cache = {"key": 0.0, "value": None}
+
+
+def _arc_status(now=None):
+    """Is the ARC API reachable from here — i.e. is the VPN up? Cached 20 s."""
+    now = now if now is not None else time.time()
+    if _arc_cache["value"] is not None and now - _arc_cache["key"] < 20:
+        return _arc_cache["value"]
+    try:
+        import drivers
+        up, detail = drivers.arc_reachable(timeout=4.0)
+    except Exception as exc:
+        up, detail = None, f"probe failed: {exc}"[:120]
+    val = {"reachable": up, "detail": detail, "checked_at": now}
+    _arc_cache.update(key=now, value=val)
+    return val
+
+
 def _health(store):
     """Small, cheap fleet-health payload for the Projects page.
 
@@ -2360,6 +2378,10 @@ def _health(store):
             "watchdog": _watchdog(store, runs),
             "leases": leases, "problems": problems,
             "stale_source": _stale_source(now),
+            # The VPN expiring is the one outage that makes the whole fleet look
+            # idle rather than broken: every driver waits for ARC, nothing runs,
+            # nothing errors. An operator staring at zeros needs to be told why.
+            "arc": _arc_status(now),
             "served_head": (_SERVED_HEAD or "")[:12], "served_at": _SERVED_AT}
 
 
