@@ -93,10 +93,46 @@ def check(*stems, db_path="orchestrator.db", tasks_dir=None):
     return clashes, held, want
 
 
+def internal(*stems, tasks_dir=None, db_path="orchestrator.db"):
+    """Files two of the LAUNCHED taskfiles would both touch.
+
+    check() only compares a batch against work already in flight, which is a
+    different question and silently answered "safe" for a wave whose own
+    members collide. Launching dashboard-modularise beside dashboard-ux is
+    exactly that case: both own static/index.html, and nothing was in flight to
+    reveal it.
+    """
+    want = {}
+    d = pathlib.Path(tasks_dir or (pathlib.Path.home() / "tasks"))
+    done = set()
+    try:
+        db = sqlite3.connect(db_path)
+        done = {r[0] for r in db.execute(
+            "SELECT id FROM code_tasks WHERE status='merged'")}
+    except sqlite3.Error:
+        pass
+    for stem in stems:
+        try:
+            proj = json.loads((d / f"{stem}.json").read_text())["project"]
+        except (OSError, ValueError, KeyError):
+            continue
+        for t in proj.get("tasks") or []:
+            if t.get("id") in done:
+                continue
+            for f in t.get("files_hint") or []:
+                want.setdefault(f, set()).add(stem)
+    return {f: sorted(v) for f, v in want.items() if len(v) > 1}
+
+
 if __name__ == "__main__":
-    clashes, held, want = check(*sys.argv[1:])
+    stems = sys.argv[1:]
+    clashes, held, want = check(*stems)
+    within = internal(*stems)
     print("  in flight:", ", ".join(sorted(held)) or "nothing")
     for f, (by, mine) in sorted(clashes.items()):
         print(f"  CLASH {f}: held by {by}, wanted by {mine}")
-    print("  ->", "SAFE to launch" if not clashes else "DO NOT launch")
-    sys.exit(1 if clashes else 0)
+    for f, projects in sorted(within.items()):
+        print(f"  CLASH {f}: {' and '.join(projects)} would both edit it")
+    bad = bool(clashes or within)
+    print("  ->", "DO NOT launch together" if bad else "SAFE to launch")
+    sys.exit(1 if bad else 0)

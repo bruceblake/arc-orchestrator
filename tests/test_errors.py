@@ -838,3 +838,33 @@ class InvariantsCheckedAgainstReality(unittest.TestCase):
         finally:
             audit._sh, reconcile.live_runs = orig_sh, orig_live
         self.assertFalse(any("no PR is open" in x["what"] for x in f))
+
+    def test_two_launched_taskfiles_that_collide_are_reported(self):
+        # check() only compares a batch against work ALREADY in flight, which
+        # silently answers "safe" for a wave whose own members collide.
+        # dashboard-modularise beside dashboard-ux was exactly that: both own
+        # static/index.html and nothing was in flight to reveal it.
+        import tools_file_clash as fc
+        self._taskfile("a", "t1", ["shared.py"])
+        self._taskfile("b", "t2", ["shared.py"])
+        within = fc.internal("a", "b", tasks_dir=self.tasks, db_path=self.db)
+        self.assertIn("shared.py", within)
+        self.assertEqual(within["shared.py"], ["a", "b"])
+
+    def test_disjoint_taskfiles_report_no_internal_clash(self):
+        import tools_file_clash as fc
+        self._taskfile("a", "t1", ["one.py"])
+        self._taskfile("b", "t2", ["two.py"])
+        self.assertEqual(fc.internal("a", "b", tasks_dir=self.tasks, db_path=self.db), {})
+
+    def test_a_merged_task_does_not_create_a_phantom_internal_clash(self):
+        import tools_file_clash as fc
+        self._taskfile("a", "done", ["shared.py"])
+        self._live("done", "merged", os.path.join(self.tasks, "a.json"))
+        self._taskfile("b", "t2", ["shared.py"])
+        self.assertEqual(fc.internal("a", "b", tasks_dir=self.tasks, db_path=self.db), {})
+
+    def test_one_taskfile_alone_never_collides_with_itself(self):
+        import tools_file_clash as fc
+        self._taskfile("a", "t1", ["shared.py"])
+        self.assertEqual(fc.internal("a", tasks_dir=self.tasks, db_path=self.db), {})
