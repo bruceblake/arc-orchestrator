@@ -275,7 +275,9 @@ class FileClashDetection(unittest.TestCase):
         self.con.close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
-    def _taskfile(self, stem, tasks):
+    def _taskfile(self, stem, tid_or_tasks, files=None):
+        tasks = ([{"id": tid_or_tasks, "files_hint": files or []}]
+                 if isinstance(tid_or_tasks, str) else tid_or_tasks)
         path = os.path.join(self.tasks, f"{stem}.json")
         with open(path, "w") as fh:
             json.dump({"project": {"repo": "/x", "tasks": tasks}}, fh)
@@ -311,6 +313,27 @@ class FileClashDetection(unittest.TestCase):
         self._live("a", "running", tf)
         self._taskfile("new", [{"id": "b", "files_hint": ["two.py"]}])
         clashes, _, _ = fc.check("new", db_path=self.db, tasks_dir=self.tasks)
+        self.assertEqual(clashes, {})
+
+    def test_relaunching_a_taskfile_is_not_a_clash_with_itself(self):
+        # Re-running a taskfile to resume it is the normal recovery path:
+        # resync, conflict repair, retry after a failed merge. Refusing because
+        # the task being resumed holds its own files blocks the exact operation
+        # that fixes things.
+        import tools_file_clash as fc
+        tf = self._taskfile("proj", "a", ["shared.py"])
+        self._live("a", "conflict", tf)
+        clashes, _, _ = fc.check("proj", db_path=self.db, tasks_dir=self.tasks)
+        self.assertEqual(clashes, {})
+
+    def test_a_merged_task_in_the_launched_file_wants_nothing(self):
+        # On resume it collapses to a skip stub and edits nothing.
+        import tools_file_clash as fc
+        other = self._taskfile("busy", "live", ["shared.py"])
+        self._live("live", "running", other)
+        self._taskfile("mine", "done", ["shared.py"])
+        self._live("done", "merged", os.path.join(self.tasks, "mine.json"))
+        clashes, _, _ = fc.check("mine", db_path=self.db, tasks_dir=self.tasks)
         self.assertEqual(clashes, {})
 
     def test_a_terminal_task_owns_nothing(self):
