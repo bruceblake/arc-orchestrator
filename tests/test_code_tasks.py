@@ -1211,3 +1211,53 @@ class StatusMustReflectRealityDuringRework(unittest.TestCase):
         body = src[src.index("async def alloc(ctx):"):]
         body = body[:body.index("async def implement(ctx):")]
         self.assertIn('"running"', body)
+
+
+class ACrashedPreMergeReviewerIsNotARejection(unittest.TestCase):
+    """The same distinction pr_review makes, in the gate-stage reviewer.
+
+    graph-admission-control's verify gate passed FOUR times while its reviewer
+    hit 18 consecutive capacity errors. Each crash returned pass:False, so the
+    implementer was sent back to fix issues nobody had raised, one fix round at
+    a time, until the task died as "exhausted escalation" on work that was
+    never actually rejected.
+    """
+
+    def _edges(self, src="review_t1"):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        return [e for e in g.edges if e.src == src]
+
+    def _fires(self, dst, result, ctx=None):
+        return any(e.dst == dst and (e.when is None or e.when(result, ctx or {}))
+                   for e in self._edges())
+
+    CRASH = {"pass": False, "crashed": True, "issues": ["reviewer crashed: boom"]}
+    REJECT = {"pass": False, "issues": ["the null check is missing"]}
+
+    def test_a_crash_retries_the_review(self):
+        self.assertTrue(self._fires("review_t1", self.CRASH))
+
+    def test_a_crash_does_not_go_to_the_implementer(self):
+        self.assertFalse(self._fires("implement_t1", self.CRASH))
+
+    def test_a_crash_does_not_trigger_an_escalation(self):
+        self.assertFalse(self._fires("escalate_t1", self.CRASH))
+
+    def test_a_real_rejection_still_goes_to_the_implementer(self):
+        self.assertTrue(self._fires("implement_t1", self.REJECT))
+
+    def test_a_real_rejection_does_not_retry_the_review(self):
+        self.assertFalse(self._fires("review_t1", self.REJECT))
+
+    def test_repeated_crashes_eventually_fail_the_task(self):
+        ctx = {"runs": {"review_t1": config.MAX_REVIEW_CRASHES}}
+        self.assertTrue(self._fires("fail_t1", self.CRASH, ctx))
+        self.assertFalse(self._fires("review_t1", self.CRASH, ctx))
+
+    def test_the_crash_budget_is_separate_from_the_fix_budget(self):
+        self.assertGreater(config.MAX_REVIEW_CRASHES, 0)
+
+    def test_a_passing_review_is_unaffected(self):
+        self.assertTrue(self._fires("publish_t1", {"pass": True}))

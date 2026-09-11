@@ -190,6 +190,12 @@ PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "3"))
 # giving up. Each resync rewrites the branch and costs a fresh review,
 # so this is deliberately small.
 PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "2"))
+
+# Retries of a PRE-MERGE review that crashed instead of reaching a
+# verdict. Separate from the fix budget on purpose: a reviewer that
+# could not run has not objected to anything, and spending a fix round
+# on it sends the implementer to repair code nobody criticised.
+MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "3"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")

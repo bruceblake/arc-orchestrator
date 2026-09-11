@@ -126,6 +126,19 @@ the implementer it reviews when a strong model implemented.
   (bounded fix loop, Rule 4); nothing merges without `pass: true`
   (edge `review_<tid> -> publish_<tid>`, code_tasks.py:257).
 
+- **A reviewer that CRASHED did not review.** A pre-merge reviewer that dies —
+  a capacity error, a harness fault — returns `crashed`, and the task retries
+  the REVIEW rather than going back to the implementer. Spending a fix round on
+  it sends the implementer to repair code nobody criticised. Bounded by
+  `config.MAX_REVIEW_CRASHES` (`ARC_MAX_REVIEW_CRASHES`, default 3), kept
+  separate from the fix budget for the same reason `PR_MAX_INCONCLUSIVE` is
+  separate from `PR_MAX_ROUNDS`.
+
+  This cost a real task. graph-admission-control's verify gate passed FOUR
+  times while its reviewer hit 18 consecutive capacity errors; each crash was
+  recorded as a rejection, the implementer was sent to fix nothing, and the
+  task finally died as "exhausted escalation" on work that was never rejected.
+
 Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-contract.md).
 
 ### Rule 3 — Every task runs in its own git worktree off the repo's `main` branch

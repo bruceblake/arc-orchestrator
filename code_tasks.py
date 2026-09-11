@@ -898,7 +898,16 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("driver.error", task=tid, role="reviewer",
                             fingerprint=fp, model=driver.model,
                             error=str(exc)[:200])
-                return {"pass": False, "issues": [f"reviewer crashed: {exc}"[:200]]}
+                # A reviewer that CRASHED did not review. Returning pass:False
+                # sent the task back to the implementer to fix issues nobody
+                # raised, and burned one of its fix rounds doing it.
+                # graph-admission-control died exactly this way: its gate passed
+                # FOUR times while the reviewer hit 18 consecutive capacity
+                # errors, and it was recorded as "exhausted escalation" on work
+                # that was never rejected. Same distinction pr_review already
+                # makes — the diff has not been read, so retry the REVIEW.
+                return {"pass": False, "crashed": True,
+                        "issues": [f"reviewer crashed: {exc}"[:200]]}
             verdict = _parse_verdict(res.text)
             store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
@@ -1300,15 +1309,27 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                and (r.get("inconclusive_n", 0) >= config.PR_MAX_INCONCLUSIVE
                     if r.get("inconclusive")
                     else pr_rounds(c) >= config.PR_MAX_ROUNDS))
+        # A crashed reviewer retries the REVIEW; it must not consume a fix
+        # round, because no one objected to the code.
+        def review_crashes(c):
+            return c.get("runs", {}).get(f"review_{tid}", 0)
+
+        g.edge(f"review_{tid}", f"review_{tid}",
+               when=lambda r, c: r.get("crashed")
+               and review_crashes(c) < config.MAX_REVIEW_CRASHES)
+        g.edge(f"review_{tid}", f"fail_{tid}",
+               when=lambda r, c: r.get("crashed")
+               and review_crashes(c) >= config.MAX_REVIEW_CRASHES)
         for src in ("gate", "review"):
             key = "passed" if src == "gate" else "pass"
             g.edge(f"{src}_{tid}", f"implement_{tid}",
-                   when=lambda r, c, k=key: not r[k] and within_budget(c))
+                   when=lambda r, c, k=key: not r[k] and not r.get("crashed")
+                   and within_budget(c))
             g.edge(f"{src}_{tid}", f"escalate_{tid}",
-                   when=lambda r, c, k=key: not r[k]
+                   when=lambda r, c, k=key: not r[k] and not r.get("crashed")
                    and not within_budget(c) and can_escalate(c))
             g.edge(f"{src}_{tid}", f"fail_{tid}",
-                   when=lambda r, c, k=key: not r[k]
+                   when=lambda r, c, k=key: not r[k] and not r.get("crashed")
                    and not within_budget(c) and not can_escalate(c))
         g.edge(f"escalate_{tid}", f"implement_{tid}")
         # Conflict-repair fallthrough: only when the repair-mode publish ran
