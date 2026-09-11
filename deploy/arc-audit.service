@@ -1,0 +1,12 @@
+[Unit]
+Description=ARC orchestrator daily audit
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/proxyie/arc-orchestrator
+ExecStart=/home/proxyie/arc-orchestrator/daily-audit.sh
+# The report is on disk either way (logs/audit/<date>.txt); the journal keeps
+# the critical ones, which is what a non-zero exit means.
+StandardOutput=journal
+StandardError=journal
