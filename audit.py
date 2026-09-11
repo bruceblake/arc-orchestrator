@@ -425,6 +425,76 @@ def audit_pr_collisions(store=None, repo=None):
     return out
 
 
+def audit_invariants(store=None, repo=None):
+    """Things that must be true if the pipeline is behaving, checked against reality.
+
+    Each of these is a claim the database makes that git, the process table or
+    GitHub can contradict. Every bug found today was a disagreement of exactly
+    this shape — a status column believed over the world it describes — so the
+    disagreements are now checked directly rather than discovered by their
+    consequences.
+    """
+    if store is None:
+        return []
+    repo = Path(repo or config.ROOT)
+    try:
+        rows = [dict(r) for r in store.code_tasks_all()]
+    except Exception as exc:
+        return [_finding("warning", "invariants", "could not read code_tasks",
+                         str(exc)[:200], "")]
+    try:
+        import reconcile
+        live_tf = {r.get("taskfile") for r in reconcile.live_runs()}
+    except Exception:
+        return [_finding("info", "invariants", "cannot read the process table",
+                         "", "skipping invariant checks rather than guessing")]
+
+    rc, raw, _ = _sh("gh", "pr", "list", "--state", "open", "--json",
+                     "number,headRefName", cwd=repo, timeout=25)
+    prs, pr_known = {}, rc == 0
+    if pr_known:
+        try:
+            prs = {p["headRefName"]: p["number"] for p in (json.loads(raw) if raw.strip() else [])}
+        except ValueError:
+            pr_known = False
+    rc, wt, _ = _sh("git", "worktree", "list", "--porcelain", cwd=repo)
+    trees = {Path(ln.split(" ", 1)[1]).name for ln in wt.splitlines()
+             if ln.startswith("worktree ")}
+
+    out = []
+    for r in rows:
+        tid, st = r.get("id"), r.get("status")
+        if st == "running" and r.get("taskfile") not in live_tf:
+            out.append(_finding(
+                "warning", "invariants", f"{tid}: status 'running' but no run is alive",
+                "", "its run died without settling the row — "
+                    "main.py code reconcile --apply resets it"))
+        if pr_known and st == "in_review" and f"task/{tid}" not in prs:
+            out.append(_finding(
+                "warning", "invariants", f"{tid}: status 'in_review' but no PR is open",
+                "", "it cannot progress: re-run its project so publish "
+                    "re-opens or re-attaches the PR"))
+        if st == "merged" and tid in trees:
+            out.append(_finding(
+                "info", "invariants", f"{tid}: merged but its worktree remains",
+                "", "main.py code reconcile --apply removes it"))
+        if pr_known and st == "merged" and f"task/{tid}" in prs:
+            out.append(_finding(
+                "warning", "invariants",
+                f"{tid}: merged but PR #{prs[f'task/{tid}']} is still open",
+                "", "the merge did not close it — close it by hand"))
+    known = {r.get("id") for r in rows}
+    for br, n in prs.items():
+        tid = br[5:] if br.startswith("task/") else None
+        if tid and tid not in known:
+            out.append(_finding(
+                "warning", "invariants",
+                f"PR #{n} is for task '{tid}', which the database does not know",
+                "", "a branch from a lost database, or a hand-made PR on a "
+                    "task/ branch — close it or recreate the task"))
+    return out
+
+
 def audit_logs():
     out = []
     p = Path(config.EVENTS_LOG)
@@ -476,6 +546,7 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
     findings += audit_git(store=store)
     findings += audit_gates(store)
     findings += audit_pr_collisions(store)
+    findings += audit_invariants(store)
     findings += audit_tasks_backup(snapshot=snapshot)
     findings += audit_logs()
     if with_health:

@@ -741,3 +741,86 @@ class UnknownIsNotAllClear(unittest.TestCase):
             audit._sh, reconcile.live_runs = orig_sh, orig_live
         self.assertTrue(f, "a failed gh must be reported, not silently empty")
         self.assertIn("could not list", f[0]["what"])
+
+
+class InvariantsCheckedAgainstReality(unittest.TestCase):
+    """Claims the database makes that git, the process table or GitHub can refute.
+
+    Every bug found today was a disagreement of exactly this shape — a status
+    column believed over the world it describes. Checking the disagreements
+    directly beats discovering them by their consequences.
+    """
+
+    class _Store:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def code_tasks_all(self):
+            return self._rows
+
+    def _run(self, rows, prs="[]", worktrees="worktree /repo\n", live=()):
+        import audit
+        import reconcile
+        orig_sh, orig_live = audit._sh, reconcile.live_runs
+        reconcile.live_runs = lambda: [{"taskfile": t} for t in live]
+
+        def sh(*args, **kw):
+            argv = list(args)
+            if argv and argv[0] == "gh":
+                return 0, prs, ""
+            if "worktree" in argv:
+                return 0, worktrees, ""
+            return 0, "", ""
+        audit._sh = sh
+        try:
+            return audit.audit_invariants(self._Store(rows), repo="/repo")
+        finally:
+            audit._sh, reconcile.live_runs = orig_sh, orig_live
+
+    def test_running_with_no_live_run_is_flagged(self):
+        f = self._run([{"id": "t1", "status": "running", "taskfile": "/t/a.json"}])
+        self.assertTrue(any("no run is alive" in x["what"] for x in f))
+
+    def test_running_with_a_live_run_is_fine(self):
+        f = self._run([{"id": "t1", "status": "running", "taskfile": "/t/a.json"}],
+                      live=["/t/a.json"])
+        self.assertEqual(f, [])
+
+    def test_in_review_with_no_open_pr_is_flagged(self):
+        f = self._run([{"id": "t1", "status": "in_review", "taskfile": "/t/a.json"}])
+        self.assertTrue(any("no PR is open" in x["what"] for x in f))
+
+    def test_in_review_with_its_pr_open_is_fine(self):
+        f = self._run([{"id": "t1", "status": "in_review", "taskfile": "/t/a.json"}],
+                      prs='[{"number":4,"headRefName":"task/t1"}]')
+        self.assertEqual(f, [])
+
+    def test_merged_with_a_still_open_pr_is_flagged(self):
+        f = self._run([{"id": "t1", "status": "merged"}],
+                      prs='[{"number":4,"headRefName":"task/t1"}]')
+        self.assertTrue(any("still open" in x["what"] for x in f))
+
+    def test_merged_with_a_leftover_worktree_is_noted(self):
+        f = self._run([{"id": "t1", "status": "merged"}],
+                      worktrees="worktree /repo\nworktree /wt/t1\n")
+        self.assertTrue(any("worktree remains" in x["what"] for x in f))
+
+    def test_a_pr_for_an_unknown_task_is_flagged(self):
+        f = self._run([], prs='[{"number":7,"headRefName":"task/ghost"}]')
+        self.assertTrue(any("does not know" in x["what"] for x in f))
+
+    def test_a_failing_gh_does_not_produce_false_pr_findings(self):
+        # Unknown is not all-clear, and it is not "everything is broken" either.
+        import audit
+        import reconcile
+        orig_sh, orig_live = audit._sh, reconcile.live_runs
+        reconcile.live_runs = lambda: [{"taskfile": "/t/a.json"}]
+        audit._sh = lambda *a, **k: ((1, "", "gh down") if a and a[0] == "gh"
+                                     else (0, "worktree /repo\n", ""))
+        try:
+            f = audit.audit_invariants(
+                self._Store([{"id": "t1", "status": "in_review",
+                              "taskfile": "/t/a.json"}]), repo="/repo")
+        finally:
+            audit._sh, reconcile.live_runs = orig_sh, orig_live
+        self.assertFalse(any("no PR is open" in x["what"] for x in f))
