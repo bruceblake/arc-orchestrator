@@ -15,6 +15,7 @@ import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
 
+import config
 import workqueue
 
 
@@ -344,3 +345,58 @@ class TheLeaseWaitIsPushNotified(unittest.TestCase):
             aio.run(go())
         finally:
             config.DB_PATH, drivers._lease_store = orig_db, orig_store
+
+
+class TheSlotQueueHandleIsCached(unittest.TestCase):
+    """Constructing a Queue opens a connection AND re-runs the schema script.
+
+    Doing that on every lease release measured 69x the cost of reusing one, on
+    a path that runs on every driver attempt.
+    """
+
+    def setUp(self):
+        import drivers
+        self.db = tempfile.mktemp(suffix=".db")
+        self._orig = config.DB_PATH
+        drivers._slot_queue = None
+        self.addCleanup(self._cleanup)
+
+    def _cleanup(self):
+        import drivers
+        config.DB_PATH = self._orig
+        drivers._slot_queue = None
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.unlink(self.db + suffix)
+            except OSError:
+                pass
+
+    def test_the_same_handle_is_reused(self):
+        import drivers
+        config.DB_PATH = self.db
+        self.assertIs(drivers._slot_q(), drivers._slot_q())
+
+    def test_repointing_the_database_invalidates_the_cache(self):
+        # Tests and `--db` repoint config.DB_PATH. A handle cached against the
+        # old path would quietly write to the wrong database.
+        import drivers
+        config.DB_PATH = self.db
+        first = drivers._slot_q()
+        other = tempfile.mktemp(suffix=".db")
+        config.DB_PATH = other
+        try:
+            second = drivers._slot_q()
+            self.assertIsNot(first, second)
+            self.assertEqual(second.db_path, other)
+        finally:
+            for suffix in ("", "-wal", "-shm"):
+                try:
+                    os.unlink(other + suffix)
+                except OSError:
+                    pass
+
+    def test_an_unopenable_database_yields_none_rather_than_raising(self):
+        import drivers
+        config.DB_PATH = "/nonexistent-dir/nope.db"
+        drivers._slot_queue = None
+        self.assertIsNone(drivers._slot_q())

@@ -118,15 +118,42 @@ async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None):
                 sub.__exit__(None, None, None)
 
 
+_slot_queue = None
+
+
+def _slot_q():
+    """The shared Queue for slot notifications, or None if it cannot be opened.
+
+    Cached deliberately. Constructing one opens a sqlite connection AND re-runs
+    the schema script; doing that per lease release measured 69x the cost of
+    reusing it, on a path that runs on every driver attempt. It is also the
+    difference between one connection and a churn of them.
+    """
+    global _slot_queue
+    # Tests (and `--db`) repoint config.DB_PATH; a handle cached against the
+    # old path would quietly write to the wrong database.
+    if _slot_queue is not None and _slot_queue.db_path != str(config.DB_PATH):
+        _slot_queue = None
+    if _slot_queue is None:
+        try:
+            import workqueue
+            _slot_queue = workqueue.Queue(config.DB_PATH)
+        except Exception:
+            return None
+    return _slot_queue
+
+
 def _slot_subscription(model):
     """A push subscription for this lease key, or None if unavailable.
 
     Never fatal: the queue is an optimisation over a working poll loop, and a
     fleet that cannot open a unix socket should still run, more slowly.
     """
+    q = _slot_q()
+    if q is None:
+        return None
     try:
-        import workqueue
-        return workqueue.Queue(config.DB_PATH).subscribe(f"slot:{model}").__enter__()
+        return q.subscribe(f"slot:{model}").__enter__()
     except Exception:
         return None
 
@@ -177,8 +204,9 @@ def _lease_release(model, task_id):
     # effort: a release must never fail because a notification could not be
     # delivered, so every error here is swallowed deliberately.
     with contextlib.suppress(Exception):
-        import workqueue
-        workqueue.Queue(config.DB_PATH).notify(f"slot:{model}")
+        q = _slot_q()
+        if q is not None:
+            q.notify(f"slot:{model}")
 
 
 def proc_snapshot(pid):
