@@ -1735,8 +1735,13 @@ def _agents(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
     _prune_registry()
-    runs = [{"taskfile": k, **v} for k, v in _launch_registry.items()]
-    return {"now": now, "agents": inflight, "runs": runs,
+    # chat entries are not harness runs; keep them out of `runs` (the
+    # dashboard counts that list as "harness runs today")
+    runs = [{"taskfile": k, **v} for k, v in _launch_registry.items()
+            if v.get("kind") != "chat"]
+    chats = [{"session": k, **v} for k, v in _launch_registry.items()
+             if v.get("kind") == "chat"]
+    return {"now": now, "agents": inflight, "runs": runs, "chats": chats,
             "recent": _recent_agent_runs(store)}
 
 
@@ -2224,13 +2229,13 @@ def _chat_start(body):
     allowed = {r["path"] for r in _list_repos()}
     if not isinstance(repo, str) or repo not in allowed:
         return {"error": "repo is not one of the /api/repos entries"}, 400
+    if _chat_running(session):
+        return {"error": "a chat turn is already running for this session"}, 409
     path = _chat_dir() / f"{session}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps({"role": "user", "ts": time.time(),
                             "text": message}) + "\n")
-    if _chat_running(session):
-        return {"error": "a chat turn is already running for this session"}, 409
     argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py",
             "chat", "--session", session, "--repo", repo]
     proc, log_name = _spawn_logged(argv, f"chat-{session}.log")

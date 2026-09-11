@@ -240,6 +240,10 @@ class TestChatApi(_ChatCase):
         self.assertEqual(resp["error"],
                          "a chat turn is already running for this session")
         self.assertEqual(len(self.spawn_calls), 1)
+        # a rejected start must not mutate the session file
+        lines = (self.chat_dir / "s1.jsonl").read_text().splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["text"], "first")
         rec = dashboard._launch_registry["chat:s1"]
         self.assertEqual(rec["pid"], os.getpid())
 
