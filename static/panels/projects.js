@@ -6,6 +6,9 @@ function taskDag(dag, opts) {
   const topo = !!opts.topo; // static workload topology: no per-run state
   const nodes = (dag && dag.nodes) || [], edges = (dag && dag.edges) || [];
   if (!nodes.length) return "";
+  // A box or two teaches nothing a status dot does not — keep the card
+  // compact and skip the picture entirely.
+  if (mini && nodes.length < 3) return "";
   const lvl = {}; nodes.forEach(n => lvl[n.id] = 0);
   // Some graphs are cyclic (topologies: verify→synthesize, wiring_fix→
   // integration_review). The level relaxation below cannot converge on a
@@ -22,19 +25,34 @@ function taskDag(dag, opts) {
   let ch = true, guard = 0;
   while (ch && guard++ < nodes.length + 2) { ch = false;
     for (const e of edges) if (e.src !== e.dst && !back.has(e) && lvl[e.src] !== undefined && lvl[e.dst] !== undefined && lvl[e.dst] < lvl[e.src] + 1) { lvl[e.dst] = lvl[e.src] + 1; ch = true; } }
-  const NW = mini ? 132 : 200, NH = mini ? 30 : 48, GX = mini ? 46 : 60,
-        GY = mini ? 12 : 26, PAD = mini ? 6 : 14;
   // normalize levels to dense column indices so x can never exceed the
   // viewBox even if the levels above came out sparse
   const colOf = {}; [...new Set(nodes.map(n => lvl[n.id]))].sort((a, b) => a - b).forEach((l, i) => colOf[l] = i);
   const cols = {};
   nodes.forEach(n => (cols[colOf[lvl[n.id]]] = cols[colOf[lvl[n.id]]] || []).push(n));
-  const pos = {};
-  Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => pos[n.id] = {x: PAD + (+l) * (NW + GX), y: PAD + 12 + i * (NH + GY)}));
   const ncols = Object.keys(cols).length;
+  let NW = 200, NH = 48, GX = 60, GY = 26, PAD = 14, labFs = 0;
+  if (mini) {
+    NH = 30; GX = 46; GY = 12; PAD = 6;
+    // Labels must survive the scale into the ~336px card: effective px =
+    // font size x CARDW/W. Solve for the widest node that keeps 9px text at
+    // >= 7px effective; when even that box is too narrow to be worth a
+    // label, drop the labels and keep just the coloured status boxes.
+    const CARDW = 336, MINEFF = 7;
+    NW = Math.min(132, Math.floor((CARDW * 9 / MINEFF - 2 * PAD - (ncols - 1) * GX) / ncols));
+    labFs = NW >= 60 ? 9 : 0;
+    if (!labFs) NW = 40;
+  }
+  // A tall column used to stretch the viewBox until scaling made everything
+  // illegible. Past the ~120px cap, stop drawing rows and count the rest
+  // into a "+N more" footer instead (2 rows of NH+GY + footer = 112px).
+  const pos = {}; let dropped = 0;
+  Object.entries(cols).forEach(([l, ns]) => ns.forEach((n, i) => {
+    if (mini && i >= 2) { dropped++; return; }
+    pos[n.id] = {x: PAD + (+l) * (NW + GX), y: PAD + 12 + i * (NH + GY)}; }));
   const W = PAD * 2 + ncols * NW + Math.max(0, ncols - 1) * GX;
   const maxY = Math.max(...Object.values(pos).map(p => p.y));
-  const H = maxY + NH + PAD + (back.size ? 22 : 0);
+  const H = maxY + NH + PAD + (back.size ? 22 : 0) + (dropped ? 16 : 0);
   let s = "", bi = 0;
   for (const e of edges) { const a = pos[e.src], b = pos[e.dst]; if (!a || !b || e.src === e.dst) continue;
     if (back.has(e)) { // loop-back: swing below the graph so it stays visible
@@ -42,7 +60,8 @@ function taskDag(dag, opts) {
       s += `<path d="M${a.x + NW / 2},${a.y + NH} C${a.x + NW / 2},${y} ${b.x + NW / 2},${y} ${b.x + NW / 2},${b.y + NH}" stroke="#d29922" stroke-dasharray="4 3" fill="none"><title>loop back (cycle): ${esc(e.src)} → ${esc(e.dst)}</title></path>`;
       continue; }
     s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"${e.conditional ? ' stroke-dasharray="4 3"' : ""}/>`; }
-  for (const n of nodes) { const p = pos[n.id], c = topo ? ((dag.starts || []).includes(n.id) ? "#58a6ff" : n.gather ? "#bc8cff" : "#8b949e") : (STATUSC[n.status] || STATUSC.pending);
+  for (const n of nodes) { const p = pos[n.id]; if (!p) continue;
+    const c = topo ? ((dag.starts || []).includes(n.id) ? "#58a6ff" : n.gather ? "#bc8cff" : "#8b949e") : (STATUSC[n.status] || STATUSC.pending);
     const run = !topo && (n.status === "running" || n.live);
     const att = n.attempts || 0, escn = n.escalations || 0;
     const ttip = topo ? [n.id, n.gather ? "gather — joins parallel branches" : (dag.starts || []).includes(n.id) ? "start" : ""].filter(Boolean).join("\n")
@@ -58,8 +77,9 @@ function taskDag(dag, opts) {
       : `<g class="node" data-t="${attr(n.id)}" data-f="${attr(opts.file || "")}" role="button" tabindex="0" aria-label="${attr(`task ${n.id}: ${n.status}${n.live ? " (live)" : ""}`)}">` +
          `<title>${esc(ttip)}</title>` +
          `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="${mini ? 5 : 7}" fill="#0d1117" stroke="${c}" stroke-width="1.6" class="${run ? "run" : ""}"/>` +
-         `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 12.5 : 17)}" font-size="${mini ? 9 : 11}" fill="#c9d1d9">${esc(n.id.slice(0, mini ? 19 : 26))}${mini ? (STATUSG[n.status] || "") : ""}</text>` +
-         `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 24.5 : 33)}" font-size="${mini ? 7.5 : 9}" fill="#8b949e">${esc(short(n.model))} → ${esc(revShort(n.reviewer))}${att > 1 ? ` · x${att}` : ""}${escn ? ` ⬆${escn}` : ""}</text>`;
+         (mini && !labFs ? "" :
+         `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 12.5 : 17)}" font-size="${mini ? labFs : 11}" fill="#c9d1d9">${esc(n.id.slice(0, mini ? Math.max(6, Math.floor((NW - 12) / 6)) : 26))}${mini ? (STATUSG[n.status] || "") : ""}</text>` +
+         `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 24.5 : 33)}" font-size="${mini ? labFs : 9}" fill="#8b949e">${esc(short(n.model))} → ${esc(revShort(n.reviewer))}${att > 1 ? ` · x${att}` : ""}${escn ? ` ⬆${escn}` : ""}</text>`);
     if (!topo && !mini)
       s += `<text x="${p.x + 10}" y="${p.y + 45}" font-size="9" fill="${c}">${esc(n.status)}${n.live ? " · live" : ""}</text>`;
     if (!topo && (att > 1 || escn > 0))
@@ -68,6 +88,7 @@ function taskDag(dag, opts) {
     if (!topo && n.last_verdict && n.last_verdict.pass === false && n.status !== "merged")
       s += `<circle cx="${p.x + NW - 5}" cy="${p.y + 5}" r="3" fill="#f85149"/>`;
     s += `</g>`; }
+  if (dropped) s += `<text x="${PAD}" y="${H - 4}" font-size="9" fill="#8b949e">+${dropped} more — see the full DAG in the project detail</text>`;
   const wide = W > 1400;
   return `<svg viewBox="0 0 ${W} ${H}" style="display:block;${wide ? `width:${W}px;max-width:none` : "width:100%"}" preserveAspectRatio="xMinYMid meet">${s}</svg>`;
 }
@@ -97,6 +118,7 @@ function card(p, i) {
       <span class="pc">${fmtT(p.last_activity)}</span>
       <span><button class="act seg" data-arch="${attr(p.file)}" data-on="${p.archived ? 1 : 0}">${p.archived ? "restore" : "archive"}</button></span>
     </div>
+    ${taskDag(p.dag, {size: "mini", file: p.file})}
     ${(p.errors && p.errors.length) ? `<div class="cardnote" title="${attr(p.errors[0].error)}">⚠ ${esc(p.errors[0].id)}: ${esc(String(p.errors[0].error).slice(0, 90))}</div>` : ""}
   </div>`;
 }
@@ -273,6 +295,7 @@ function renderProjects() {
   const wrap = EXPANDED && $("#projects").querySelector(`.pwrap[data-file="${CSS.escape(EXPANDED)}"]`);
   if (wrap) { det.style.display = ""; wrap.after(det); }
   else det.style.display = "none";
+  bindDagClicks("#projects");
 
   document.querySelectorAll("#phase-filter [data-ph]").forEach(b =>
     b.onclick = () => { PHASE_FILT = b.dataset.ph; renderProjects(); });
