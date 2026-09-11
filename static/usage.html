@@ -50,6 +50,10 @@ h2 .hl { color: var(--accent); }
 .splitbar .p { background: var(--accent); } .splitbar .c { background: var(--purple); }
 .legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; margin-top: 4px; }
 .legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+.dir { font-size: 12px; margin-left: 4px; vertical-align: middle; }
+.dir.up { color: var(--ok); } .dir.down { color: var(--err); }
+.snote { color: var(--dim); text-transform: none; letter-spacing: normal; font-weight: normal; }
+.snote.warn { color: var(--warn); }
 
 /* model cards */
 .modelgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
@@ -66,6 +70,9 @@ h2 .hl { color: var(--accent); }
 .sharebar { display: block; height: 6px; border-radius: 3px; background: #21262d; overflow: hidden; margin: 8px 0 3px; }
 .sharebar i { display: block; height: 100%; }
 .mcap { color: var(--dim); font-size: 11px; }
+.mtok .rate { font-size: 12px; margin-left: 6px; }
+.rate.ok { color: var(--ok); } .rate.warn { color: var(--warn); } .rate.err { color: var(--err); }
+.mcard.bad { border-color: var(--err); }
 
 /* family table */
 table { border-collapse: collapse; width: 100%; }
@@ -80,6 +87,8 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 .capflag.over { background: var(--err); color: #fff; }
 .capflag.at { background: #d29922; color: #000; }
 .tblwrap { overflow-x: auto; }
+#daily-box summary { cursor: pointer; color: var(--dim); }
+#daily-box[open] summary { margin-bottom: 8px; }
 
 /* driver events / errors panel */
 #drv-events { max-height: 320px; overflow: auto; }
@@ -132,10 +141,11 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   <section class="panel">
     <h2>total · <span class="hl" id="range-label">1h</span></h2>
     <div class="totrow">
-      <span class="big"><b id="total-tok">—</b> <small>tokens</small></span>
-      <span class="tot-kv">requests <b id="total-req">—</b></span>
-      <span class="tot-kv">ok <b class="ok" id="total-ok">—</b></span>
-      <span class="tot-kv">errors <b class="err" id="total-err">—</b></span>
+      <span class="big"><b id="total-srate">—</b> <small>success</small></span>
+      <span class="tot-kv" id="total-srate-sub" title="ok / (ok + errors + failed attempts)">—</span>
+      <span class="big"><b id="total-tok">—</b> <small>tokens</small><span class="dir" id="dir-tok"></span></span>
+      <span class="tot-kv">requests <b id="total-req">—</b><span class="dir" id="dir-req"></span></span>
+      <span class="tot-kv" title="quota spent on nothing · ≈ = failed × avg per ok">waste <b id="total-waste">—</b></span>
     </div>
     <div class="splitbar"><i class="p" id="split-prompt" style="width:0%"></i><i class="c" id="split-comp" style="width:0%"></i></div>
     <div class="legend">
@@ -145,7 +155,7 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   </section>
 
   <section class="panel">
-    <h2>Models</h2>
+    <h2>Models · <span class="snote" id="sort-note"></span></h2>
     <div class="modelgrid" id="modelgrid"></div>
     <div class="empty" id="models-empty" style="display:none">No model activity in this range.</div>
   </section>
@@ -158,6 +168,19 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
         <tbody id="fam-body"></tbody>
       </table>
     </div>
+  </section>
+
+  <section class="panel">
+    <h2>Daily</h2>
+    <details id="daily-box">
+      <summary>show daily breakdown (requests · tokens · task runs)</summary>
+      <div class="tblwrap">
+        <table>
+          <thead><tr><th>day</th><th class="r">requests</th><th class="r">tokens</th><th class="r">task runs</th></tr></thead>
+          <tbody id="daily-body"></tbody>
+        </table>
+      </div>
+    </details>
   </section>
 
   <section class="panel">
@@ -182,6 +205,28 @@ const ago = ts => { if (!ts) return "—"; const s = Math.max(0, (Date.now()/100
   if (s < 86400) return (s/3600).toFixed(1)+"h ago"; return (s/86400).toFixed(1)+"d ago"; };
 const srcLabel = s => SRC[s] || (s && s.startsWith("driver:") ? "driver:" + s.split(":")[1] : (s || ""));
 
+const rateOf = t => { const a = (t.ok || 0) + (t.errors || 0) + (t.failed_attempts || 0);
+  return a ? (t.ok || 0) / a : null; };
+const wasteFig = t => ({ failed: t.failed_attempts || 0,
+  est: (t.ok || 0) > 0 ? Math.round(((t.tokens || 0) / (t.ok || 1)) * (t.failed_attempts || 0)) : 0 });
+const dirWindow = range => range === "24h" ? {n: 1, label: "yesterday"}
+  : range === "7d" ? {n: 7, label: "previous 7 days"} : null;
+const daySums = (daily, n) => {
+  const d = daily || [];
+  const sum = arr => ({ req: arr.reduce((s, x) => s + (x.requests || 0), 0),
+                        tok: arr.reduce((s, x) => s + (x.tokens || 0), 0) });
+  return [sum(d.slice(-n)), sum(d.slice(-2 * n, -n))];
+};
+const dirPct = (cur, prev) => prev > 0 ? ((cur - prev) / prev) * 100 : null;
+const dirHtml = pct => { if (pct == null) return null; const up = pct >= 0;
+  return { txt: (up ? "▲ +" : "▼ -") + Math.abs(pct).toFixed(0) + "%", cls: up ? "up" : "down" }; };
+function fillDir(id, pct, titleTxt) {
+  const el = $("#" + id), d = dirHtml(pct);
+  el.textContent = d ? d.txt : "";
+  el.className = "dir" + (d ? " " + d.cls : "");
+  el.title = d ? titleTxt : "";
+}
+
 async function jget(url) {
   const r = await fetch(url, {cache:"no-store"});
   if (!r.ok) return null;
@@ -202,9 +247,19 @@ async function fetchFleet() {
   } catch (e) {}
   try {
     const u = await jget("/api/usage?range=all");
-    return {caps: {}, totals: u ? u.totals : null, fromUsage:true};
+    return {caps: {}, totals: u ? u.totals : null, fromUsage:true, daily: u ? u.daily : null};
   } catch (e) {}
   return {caps: {}, totals: null, fromUsage:false};
+}
+
+let DAILY = null, DAILY_TS = 0;
+async function fetchDaily(fleet) {
+  if (fleet && fleet.daily && fleet.daily.length) { DAILY = fleet.daily; DAILY_TS = Date.now(); return; }
+  if (DAILY && Date.now() - DAILY_TS < 60000) return;
+  try {
+    const u = await jget("/api/usage?range=all");
+    if (u && u.daily && u.daily.length) { DAILY = u.daily; DAILY_TS = Date.now(); }
+  } catch (e) {}
 }
 
 function fillToolbar(fleet) {
@@ -215,10 +270,26 @@ function fillToolbar(fleet) {
 
 function fillTotal(u) {
   const t = u.totals || {};
+  const rate = rateOf(t);
+  const sr = $("#total-srate");
+  sr.textContent = rate == null ? "—" : (rate * 100).toFixed(1) + "%";
+  sr.style.color = rate == null ? "" : rate >= 0.9 ? "var(--ok)" : rate >= 0.75 ? "var(--warn)" : "var(--err)";
+  $("#total-srate-sub").textContent =
+    (t.ok || 0) + " ok · " + (t.errors || 0) + " err · " + (t.failed_attempts || 0) + " failed";
   $("#total-tok").textContent = fmt(t.tokens);
-  $("#total-req").textContent = t.requests;
-  $("#total-ok").textContent = t.ok;
-  $("#total-err").textContent = t.errors;
+  $("#total-req").textContent = fmt(t.requests);
+  const wf = wasteFig(t), wl = $("#total-waste");
+  wl.textContent = wf.failed || wf.est ? wf.failed + " failed · ≈" + fmt(wf.est) + " tok" : "none";
+  wl.className = wf.failed || wf.est ? "err" : "ok";
+  const w = dirWindow(u.range || RANGE);
+  let tokPct = null, reqPct = null;
+  if (w && DAILY && DAILY.length) {
+    const sums = daySums(DAILY, w.n);
+    tokPct = dirPct(sums[0].tok, sums[1].tok);
+    reqPct = dirPct(sums[0].req, sums[1].req);
+  }
+  fillDir("dir-tok", tokPct, w ? "vs " + w.label + (w.n === 1 ? " (today is partial)" : "") : "");
+  fillDir("dir-req", reqPct, w ? "vs " + w.label + (w.n === 1 ? " (today is partial)" : "") : "");
   const p = t.prompt_tokens || 0, c = t.completion_tokens || 0, tot = p + c;
   const pp = tot ? (p/tot)*100 : 0;
   $("#split-prompt").style.width = pp + "%";
@@ -228,94 +299,75 @@ function fillTotal(u) {
   $("#range-label").textContent = (u.range || RANGE).toUpperCase();
 }
 
-function mkey(m) { return (m.model||"") + "|" + (m.source||""); }
+function sortModels(models) {
+  const list = (models || []).slice();
+  const rate = m => { const r = rateOf(m); return r == null ? 1 : r; };
+  const alarm = list.some(m => rate(m) < 0.9);
+  list.sort(alarm ? (a, b) => rate(a) - rate(b) : (a, b) => (b.tokens || 0) - (a.tokens || 0));
+  return { list, alarm };
+}
 
-function fillCard(card, m, caps, totalTok) {
+function modelCard(m, caps, totalTok) {
   const c = COLORS[m.family] || COLORS.unknown;
-  card.querySelector(".dot").style.background = c;
-  card.querySelector(".mname").textContent = m.pretty || m.model;
-  card.querySelector(".v-src").textContent = srcLabel(m.source);
-  card.querySelector(".fam-tag").textContent = m.family || "?";
-  card.querySelector(".v-tok").textContent = fmt(m.tokens);
-  card.querySelector(".v-req").textContent = fmt(m.requests);
-  card.querySelector(".v-ok").textContent = fmt(m.ok);
-  card.querySelector(".v-err").textContent = fmt(m.errors);
-  card.querySelector(".v-lat").textContent = ms(m.avg_latency_ms);
-  card.querySelector(".v-last").textContent = ago(m.last_ts);
-  const share = totalTok && m.tokens ? (m.tokens/totalTok)*100 : 0;
-  card.querySelector(".v-share").style.width = Math.min(100, share) + "%";
-  card.querySelector(".v-sharepct").textContent = totalTok && m.tokens ? share.toFixed(1) + "%" : "0%";
+  const rate = rateOf(m);
+  const rcls = rate == null ? "" : rate >= 0.9 ? "ok" : rate >= 0.75 ? "warn" : "err";
   const cap = caps && caps[m.model];
-  const capEl = card.querySelector(".v-caps");
+  let capTxt = "";
   if (cap && (cap.account_cap != null || cap.driver_cap != null)) {
     const a = cap.account_cap != null ? "a " + cap.account_cap : "";
     const d = cap.driver_cap != null ? "d " + cap.driver_cap : "";
-    capEl.textContent = " · cap " + [a, d].filter(Boolean).join(" / ");
-  } else {
-    capEl.textContent = "";
+    capTxt = " · cap " + [a, d].filter(Boolean).join(" / ");
   }
-}
-
-function buildCard(m, caps, totalTok) {
-  const card = document.createElement("div");
-  card.className = "mcard";
-  card.dataset.mk = mkey(m);
-  card.innerHTML =
-    '<div class="mhead"><span class="dot"></span><b class="mname"></b>'
-    + '<span class="tag fam-tag"></span><span class="tag v-src"></span></div>'
-    + '<div class="mtok"><b class="v-tok">—</b> <small>tok</small></div>'
-    + '<div class="mrow">req <b class="v-req">—</b> · ok <b class="ok v-ok">—</b> · err <b class="err v-err">—</b></div>'
-    + '<div class="mrow">lat <b class="v-lat">—</b> · last <b class="v-last">—</b></div>'
-    + '<div class="sharebar"><i class="v-share" style="width:0%"></i></div>'
-    + '<div class="mcap">share <b class="v-sharepct">0%</b><span class="v-caps"></span></div>';
-  fillCard(card, m, caps, totalTok);
-  return card;
+  const share = totalTok && m.tokens ? (m.tokens / totalTok) * 100 : 0;
+  const wf = wasteFig(m);
+  const wasteRow = wf.failed || wf.est
+    ? '<div class="mrow">waste <b class="err">' + fmt(wf.failed) + ' failed</b> · <b>≈' + fmt(wf.est) + ' tok</b>'
+      + ' <span class="mcap">(failed × avg per ok)</span></div>' : "";
+  return '<div class="mcard' + (rate != null && rate < 0.9 ? " bad" : "") + '">'
+    + '<div class="mhead"><span class="dot" style="background:' + c + '"></span>'
+    + '<b class="mname">' + esc(m.pretty || m.model) + '</b>'
+    + '<span class="tag fam-tag">' + esc(m.family || "?") + '</span>'
+    + '<span class="tag v-src">' + esc(srcLabel(m.source)) + '</span></div>'
+    + '<div class="mtok"><b class="v-tok">' + fmt(m.tokens) + '</b> <small>tok</small>'
+    + (rate == null ? "" : ' <span class="rate ' + rcls + '">' + (rate * 100).toFixed(0) + '%</span>') + '</div>'
+    + '<div class="mrow">req <b class="v-req">' + fmt(m.requests) + '</b> · ok <b class="ok v-ok">' + fmt(m.ok) + '</b>'
+    + ' · err <b class="err v-err">' + fmt(m.errors) + '</b> · failed <b class="v-failed">' + fmt(m.failed_attempts) + '</b></div>'
+    + wasteRow
+    + '<div class="mrow">lat <b class="v-lat">' + ms(m.avg_latency_ms) + '</b> · last <b class="v-last">' + esc(ago(m.last_ts)) + '</b></div>'
+    + '<div class="sharebar"><i class="v-share" style="width:' + Math.min(100, share) + '%"></i></div>'
+    + '<div class="mcap">share <b class="v-sharepct">' + (totalTok && m.tokens ? share.toFixed(1) + "%" : "0%") + '</b>'
+    + '<span class="v-caps">' + esc(capTxt) + '</span></div></div>';
 }
 
 function updateModels(models, caps, totalTok) {
-  const grid = $("#modelgrid");
-  const seen = new Set();
-  for (const m of (models || [])) {
-    const k = mkey(m);
-    seen.add(k);
-    let card = grid.querySelector('[data-mk="' + k.replace(/"/g, '\\"') + '"]');
-    if (!card) { card = buildCard(m, caps, totalTok); grid.appendChild(card); }
-    else fillCard(card, m, caps, totalTok);
-  }
-  grid.querySelectorAll(".mcard").forEach(c => { c.style.display = seen.has(c.dataset.mk) ? "" : "none"; });
+  const s = sortModels(models);
+  $("#modelgrid").innerHTML = s.list.map(m => modelCard(m, caps, totalTok)).join("");
+  const note = $("#sort-note");
+  note.textContent = s.alarm ? "sorted by success rate — below 90%" : "sorted by tokens";
+  note.className = "snote" + (s.alarm ? " warn" : "");
   $("#models-empty").style.display = (models || []).length ? "none" : "";
 }
 
-function familyRow(f) {
-  const tr = document.createElement("tr");
-  tr.dataset.fam = f.family;
-  tr.innerHTML = '<td><span class="dot"></span><span class="f-name"></span></td>'
-    + '<td class="r f-cap"></td><td class="r f-req"></td><td class="r f-tok"></td><td class="r f-in"></td>';
-  return tr;
+function familyRowHtml(f) {
+  const c = COLORS[f.family] || COLORS.unknown;
+  const eff = f.inflight_shared != null ? f.inflight_shared : f.inflight;
+  const flag = f.over_cap ? '<span class="capflag over">OVER LIMIT</span>'
+    : f.at_cap ? '<span class="capflag at">AT LIMIT</span>' : "";
+  return '<tr class="' + (f.over_cap ? "over" : f.at_cap ? "atcap" : "") + '">'
+    + '<td><span class="dot" style="background:' + c + '"></span><span class="f-name">' + esc(f.family) + '</span></td>'
+    + '<td class="r f-cap">' + (f.limit != null ? esc(f.limit) : "—") + '</td>'
+    + '<td class="r f-req">' + fmt(f.requests) + '</td>'
+    + '<td class="r f-tok">' + fmt(f.tokens) + '</td>'
+    + '<td class="r f-in f-in-cell">' + esc(eff) + flag + '</td></tr>';
 }
 
 function updateFamilies(families) {
-  const tb = $("#fam-body");
-  const seen = new Set();
+  families = families || [];
+  $("#fam-body").innerHTML = families.length
+    ? families.map(familyRowHtml).join("")
+    : '<tr class="f-empty"><td colspan="5" class="empty">none</td></tr>';
   let worst = null;
-  for (const f of (families || [])) {
-    seen.add(f.family);
-    let tr = tb.querySelector('[data-fam="' + f.family.replace(/"/g, '\\"') + '"]');
-    if (!tr) { tr = familyRow(f); tb.appendChild(tr); }
-    const c = COLORS[f.family] || COLORS.unknown;
-    tr.querySelector(".dot").style.background = c;
-    tr.querySelector(".f-name").textContent = f.family;
-    tr.querySelector(".f-cap").textContent = f.limit != null ? f.limit : "—";
-    tr.querySelector(".f-req").textContent = fmt(f.requests);
-    tr.querySelector(".f-tok").textContent = fmt(f.tokens);
-    const inc = tr.querySelector(".f-in");
-    inc.classList.add("f-in-cell");
-    const eff = f.inflight_shared != null ? f.inflight_shared : f.inflight;
-    inc.innerHTML = esc(eff)
-      + (f.over_cap ? '<span class="capflag over">OVER LIMIT</span>'
-        : (f.at_cap ? '<span class="capflag at">AT LIMIT</span>' : ""));
-    tr.classList.toggle("over", !!f.over_cap);
-    tr.classList.toggle("atcap", !f.over_cap && !!f.at_cap);
+  for (const f of families) {
     if (f.over_cap) worst = f;
     else if (f.at_cap && !worst) worst = f;
   }
@@ -327,18 +379,15 @@ function updateFamilies(families) {
       : "at limit: " + worst.family + " " + (worst.inflight_shared ?? worst.inflight) + "/" + worst.limit;
     badge.style.background = worst.over_cap ? "var(--err)" : "#d29922";
     badge.style.color = worst.over_cap ? "#fff" : "#000";
-  } else {
-    badge.style.display = "none";
-  }
-  tb.querySelectorAll("tr[data-fam]").forEach(tr => {
-    if (!seen.has(tr.dataset.fam)) tr.style.display = "none";
-    else tr.style.display = "";
-  });
-  let empty = tb.querySelector("tr.f-empty");
-  if (!(families || []).length) {
-    if (!empty) { empty = document.createElement("tr"); empty.className = "f-empty";
-      empty.innerHTML = '<td colspan="5" class="empty">none</td>'; tb.appendChild(empty); }
-  } else if (empty) { empty.remove(); }
+  } else { badge.style.display = "none"; }
+}
+
+function updateDaily(daily) {
+  daily = daily || [];
+  $("#daily-body").innerHTML = daily.slice().reverse().map(d =>
+    '<tr><td>' + esc(d.date) + '</td><td class="r">' + fmt(d.requests) + '</td>'
+    + '<td class="r">' + fmt(d.tokens) + '</td><td class="r">' + fmt(d.task_runs) + '</td></tr>').join("");
+  $("#daily-box").style.display = daily.length ? "" : "none";
 }
 
 const EV_BAD = {"driver.error":1, "driver.timeout":1, "driver.stalled":1, "inflight.over_cap":1, "task.failed":1};
@@ -365,8 +414,9 @@ function updateUI(u, fleet) {
   USAGE = u; FLEET = fleet;
   fillTotal(u);
   fillToolbar(fleet);
-  updateModels(u.models, fleet.caps, u.totals.tokens);
+  updateModels(u.models, fleet.caps, (u.totals || {}).tokens);
   updateFamilies(u.families);
+  updateDaily(DAILY);
   updateDriverEvents(u.recent_driver_events);
 }
 
@@ -380,6 +430,7 @@ async function load() {
     const u = await jget("/api/usage?range=" + RANGE);
     if (!u) throw new Error("usage unavailable");
     const fleet = await fetchFleet();
+    await fetchDaily(fleet);
     updateUI(u, fleet);
     $("#stale").style.display = "none";
     $("#clock").textContent = new Date().toLocaleTimeString();
