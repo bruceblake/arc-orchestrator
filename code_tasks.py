@@ -785,8 +785,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     raise
                 store.save_harness_run(tid, driver.harness, model, "implementer",
                                        attempt, 1, "", 0.0)
+                # An implementer crash is the single most consequential failure
+                # in the pipeline and it was the one path still throwing its
+                # traceback away — the capture wired into drivers.py does not
+                # reach here, because this except is what catches what THAT
+                # one re-raises.
+                fp = errors.capture(exc, task=tid, model=model,
+                                    node=f"implement_{tid}", role="implementer",
+                                    attempt=attempt, harness=driver.harness)
                 events.emit("driver.error", task=tid, role="implementer",
-                            error=str(exc)[:200])
+                            model=model, attempt=attempt,
+                            error=str(exc)[:200], fingerprint=fp)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
             store.save_harness_run(tid, driver.harness, model, "implementer",
@@ -849,7 +858,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
                                        attempt, 1, "", 0.0,
                                        verdict='{"pass": false, "issues": ["reviewer crashed"]}')
+                fp = errors.capture(exc, task=tid, model=driver.model,
+                                    node=f"review_{tid}", role="reviewer",
+                                    attempt=attempt, harness=driver.harness)
                 events.emit("driver.error", task=tid, role="reviewer",
+                            fingerprint=fp, model=driver.model,
                             error=str(exc)[:200])
                 return {"pass": False, "issues": [f"reviewer crashed: {exc}"[:200]]}
             verdict = _parse_verdict(res.text)

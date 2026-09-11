@@ -1144,3 +1144,43 @@ class TerminalFailuresSayWhy(unittest.TestCase):
             self.assertIn(field, body,
                           "the event must carry the numbers that make the "
                           "reason checkable")
+
+
+class EveryErrorPathCaptures(unittest.TestCase):
+    """A driver.error emitted without a fingerprint threw its traceback away.
+
+    drivers.py captures what IT raises — but code_tasks catches what drivers
+    re-raises, in the implementer and reviewer paths, and those two emitted
+    their own driver.error with no capture at all. The implementer crash is the
+    most consequential failure in the pipeline and was the last one still
+    discarding its evidence. Observed live: a driver.error for
+    projects-ui-cleanup with fingerprint=None.
+    """
+
+    def _emit_sites(self):
+        import ast
+        tree = ast.parse(pathlib.Path(code_tasks.__file__).read_text())
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "emit"
+                    and getattr(node.func.value, "id", None) == "events"):
+                continue
+            if (node.args and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "driver.error"):
+                yield node
+
+    def test_the_scan_finds_both_sites(self):
+        self.assertGreaterEqual(len(list(self._emit_sites())), 2)
+
+    def test_every_driver_error_carries_a_fingerprint(self):
+        missing = [n.lineno for n in self._emit_sites()
+                   if not any(k.arg == "fingerprint" for k in n.keywords)]
+        self.assertEqual(missing, [],
+                         f"driver.error emitted with no capture at line(s) {missing}")
+
+    def test_both_paths_call_errors_capture(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        for marker in ('node=f"implement_{tid}"', 'node=f"review_{tid}"'):
+            self.assertIn(marker, src,
+                          "the crash path must capture with its node name")
