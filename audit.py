@@ -73,17 +73,35 @@ def triage_tasks(store):
     except Exception as exc:
         return [_finding("warning", "triage", "could not read code_tasks",
                          str(exc)[:200], "")]
-    stuck = [r for r in rows if r.get("status") in ("conflict", "in_review", "running")]
+    # A non-terminal task with a live run is a task WORKING, not a task stuck.
+    # Telling the operator to "re-run their project to resume" something that is
+    # running right now is noise, and noise is how an audit stops being read.
+    try:
+        import reconcile
+        live_files = {r.get("taskfile") for r in reconcile.live_runs()}
+    except Exception:
+        live_files = None
+    stuck, working = [], 0
+    for r in rows:
+        if r.get("status") not in ("conflict", "in_review", "running"):
+            continue
+        if live_files is not None and r.get("taskfile") in live_files:
+            working += 1
+            continue
+        stuck.append(r)
+    if working:
+        out.append(_finding("info", "tasks",
+                            f"{working} task(s) in flight right now", "", ""))
     by_status = {}
     for r in stuck:
         by_status.setdefault(r["status"], []).append(r["id"])
     for status, ids in sorted(by_status.items()):
         sev = "critical" if status == "conflict" else "warning"
         out.append(_finding(
-            sev, "tasks", f"{len(ids)} task(s) in '{status}'",
+            sev, "tasks", f"{len(ids)} task(s) stranded in '{status}'",
             ", ".join(ids[:10]),
-            "re-run their project to resume; a task left non-terminal holds a "
-            "worktree, a branch and possibly an open PR"))
+            "no run is working on them: re-run their project to resume; a task "
+            "left non-terminal holds a worktree, a branch and possibly an open PR"))
     failed = [r for r in rows if r.get("status") == "failed"]
     reasons = {}
     for r in failed:
@@ -97,18 +115,37 @@ def triage_tasks(store):
 
 # ---- 2. what is rotting --------------------------------------------------
 
-def audit_git(repo=None):
+def audit_git(repo=None, store=None):
     repo = Path(repo or config.ROOT)
     out = []
     rc, wt, _ = _sh("git", "worktree", "list", "--porcelain", cwd=repo)
     trees = [ln.split(" ", 1)[1] for ln in wt.splitlines() if ln.startswith("worktree ")]
-    orphan = [t for t in trees if Path(t).resolve() != repo.resolve()]
+    allocated = [t for t in trees if Path(t).resolve() != repo.resolve()]
+    # A worktree belonging to a task that is STILL WORKING is not a leak, it is
+    # the task working. The first version counted all of them and reported
+    # "8 worktrees — CRITICAL" while four of them were in active use. An audit
+    # that raises a critical alarm during normal operation is one nobody reads
+    # twice, which is the failure this module exists to avoid.
+    live = set()
+    if store is not None:
+        try:
+            live = {r["id"] for r in store.code_tasks_all()
+                    if r.get("status") in ("running", "in_review", "conflict")}
+        except Exception:
+            live = set()
+    orphan = [t for t in allocated if Path(t).name not in live]
+    in_use = len(allocated) - len(orphan)
     if orphan:
         out.append(_finding(
             "warning" if len(orphan) < 8 else "critical", "git",
-            f"{len(orphan)} task worktree(s) still allocated",
+            f"{len(orphan)} orphaned worktree(s)"
+            + (f" ({in_use} more in active use)" if in_use else ""),
             ", ".join(Path(t).name for t in orphan[:10]),
-            "main.py code reconcile --apply removes the ones whose run is gone"))
+            "their task is not running: main.py code reconcile --apply "
+            "removes them"))
+    elif in_use:
+        out.append(_finding("info", "git",
+                            f"{in_use} worktree(s) in active use", "", ""))
     rc, br, _ = _sh("git", "branch", "--list", "task/*", cwd=repo)
     branches = [b.strip("*+ ").strip() for b in br.splitlines() if b.strip()]
     merged = set()
@@ -208,7 +245,7 @@ def run(store=None, since_s=86400, with_health=True):
     if store is not None:
         findings += triage_tasks(store)
         findings += audit_leases(store)
-    findings += audit_git()
+    findings += audit_git(store=store)
     findings += audit_logs()
     if with_health:
         findings += audit_health()
