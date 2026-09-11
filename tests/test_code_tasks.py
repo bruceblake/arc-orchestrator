@@ -861,18 +861,13 @@ class AReviewerThatCrashedDidNotReview(unittest.TestCase):
     """
 
     def _outcomes(self, *pairs):
-        """Replicates pr_review's aggregation over reviewer outcomes."""
-        issues, approvals, crashed = [], [], []
-        for model, v in pairs:
-            if v.get("crashed"):
-                crashed.append(model)
-            elif v["approve"]:
-                approvals.append(model)
-            else:
-                issues.extend(f"[{model}] {i}" for i in v["issues"])
-        approved = bool(pairs) and len(approvals) == len(pairs)
+        """Calls the REAL aggregation. A copy of it here caught nothing —
+        mutation testing showed the suite stayed green with the production
+        logic broken."""
+        issues, approvals, crashed, approved, inconclusive = \
+            code_tasks._tally_reviews(list(pairs))
         return {"approved": approved, "issues": issues, "crashed": crashed,
-                "inconclusive": bool(crashed) and not issues}
+                "inconclusive": inconclusive}
 
     CRASH = {"approve": False, "crashed": True, "issues": ["boom"]}
     OK = {"approve": True, "issues": []}

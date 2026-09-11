@@ -386,6 +386,30 @@ def _eligible_pr_reviewers(impl_fam, pol):
     return out
 
 
+def _tally_reviews(outcomes):
+    """(issues, approvals, crashed, approved, inconclusive) for one PR round.
+
+    Module-level so it is TESTED rather than re-implemented in a test. A
+    previous version of this logic was verified by a copy of itself living in
+    the test file, which mutation testing showed catches nothing: breaking the
+    real code left the suite green.
+
+    `inconclusive` is the distinction that matters — nobody objected, but a
+    reviewer never ran, so the round reached no verdict. That is a review to
+    retry, not a change to request: the diff has not been read.
+    """
+    issues, approvals, crashed = [], [], []
+    for model, v in outcomes:
+        if v.get("crashed"):
+            crashed.append(model)
+        elif v["approve"]:
+            approvals.append(model)
+        else:
+            issues.extend(f"[{model}] {i}" for i in v["issues"])
+    approved = bool(outcomes) and len(approvals) == len(outcomes)
+    return issues, approvals, crashed, approved, bool(crashed) and not issues
+
+
 def _rework_feedback(tid, results):
     """Why this task is being implemented again, most authoritative first.
 
@@ -1073,19 +1097,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return model, verdict
 
             outcomes = await asyncio.gather(*[one(m) for m in chosen])
-            issues, approvals, crashed = [], [], []
-            for model, v in outcomes:
-                if v.get("crashed"):
-                    crashed.append(model)
-                elif v["approve"]:
-                    approvals.append(model)
-                else:
-                    issues.extend(f"[{model}] {i}" for i in v["issues"])
-            approved = bool(chosen) and len(approvals) == len(chosen)
-            # Nobody actually objected, but a reviewer never ran: this round
-            # reached no verdict. That is a review to RETRY, not a change to
-            # request — the diff has not been read.
-            inconclusive = bool(crashed) and not issues
+            issues, approvals, crashed, approved, inconclusive = \
+                _tally_reviews(outcomes)
             prior_incon = (prior_r or {}).get("inconclusive_n", 0)
             inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
             # The issue TEXT, not just a count. "3 issues" tells an operator

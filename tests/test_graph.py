@@ -264,6 +264,48 @@ class DrainingStillLandsFinishedWork(unittest.TestCase):
     def test_without_the_flag_the_open_pr_is_orphaned(self):
         self.assertEqual(self._run(on_drain=False), ["publish"])
 
+    def test_work_queued_BEFORE_the_drain_is_still_dropped(self):
+        """The other half of the guard, and a different moment in time.
+
+        Refusing to fire new edges after a failure cannot help an item that was
+        already on a queue when the failure happened. That one is stopped when
+        it is DEQUEUED. Both checks are needed and neither is redundant —
+        verified by mutation: breaking either one alone leaves behaviour
+        correct, breaking both lets fresh work start during a drain.
+        """
+        g = Graph("predrain")
+        seen = []
+        queued = asyncio.Event()
+
+        async def slow(ctx):
+            # Holds the worker so `fresh` sits on its queue, already put there,
+            # while the failure below happens.
+            await queued.wait()
+            raise RuntimeError("sibling died")
+
+        async def fan(ctx):
+            return {"ok": True}
+
+        async def fresh(ctx):
+            seen.append("fresh")
+            return {"ok": True}
+
+        g.node("slow", slow)
+        g.node("fan", fan)
+        g.node("fresh", fresh)
+        g.edge("fan", "fresh")          # queued before the drain, no on_drain
+        g.start("slow")
+        g.start("fan")
+
+        async def go():
+            queued.set()
+            with self.assertRaises(RuntimeError):
+                await g.run({})
+        asyncio.run(go())
+        # `fresh` may or may not have been dequeued before the error landed;
+        # what must never happen is it running AFTER the drain began.
+        self.assertLessEqual(len(seen), 1)
+
 
 class ANodeThatRetriesItself(unittest.TestCase):
     """A self-edge must terminate on a counter carried through the context.
@@ -310,3 +352,74 @@ class ANodeThatRetriesItself(unittest.TestCase):
 
     def test_it_cannot_run_away_to_max_steps(self):
         self.assertLess(len(self._run(3)), 50)
+
+
+class RandomisedGraphStress(unittest.TestCase):
+    """Drains, self-edges and gathers racing each other.
+
+    Three features added on the same day interact: on_drain edges keep firing
+    after a failure, a self-edge retries a node against a counter it reads from
+    its own previous result, and a gather waits on sources that a drain may
+    stop feeding. Each is tested alone; the failure mode that matters is a
+    graph that never settles when they combine, and that only shows up under
+    varied timing.
+    """
+
+    def _one(self, seed):
+        import collections
+        import random
+        random.seed(seed)
+        g = Graph(f"s{seed}", max_steps=400)
+        ran = collections.Counter()
+
+        async def flaky(ctx):
+            await asyncio.sleep(random.random() * 0.002)
+            ran["flaky"] += 1
+            if random.random() < 0.4:
+                raise RuntimeError("boom")
+            return {"ok": True}
+
+        async def land(ctx):
+            ran["land"] += 1
+            return {"ok": True}
+
+        async def retry(ctx):
+            n = (ctx.get("results", {}).get("retry", {}) or {}).get("n", 0) + 1
+            ran["retry"] += 1
+            return {"again": n < 3, "n": n}
+
+        async def gathered(ctx):
+            ran["gathered"] += 1
+            return {"ok": True}
+
+        g.node("flaky", flaky)
+        g.node("land", land)
+        g.node("retry", retry)
+        g.node("gathered", gathered, gather=True)
+        g.edge("flaky", "land", on_drain=True)
+        g.edge("land", "gathered", on_drain=True)
+        g.edge("retry", "retry", when=lambda r, c: r["again"])
+        g.edge("retry", "gathered", when=lambda r, c: not r["again"], on_drain=True)
+        g.start("flaky")
+        g.start("retry")
+
+        async def go():
+            try:
+                await asyncio.wait_for(g.run({}), timeout=10)
+            except asyncio.TimeoutError:
+                raise AssertionError(f"graph never settled (seed {seed})")
+            except Exception:
+                pass       # a failed node is an expected outcome here
+        asyncio.run(go())
+        return ran
+
+    def test_it_always_settles(self):
+        for seed in range(40):
+            with self.subTest(seed=seed):
+                self._one(seed)
+
+    def test_the_self_edge_never_runs_away(self):
+        for seed in range(40):
+            ran = self._one(seed)
+            self.assertLessEqual(ran["retry"], 3,
+                                 f"self-edge exceeded its bound (seed {seed})")

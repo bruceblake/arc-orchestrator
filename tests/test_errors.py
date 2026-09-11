@@ -720,7 +720,21 @@ class UnknownIsNotAllClear(unittest.TestCase):
         import audit
         orig_sh, orig_root = audit._sh, config.WORKTREE_ROOT
         config.WORKTREE_ROOT = "/wt"
-        audit._sh = lambda *a, **k: (0, "worktree /repo\nworktree /wt/repo/x\n", "")
+
+        def sh(*args, **kw):
+            # Answer each subcommand for what it asked. A stub returning one
+            # blob for everything made `gh` look like it found a PR, so the
+            # worktree read as "holds work" and the assertion below could not
+            # fail even with the guard removed — mutation testing caught it.
+            argv = list(args)
+            if "worktree" in argv:
+                return 0, "worktree /repo\nworktree /wt/repo/x\n", ""
+            if "rev-list" in argv:
+                return 0, "0", ""
+            if argv and argv[0] == "gh":
+                return 0, "[]", ""
+            return 0, "", ""
+        audit._sh = sh
         try:
             f = audit.audit_git(repo="/repo", store=self._BrokenStore())
         finally:
