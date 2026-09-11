@@ -118,13 +118,15 @@ inside a file. Full semantics, exit codes, and events:
 
 ```
 alloc ─► implement ─► gate ─► review ─► publish ──► pr_review ──► pr_merge
-          ▲             │        │         │            │  (all approve)
-          │             │        │         │            │
-          └─────────────┴────────┴─────────┘            │
-             fix loop (gate/review reject)              │
-          ▲                                             │
-          └─────────────────────────────────────────────┘
-                    PR reviewers request changes
+          ▲             │        │         │            │ ▲ ▲   (all approve)  │
+          │             │        │         │            │ │ │                  │
+          └─────────────┴────────┴─────────┘            │ │ └── resynced ──────┘
+             fix loop (gate/review reject)              │ │     (base moved on;
+          ▲                                             │ │      re-review)
+          │                                             │ └──── inconclusive
+          └─────────────────────────────────────────────┘       (a reviewer
+                    PR reviewers request changes                  crashed; retry
+                    (a REAL objection, not a crash)                the review)
 ```
 
 `publish` commits, pushes `task/<id>`, and opens a PR against
@@ -136,10 +138,35 @@ each other. Every one must approve. A rejection posts the issues as a PR
 comment and returns the task to `implement`, whose next commit updates the
 same PR; `config.PR_MAX_ROUNDS` (3) bounds that loop.
 
+A reviewer that CRASHED did not review. If nobody objected but one never ran,
+the round is **inconclusive**: nothing is posted as `--request-changes`, the
+task returns to `pr_review` rather than to `implement`, and the retry budget is
+`config.PR_MAX_INCONCLUSIVE` — separate from `PR_MAX_ROUNDS` so an
+infrastructure failure cannot consume a round reserved for real disagreement.
+A genuine objection still beats a crash.
+
 `pr_merge` runs only after unanimous approval: `gh pr merge --squash
 --delete-branch`, then fast-forwards the local base branch and removes the
-worktree. A PR GitHub reports as `CONFLICTING` records status `conflict`
-rather than merging.
+worktree.
+
+A PR GitHub reports as `CONFLICTING` is **resynced before being given up on**:
+`gitstore.sync_with_base` merges the current base into the task branch (and
+aborts on failure, so a genuine overlap never leaves a half-merged worktree),
+pushes, and routes back to `pr_review` — the diff changed, so the approval it
+already holds no longer covers it. `config.PR_MAX_RESYNCS` (2) bounds it. Only
+a real textual conflict records status `conflict`, and it records which files
+disagree.
+
+**Resuming.** A task in `in_review` or `conflict` restarts at `publish`, which
+re-attaches to its existing worktree and open PR. It must NOT restart at
+`alloc`: alloc resets `task/<id>` to the base and would discard the branch the
+PR was opened from.
+
+**Draining.** When a sibling task fails, the graph stops scheduling new work,
+but the `publish -> pr_review -> pr_merge` edges are marked `on_drain=True` and
+keep firing, so an already-open PR still gets reviewed and merged instead of
+being orphaned. The rework edge is deliberately not marked: draining must still
+refuse to commit fresh model time.
 
 Reviewers are instructed that a code change must ship tests that would fail
 without it (`config.REQUIRE_TESTS`), and to look for regressions in callers of
@@ -184,3 +211,12 @@ crash, `SIGINT`, `SIGTERM` — a run cancels in-flight work, kills its harness
 child processes, marks its unfinished tasks `failed` with an infrastructure
 reason, and releases the driver leases it held. `main.py code reconcile`
 reaps orphans from runs that died before this was true.
+
+**Standalone PR review (gh_ops).** The `pr-reviewer` agent (`main.py gh
+pr-review <repo> <N>`) reviews an arbitrary open pull request under the exact
+verdict contract of the internal reviewers above — strict JSON
+`{"pass": true}` or `{"pass": false, "issues": [...]}`, parsed by the same
+`code_tasks._parse_verdict` — so a verdict from either path means the same
+thing. It is print-only unless `--post` submits the verdict via `gh pr
+review` (approve on pass, otherwise a comment listing the issues), and it
+plays no role in the governed merge gate described here.

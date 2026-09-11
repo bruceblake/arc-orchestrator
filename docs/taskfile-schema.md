@@ -232,14 +232,9 @@ to the implementer with the issue list.
    per-task `id` are read up front; per-task `prompt` is read when the task
    record is built (after checks 4–7 for that task). A missing key raises
    `KeyError` (not `ValueError`), e.g. `KeyError: 'prompt'`.
-3. **`project.after` shape** — must be a list of non-empty strings:
-   `ValueError: project.after must be a list of taskfile paths`. Entries are
-   deduplicated and resolved to canonical absolute keys; a taskfile listing
-   **itself** is rejected
-   (`ValueError: project.after lists this taskfile itself: ...`). Upstream
-   files need not exist yet — waiting is a runtime state, not a validation
-   error — but a cycle among existing files is rejected at graph build
-   (`ValueError: project.after cycle detected: ...`).
+3. **Id shape** — the id must match `[a-z0-9][a-z0-9-]{0,60}` (it becomes a
+   branch name, a worktree path, a ref fragment, and a log filename):
+   `ValueError: task id {tid!r} must match [a-z0-9][a-z0-9-]{0,60} (it becomes a worktree path and a git-ref fragment)`
 4. **Duplicate ids** — `ValueError: duplicate task id: {tid}`
 5. **Unknown/missing model** — the model must be one of the four
    `config.IMPLEMENTER_MODELS` (a missing `model` defaults to `""` and is
@@ -254,20 +249,23 @@ to the implementer with the issue list.
    `ValueError: task {tid}: unknown dep {d!r}`
 9. **No cycles** — topological sort over deps:
    `ValueError: dependency cycle at {tid}`
+10. **`project.after` shape** — must be a list of non-empty strings:
+    `ValueError: project.after must be a list of taskfile paths`. Entries are
+    deduplicated and resolved to canonical absolute keys; a taskfile listing
+    **itself** is rejected
+    (`ValueError: project.after lists this taskfile itself: ...`). Upstream
+    files need not exist yet — waiting is a runtime state, not a validation
+    error — but a cycle among existing files is rejected at graph build
+    (`ValueError: project.after cycle detected: ...`).
 
 Not checked by the loader (know where these live):
 
-- **id format** — the kebab-case pattern is enforced by the dashboard's
-  create-project endpoint (`dashboard.py`: `task {i}: id must match [a-z0-9][a-z0-9-]{0,60}`);
-  hand-written files should follow the same pattern since ids become branch
-  names, log filenames, and `deps` keys. The loader itself only enforces
-  uniqueness.
 - **Tier routing** — the loader rejects models outside the four, but does not
   check basic/medium/hard suitability; tier assignment is an authoring rule
   from `config.IMPLEMENT_TIERS` and the planner prompt.
 - **Field types beyond the above** — `deps`/`files_hint` are only wrapped with
   `list(...)`; keep them JSON arrays of strings (a bare string gets split into
-  characters and then fails rule 7 with `unknown dep`).
+  characters and then fails rule 8 with `unknown dep`).
 - **Prompt quality / verify_cmd honesty** — the gate only checks exit codes;
   only you (or the planner) can make them meaningful.
 

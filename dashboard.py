@@ -18,6 +18,7 @@ import os
 import re
 import signal
 import socket
+import sqlite3
 import subprocess
 import time
 from datetime import datetime
@@ -395,6 +396,7 @@ def _collect_inflight(now, store=None):
     starts = {}      # request_start req_id -> event (in-flight raw pool/stream requests)
     driver_starts = {}  # (harness, model, role, task, attempt) -> event (in-flight task runs)
     driver_progress = {}  # same key -> newest driver.progress heartbeat
+    driver_last = {}  # same key -> newest start/heartbeat/stalled/timeout event
     for line in _load_event_lines():
         try:
             e = json.loads(line)
@@ -408,8 +410,15 @@ def _collect_inflight(now, store=None):
         elif etype in ("request", "request_end"):
             starts.pop(e.get("req_id"), None)
         elif etype == "driver.start":
-            driver_starts[(e.get("harness"), e.get("model"), e.get("role"),
-                           e.get("task"), e.get("attempt"))] = e
+            key = (e.get("harness"), e.get("model"), e.get("role"),
+                   e.get("task"), e.get("attempt"))
+            driver_starts[key] = e
+            driver_last[key] = e
+        elif etype in ("driver.heartbeat", "driver.stalled", "driver.timeout"):
+            # Liveness/failure pings for an in-flight attempt — they settle
+            # nothing, but the newest one is what "last_event_s" reports.
+            driver_last[(e.get("harness"), e.get("model"), e.get("role"),
+                         e.get("task"), e.get("attempt"))] = e
         elif etype == "driver.progress":
             # Not a terminal event — it settles nothing. It is proof the driver
             # was alive at that moment, and carries the idle/CPU sample that
@@ -421,10 +430,12 @@ def _collect_inflight(now, store=None):
             key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
             if key in driver_starts:
                 del driver_starts[key]
+                driver_last.pop(key, None)
             else:  # driver.error/stale may carry no role; settle by the other fields
                 for k in list(driver_starts):
                     if k[:2] == key[:2] and k[3:] == key[3:]:
                         del driver_starts[k]
+                        driver_last.pop(k, None)
                         break
         elif etype == "request.stale":
             starts.pop(e.get("req_id"), None)
@@ -472,6 +483,12 @@ def _collect_inflight(now, store=None):
         idle_s = None
         if prog_ts is not None and isinstance(prog.get("idle_s"), (int, float)):
             idle_s = round(prog["idle_s"] + max(0.0, now - prog_ts), 1)
+        # Age of the agent's most recent liveness event (start/heartbeat/
+        # stalled/timeout) — the heartbeat the UI renders per agent. A run
+        # is "stalled" when that newest event is a stall report or its idle
+        # time has grown far past what a live driver would tolerate.
+        last = driver_last.get((harness, model, role, task, attempt)) or e
+        last_ts = _ts(last.get("ts")) or started
         rows.append({"req_id": f"driver/{harness}:{model}:{role}:{task}",
                      "family": config.MODEL_FAMILY.get(model, "harness"), "model": model,
                      "pretty": _pretty(model), "source": f"driver:{harness}",
@@ -483,6 +500,9 @@ def _collect_inflight(now, store=None):
                      "cpu_delta_s": prog.get("cpu_delta_s"),
                      "stuck": bool(idle_s is not None
                                    and idle_s > config.DRIVER_IDLE_TIMEOUT * 0.5),
+                     "last_event_s": round(max(0.0, now - last_ts), 1),
+                     "stalled": bool(last.get("type") == "driver.stalled"
+                                     or (idle_s is not None and idle_s > 300)),
                      "transcript": transcript})
     kimi = _kimi_code_usage(now, _fleet_task_names(store))
     rows.extend(kimi["inflight"])
@@ -819,6 +839,191 @@ def _fleet(store):
               ("requests", "ok", "errors", "tokens", "prompt_tokens", "completion_tokens")}
     _fleet_cache.update(key=now, models=models, totals=totals)
     return {"totals": totals, "models": models, "ranges": RANGES, "ts": time.time()}
+
+
+ROLE_LABEL = {"pr_reviewer": "PR review", "reviewer": "gate review",
+              "implementer": "coding", "planner": "planning"}
+# How long a wait may sit unrefreshed before it is presumed dead. driver.queued
+# fires once, then cap_wait re-fires roughly once a minute, so a live wait is
+# always younger than this unless its run process was killed.
+WAIT_STALE_S = 900
+
+
+def _pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
+
+
+def _harness_of(model):
+    """Which local harness runs this model. Mirrors code_tasks._driver."""
+    return "kimi" if model == "Kimi-K3" else "opencode"
+
+
+def _first_event_at_or_after(lines, ts):
+    """Index of the first event whose ts >= `ts`, or len(lines) if none.
+
+    Scans BACKWARD from the end rather than binary-searching: the log is
+    append-ordered but individual lines can be malformed or missing a ts, which
+    a bisect cannot step over. Callers want a recent cutoff, so the walk is
+    short in practice and the answer is exact.
+    """
+    i = len(lines)
+    for idx in range(len(lines) - 1, -1, -1):
+        line = lines[idx]
+        if '"ts"' not in line:
+            continue
+        try:
+            t = json.loads(line).get("ts")
+        except (ValueError, TypeError):
+            continue
+        if t is None:
+            continue
+        if t < ts:
+            return i
+        i = idx
+    return i
+
+
+def _queue(store):
+    """Who is holding a model slot right now, and who is queued behind them.
+
+    Two separate queues sit in front of every driver attempt and they fail in
+    different ways, so they are reported separately rather than summed:
+
+      process  — this run's own asyncio.Semaphore (driver.slot_wait)
+      fleet    — the cross-process DB lease shared by every run (driver.cap_wait)
+
+    Running comes from the lease table because that IS the definition of
+    occupying a slot, and it carries a pid so a dead run cannot pin capacity in
+    the UI. Waiting comes from the event log, pairing each driver.queued with
+    its terminal event; anything whose pid is gone, or that has gone quiet for
+    WAIT_STALE_S, is dropped rather than shown as a phantom queue.
+    """
+    now = time.time()
+    running, waiting = [], []
+    roles, leases = {}, []
+    try:
+        leases = list(store.driver_lease_rows() or [])
+    except Exception:
+        leases = []
+
+    # Last event per attempt decides that attempt's state.
+    state = {}
+    for line in _load_event_lines()[-6000:]:
+        if '"driver.' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        kind = e.get("type", "")
+        if not kind.startswith("driver."):
+            continue
+        key = (e.get("task"), e.get("model"), e.get("attempt"))
+        if e.get("role"):
+            roles[(e.get("task"), e.get("model"))] = e["role"]
+        if kind in ("driver.queued", "driver.slot_wait", "driver.cap_wait"):
+            state[key] = e
+        elif kind.startswith("driver."):
+            state.pop(key, None)  # start/done/error/timeout/cancelled all settle it
+
+    for (task, model, _attempt), e in state.items():
+        ts = _ts(e.get("ts")) or 0
+        if now - ts > WAIT_STALE_S or not _pid_alive(e.get("pid")):
+            continue
+        kind = e.get("type")
+        waiting.append({
+            "task": task, "model": model, "pretty": _pretty(model),
+            "role": e.get("role"), "role_label": ROLE_LABEL.get(e.get("role"), e.get("role")),
+            "scope": e.get("scope") or ("fleet" if kind == "driver.cap_wait"
+                                        else "process"),
+            "harness": e.get("harness"),
+            "seconds": round(now - ts) if ts else None,
+            "in_use": e.get("in_use"), "cap": e.get("cap"),
+        })
+
+    blocked = {(w["task"], w["model"]) for w in waiting}
+    harness_running = {}
+    for r in leases:
+        pid = r["pid"] if isinstance(r, dict) or hasattr(r, "keys") else None
+        if not _pid_alive(pid):
+            continue
+        ts = _ts(r["acquired_at"]) or 0
+        model = r["model"]
+        # A harness lease is the SAME attempt as its model lease, held one
+        # level out. Counting it as another running task would double every
+        # row; it is capacity accounting, so it is reported as capacity.
+        if model.startswith("harness:"):
+            harness_running[model.split(":", 1)[1]] = \
+                harness_running.get(model.split(":", 1)[1], 0) + 1
+            continue
+        # A task can hold its MODEL lease while still queued for the harness
+        # lease nested inside it. The model lease makes it look running and the
+        # harness wait makes it look queued, and it was reported as both. It is
+        # not running until it holds every slot it needs, so the wait wins.
+        if (r["task"], model) in blocked:
+            continue
+        role = roles.get((r["task"], model))
+        running.append({
+            "task": r["task"], "model": model, "pretty": _pretty(model),
+            "role": role, "role_label": ROLE_LABEL.get(role, role or "working"),
+            "pid": pid, "seconds": round(now - ts) if ts else None,
+        })
+
+    running.sort(key=lambda x: -(x["seconds"] or 0))
+    waiting.sort(key=lambda x: -(x["seconds"] or 0))
+
+    models = []
+    for model in sorted(set(config.MODEL_FAMILY)
+                        | {r["model"] for r in running}
+                        | {w["model"] for w in waiting}):
+        if model.startswith("harness:"):
+            continue
+        try:
+            cap = config.driver_limit(model)
+        except Exception:
+            continue
+        run_n = sum(1 for r in running if r["model"] == model)
+        wait_n = sum(1 for w in waiting if w["model"] == model)
+        models.append({
+            "model": model, "pretty": _pretty(model), "cap": cap,
+            "running": run_n, "waiting": wait_n, "free": max(0, cap - run_n),
+            "reviewers_waiting": sum(1 for w in waiting if w["model"] == model
+                                     and w["role"] == "pr_reviewer"),
+        })
+    models.sort(key=lambda m: (-(m["running"] + m["waiting"]), m["model"]))
+
+    # The harness is a real ceiling and usually the BINDING one: opencode's
+    # models can each be under their own cap while the single local opencode
+    # process pool is saturated. Without this row that shows up as "everything
+    # idle, nothing progressing".
+    harnesses = []
+    for h in ("opencode", "kimi"):
+        cap = config.harness_limit(h)
+        run_n = harness_running.get(h, 0)
+        wait_n = sum(1 for w in waiting if w.get("scope") == "harness"
+                     and w.get("harness") == h)
+        run_n = run_n or sum(1 for r in running
+                             if _harness_of(r["model"]) == h)
+        harnesses.append({"harness": h, "cap": cap, "running": run_n,
+                          "waiting": wait_n, "free": max(0, cap - run_n)})
+
+    return {"running": running, "waiting": waiting, "models": models,
+            "harnesses": harnesses,
+            "totals": {"running": len(running), "waiting": len(waiting),
+                       "reviewers_waiting": sum(1 for w in waiting
+                                                if w["role"] == "pr_reviewer"),
+                       "capacity": sum(m["cap"] for m in models)},
+            "ts": now}
 
 
 def _task_slug(text):
@@ -1434,11 +1639,30 @@ def _github(store, repo=None):
                 "round": e.get("round"), "approved": e.get("approved"),
                 "approvals": e.get("approvals") or [],
                 "reviewers": e.get("reviewers") or [],
-                "issues": e.get("n_issues") or 0, "ts": _ts(e.get("ts"))})
+                "issues": e.get("n_issues") or 0,
+                # What they actually objected to, so the verdict is readable
+                # here rather than only on GitHub.
+                "detail": e.get("issues") or [],
+                "inconclusive": bool(e.get("inconclusive")),
+                "crashed": e.get("crashed") or [],
+                "ts": _ts(e.get("ts"))})
 
     ahead = git("rev-list", "--count",
                 f"{config.PROD_BRANCH}..{config.BASE_BRANCH}").strip()
     out["unpromoted"] = int(ahead) if ahead.isdigit() else 0
+    # A PR nobody is working on is the failure mode that cost this repo the
+    # most: publish opened it, pr_review never ran, the run ended, and the
+    # branch sat on GitHub with no process coming back for it. Seven at once,
+    # and nothing in the UI said so — each looked like a healthy open PR.
+    import reconcile  # imported per-function here, as elsewhere in this module
+    try:
+        live = {r.get("taskfile") for r in reconcile.live_runs()}
+    except OSError:
+        live = None  # cannot read the process table: report nothing, not everything
+    try:
+        owner = {r["id"]: r for r in (store.code_tasks_all() if store else [])}
+    except (AttributeError, sqlite3.Error):
+        owner = {}
     for pr in prs:
         n = pr.get("number")
         v = verdicts.get(n, {})
@@ -1446,9 +1670,45 @@ def _github(store, repo=None):
         pr["rounds"] = v.get("rounds", [])
         pr["approvals"] = (v["rounds"][-1]["approvals"] if v.get("rounds") else [])
         pr["reviewers"] = (v["rounds"][-1]["reviewers"] if v.get("rounds") else [])
+        pr["stranded"] = _pr_is_stranded(pr, owner, live)
         out["prs"].append(pr)
+    out["stranded"] = sum(1 for p in out["prs"] if p.get("stranded"))
     _gh_cache.update(key=now, data=out)
     return out
+
+
+def _pr_is_stranded(pr, owner, live):
+    """True when this PR is open and no run is CURRENTLY working on it.
+
+    Note what this does and does not claim. It is true both for a PR that was
+    genuinely orphaned (its run died mid-flight) and for one whose project is
+    simply queued behind others — the fleet keeps no durable queue state, so
+    from here those are indistinguishable. The UI therefore says "no run",
+    which is exactly true of both, rather than "abandoned", which would be
+    alarming and often wrong. The operator action is the same either way:
+    re-run its project.
+
+    Deliberately conservative — an unclear answer is NOT a warning:
+      - only OPEN pull requests count
+      - `live` is None when the run list could not be read at all, and then
+        nothing is reported rather than everything
+      - a task whose taskfile has a live run is being worked on right now
+      - a task the DB does not know is skipped: it may be a human's branch,
+        and calling someone's own PR abandoned is worse than staying quiet
+    """
+    if (pr.get("state") or "").upper() != "OPEN" or live is None:
+        return False
+    task = pr.get("task")
+    if not task:
+        head = pr.get("headRefName") or ""
+        task = head[5:] if head.startswith("task/") else None
+    row = owner.get(task) if task else None
+    if row is None:
+        return False
+    if row.get("status") in ("merged", "failed"):
+        return False
+    taskfile = row.get("taskfile")
+    return not (taskfile and taskfile in live)
 
 
 def _task_deliverable(repo, task_id, want_patch=False):
@@ -2017,6 +2277,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_usage(Handler.store, range_key, include_series))
             if u.path == "/api/fleet":
                 return self._json(_fleet(Handler.store))
+            if u.path == "/api/queue":
+                return self._json(_queue(Handler.store))
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
             if u.path == "/api/project":
@@ -2086,6 +2348,15 @@ class Handler(BaseHTTPRequestHandler):
                 lines = _load_event_lines()
                 reset = after > len(lines)
                 start = 0 if reset else after
+                # A cold client asking for "today" used to walk the whole log
+                # from line 0 — every page load downloaded the entire history
+                # (677KB and climbing, rotating only at 100MB) to count a
+                # handful of today's merges. `since` seeds the cursor instead.
+                if start == 0 and q.get("since"):
+                    try:
+                        start = _first_event_at_or_after(lines, float(q["since"][0]))
+                    except (TypeError, ValueError):
+                        pass
                 chunk = lines[start:start + MAX_EVENTS_PER_RESPONSE]
                 events = []
                 for line in chunk:
@@ -2093,7 +2364,8 @@ class Handler(BaseHTTPRequestHandler):
                         events.append(json.loads(line))
                     except Exception:
                         pass
-                return self._json({"events": events, "next": start + len(chunk), "reset": reset})
+                return self._json({"events": events, "next": start + len(chunk),
+                                   "reset": reset, "total": len(lines)})
             if u.path == "/api/graphs":
                 return self._json(_build_graph_topologies())
             if u.path == "/api/code":

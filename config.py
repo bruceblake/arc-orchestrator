@@ -25,7 +25,7 @@ class Family:
 FAMILIES = {
     "gpt-oss": Family(
         "gpt-oss",
-        10,
+        5,
         {
             "default": "gpt-oss-120b",
             "low": "gpt-oss-120b-thinking-low",
@@ -54,7 +54,7 @@ FAMILIES = {
     ),
     "deepseek": Family(
         "deepseek",
-        10,
+        5,
         {
             "default": "DeepSeek-V4-Flash",
             "low": "DeepSeek-V4-Flash-thinking-low",
@@ -181,6 +181,15 @@ PROD_BRANCH = os.getenv("ARC_PROD_BRANCH", "main")
 PR_REVIEWERS = int(os.getenv("ARC_PR_REVIEWERS", "2"))
 # How many times a PR may go back to the implementer before the task fails.
 PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "3"))
+# Retries of a review that reached NO verdict (every reviewer crashed).
+# Separate from PR_MAX_ROUNDS on purpose: an infrastructure failure must
+# not consume the rounds reserved for real disagreement about the code.
+PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "3"))
+
+# How many times a conflicting PR may be resynced with the base before
+# giving up. Each resync rewrites the branch and costs a fresh review,
+# so this is deliberately small.
+PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "2"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
@@ -194,6 +203,14 @@ MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "3"))
 # not minutes. A chain that never settles must eventually fail loudly rather
 # than sit on the dashboard forever.
 CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
+
+# --- GitHub operations agents (gh_ops.py) ------------------------------------
+# Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
+# governed code pipeline: no worktree, no gate, no publish. Only Kimi-K3 and
+# GLM-5.3 may hold the gh roles (driver validation enforces it), every command
+# previews by default, and --apply-labels/--create/--post are the only writes.
+GH_MODEL = os.getenv("ARC_GH_MODEL", "Kimi-K3")
+GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "60"))
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of
@@ -308,7 +325,57 @@ MODEL_FAMILY = {
     "GLM-5.3": "glm",
     "Kimi-K3": "kimi",
 }
-_MODEL_DRIVER_CAP = {"Kimi-K3": 2, "GLM-5.3": 3, "gpt-oss-120b": 8, "DeepSeek-V4-Flash": 8}
+# Measured 2026-09-10 by ramping concurrent requests until ARC rejected, with
+# the fleet's own usage counted in:
+#
+#     gpt-oss-120b       5 concurrent   (was configured 10 account / 8 drivers)
+#     DeepSeek-V4-Flash  5 concurrent   (was configured 10 account / 8 drivers)
+#     GLM-5.3            4 concurrent
+#     Kimi-K3            3 concurrent
+#
+# gpt-oss and DeepSeek were OVER-subscribed: 8 drivers against a real ceiling
+# of 5, so the fleet generated its own 400s under load and blamed the provider.
+# GLM and Kimi were UNDER-subscribed by one slot each.
+#
+# Driver caps now equal the measured ceiling. ARC_DRIVER_HEADROOM reserves
+# slots for interactive use of the same account — set it to 1 if you want to
+# run an interactive `kimi` alongside the fleet without contending.
+_MEASURED_CONCURRENCY = {"Kimi-K3": 3, "GLM-5.3": 4,
+                         "gpt-oss-120b": 5, "DeepSeek-V4-Flash": 5}
+DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
+_MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
+                     for m, n in _MEASURED_CONCURRENCY.items()}
+
+
+# The per-MODEL caps above are the ARC API's ceiling. They are not the only
+# ceiling: every opencode-backed model shares ONE local harness, and that
+# harness serialises through a single ~240MB sqlite db in
+# ~/.local/share/opencode. The model caps permit GLM 4 + DeepSeek 5 + gpt-oss 5
+# = 14 concurrent opencode processes against it, and measured on this machine
+# (identical prompt, warm cache):
+#
+#     3 concurrent   3/3 ok
+#     4 concurrent   4/4 ok
+#     5 concurrent   5/5 ok
+#     6 concurrent   4/6 ok
+#    10 concurrent   4/10 ok
+#
+# Past 5 it fails fast with an empty stderr, which the fleet logged as
+# "opencode exited 1: " and retried four times per task — burning the retry
+# ladder on self-inflicted contention and blaming the provider for it. The
+# kimi CLI has no shared store, so its limit is just Kimi-K3's own cap.
+_HARNESS_CAP = {"opencode": 5, "kimi": _MEASURED_CONCURRENCY["Kimi-K3"]}
+
+
+def harness_limit(harness):
+    """Max concurrent processes for a HARNESS, across every model it serves."""
+    override = os.getenv(f"ARC_HARNESS_LIMIT_{harness.upper()}")
+    if override:
+        try:
+            return max(1, int(override))
+        except ValueError:
+            pass
+    return _HARNESS_CAP.get(harness, 8)
 
 
 def driver_limit(model):

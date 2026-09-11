@@ -46,10 +46,10 @@ whoever writes a taskfile by hand) and is **enforced again by the loader**,
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review | 3 | 2 |
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review | 4 | 3 |
-| gpt-oss-120b | `opencode` (`OpencodeDriver`) | basic | **Implement only** | 10 | 8 |
-| DeepSeek-V4-Flash | `opencode` (`OpencodeDriver`) | medium | **Implement only** | 10 | 8 |
+| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review, PR-review | 3 | 3 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
+| gpt-oss-120b | `opencode` (`OpencodeDriver`) | basic | **Implement only** | 10 | 5 |
+| DeepSeek-V4-Flash | `opencode` (`OpencodeDriver`) | medium | **Implement, PR-review** | 10 | 5 |
 
 - **Tiers** (`config.IMPLEMENT_TIERS`): `basic` → gpt-oss-120b (very basic /
   mechanical work only), `medium` → DeepSeek-V4-Flash (moderate work only),
@@ -106,10 +106,22 @@ the implementer it reviews when a strong model implemented.
   (gpt-oss-120b / DeepSeek-V4-Flash implementations may be reviewed by
   either `kimi` or `glm` — never by themselves, since they cannot review at
   all.)
-- The review node (code_tasks.py:208) instantiates `KimiDriver("reviewer")`
-  or `OpencodeDriver("GLM-5.3", "reviewer")` accordingly and sends the full
+- The review node instantiates `KimiDriver("reviewer")` or
+  `OpencodeDriver("GLM-5.3", "reviewer")` accordingly and sends the full
   diff (`gitstore.diff_full`) with the original spec; the verdict must be
   JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
+- **`reviewer` and `pr_reviewer` are different roles.** `reviewer` is this
+  pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5),
+  and `DeepSeek-V4-Flash` may hold it even though it may not hold `reviewer`:
+  judging a bounded diff against a spec is a much smaller job than authoring
+  the change, and with three cross-family-eligible models a two-reviewer merge
+  gate is otherwise unreachable whenever Kimi or GLM implemented — which is
+  most tasks. `gpt-oss-120b` stays implement-only.
+- **Never keep a second list of who may review.** Eligibility is decided by
+  CONSTRUCTING the driver (`code_tasks._eligible_pr_reviewers`). A hand-kept
+  pool and the drivers' own role rules drifted apart once and it cost seven
+  pull requests: the pool offered DeepSeek, `OpencodeDriver` refused the role,
+  and the `ValueError` killed `pr_review` one second after each PR opened.
 - A failed review sends the issues back to the implementer as feedback
   (bounded fix loop, Rule 4); nothing merges without `pass: true`
   (edge `review_<tid> -> publish_<tid>`, code_tasks.py:257).
@@ -213,6 +225,31 @@ PR** in the life of the repo.
   updates the same PR and a new round begins.
 - The loop is bounded by `config.PR_MAX_ROUNDS` (default 3); exhausting it
   fails the task rather than looping forever.
+- **A reviewer that crashed did not review.** If no reviewer objects but one
+  never ran, the round is *inconclusive*, not a rejection: nothing is posted
+  as `--request-changes`, the task goes back to `pr_review` rather than to the
+  implementer, and the retry comes from `config.PR_MAX_INCONCLUSIVE` — kept
+  separate from `PR_MAX_ROUNDS` so infrastructure failures cannot eat the
+  rounds reserved for real disagreement about the code (`ARC_PR_MAX_INCONCLUSIVE`,
+  default 3). A genuine objection still beats a crash. Before this, a crash was posted to a public PR as
+  "changes requested: reviewer crashed" and sent the implementer to fix issues
+  that did not exist.
+- **A conflicting PR is resynced, not abandoned.** `pr_merge` merges the
+  current base into the task branch (`gitstore.sync_with_base`, which ABORTS
+  on failure so a genuine overlap never leaves a half-merged worktree for the
+  next publish to commit), pushes, and routes back to `pr_review` — the diff
+  changed, so the approval it already has no longer covers it. Bounded by
+  `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 2). A real textual conflict still stops,
+  recording which files disagree.
+- **Resuming a task whose PR is open re-attaches to it.** `in_review` and
+  `conflict` tasks restart at `publish`, which finds the existing worktree and
+  the open PR and hands it straight to review. Do not "fix" this by starting
+  at `alloc`: alloc RESETS `task/<id>` to the base and discards the branch the
+  PR was opened from.
+- **A sibling's failure must not orphan an open PR.** The `publish ->
+  pr_review -> pr_merge` edges are marked `on_drain=True`, so they keep firing
+  after the graph starts draining. The rework edge deliberately is not:
+  draining must still refuse to start fresh model time.
 - Reviewers are told that a code change **must** ship tests that would fail
   without it (`config.REQUIRE_TESTS`), and to check for regressions in what
   calls the changed code. Documentation-only changes are exempt.
@@ -234,19 +271,43 @@ preferred `origin/<base>` whenever a remote existed, which meant the first
 skipped push would have every new task branch from a stale origin and revert
 merged work.
 
-### Rule 6 — Concurrency caps are two-layer; know both before launching anything
+### Rule 6 — Concurrency caps are THREE-layer; know all three before launching anything
 
 | Layer | Where | gpt-oss | deepseek | glm | kimi | Override |
 |---|---|---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
-| Driver semaphores | `config._MODEL_DRIVER_CAP` via `drivers._gate` → `config.driver_limit` | 8 | 8 | 3 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| Driver leases | `store.driver_leases` via `drivers._lease_acquire` — same caps, enforced **across processes** | shared | shared | shared | shared | `ARC_DRIVER_LEASE_TTL` |
+| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` via `drivers._gate` → `config.driver_limit`, and `store.driver_leases` across processes | 5 | 5 | 4 | 3 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode: **5** total | ← shared | ← shared | kimi: 3 | `ARC_HARNESS_LIMIT_<HARNESS>` |
+
+The driver numbers are the ceilings MEASURED on this fleet (2026-09-10), not
+guesses. gpt-oss and DeepSeek were previously configured at 8 against a real
+ceiling of 5, so the fleet generated its own 400s under load and blamed the
+provider.
+
+**The harness layer is the one people forget, and it is often the binding
+one.** Every opencode-backed model runs through ONE local binary backed by ONE
+~240MB sqlite store in `~/.local/share/opencode`. The per-model caps permit
+GLM 4 + DeepSeek 5 + gpt-oss 5 = **14** concurrent opencode processes against
+it. Measured with an identical prompt and a warm cache:
+
+| concurrent | 3 | 4 | 5 | 6 | 10 |
+|---|---|---|---|---|---|
+| succeeded | 3/3 | 4/4 | 5/5 | 4/6 | 4/10 |
+
+Past five it fails fast with an EMPTY stderr, which the fleet logged as
+`opencode exited 1: ` and retried four times per task — burning the retry
+ladder on self-inflicted contention. A model sitting under its own cap is NOT
+available if its harness is full, which is why `code_tasks._reviewer_pressure`
+scores a reviewer on whichever ceiling binds first.
 
 - The **account caps are per API key, not per process** — other agents and
   interactive sessions share them (config.py:88).
-- The **driver semaphores bound concurrent `kimi`/`opencode` harness
-  instances in this process** and sit deliberately below the account caps to
-  reserve headroom for interactive use (config.py:108, drivers.py:47).
+- The **driver semaphores bound concurrent harness instances of one MODEL in
+  this process**; `ARC_DRIVER_HEADROOM` reserves slots for interactive use of
+  the same account.
+- Acquisition order is always model gate → model lease → harness gate →
+  harness lease. One global order means no circular wait, and the scarce
+  harness slot is never held while queueing for a plentiful model slot.
 - The **driver leases close the cross-process hole**: semaphores alone let a
   terminal queue AND dashboard-launched runs each hold their own cap and stack
   to 2× the account limit. Before spawning a harness, `drivers._lease_acquire`
@@ -254,12 +315,44 @@ merged work.
   cap; over cap the task **waits** (poll every 20 s) and emits
   `driver.cap_wait {model, task, in_use, cap}` about once a minute — that event
   is the warning surface for "a new task is about to exceed concurrency".
-  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (1800 s) or when
+  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (3300 s) or when
   the owning pid is dead, so killed runs never deadlock the fleet.
 - For the research workload, `pool.py` additionally enforces per-family
   `asyncio.Semaphore(config.family_limit(f))` client-side.
 - Full explanation, including how the ARC API rejects over-limit requests:
   [docs/concurrency-limits.md](docs/concurrency-limits.md).
+
+### Rule 6b — The dashboard is UNAUTHENTICATED and this is a deliberate choice
+
+`main.py serve` binds `0.0.0.0:8787` with no authentication of any kind. That
+is not an oversight; the operator was shown the following and chose to keep it,
+on the basis that the network is trusted.
+
+**What it means concretely.** `POST /api/projects/create` accepts a task whose
+`verify_cmd` is an arbitrary shell string, and `code_tasks.gate` runs that
+string through `asyncio.create_subprocess_shell`. So:
+
+```
+POST /api/projects/create   {"tasks":[{... "verify_cmd":"<anything>"}]}
+POST /api/projects/run      {"file":"..."}
+```
+
+is remote code execution as the operator, for anyone who can reach port 8787.
+Verified live on 2026-09-10: an unauthenticated POST created a taskfile. The
+other mutating routes (`run`, `stop`, `archive`, `retry-task`, `promote`) spawn
+processes and move git refs on the same terms.
+
+**Therefore:**
+
+- Do NOT expose port 8787 beyond a trusted LAN. No port-forwarding, no tunnel,
+  no reverse proxy to the public internet.
+- Do NOT add a route that widens this — nothing that takes a path, a command,
+  or a git ref from the request body without an allowlist.
+- If the trust assumption ever stops holding, the two mechanisms already
+  designed for it are: bind the loopback address instead of `0.0.0.0` (which
+  would need a new bind-address setting in `main.py serve`), and require a
+  shared-secret header on POST only, so read-only access from `phone.html`
+  keeps working. **Neither exists** — do not go looking for an env var.
 
 ### Rule 7 — Evidence is mandatory: every agent run leaves a live transcript and events
 
@@ -283,7 +376,7 @@ merged work.
   (distinct from `failed` red), and the last review verdict on each node.
 - Harness-level resilience: `config.DRIVER_TIMEOUT` = 2700 s per harness
   invocation (override `ARC_DRIVER_TIMEOUT`) as a total-runtime backstop, and
-  `config.DRIVER_IDLE_TIMEOUT` = 120 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
+  `config.DRIVER_IDLE_TIMEOUT` = 420 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
   a **stall detector**: a harness that produces no stdout for that long is
   waiting on a request that is not coming back, so it is killed and retried
   rather than waited out. Every stall records forensics first — process state,
@@ -386,6 +479,38 @@ to `logs/orchbench/<stamp>/results.jsonl`; the table is
 `harness_runs` rows are produced exactly as in normal runs (Rule 7 holds
 for benchmarks too).
 
+### GitHub operations agents (gh_ops.py)
+
+Standalone `gh`-CLI agents for GitHub housekeeping — NOT part of the governed
+code pipeline (no worktree, no gate, no publish; Rules 1–8 do not apply):
+
+- **`issue-triager`** — `main.py gh triage <repo> [--apply-labels] [--model
+  Kimi-K3|GLM-5.3]`: classifies open issues (kind bug|feature|question|docs,
+  size S|M|L, recommended tier per `config.IMPLEMENT_TIERS`), prints a triage
+  table, and writes a ready-to-run taskfile to `~/tasks/<repo>-issues.json`
+  with correct cross-review pairing (fill in each `verify_cmd` and dry-run
+  before executing — Rules 4/8 apply once it becomes a taskfile).
+- **`issue-maker`** — `main.py gh issue "<desc>" <repo> [--create]`: drafts a
+  structured issue (title; body with context/repro/acceptance) and prints it.
+- **`pr-reviewer`** — `main.py gh pr-review <repo> <N> [--post]`: reviews a PR
+  under the same verdict JSON contract as internal review (it reuses
+  `code_tasks._parse_verdict`; see docs/orchestration-contract.md).
+
+Only **Kimi-K3** and **GLM-5.3** may hold these three roles —
+`drivers.KimiDriver.__init__` / `drivers.OpencodeDriver.__init__` raise
+`ValueError` if gpt-oss-120b or DeepSeek-V4-Flash is given one (same
+enforcement pattern as Rule 2). Default model `config.GH_MODEL`
+(`ARC_GH_MODEL`, default Kimi-K3); each `gh` subprocess is bounded by
+`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 60 s).
+
+**Preview by default.** `--apply-labels`, `--create`, and `--post` are the
+ONLY paths that write to GitHub; without them every command is read-only.
+Every gh-touching command checks `gh auth status` first and exits with
+`run: gh auth login` when unauthenticated (drafting/printing need no gh).
+These agents do not change publishing: project publishes still merge via
+`gitstore` exactly as Rule 5 defines; a gh_ops PR-publishing mode is a future
+policy hook and is deliberately not implemented here.
+
 ---
 
 ## 4. Repo file map
@@ -401,6 +526,7 @@ Top-level Python modules (one role each):
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
+| `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
 | `gitstore.py` | The only git actor: blessed clone `~/repos/<project>`, worktree `alloc`/`publish`/`merge_to_main`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout) |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), and `code {plan,run,status,bench}` |
@@ -418,7 +544,7 @@ Everything else at the top level:
 | `static/usage.html` | Dashboard usage/tokens view |
 | `static/phone.html` | Small-screen dashboard page (add `/phone.html` to the URL) |
 | `start.sh` / `stop.sh` | Start/stop the dashboard (`nohup .venv/bin/python main.py serve` → `logs/server.log`; `pkill -f "main\.py serve"` — never touches an orchestrator process) |
-| `docs/` | Detail reference docs — see [Links](#links) |
+| `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the pattern library the planner consults |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
 | `production/minecraft` | Build-workload output dir (`config.BUILD_OUTPUT_DIR`) |
 | `requirements.txt` | Python dependencies (openai, python-dotenv) — install into `.venv`; the system `python3` lacks them |
@@ -473,6 +599,11 @@ The full operator runbook, with troubleshooting, is
   of concurrency caps and their env overrides
 - [docs/taskfile-schema.md](docs/taskfile-schema.md) — taskfile JSON reference
   and validation rules
+- [docs/graph-patterns.md](docs/graph-patterns.md) — the graph-pattern library
+  for multi-agent work (chain, fan-out/fan-in, diamond, router,
+  orchestrator-workers, …); the `code plan` planner
+  (`code_tasks.plan_tasks`) consults it and records its choice as
+  `"pattern"` in the taskfile
 - [docs/runbook.md](docs/runbook.md) — operator runbook: dashboard,
   plan → dry-run → run, troubleshooting
 - [docs/audit-2026-09-09.md](docs/audit-2026-09-09.md) — reliability audit

@@ -236,8 +236,8 @@ unit of measurement* — never compare a `direct` score for model A against a
     --n 4 --label weekly                            # real run
 ```
 
-`ARC_BENCH_JOBS` (default 24) caps parallel jobs; per-family API concurrency
-is still governed by the pool semaphores in `.env`.
+Parallel benchmark jobs are bounded by the per-family API concurrency, which
+is governed by the pool semaphores in `.env`.
 
 All commands accept `--dry-run` (simulated model calls, separate `dry-run.db`;
 the build workload writes to `production/minecraft-dry-run/` so it can never
@@ -282,6 +282,15 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_MAX_INTEGRATION_ROUNDS` | 3 | wiring_fix ⇄ integration_review cycles |
 | `ARC_REVIEW_PASS_SCORE` | 6.5 | cross-model review score required to ship |
 | `ARC_DASHBOARD_PORT` | 8787 | dashboard port |
+| `ARC_DRIVER_LEASE_WAIT` | 1800 | max seconds a task waits for a driver lease before failing on capacity |
+| `ARC_DRIVER_CAPACITY_BACKOFF_CAP` | 300 | max capacity-backoff sleep on a harness retry (seconds) |
+| `ARC_BASE_URL` | https://llm-api.arc.vt.edu/api/v1 | ARC API base URL |
+| `ARC_MAX_GRAPH_STEPS` | 1500 | max graph steps before a run is aborted |
+| `ARC_BASE_BRANCH` | development | branch the code fleet integrates into |
+| `ARC_PROD_BRANCH` | main | production branch, promoted by hand |
+| `ARC_PR_REVIEWERS` | 2 | independent PR reviewers required to approve before merge |
+| `ARC_PR_MAX_ROUNDS` | 3 | PR review rounds before a task fails |
+| `ARC_REQUIRE_TESTS` | 1 | require changes to ship tests that fail without them |
 
 A round makes roughly `13 x questions` model calls. Defaults are polite; the
 per-model semaphores are the hard guarantee that you never exceed ARC's

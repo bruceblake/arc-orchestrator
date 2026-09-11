@@ -427,6 +427,26 @@ class Store:
                 "SELECT id, model, pid, task, acquired_at FROM driver_leases "
                 "ORDER BY id").fetchall()]
 
+    def lease_usage(self):
+        """{model: live lease count} — how contended each model is right now.
+
+        Reviewer selection uses this to pick the LEAST busy eligible model.
+        Choosing a fixed order instead meant Kimi and GLM took every review
+        while DeepSeek sat idle, and tasks queued 30 minutes for a slot that
+        another model could have served immediately.
+        """
+        now = time.time()
+        out = {}
+        with self.lock:
+            for r in self.conn.execute(
+                    "SELECT model, pid, acquired_at FROM driver_leases"):
+                try:
+                    os.kill(r["pid"], 0)
+                except OSError:
+                    continue
+                out[r["model"]] = out.get(r["model"], 0) + 1
+        return out
+
     def release_leases_for_pid(self, pid):
         """Drop every lease this process owns — the shutdown counterpart to
         acquire_driver_lease, so a killed run does not pin a model at cap for

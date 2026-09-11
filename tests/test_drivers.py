@@ -327,6 +327,44 @@ class StallInstrumentation(unittest.TestCase):
         self.assertLessEqual(beats[0]["idle_s"], beats[-1]["idle_s"],
                              "idle time must grow while the harness is quiet")
 
+    def test_pump_heartbeats_report_liveness(self):
+        """driver.heartbeat is the wall-clock liveness ping behind the
+        dashboard's last_event_s / stalled fields — it must fire while the
+        pump loop runs even when no output arrives, and carry the sample
+        (bytes, idle, elapsed) plus task/attempt attribution."""
+        orig_idle = config.DRIVER_IDLE_TIMEOUT
+        orig_hb = drivers.HEARTBEAT_INTERVAL
+        config.DRIVER_IDLE_TIMEOUT = 1.0
+        drivers.HEARTBEAT_INTERVAL = 0.15
+
+        class Sleeper(Driver):
+            harness = "sleep"
+            model = "gpt-oss-120b"
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                return ["sleep", "30"]
+
+        try:
+            with capture_events() as ev:
+                async def go():
+                    with self.assertRaises(DriverError):
+                        await Sleeper()._once("p", Path("."), None, "t1", 1)
+                asyncio.run(go())
+        finally:
+            config.DRIVER_IDLE_TIMEOUT = orig_idle
+            drivers.HEARTBEAT_INTERVAL = orig_hb
+        beats = ev.of("driver.heartbeat")
+        self.assertGreaterEqual(len(beats), 2, "heartbeats should repeat")
+        for b in beats:
+            self.assertEqual(b.get("task"), "t1")
+            self.assertEqual(b.get("attempt"), 1)
+            self.assertIn("bytes", b)
+            self.assertIn("idle_s", b)
+            self.assertIn("seconds", b)
+        self.assertLessEqual(beats[0]["idle_s"], beats[-1]["idle_s"],
+                             "idle time must grow while the harness is quiet")
+
 
 class CapacityClassification(unittest.TestCase):
     """Capacity rejections need a long backoff; crashes need a short one."""
@@ -551,3 +589,62 @@ class InflightIsCountedOnlyWhenHoldingASlot(unittest.TestCase):
                 drivers.asyncio.sleep = orig_sleep
         self.assertEqual(ev.of("driver.start"), [],
                          "a driver that never got a slot must not emit start")
+
+
+class ReviewingAnOpenPullRequest(unittest.TestCase):
+    """Which models may hold the pr_reviewer role."""
+
+    def test_kimi_and_glm_may_review_a_pr(self):
+        self.assertEqual(drivers.KimiDriver("pr_reviewer").role, "pr_reviewer")
+        self.assertEqual(
+            drivers.OpencodeDriver("GLM-5.3", "pr_reviewer").role, "pr_reviewer")
+
+    def test_deepseek_may_review_a_pr_but_not_gate_or_plan(self):
+        self.assertEqual(
+            drivers.OpencodeDriver("DeepSeek-V4-Flash", "pr_reviewer").role,
+            "pr_reviewer")
+        for role in ("reviewer", "planner"):
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("DeepSeek-V4-Flash", role)
+
+    def test_gpt_oss_stays_implement_only(self):
+        for role in ("pr_reviewer", "reviewer", "planner"):
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("gpt-oss-120b", role)
+
+
+class GitHubOpsRoles(unittest.TestCase):
+    """Who may hold the gh_ops roles (issue-triager / issue-maker /
+    pr-reviewer): only Kimi-K3 and GLM-5.3 — the same enforcement pattern as
+    review eligibility, so a hand-kept pool can never drift from the drivers'
+    own role rules."""
+
+    GH_ROLES = ("issue-triager", "issue-maker", "pr-reviewer")
+
+    def test_kimi_may_hold_every_gh_role(self):
+        for role in self.GH_ROLES:
+            self.assertEqual(drivers.KimiDriver(role).role, role)
+
+    def test_glm_may_hold_every_gh_role(self):
+        for role in self.GH_ROLES:
+            self.assertEqual(
+                drivers.OpencodeDriver("GLM-5.3", role).role, role)
+
+    def test_gpt_oss_may_hold_no_gh_role(self):
+        for role in self.GH_ROLES:
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("gpt-oss-120b", role)
+
+    def test_deepseek_may_hold_no_gh_role(self):
+        # pr_reviewer (an open-PR merge review) is allowed for DeepSeek; the
+        # hyphenated gh_ops 'pr-reviewer' is a different role and is not.
+        for role in self.GH_ROLES:
+            with self.assertRaises(ValueError):
+                drivers.OpencodeDriver("DeepSeek-V4-Flash", role)
+
+    def test_existing_roles_still_construct(self):
+        # The gh roles were added without breaking planner|reviewer|implementer.
+        for role in ("planner", "reviewer", "implementer"):
+            self.assertEqual(drivers.KimiDriver(role).role, role)
+            self.assertEqual(
+                drivers.OpencodeDriver("GLM-5.3", role).role, role)
