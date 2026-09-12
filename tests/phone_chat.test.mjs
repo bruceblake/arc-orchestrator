@@ -86,6 +86,7 @@ const EXTERNALS = [...src.matchAll(/<script[^>]+src="([^"]+)"/g)]
   .map(p => fs.readFileSync(p, "utf8"))
   .join("\n");
 const JS = src.slice(src.indexOf("<script>") + 8, src.lastIndexOf("</script>"));
+const INPUT_PLACEHOLDER = (src.match(/id="plan-input"[^>]*placeholder="([^"]*)"/) || [])[1] || "";
 
 function loadPage(withSR) {
   fetchLog = [];
@@ -94,7 +95,7 @@ function loadPage(withSR) {
   qsaMap = {};
   confirmVal = true;
   const els = new Map();
-  function getEl(id) { if (!els.has(id)) els.set(id, mk(id)); return els.get(id); }
+  function getEl(id) { if (!els.has(id)) { const e = mk(id); if (id === "plan-input") e.placeholder = INPUT_PLACEHOLDER; els.set(id, e); } return els.get(id); }
   const document = {
     querySelector: s => (s && s[0] === "#" ? getEl(s.slice(1)) : mk(s)),
     querySelectorAll: sel => qsaMap[sel] || [],
@@ -122,7 +123,7 @@ function loadPage(withSR) {
   const api = new Function(EXTERNALS + "\n" + JS + "\n" +
     "return {S, j, jpost, handleSpeechResult, setMicLive, getPlanSession," +
     " sendPlanMessage, pollPlan, renderPlanTranscript, renderPlanTaskcard," +
-    " loadPlanHistory, loadPlanRepos, wireRun, runProject, init};")();
+    " loadPlanHistory, loadPlanRepos, onPlanRepoChange, wireRun, runProject, init};")();
   const el = id => document.getElementById(id);
   return {
     api, el,
@@ -145,12 +146,13 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   input.value = "";
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "hello world" }, isFinal: true }] }), "handleSpeechResult() final");
   ok(input.value === "hello world", "final transcript lands in the input value");
-  ok(input.placeholder === "Ask Kimi‑K3", "placeholder resets with no interim text");
+  ok(p.el("plan-interim").textContent === "", "interim element is empty when there is no interim speech");
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "more" }, isFinal: true }] }), "handleSpeechResult() second final");
   ok(input.value === "hello world more", "a later final appends to the existing value");
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "partial" }, isFinal: false }] }), "handleSpeechResult() interim");
   ok(input.value === "hello world more", "interim text stays out of the committed value");
-  ok(input.placeholder.includes("partial"), "interim text appears muted via the placeholder");
+  ok(p.el("plan-interim").textContent.includes("partial"), "interim text goes to the dedicated interim element");
+  ok(input.placeholder === "Ask Kimi‑K3", "interim speech never pollutes the input placeholder");
   input.value = "  x";
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "y" }, isFinal: true }] }), "handleSpeechResult() final after manual edit");
   ok(input.value === "  x y", "a final appends to, not overwrites, manually typed text");
@@ -169,7 +171,9 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   ok(mic.textContent === "🎤", "mic idle returns to the mic glyph");
   ok(!mic.classList.contains("mic-live"), "mic idle drops the .mic-live class");
   ok(input.value === "keep me", "returning to idle does not discard typed text");
-  ok(p.el("plan-input").placeholder === "Ask Kimi‑K3", "mic idle resets the placeholder");
+  ok(p.el("plan-input").placeholder === "Ask Kimi‑K3", "mic idle leaves the placeholder alone");
+  run(() => { p.el("plan-interim").textContent = "partial"; p.api.setMicLive(false); }, "setMicLive(false) clears the interim element");
+  ok(p.el("plan-interim").textContent === "", "mic idle clears the interim element");
 }
 
 // ---- 4. session id from the repo path ----------------------------------------
@@ -222,12 +226,21 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   ok(p.alertLog().includes("Select repo"), "new-repo sentinel blocks with an alert");
   ok(p.el("plan-send").disabled === false, "blocked send never disables the button");
   repo.value = "/home/x/tasks/demo.json";
-  p.setImpl({ status: 409, json: async () => ({}) });
+  p.setImpl({ status: 409, json: async () => ({ turns: [{ role: "user", text: "already running" }], running: true }) });
   input.value = "go";
   p.api.sendPlanMessage();
   await tick(10);
-  ok(p.alertLog().includes("Error starting chat"), "non-200 chat start alerts");
-  ok(p.el("plan-send").disabled === false, "send re-enabled after an error");
+  ok(!p.alertLog().includes("Error starting chat"), "409 chat start attaches instead of alerting");
+  ok(p.fetchLog().filter(f => f.url.includes("/api/chat/poll")).length >= 1, "409 chat start polls the already-running turn");
+  ok(p.el("plan-send").disabled === true, "409 attach keeps the button busy for a running turn");
+
+  p.setImpl({ status: 200, json: async () => ({ turns: [], running: false }) });
+  const before = p.fetchLog().filter(f => f.url === "/api/chat/start").length;
+  p.el("plan-send").disabled = true;
+  input.value = "go";
+  p.api.sendPlanMessage();
+  await tick(10);
+  ok(p.fetchLog().filter(f => f.url === "/api/chat/start").length === before, "busy guard: a disabled send never posts");
 }
 
 // ---- 7. pollPlan renders turns, taskcard and escaping ------------------------
@@ -261,11 +274,26 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   await arun(async () => { p.api.pollPlan(); await tick(20); }, "pollPlan() with hostile text");
   ok(clean(tx.innerHTML), "transcript escapes hostile turn text");
 
+  p.setImpl({ status: 200, json: async () => ({
+    turns: [{ role: "assistant", ts: "", text: "task failed", error: EVIL }], running: false,
+  }) });
+  await arun(async () => { p.api.pollPlan(); await tick(20); }, "pollPlan() with an error turn");
+  ok(tx.innerHTML.includes("task failed"), "error turn renders its message");
+  ok(tx.innerHTML.includes("plan-turn err"), "error turn carries the err class");
+  ok(clean(tx.innerHTML), "transcript escapes the error detail text");
+
   const p3 = loadPage(false);
   p3.el("plan-repo").value = "/home/x/tasks/demo.json";
   p3.setImpl({ status: 200, json: async () => ({ turns: [{ role: "user", text: "hi" }], running: false }) });
   await arun(async () => { p3.api.pollPlan(); await tick(20); }, "pollPlan() with no plan");
   ok(p3.el("plan-taskcard").innerHTML === "", "taskcard empty when no assistant plan");
+
+  const p4 = loadPage(false);
+  p4.el("plan-repo").value = "/home/x/tasks/demo.json";
+  p4.setImpl({ status: 500, json: async () => { throw new Error("net"); } });
+  await arun(async () => { p4.api.pollPlan(); await tick(20); }, "pollPlan() fetch error");
+  ok(p4.el("plan-send").disabled === false, "poll fetch error un-busies the send button");
+  ok(p4.el("plan-transcript").className !== "plan-tx", "poll fetch error does not wedge into plan-tx mode");
 }
 
 // ---- 8. loadPlanHistory empty state ------------------------------------------
@@ -334,6 +362,42 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   ok(after > before, "repo switch reloads the plan history");
   ok(!p.alertLog().includes("Repo exists"), "switching to a real repo does not prompt");
   ok(!p.alertLog().includes("Select repo"), "repo switch does not block on a select alert");
+}
+
+// ---- 12. repo creation slugs the name and catches failures --------------------
+{
+  const p = loadPage(false);
+  const repo = p.el("plan-repo");
+  repo.innerHTML = '<option value="__new__">new repo…</option>';
+  repo.value = "__new__";
+  globalThis.prompt = () => "My New Repo";
+  p.setImpl({ status: 200, json: async () => ({ name: "my-new-repo", path: "/r/my-new-repo.json" }) });
+  await arun(async () => { p.api.onPlanRepoChange(); await tick(20); }, "onPlanRepoChange() create");
+  globalThis.prompt = () => null;
+  const calls = p.fetchLog().filter(f => f.url === "/api/repos/create");
+  ok(calls.length === 1, "create posts /api/repos/create");
+  ok(JSON.parse(calls[0].opts.body).name === "my-new-repo", "create body carries the kebab-slugged name");
+  ok(!p.fetchLog().some(f => f.url === "/api/repos/create" && JSON.parse(f.opts.body).name === "My New Repo"), "create never posts the raw un-slugged name");
+
+  const p2 = loadPage(false);
+  const repo2 = p2.el("plan-repo");
+  repo2.innerHTML = '<option value="__new__">new repo…</option>';
+  repo2.value = "__new__";
+  globalThis.prompt = () => "My New Repo";
+  p2.setImpl({ status: 409, json: async () => ({ error: "exists" }) });
+  await arun(async () => { p2.api.onPlanRepoChange(); await tick(20); }, "onPlanRepoChange() create non-200");
+  globalThis.prompt = () => null;
+  ok(p2.alertLog().includes("Repo exists"), "create non-200 alerts Repo exists");
+
+  const p3 = loadPage(false);
+  const repo3 = p3.el("plan-repo");
+  repo3.innerHTML = '<option value="__new__">new repo…</option>';
+  repo3.value = "__new__";
+  globalThis.prompt = () => "My New Repo";
+  p3.setImpl({ status: 200, json: async () => { throw new Error("boom"); } });
+  await arun(async () => { p3.api.onPlanRepoChange(); await tick(20); }, "onPlanRepoChange() create rejected");
+  globalThis.prompt = () => null;
+  ok(p3.alertLog().includes("Repo exists"), "create network/json failure alerts Repo exists");
 }
 
 // ---- done ---------------------------------------------------------------------

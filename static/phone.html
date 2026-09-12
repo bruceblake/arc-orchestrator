@@ -118,8 +118,24 @@ a { color: var(--accent); text-decoration: none; }
   color: var(--dim); font-size: 12px; text-align: center;
   border: 1px dashed var(--border); border-radius: 12px; padding: 14px 8px;
 }
+/* Shared controls: select and action buttons (same as index.html). */
+.fsel {
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
+  border-radius: 12px; padding: 2px 4px; font: inherit; font-size: 11px;
+  max-width: 220px;
+}
+.fsel:hover { border-color: var(--accent); }
+button.act {
+  background: #21262d; color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit;
+  font-size: 12px; min-width: 44px; min-height: 44px;
+}
+button.act:hover { border-color: var(--accent); color: var(--accent); }
+button.act.primary { border-color: var(--accent); color: var(--accent); }
+button.act.danger { border-color: var(--err); color: var(--err); }
 
 /* Plan chat: transcript bubbles and the live-mic state. */
+.interim { color: var(--dim); font-size: 11px; min-height: 14px; }
 .plan-tx {
   display: flex; flex-direction: column; gap: 8px;
   max-height: 220px; overflow-y: auto; overflow-wrap: anywhere;
@@ -182,6 +198,7 @@ a { color: var(--accent); text-decoration: none; }
     <button class="act" id="plan-send">Send</button>
     <button class="act" id="plan-mic" style="display:none;">🎤</button>
   </div>
+  <div id="plan-interim" class="interim"></div>
   <div id="plan-taskcard"></div>
 </section>
 
@@ -756,7 +773,8 @@ function handleSpeechResult(event){
     var v = input.value || "";
     input.value = v ? v.replace(/\s+$/, "") + " " + final : final;
   }
-  input.placeholder = interim ? "Ask Kimi‑K3 · " + interim : "Ask Kimi‑K3";
+  var interimEl = $("#plan-interim");
+  if (interimEl) interimEl.textContent = interim;
 }
 
 function setMicLive(live){
@@ -768,8 +786,8 @@ function setMicLive(live){
   } else {
     mic.classList.remove("mic-live");
     mic.textContent = "🎤";
-    var input = $("#plan-input");
-    if (input) input.placeholder = "Ask Kimi‑K3";
+    var interimEl = $("#plan-interim");
+    if (interimEl) interimEl.textContent = "";
   }
 }
 
@@ -799,9 +817,11 @@ function onPlanRepoChange() {
   if (sel.value === "__new__") {
     const name = prompt("Repo kebab name:");
     if (!name) { loadPlanRepos(); return; }
-    jpost("/api/repos/create", { name: name }).then(res => {
+    const slug = kebabSlug(name);
+    if (!slug) { loadPlanRepos(); return; }
+    jpost("/api/repos/create", { name: slug }).then(res => {
       if (res.code === 200) loadPlanRepos(res.body.path); else alert("Repo exists");
-    });
+    }).catch(function () { alert("Repo exists"); });
     return;
   }
   planRepoPath = sel.value;
@@ -823,7 +843,7 @@ function getPlanSession() {
   if (!repoPath || repoPath === "__new__") return null;
   let slug = kebabSlug(repoPath.split("/").filter(Boolean).pop());
   if (!slug) return null;
-  if (slug.length > 35) slug = slug.slice(0, 35).replace(/-+$/, "");
+  if (slug.length > 34) slug = slug.slice(0, 34).replace(/-+$/, "");
   return "plan-" + slug;
 }
 
@@ -831,7 +851,7 @@ function setPlanBusy(busy) {
   const send = $("#plan-send");
   if (send) send.disabled = busy;
   const sub = $("#plan-sub");
-  if (sub) sub.textContent = busy ? "Kimi‑K3 is thinking…" : "";
+  if (sub) sub.textContent = busy ? "Kimi‑K3 is thinking…" : "Select a repo to start planning";
 }
 
 function startPlanPoll() {
@@ -846,6 +866,8 @@ function stopPlanPoll() {
 }
 
 function sendPlanMessage() {
+  const send = $("#plan-send");
+  if (send && send.disabled) return;
   const input = $("#plan-input");
   const msg = input ? input.value.trim() : "";
   if (!msg) return;
@@ -858,6 +880,10 @@ function sendPlanMessage() {
   setPlanBusy(true);
   jpost("/api/chat/start", { session: planSession, repo: repo, message: msg }).then(res => {
     if (res && res.code === 200) {
+      startPlanPoll();
+      pollPlan();
+    } else if (res && res.code === 409) {
+      setPlanBusy(true);
       startPlanPoll();
       pollPlan();
     } else {
@@ -874,7 +900,7 @@ async function pollPlan() {
   if (!planSession) planSession = getPlanSession();
   if (!planSession) { setPlanBusy(false); stopPlanPoll(); return; }
   const data = await j("/api/chat/poll?session=" + encodeURIComponent(planSession) + "&since=" + planTurns.length).catch(() => null);
-  if (!data) return;
+  if (!data) { setPlanBusy(false); stopPlanPoll(); return; }
   const turns = data.turns || [];
   if (turns.length) planTurns = planTurns.concat(turns);
   renderPlanTranscript();
@@ -903,7 +929,8 @@ function renderPlanTranscript() {
     if (t.ts) { try { time = new Date(t.ts * 1000).toLocaleTimeString(); } catch (e) {} }
     return '<div class="plan-turn ' + cls + '">' +
       (time ? "<small>" + esc(time) + "</small>" : "") +
-      "<div>" + esc(t.text || "") + "</div></div>";
+      "<div>" + esc(t.text || "") + "</div>" +
+      (t.error ? "<div>" + esc(t.error) + "</div>" : "") + "</div>";
   }).join("");
 }
 
