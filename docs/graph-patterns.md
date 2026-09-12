@@ -339,8 +339,8 @@ Recurse the orchestrator: a top-level plan whose results seed further plans.
 This repo's planner is single-level by design (2–8 focused tasks), so
 hierarchy is expressed as **ordered planning rounds**: land contracts first,
 then plan each module against the merged base (the dashboard does this as
-separate projects; `code promote` separates levels if `development` is the
-integration base).
+separate projects; with a two-branch flow, `ARC_BASE_BRANCH=development`,
+`code promote` separates levels).
 
 - **When:** large greenfield systems (> 8 natural tasks), multi-subsystem
   migrations, "build a game/app" goals where each module is itself a plan.

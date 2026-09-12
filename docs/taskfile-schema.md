@@ -354,10 +354,10 @@ Why it is shaped this way:
 ## 4b. What happens to your task file
 
 ```
-alloc (worktree on task/<id>, branched from development)
-  └─ implement ─ gate ─ review ─ publish (commit, push, OPEN PR)
+alloc (worktree on task/<id>, branched from the base branch — main by default)
+  └─ implement ─ gate ─ review ─ publish (commit, sync with base, push, OPEN PR)
                                     └─ pr_review (2 reviewers, unanimous)
-                                         ├─ approved → pr_merge (squash into development)
+                                         ├─ approved → pr_merge (squash into the base branch)
                                          └─ rejected → back to implement, same PR, max 3 rounds
 ```
 
@@ -365,8 +365,9 @@ Nothing is merged locally. The pull request is the gate, so a reviewer's
 rejection genuinely withholds the change. A task with `deps` starts only once
 its dependency's PR has **merged**, not merely opened.
 
-`development` reaches `main` only through `main.py code promote`, which opens
-a PR for a human to merge. The fleet never writes to `main`.
+The base branch is `main` unless `ARC_BASE_BRANCH` says otherwise. With
+`ARC_BASE_BRANCH=development`, `development` reaches `main` only through
+`main.py code promote`, which opens a PR for a human to merge.
 
 ## 5. Authoring tips
 

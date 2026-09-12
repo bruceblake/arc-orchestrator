@@ -24,7 +24,6 @@ from graph import Graph, GraphError
 
 log = logging.getLogger("code-tasks")
 
-_merge_lock = asyncio.Lock()
 
 
 # Where a retired model's work goes now. Callables so they read the roster at
@@ -732,20 +731,6 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                   if (m := start_model(tid)) != _baseline(tid)}
         events.emit("run.resume", taskfile=taskfile, skipped_merged=skipped,
                     retried=retried, escalated_on_resume=higher)
-
-    async def _pr_hook(tid, t):
-        """Best-effort push + PR after a successful merge; never raises."""
-        try:
-            url, note = await gitstore.push_and_open_pr(
-                repo, tid, t["title"], taskfile)
-            if url:
-                events.emit("task.pr_opened", task=tid, url=url)
-            else:
-                events.emit("task.pr_skipped", task=tid, reason=note)
-        except Exception as exc:  # publish must never fail on the PR hook
-            fp = errors.capture(exc, task=tid, node="pr_hook")
-            events.emit("task.pr_skipped", task=tid,
-                        reason=f"pr hook: {exc}"[:200], fingerprint=fp)
 
     def wire_deps(t, target):
         """Gate `target` on EVERY dependency merging, not just the last one.
