@@ -221,7 +221,8 @@ def cmd_code(args):
 
     async def run():
         if args.code_cmd == "plan":
-            path = await plan_tasks(args.goal, Path(args.repo).resolve())
+            path = await plan_tasks(args.goal, Path(args.repo).resolve(),
+                                    store=Store(db_path(args, False)))
             print(f"task file written: {path}")
             print(describe(load_taskfile(path)))
             return

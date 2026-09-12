@@ -1,14 +1,30 @@
 # Graph patterns for multi-agent work
 
-The pattern library for planning code runs in this repo. The `code plan`
-planner (`code_tasks.plan_tasks`, Kimi-K3) picks **one** pattern per goal,
-designs the taskfile's `deps` graph to match it, and records the choice as
-`"pattern": "<name>"` in the taskfile's project object (optional, passthrough
-— `load_taskfile` ignores it; it is a label for humans, the planner's own
-memory of the shape it chose. The `deps` are still the whole graph).
+The pattern library for planning code runs in this repo — the prose behind
+`graph_shapes.PATTERNS`. The `code plan` planner (`code_tasks.plan_tasks`,
+`config.PLANNER_MODEL`) is handed the catalogue **from code**
+(`graph_shapes.planner_prose`, so a planner working on another repo does not
+need this file), picks **one** pattern per goal by the kind of work, designs
+the taskfile's `deps` graph to match it, and records the choice as
+`"pattern": "<id>"` in the project object. The loader normalizes the label
+to a catalogue id (`fan-out-fan-in` → `fanout`; unknown names pass through
+with a warning). The `deps` are still the whole graph: `graph_shapes.classify`
+derives the shape they actually form, and `code_tasks.describe` — printed
+after `code plan` and on every dry run — reports declared vs detected and
+flags a mismatch. The dashboard's "Graph shapes" view (`GET /api/graph-shapes`)
+draws every pattern and classifies every taskfile in `~/tasks`.
 
-Grounding first, then nine patterns, then a decision table. Sources at the
-bottom.
+Classification rules (deps between the file's own ids only): **single** —
+one task; **chain** — one path, every task ≤ 1 dep and ≤ 1 dependent;
+**fanout** — no task has two deps (parallel heads, single-dep tails may hang
+off them); **fanin** — several heads and one join (the catalogue's
+fan-out/fan-in); **diamond** — one root, a split, and one join whose sides all
+descend from the root (a join that redundantly lists the root still counts);
+**hierarchical** — several joins or fan-out under fan-out; **mixed** —
+anything else.
+
+Grounding first, then nine patterns, then a decision table, then what the
+engine can and cannot express yet. Sources at the bottom.
 
 ## Ground rules of this system (the same for every pattern)
 
@@ -49,10 +65,11 @@ Two facts from the literature shape everything below:
   chain of 2 batches, so plan for it or spread tiers.
 - Keep `files_hint` disjoint across parallel tasks. Two implementers editing
   one file = merge conflict = failed task.
-- `deps` needle: today only the **last** entry of a task's `deps` creates
-  the wait edge (`pr_merge_<deps[-1]> → alloc_<tid>`). Fan-in graphs must
-  order `deps` so the task whose code matters most — usually the one that
-  finishes last — is last in the list.
+- `deps` joins are real: a task with two or more deps gets a gather node
+  (`code_tasks.build_code_graph`, `wire_deps`) that waits for **every** dep's
+  PR to merge. Order in the list does not matter. (It used to be the last
+  entry only — a dependent could branch from a base missing the code it
+  depended on; that is gone.)
 
 Taskfile task shape (see docs/taskfile-schema.md):
 
@@ -218,7 +235,9 @@ probe taskfile first, then the real one.
 
 - **Pitfalls:** a router whose probe lands code other than the reproduction
   test contaminates phase 2's base. Keep probes read-only-plus-test. The
-  second phase is a *new* plan/run — there is no cross-taskfile `deps`.
+  second phase is a *new* taskfile; declare `"after": ["<probe taskfile>"]`
+  in its project object so it holds at the chain gate until the probe has
+  merged (Rule 9) — that is the cross-taskfile edge.
 
 ## 5. Orchestrator-workers (supervisor)
 
@@ -411,6 +430,50 @@ more gate/PR rounds, so prefer the narrowest pattern that isolates the real
 risk. When torn between two patterns, take the cheaper one; the
 evaluator-optimizer loop around every task absorbs small misjudgments for
 free.
+
+## Toward more complex graphs
+
+What the engine (`graph.py`) has today, and what a taskfile can say with it.
+`graph_shapes._engine` checks each of these against the code at call time
+and the dashboard renders the result; keep this list in step with it.
+
+**The engine has:**
+
+- *Conditional edges* — `Edge(when=...)`. The per-task pipeline's
+  gate/review/escalate branches are these.
+- *Joins* — `Node(gather=True)`. A task with several deps gets one.
+- *Dynamic fan-out* — `Spawn`: one node spawning N children decided at
+  runtime. The pipeline's `pr_fanout` (one child per PR reviewer) uses it.
+- *Retry and timeout per node* — `Retry`, `Node(timeout=)`; the fix loop and
+  tier escalation are built on them.
+- *Subgraphs* — `Graph.subgraph`: a whole graph as one node of another.
+- *Taskfile chaining* — `project.after` → the `chain_wait` gate.
+
+**What a taskfile cannot yet express** (each marked *not implemented*):
+
+- *Conditional deps between tasks.* Every task you write runs; a dep cannot
+  say "only if the probe found X". Today: route at plan time, or a second
+  taskfile `after` the first (the router pattern). A task-level `when` on a
+  dep would map onto `Edge(when=)` reading the upstream task's result — the
+  predicate would need a vocabulary (gate output? a JSON verdict file the
+  task writes?) and the dashboard would need to draw an edge that may never
+  fire. *Not implemented.*
+- *Tasks spawning tasks.* A task cannot add tasks to its own taskfile at
+  runtime; the planner decides the set once. Hierarchical work is rounds of
+  taskfiles. A `"kind": "spawn"` task whose result is a list of task specs
+  would map onto `graph.Spawn` with the per-task pipeline as the target —
+  the loader would have to validate the spawned specs (Rules 1–2) at
+  runtime rather than at load. *Not implemented.*
+- *Loops between tasks.* `deps` must be acyclic; the only loops are inside a
+  task (gate → fix, review → fix) with a round budget. A bounded
+  evaluator loop between two tasks (build ↔ audit) would be an `Edge` from
+  the audit task's `pr_merge` back to the build task's `alloc` with a
+  budget like `MAX_FIX_ROUNDS` — and a branch policy for the re-run (reset
+  to base, or continue on the merged result). *Not implemented.*
+
+The order to add them, if wanted: conditional deps first (smallest change,
+unlocks a one-file router), then task-level loops (reuses the fix-loop
+budget), then spawning (needs runtime validation).
 
 ## Sources
 

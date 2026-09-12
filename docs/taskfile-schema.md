@@ -46,6 +46,7 @@ also exits with `repo not found: <path>` if `project.repo` does not exist
 | `project.title` | no | Short informational label; defaults to `""`. Never shown to the implementing agents. |
 | `project.tasks` | yes | JSON array of task objects. `load_taskfile` imposes no count limit and accepts an empty array (such a run is a no-op); the 1–50 requirement lives only in the dashboard's create-project endpoint, and the planner aims for 2–6. |
 | `project.after` | no | List of taskfile paths this project chains on (see "Project chaining" below). `[]`/absent = start immediately. |
+| `project.pattern` | no | The planner's label for the shape of the graph between tasks: a `graph_shapes.PATTERNS` id (`single`, `chain`, `fanout`, `diamond`, `router`, `debate`, `hierarchical`). Aliases such as `fan-out-fan-in` are normalized by the loader; an unknown name is kept and logged. A label only — `deps` are the graph; `code_tasks.describe` reports the shape the deps actually form and flags a mismatch. See [graph-patterns.md](graph-patterns.md). |
 
 ### Project chaining (`project.after`)
 
@@ -102,7 +103,7 @@ its first worktree.
 | `reviewer` | string | `""` (rejected) | `"kimi"` (Kimi-K3 via the `kimi` CLI) or `"glm"` (GLM-5.3 via `opencode`) — the only two reviewers, subject to the cross-harness rule below. |
 | `verify_cmd` | string | `""` (gate skipped) | Deterministic honesty gate: a shell command run in the task's worktree that **must fail when the work is wrong**. Exit 0 = pass. See "The verify gate" below. |
 | `files_hint` | list of strings | `[]` | Repo-relative paths the task expects to touch. Injected into the implementer prompt as `Files you are expected to touch: ...`. Informational (not enforced), but keep **disjoint between dep-independent (parallel) tasks** — two agents editing the same file is the main cause of `conflict` merge failures. |
-| `deps` | list of strings | `[]` | Ids of tasks whose merged output this task needs (the id is the canonical key). The runner wires `publish_<last dep> → alloc_<task>`: a dependent task allocates its worktree only after the **last listed** dep has merged to `main` (merges are serialized; the worktree always branches from `main`, so it inherits every earlier merge). |
+| `deps` | list of strings | `[]` | Ids of tasks whose merged output this task needs (the id is the canonical key). One dep: the runner wires `pr_merge_<dep> → alloc_<task>`. Two or more: a gather node (`join_<task>`) waits for **every** listed dep's PR to merge before the task allocates its worktree — a real join, order irrelevant (`code_tasks.build_code_graph`, `wire_deps`). The worktree always branches from `main`, so it inherits every earlier merge. |
 
 ### Model routing (tier table, `config.IMPLEMENT_TIERS`)
 

@@ -3211,6 +3211,12 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 return self._json({"events": events, "next": start + len(chunk),
                                    "reset": reset, "total": len(lines)})
+            if u.path == "/api/graph-shapes":
+                # The graph BETWEEN tasks: the pattern catalogue the planner
+                # chooses from, every taskfile classified by the shape its deps
+                # actually form, and what the engine can and cannot express.
+                import graph_shapes
+                return self._json(graph_shapes.describe())
             if u.path == "/api/pipeline":
                 import pipeline_doc
                 return self._json(pipeline_doc.describe(
