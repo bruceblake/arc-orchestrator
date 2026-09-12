@@ -247,6 +247,18 @@ class TestChatApi(_ChatCase):
         rec = dashboard._launch_registry["chat:s1"]
         self.assertEqual(rec["pid"], os.getpid())
 
+    def test_agents_splits_chats_out_of_runs(self):
+        # Regression: chat entries must not inflate /api/agents `runs` (the
+        # dashboard counts that list as "harness runs today").
+        live = os.getpid()  # _agents prunes dead pids before building lists
+        dashboard._launch_registry["chat:s1"] = {
+            "pid": live, "log": "chat-s1.log", "started": 1.0, "kind": "chat"}
+        dashboard._launch_registry["proj.json"] = {
+            "pid": live, "log": "proj.log", "started": 1.0}
+        data = dashboard._agents(None)
+        self.assertEqual([r["taskfile"] for r in data["runs"]], ["proj.json"])
+        self.assertEqual([c["session"] for c in data["chats"]], ["chat:s1"])
+
 
 class TestChatApiPoll(_ChatCase):
     """GET /api/chat/poll — the UI's incremental read of a session file."""
