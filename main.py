@@ -175,6 +175,7 @@ def cmd_code(args):
     import json
     import events
     from store import Store
+    import gitstore
     from code_tasks import (build_code_graph, chain_status, describe,
                         load_taskfile, pending_chains, plan_tasks)
 
@@ -301,6 +302,24 @@ def cmd_code(args):
                 "there to approve it. Set default_plan_mode = false, or pass "
                 "--force to run anyway.", config.KIMI_CONFIG)
             events.emit("run.refused", taskfile=tf, reason="kimi default_plan_mode is true")
+            if not args.force:
+                sys.exit(1)
+        # The PR gate needs somewhere to push. Checked HERE, before a model is
+        # spent, because the alternative is what happened to minecraft-test on
+        # 09-12: the scaffold was written, passed its gate, passed review, and
+        # was then thrown away at publish with "push failed: no git remote
+        # configured". Roughly eight minutes of model time to discover a fact
+        # `git remote` answers instantly.
+        gh = asyncio.run(gitstore.github_status(taskset["repo"]))
+        if not gh.get("ready"):
+            log.error(
+                "%s cannot complete a task: %s.\n"
+                "Every task ends by pushing a branch and opening a pull request "
+                "— without that, work is written, reviewed, and then discarded. "
+                "Fix it, or pass --force to run anyway.",
+                taskset["repo"], gh.get("reason") or "not ready for pull requests")
+            events.emit("run.refused", taskfile=tf,
+                        reason=f"repo not PR-ready: {gh.get('reason')}")
             if not args.force:
                 sys.exit(1)
         graph = build_code_graph(store, taskset, taskfile=tf)

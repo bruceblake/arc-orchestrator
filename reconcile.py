@@ -22,6 +22,20 @@ import gitstore
 INTERRUPTED_REASON = "interrupted: run process exited before the task finished"
 
 
+def _ancestry(pid, limit=12):
+    """{pid} plus its parents, walking /proc up to init."""
+    out, seen = {pid}, 0
+    while pid > 1 and seen < limit:
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text()
+            pid = int(stat[stat.rindex(")") + 2:].split()[1])   # ppid
+        except (OSError, ValueError, IndexError):
+            break
+        out.add(pid)
+        seen += 1
+    return out
+
+
 def live_runs():
     """[{'pid', 'taskfile'}] for every `main.py code run` alive on this machine.
 
@@ -30,9 +44,15 @@ def live_runs():
     "main.py", "code" and "run" scattered across unrelated arguments.
     """
     me = os.getpid()
+    # A process in our own ANCESTRY is not a competing run: `timeout 60 python
+    # main.py code run <file>`, `nohup`, `nice` and friends keep the whole
+    # command in their argv, so the wrapper that launched THIS run matches the
+    # pattern and the run refuses to start against itself. Verified: a launch
+    # under `timeout` reported "already being run by pid <the timeout>".
+    mine = _ancestry(me)
     runs = []
     for entry in Path("/proc").iterdir():
-        if not entry.name.isdigit() or int(entry.name) == me:
+        if not entry.name.isdigit() or int(entry.name) in mine:
             continue
         try:
             argv = [a for a in (entry / "cmdline").read_bytes()

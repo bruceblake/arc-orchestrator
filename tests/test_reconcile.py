@@ -146,3 +146,34 @@ class LiveRunGuard(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AWrapperIsNotACompetingRun(unittest.TestCase):
+    """`timeout 60 python main.py code run <file>` keeps the whole command in
+    the wrapper's argv, so the wrapper matches the run pattern — and the run it
+    launched then refuses to start, reporting that its own parent is already
+    running the taskfile. Observed exactly that while relaunching
+    minecraft-test.
+    """
+
+    def test_our_own_ancestry_is_excluded(self):
+        import os
+        mine = reconcile._ancestry(os.getpid())
+        self.assertIn(os.getpid(), mine)
+        self.assertIn(os.getppid(), mine)
+
+    def test_ancestry_terminates_on_a_broken_chain(self):
+        # A pid that does not exist must not loop or raise.
+        self.assertEqual(reconcile._ancestry(2 ** 22), {2 ** 22})
+
+    def test_ancestry_is_bounded(self):
+        import os
+        self.assertLessEqual(len(reconcile._ancestry(os.getpid(), limit=3)), 4)
+
+    def test_live_runs_does_not_report_this_process_tree(self):
+        # Whatever launched this test may well have "main.py code run" in its
+        # argv; none of it is a live run of a taskfile.
+        import os
+        pids = {r["pid"] for r in reconcile.live_runs()}
+        self.assertNotIn(os.getpid(), pids)
+        self.assertNotIn(os.getppid(), pids)
