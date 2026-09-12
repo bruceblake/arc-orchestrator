@@ -119,6 +119,15 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .stat.tok { color: var(--warn); }
 .err { color: var(--err); font-size: 12px; margin-top: 6px; }
 .okmsg { color: var(--ok); font-size: 12px; margin-top: 6px; }
+/* the Run/Stop feedback strip: empty and invisible until a click needs it */
+.runmsg { display: none; font-size: 13px; margin: 8px 0 4px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border, #30363d); line-height: 1.6; }
+.runmsg.ask, .runmsg.wait, .runmsg.ok, .runmsg.err { display: block; }
+.runmsg.ok { color: var(--ok); border-color: var(--ok); }
+.runmsg.err { color: var(--err); border-color: var(--err); }
+.runmsg.wait { color: var(--dim); }
+.runmsg .act { margin-left: 4px; }
+.runmsg a { color: inherit; text-decoration: underline; }
+.runtail { margin: 6px 0 0; font-size: 11px; white-space: pre-wrap; opacity: .85; max-height: 200px; overflow: auto; }
 svg text { font-family: ui-monospace, monospace; }
 svg g.node { cursor: pointer; }
 svg g.node:hover rect { stroke-width: 2.4; }
@@ -392,6 +401,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <button class="act danger" id="btn-stop" style="display:none" aria-label="Stop the running project">■ Stop</button>
       </h2>
       <div class="kv" id="d-meta"></div>
+      <div id="d-runmsg" class="runmsg" role="status" aria-live="polite"></div>
       <div id="d-progress"></div>
       <div style="margin-top:8px" id="d-git"></div>
     </div>

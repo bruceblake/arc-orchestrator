@@ -205,3 +205,31 @@ class HttpReadEndpoints(unittest.TestCase):
         self.assertEqual(status, 404)
         self.assertIsInstance(body, dict)
         self.assertIn("error", body)
+
+    # ---- /api/run-log -----------------------------------------------------
+    # What "view log" opens after a Run click: the stdout of a run/plan process
+    # the dashboard launched. Only logs/run-*.log and logs/plan-*.log — the
+    # name comes from the browser, so it must not reach any other file.
+    def test_run_log_returns_the_tail_of_a_run_log(self):
+        log_dir = Path(config.ROOT) / "logs"
+        log_dir.mkdir(exist_ok=True)
+        name = "run-test-http-read-0.log"
+        (log_dir / name).write_text("".join(f"line {i}\n" for i in range(30)),
+                                    encoding="utf-8")
+        try:
+            status, body = self._get(f"/api/run-log?file={name}&lines=5")
+            self.assertEqual(status, 200)
+            self.assertEqual(body["file"], name)
+            self.assertEqual(body["lines"], [f"line {i}" for i in range(25, 30)])
+        finally:
+            (log_dir / name).unlink()
+
+    def test_run_log_refuses_any_other_file(self):
+        for bad in ("server.log", "../orchestrator.db", "gates/x.log",
+                    "run-..%2F..%2Fetc.log", ""):
+            with self.subTest(file=bad):
+                status, body = self._get(f"/api/run-log?file={bad}")
+                self.assertIn(status, (400, 404))
+                self.assertIn("error", body)
+        status, body = self._get("/api/run-log?file=run-nope-1.log")
+        self.assertEqual(status, 404)
