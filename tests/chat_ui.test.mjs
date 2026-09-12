@@ -62,6 +62,11 @@ const mod = new Function(externals + "\n" + js
   + " if ('LISTENING' in o) CHAT_LISTENING=o.LISTENING;"
   + " if ('FINAL' in o) CHAT_SPEECH_FINAL=o.FINAL;"
   + " };"
+  + "\nglobalThis.__getChat = () => ({"
+  + " REPO: CHAT_REPO, REPOS: CHAT_REPOS, SESSION: CHAT_SESSION,"
+  + " TURNS: CHAT_TURNS, LAST: CHAT_LAST, RUNNING: CHAT_RUNNING,"
+  + " LISTENING: CHAT_LISTENING, FINAL: CHAT_SPEECH_FINAL"
+  + " });"
   + "\nreturn {chatSend, chatPoll, chatRender, chatTurnHTML, chatTaskcardHTML,"
   + " chatEmptyState, chatSupportsSpeech, chatUpdateMic, chatMic, chatStopMic,"
   + " chatLoadRepos, chatNewRepo, chatStartSession, chatOpen};");
@@ -130,6 +135,19 @@ ok(textInput.value === "build a tool for parsing logs",
    "speech: finals appended exactly once across cumulative results");
 c.chatStopMic();
 window.SpeechRecognition = undefined;
+
+// ---- send resets the speech buffer (mic may be live while sending) ----------
+// Regression: chatSend cleared only the compose input, leaving
+// CHAT_SPEECH_FINAL holding the just-sent text. With continuous dictation the
+// next live onresult wrote that text back into the compose box, so a later
+// Send transmitted '<msg1> <msg2>'. A successful send must clear the
+// accumulator too.
+__setChat({ FINAL: "build a tool", RUNNING: false, SESSION: "plan-x" });
+const sendInput = document.querySelector("#c-text");
+sendInput.value = "build a tool";
+await c.chatSend();
+ok(__getChat().FINAL === "", "send: successful send clears the speech buffer");
+sendInput.value = "";
 
 // ---- escaping: turn text must be neutralised -------------------------------
 ok(clean(c.chatTurnHTML({ role: "user", text: EVIL, ts: null })),

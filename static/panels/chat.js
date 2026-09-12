@@ -171,6 +171,7 @@ async function chatSend() {
   const { code, body: resp } = await jpost("/api/chat/start", body);
   if (code === 200) {
     input.value = "";
+    CHAT_SPEECH_FINAL = "";
     CHAT_RUNNING = true;
     chatSetSend(true);
     chatRender();
