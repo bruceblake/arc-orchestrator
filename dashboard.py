@@ -1983,8 +1983,12 @@ def _spawn_logged(argv, log_name):
     log_dir = Path(config.ROOT) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     lf = open(log_dir / log_name, "ab", buffering=0)
+    # Unbuffered: with stdout redirected to a file Python block-buffers it,
+    # so a live run's log stayed EMPTY until the process exited and "view
+    # log" on a running project showed nothing at all.
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
     proc = subprocess.Popen(argv, cwd=str(config.ROOT), stdout=lf, stderr=subprocess.STDOUT,
-                            start_new_session=True, close_fds=True)
+                            start_new_session=True, close_fds=True, env=env)
     return proc, log_name
 
 
@@ -2140,9 +2144,45 @@ def _run_project(body):
     slug = _task_slug(path.stem)
     log_name = f"run-{slug}-{int(time.time())}.log"
     proc, log_name = _spawn_logged(argv, log_name)
-    _launch_registry[key] = {"pid": proc.pid, "log": log_name, "started": time.time(),
-                             "dry_run": dry_run, "kind": "run"}
-    return {"pid": proc.pid, "log": log_name, "dry_run": dry_run}, 200
+    # "started" must mean the run is actually going, not merely that a
+    # process was forked. On 09-12 a bad asyncio.run() in `code run` killed
+    # every run in its first second; the button said "started (pid N)" and
+    # the operator was left staring at a project that never changed. So wait
+    # a moment and, if the process is already gone, say so — with the tail
+    # of its log, which is where the reason is. A dry run legitimately exits
+    # fast, and its exit code says whether that was success.
+    died = _exited_early(proc, 1.5)
+    if died is not None and not (dry_run and died == 0):
+        return {"error": f"the run exited immediately (exit {died}) — see logs/{log_name}",
+                "log": log_name, "exit": died, "tail": _log_tail(log_name, 12)}, 500
+    if died is None:
+        _launch_registry[key] = {"pid": proc.pid, "log": log_name, "started": time.time(),
+                                 "dry_run": dry_run, "kind": "run"}
+    return {"pid": proc.pid, "log": log_name, "dry_run": dry_run,
+            "finished": died is not None}, 200
+
+
+def _exited_early(proc, seconds):
+    """The exit code if `proc` ends within `seconds`, else None."""
+    try:
+        return proc.wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        return None
+
+
+_RUN_LOG_RE = re.compile(r"^(run|plan)-[\w.-]+\.log$")
+
+
+def _log_tail(log_name, n):
+    """Last n lines of logs/<log_name>, [] if unreadable."""
+    if not _RUN_LOG_RE.fullmatch(log_name or ""):
+        return []
+    try:
+        lines = (Path(config.ROOT) / "logs" / log_name).read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    return lines[-n:]
 
 
 # --- Orchestrator chat + repo listing -------------------------------------
@@ -2975,6 +3015,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_task_deliverable(
                     _valid_repo(proj.get("repo") or ""), q.get("task", [""])[0],
                     want_patch=q.get("patch", ["0"])[0] == "1"))
+            if u.path == "/api/run-log":
+                # The stdout/stderr of a run or plan process the dashboard
+                # launched (logs/run-*.log, logs/plan-*.log) — what "view log"
+                # opens after a Run click, and the only place a run that
+                # crashed at startup explains itself.
+                q = parse_qs(u.query)
+                fn = q.get("file", [""])[0]
+                if not _RUN_LOG_RE.fullmatch(fn):
+                    return self._json({"error": "bad file name"}, 400)
+                if not (Path(config.ROOT) / "logs" / fn).is_file():
+                    return self._json({"error": "no such run log"}, 404)
+                try:
+                    n = min(max(int(q.get("lines", ["200"])[0]), 1), 2000)
+                except ValueError:
+                    n = 200
+                lines = _log_tail(fn, n)
+                return self._json({"file": fn, "lines": lines})
             if u.path == "/api/gate-log":
                 q = parse_qs(u.query)
                 fn = q.get("file", [""])[0]

@@ -100,7 +100,9 @@ class _ChatCase(unittest.TestCase):
 
     def _fake_spawn(self, argv, log_name):
         self.spawn_calls.append((list(argv), log_name))
-        return mock.Mock(pid=4242), log_name
+        proc = mock.Mock(pid=4242)
+        proc.wait.side_effect = subprocess.TimeoutExpired(argv, 1.5)  # still running
+        return proc, log_name
 
     def _get(self, path):
         req = _FakeRequest(path)

@@ -35,6 +35,8 @@ async function refreshDetail() {
   $("#btn-stop").style.display = CUR_PID ? "" : "none";
   $("#btn-stop").title = CUR_PID ? `stop run process ${CUR_PID}` : "";
   $("#btn-run").disabled = !!CUR_PID;
+  $("#btn-run").textContent = CUR_PID ? "● running" : "▶ Run";
+  $("#btn-run").title = CUR_PID ? `run process ${CUR_PID} is live` : "start a real run";
   // Tokens come from the /api/projects snapshot (PROJECTS), not this
   // response: /api/project has no tokens field, and the card no longer
   // shows them — this line is where they live now.
@@ -207,22 +209,97 @@ function renderTasks(d) {
 
 
 // ---- run buttons ----
+// No confirm()/alert() here. Native dialogs are the one thing on this page
+// the browser may silently suppress ("prevent this page from creating
+// additional dialogs"), after which a Run click does nothing and says
+// nothing. Everything the operator needs to know — are you sure, starting,
+// started with which pid, or why not — is rendered inline under the header,
+// and "started" is only shown once the server has seen the process survive
+// its first moments and the next poll has found it alive.
+let RUN_ARMED = null;   // "run" | "dry" while the inline confirm strip is up
+function runMsg(cls, html) {
+  const el = $("#d-runmsg"); if (!el) return;
+  el.className = "runmsg " + (cls || ""); el.innerHTML = html || "";
+}
+function runLogLink(log) {
+  return log ? ` <a href="#" data-runlog="${attr(log)}">view log</a>` : "";
+}
+function armRun(dry) {
+  if (!CUR || CUR_PID) return;
+  RUN_ARMED = dry ? "dry" : "run";
+  const what = dry ? "a <b>dry run</b> — resolves the DAG, no models, no git changes"
+                   : "a <b>real run</b> — spends model tokens and mutates repo branches";
+  runMsg("ask", `Start ${what} for <b>${esc(CUR)}</b>? ` +
+    `<button class="act primary" id="run-confirm">▶ start</button> ` +
+    `<button class="act" id="run-cancel">cancel</button>`);
+  const box = $("#d-runmsg");   // the buttons live inside the strip, not the page
+  box.querySelector("#run-confirm").onclick = () => doRun(dry);
+  box.querySelector("#run-cancel").onclick = () => { RUN_ARMED = null; runMsg("", ""); };
+  box.querySelector("#run-confirm").focus();
+}
 async function doRun(dry) {
   if (!CUR) return;
-  const what = dry ? "a DRY run (resolves the DAG, no models, no git changes)" : "a REAL run (spends model tokens, mutates repo branches)";
-  if (!confirm(`Start ${what} for ${CUR}?`)) return;
-  const {code, body} = await jpost("/api/projects/run", {file: CUR, dry_run: dry});
-  alert(code === 200 ? `started (pid ${body.pid})\nlog: logs/${body.log}` : `not started: ${body.error}`);
-  refreshDetail();
+  RUN_ARMED = null;
+  const file = CUR, btn = $("#btn-run"), dryb = $("#btn-dry");
+  btn.disabled = true; dryb.disabled = true;
+  runMsg("wait", `⏳ starting ${dry ? "dry run" : "run"} of <b>${esc(file)}</b>…`);
+  let code, body;
+  try { ({code, body} = await jpost("/api/projects/run", {file, dry_run: dry})); }
+  catch (e) { code = 0; body = {error: "no answer from the dashboard — is it running?"}; }
+  dryb.disabled = false;
+  if (code !== 200) {
+    const tail = (body.tail || []).length ? `<pre class="runtail">${esc(body.tail.join("\n"))}</pre>` : "";
+    runMsg("err", `✖ not started: ${esc(body.error || "unknown error")}${runLogLink(body.log)}${tail}`);
+    btn.disabled = !!CUR_PID;
+    return;
+  }
+  if (body.finished) {   // a dry run that already ran to completion
+    runMsg("ok", `✔ dry run finished — ${esc(file)} resolves cleanly.${runLogLink(body.log)}`);
+    btn.disabled = false;
+    return;
+  }
+  runMsg("ok", `✔ ${dry ? "dry run" : "run"} started · pid <b>${body.pid}</b> · logs/${esc(body.log)}${runLogLink(body.log)} — confirming it is alive…`);
+  await refreshDetail();
+  // The server saw it survive 1.5 s; now confirm the poll sees it too.
+  setTimeout(async () => {
+    if (CUR !== file) return;
+    await refreshDetail();
+    const live = CUR_PID || (CUR_DATA && (CUR_DATA.rows || []).some(r => r.status === "running"));
+    if (live) runMsg("ok", `✔ ${dry ? "dry run" : "run"} is live · pid <b>${body.pid}</b> · logs/${esc(body.log)}${runLogLink(body.log)}`);
+    else runMsg("err", `✖ the run started (pid ${body.pid}) but is already gone — read the log.${runLogLink(body.log)}`);
+  }, 3000);
 }
-$("#btn-run").onclick = () => doRun(false);
-$("#btn-dry").onclick = () => doRun(true);
+$("#btn-run").onclick = () => armRun(false);
+$("#btn-dry").onclick = () => armRun(true);
+document.addEventListener("click", ev => {
+  const a = ev.target.closest && ev.target.closest("[data-runlog]");
+  if (!a) return;
+  ev.preventDefault(); showRunLog(a.dataset.runlog);
+});
+async function showRunLog(fn) {
+  const d = await jget(`/api/run-log?file=${encodeURIComponent(fn)}`);
+  $("#drawer").classList.add("open");
+  $("#drawer-title").textContent = "run log";
+  $("#drawer-sub").textContent = d.error ? "" : `logs/${fn} · last ${(d.lines || []).length} lines`;
+  drawerFile = null;
+  $("#drawer-body").textContent = d.error || (d.lines || []).join("\n") || "(empty)";
+}
 $("#btn-stop").onclick = async () => {
   if (!CUR) return;
-  if (!confirm(`Stop the run for ${CUR}?\n\nIn-flight agents are cancelled, unfinished tasks are marked failed, and driver slots are released. Work already merged is kept.`)) return;
+  if (RUN_ARMED !== "stop") {
+    RUN_ARMED = "stop";
+    runMsg("ask", `Stop the run for <b>${esc(CUR)}</b>? In-flight agents are cancelled, unfinished tasks are marked failed, driver slots are released; merged work is kept. ` +
+      `<button class="act danger" id="stop-confirm">■ stop</button> <button class="act" id="stop-cancel">cancel</button>`);
+    const box = $("#d-runmsg");
+    box.querySelector("#stop-confirm").onclick = () => $("#btn-stop").onclick();
+    box.querySelector("#stop-cancel").onclick = () => { RUN_ARMED = null; runMsg("", ""); };
+    return;
+  }
+  RUN_ARMED = null;
+  runMsg("wait", "⏳ stopping…");
   const {code, body} = await jpost("/api/projects/stop", {file: CUR});
-  alert(code === 200 ? `stop signal sent to pid ${(body.stopped || []).join(", ")}\n${body.note || ""}`
-                     : `not stopped: ${body.error}`);
+  if (code === 200) runMsg("ok", `■ stop signal sent to pid ${esc((body.stopped || []).join(", "))} ${esc(body.note || "")}`);
+  else runMsg("err", `✖ not stopped: ${esc(body.error || "unknown error")}`);
   refreshDetail(); pollHealth();
 };
 

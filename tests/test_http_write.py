@@ -109,6 +109,7 @@ class _PostCase(unittest.TestCase):
         dashboard._launch_registry.clear()
         dashboard.Handler.store = Store(":memory:")
         self.spawn_calls = []
+        self.spawn_exit = None   # set to an int to fake a process that exits at once
         self._spawn_patch = mock.patch.object(
             dashboard, "_spawn_logged", side_effect=self._fake_spawn)
         self._spawn_patch.start()
@@ -131,7 +132,17 @@ class _PostCase(unittest.TestCase):
 
     def _fake_spawn(self, argv, log_name):
         self.spawn_calls.append((list(argv), log_name))
-        return mock.Mock(pid=4242), log_name
+        # A run that is still going: /api/projects/run waits briefly on the
+        # process and reports "started" only if it has NOT exited. A bare
+        # Mock's wait() returns a Mock — truthy, "it exited" — so make the
+        # stub behave like a live process unless a test says otherwise.
+        proc = mock.Mock(pid=4242)
+        proc.wait.side_effect = subprocess.TimeoutExpired(argv, 1.5)
+        proc.wait.return_value = None
+        if self.spawn_exit is not None:
+            proc.wait.side_effect = None
+            proc.wait.return_value = self.spawn_exit
+        return proc, log_name
 
     def _post(self, path, body, length=None, headers=None):
         """POST raw bytes; returns (status, parsed JSON body)."""
@@ -347,6 +358,31 @@ class HttpWriteRunEndpoint(_PostCase):
         rec = dashboard._launch_registry[str(path)]
         self.assertEqual(rec["pid"], 4242)
         self.assertEqual(rec["kind"], "run")
+
+    def test_a_run_that_dies_at_once_is_reported_not_started(self):
+        # The 09-12 case: `code run` crashed in its first second (a nested
+        # asyncio.run), the dashboard said "started (pid N)", and the project
+        # never moved. "started" must mean the process is still alive after
+        # the spawn — otherwise it is an error carrying the log's tail.
+        path = self._write_taskfile()
+        self.spawn_exit = 1
+        (Path(config.ROOT) / "logs").mkdir(exist_ok=True)
+        status, resp = self._post_json("/api/projects/run", {"file": "proj.json"})
+        self.assertEqual(status, 500)
+        self.assertIn("exited immediately", resp["error"])
+        self.assertEqual(resp["exit"], 1)
+        self.assertTrue(resp["log"].startswith("run-proj-"))
+        self.assertIsInstance(resp["tail"], list)
+        self.assertNotIn(str(path), dashboard._launch_registry)
+
+    def test_a_dry_run_that_finishes_cleanly_is_reported_finished(self):
+        self._write_taskfile()
+        self.spawn_exit = 0
+        status, resp = self._post_json("/api/projects/run",
+                                       {"file": "proj.json", "dry_run": True})
+        self.assertEqual(status, 200)
+        self.assertTrue(resp["finished"])
+        self.assertEqual(dashboard._launch_registry, {})
 
     def test_dry_run_flag_reaches_argv_and_response(self):
         # the UI's only pre-flight check: a dry run must be visible in the
