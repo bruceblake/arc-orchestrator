@@ -247,15 +247,17 @@ const DET = { file: "ui.json", title: "game UI polish", repo: "acme/arc-orchestr
 // as amber loops — a fix round back to implement, and pr_review's self-retry.
 const GRAPHS = { code: { name: "code-tasks pipeline", starts: ["alloc"],
     nodes: [{name: "alloc"}, {name: "implement"}, {name: "gate"}, {name: "review"},
-            {name: "publish"}, {name: "pr_review"}, {name: "pr_merge"}, {name: "fail"}],
+            {name: "publish"}, {name: "pr_fanout"}, {name: "pr_reviewer"},
+            {name: "pr_review"}, {name: "pr_merge"}, {name: "fail"}],
     edges: [{src: "alloc", dst: "implement"}, {src: "implement", dst: "gate"},
             {src: "gate", dst: "review", conditional: true},
             {src: "gate", dst: "implement", conditional: true},
             {src: "review", dst: "publish", conditional: true},
-            {src: "publish", dst: "pr_review", conditional: true},
+            {src: "publish", dst: "pr_fanout", conditional: true},
+            {src: "pr_fanout", dst: "pr_reviewer"}, {src: "pr_reviewer", dst: "pr_review"},
             {src: "pr_review", dst: "pr_merge", conditional: true},
             {src: "pr_review", dst: "implement", conditional: true},
-            {src: "pr_review", dst: "pr_review", conditional: true},
+            {src: "pr_review", dst: "pr_fanout", conditional: true},
             {src: "pr_review", dst: "fail", conditional: true}] } };
 
 // Route the page's pollers at the fixtures; unknown URLs get {} like the
@@ -307,7 +309,7 @@ ok("topology section shows the real pipeline", tp.includes("topohead") && tp.inc
 ok("topology no longer shows the stale workloads", !tp.includes("research round") && !tp.includes("build graph"));
 // 3 loops in the fixture: gate->implement, pr_review->implement, pr_review->pr_review
 ok("topology meta counts the loops", document.querySelector("#topo-meta").textContent.includes("3 of them"));
-ok("topology counts", tp.includes("8 nodes · 10 edges"));
+ok("topology counts", tp.includes("10 nodes · 12 edges"));
 ok("conditional edge dashed", tp.includes('stroke-dasharray="4 3"'));
 ok("topo node class", tp.includes('class="node topo"'));
 const tsvg = api.taskDag({starts: ["a"], nodes: [{id: "a"}, {id: "b", gather: true}],

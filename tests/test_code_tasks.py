@@ -348,7 +348,10 @@ class PullRequestIsTheGate(unittest.TestCase):
         g = self.graph()
         self.assertIn("pr_merge_t1", g.nodes)
         self.assertIn("pr_review_t1", g.nodes)
-        self.assertIsNotNone(self._edge(g, "publish_t1", "pr_review_t1"))
+        # review is now three nodes: fan-out -> one node per reviewer -> join
+        self.assertIn("pr_fanout_t1", g.nodes)
+        self.assertIn("pr_reviewer_t1", g.nodes)
+        self.assertIsNotNone(self._edge(g, "publish_t1", "pr_fanout_t1"))
         self.assertIsNotNone(self._edge(g, "pr_review_t1", "pr_merge_t1"))
 
     def test_merge_requires_approval(self):
@@ -375,7 +378,8 @@ class PullRequestIsTheGate(unittest.TestCase):
 
     def test_publish_that_never_opened_a_pr_does_not_reach_review(self):
         g = self.graph()
-        e = self._edge(g, "publish_t1", "pr_review_t1")
+        # publish now enters the review stage at its FAN-OUT node
+        e = self._edge(g, "publish_t1", "pr_fanout_t1")
         self.assertFalse(e.when({"published": False, "reason": "push failed"}, {}))
 
     def test_tasks_branch_from_the_integration_branch_not_prod(self):
@@ -944,13 +948,13 @@ class InconclusiveReviewRouting(unittest.TestCase):
 
     def test_an_inconclusive_round_retries_the_review(self):
         r = {"approved": False, "inconclusive": True, "inconclusive_n": 1}
-        self.assertTrue(self._fires("pr_review_t1", r))
+        self.assertTrue(self._fires("pr_fanout_t1", r))  # re-enter at the fan-out
         self.assertFalse(self._fires("implement_t1", r))
 
     def test_it_stops_retrying_once_the_budget_is_spent(self):
         r = {"approved": False, "inconclusive": True,
              "inconclusive_n": config.PR_MAX_INCONCLUSIVE}
-        self.assertFalse(self._fires("pr_review_t1", r))
+        self.assertFalse(self._fires("pr_fanout_t1", r))
         self.assertTrue(self._fires("fail_t1", r))
 
     def test_a_real_rejection_still_goes_to_the_implementer(self):
@@ -983,10 +987,10 @@ class AConflictingPullRequestIsRetried(unittest.TestCase):
     def test_a_resynced_branch_goes_back_for_review(self):
         # The diff changed, so the approval it already has no longer covers it.
         r = {"merged": False, "resynced": True, "resyncs": 1}
-        self.assertTrue(self._fires("pr_merge_t1", "pr_review_t1", r))
+        self.assertTrue(self._fires("pr_merge_t1", "pr_fanout_t1", r))
 
     def test_a_clean_merge_does_not_loop_back(self):
-        self.assertFalse(self._fires("pr_merge_t1", "pr_review_t1",
+        self.assertFalse(self._fires("pr_merge_t1", "pr_fanout_t1",
                                      {"merged": True, "pr": 4}))
 
     def test_a_terminal_conflict_does_not_loop_back(self):
@@ -1375,3 +1379,108 @@ class AJoinWaitsForEveryDependency(unittest.TestCase):
             await task
         asyncio.run(run())
         self.assertEqual(seen, [["fast", "slow"]])
+
+
+class ReviewersAreRealGraphNodes(unittest.TestCase):
+    """PR reviewers fan out as Spawn'd nodes, not inside one asyncio.gather.
+
+    Inside one node they were invisible to the graph: not in the diagram, not
+    checkpointed, not individually retryable, and a crashed reviewer surfaced
+    only as a field on its parent's result. Each is now pr_reviewer_<tid> with
+    its own retry policy and timeout, joined at pr_review_<tid>.
+    """
+
+    def _graph(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            return code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+
+    def test_the_three_review_nodes_exist(self):
+        g = self._graph()
+        for n in ("pr_fanout_t1", "pr_reviewer_t1", "pr_review_t1"):
+            self.assertIn(n, g.nodes)
+
+    def test_the_reviewer_node_has_its_own_retry_and_timeout(self):
+        g = self._graph()
+        n = g.nodes["pr_reviewer_t1"]
+        self.assertIsNotNone(n.retry)
+        self.assertEqual(n.retry.on, (code_tasks.DriverError,))
+        self.assertGreater(n.timeout, config.DRIVER_TIMEOUT)
+
+    def test_the_fanout_returns_a_spawn_with_one_item_per_reviewer(self):
+        """Run the real pr_fanout node against stubbed git/store."""
+        import asyncio as aio
+        from graph import Spawn
+        g = self._graph()
+        fan = g.nodes["pr_fanout_t1"].fn
+        orig = code_tasks.gitstore.pr_diff
+        code_tasks.gitstore.pr_diff = lambda repo, n: aio.sleep(0, result="diff --git a b")
+        try:
+            out = aio.run(fan({"results": {"publish_t1": {"pr": 42}}, "runs": {}}))
+        finally:
+            code_tasks.gitstore.pr_diff = orig
+        self.assertIsInstance(out, Spawn)
+        self.assertEqual(out.target, "pr_reviewer_t1")
+        self.assertEqual(out.join, "pr_review_t1")
+        self.assertEqual(len(out.items), config.PR_REVIEWERS)
+        models = [i["model"] for i in out.items]
+        self.assertEqual(len(set(models)), len(models), "reviewers must differ")
+        self.assertTrue(all(i["pr"] == 42 for i in out.items))
+
+    def test_no_pull_request_short_circuits_to_the_join(self):
+        import asyncio as aio
+        from graph import Spawn
+        g = self._graph()
+        out = aio.run(g.nodes["pr_fanout_t1"].fn({"results": {"publish_t1": {}}, "runs": {}}))
+        self.assertNotIsInstance(out, Spawn)
+        self.assertTrue(out["no_pr"])
+        e = next(e for e in g.edges if e.src == "pr_fanout_t1" and e.dst == "pr_review_t1")
+        self.assertTrue(e.when(out, {}))
+
+    def test_the_join_tallies_the_spawned_verdicts(self):
+        import asyncio as aio
+        g = self._graph()
+        join = g.nodes["pr_review_t1"].fn
+        orig = code_tasks.gitstore._gh
+        code_tasks.gitstore._gh = lambda *a, **k: aio.sleep(0, result=(0, "", ""))
+        try:
+            with capture_events() as ev:
+                out = aio.run(join({"results": {
+                    "pr_fanout_t1": {"pr": 7, "round": 1, "reviewers": ["A", "B"]},
+                    "pr_reviewer_t1": [
+                        {"model": "A", "approve": True, "issues": []},
+                        {"model": "B", "approve": False, "issues": ["missing test"]}]},
+                    "runs": {}}))
+        finally:
+            code_tasks.gitstore._gh = orig
+        self.assertFalse(out["approved"])
+        self.assertEqual(out["approvals"], ["A"])
+        self.assertEqual(out["issues"], ["[B] missing test"])
+        rev = [f for t, f in ev.seen if t == "task.pr_reviewed"]
+        self.assertEqual(rev[0]["n_issues"], 1)
+
+    def test_every_reviewer_crashing_is_inconclusive_at_the_join(self):
+        import asyncio as aio
+        g = self._graph()
+        join = g.nodes["pr_review_t1"].fn
+        orig = code_tasks.gitstore._gh
+        code_tasks.gitstore._gh = lambda *a, **k: aio.sleep(0, result=(0, "", ""))
+        try:
+            out = aio.run(join({"results": {
+                "pr_fanout_t1": {"pr": 7, "round": 1, "reviewers": ["A", "B"]},
+                "pr_reviewer_t1": [
+                    {"model": "A", "approve": False, "crashed": True, "issues": ["x"]},
+                    {"model": "B", "approve": False, "crashed": True, "issues": ["y"]}]},
+                "runs": {}}))
+        finally:
+            code_tasks.gitstore._gh = orig
+        self.assertTrue(out["inconclusive"])
+        self.assertEqual(out["inconclusive_n"], 1)
+        self.assertEqual(sorted(out["crashed"]), ["A", "B"])
+
+    def test_the_pipeline_diagram_now_shows_the_fanout(self):
+        import dashboard
+        topo = dashboard._build_graph_topologies()["code"]
+        names = {n["name"] for n in topo["nodes"]}
+        self.assertIn("pr_fanout", names)
+        self.assertIn("pr_reviewer", names)

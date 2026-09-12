@@ -1077,12 +1077,24 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         head=head, note=note)
             return {"published": True, "pr": number, "url": url, "head": head}
 
-        async def pr_review(ctx):
-            """N independent reviewers read the real PR diff. All must approve."""
+        async def pr_fanout(ctx):
+            """Pick the reviewers and SPAWN one graph node per reviewer.
+
+            The reviewers used to fan out inside a single node via
+            asyncio.gather, which made them invisible to the graph: not in
+            the diagram, not checkpointed, not individually retryable, and a
+            crashed reviewer surfaced only as a field on its parent's result.
+            Each is now a real node — pr_reviewer_<tid> — with its own retry
+            policy and timeout, joined at pr_review_<tid>. Width is decided
+            here at runtime from the eligible pool, which is what dynamic
+            fan-out is for.
+            """
+            from graph import Spawn
             pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
             number = pub.get("pr")
             if not number:
-                return {"approved": False, "issues": ["no pull request to review"]}
+                return {"no_pr": True, "approved": False,
+                        "issues": ["no pull request to review"]}
             round_n = ctx.get("runs", {}).get(f"pr_review_{tid}", 0) + 1
             prior_r = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
             diff = await gitstore.pr_diff(repo, number)
@@ -1090,88 +1102,78 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # other, so two approvals mean two genuinely separate readings.
             impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
             pool = _eligible_pr_reviewers(impl_fam, pol)
-            # Pick the LEAST CONTENDED eligible models, not a fixed order.
-            # The fixed order sent every review to Kimi and GLM while DeepSeek
-            # sat idle, so tasks waited 30 minutes for a slot another model
-            # could have served at once (260 cap_wait events in one hour).
-            #
-            # Contention is whichever ceiling binds FIRST — the model's own cap
-            # or its harness's. Sorting on the model alone sent reviews to GLM
-            # and DeepSeek while the single opencode pool they share sat at 5/5
-            # with seven reviewers queued behind it and the kimi harness idle at
-            # 1/3. A model under its own cap is not available if its harness
-            # is full.
+            # Least-contended first; contention is whichever ceiling binds
+            # first, the model's own cap or its harness's (_reviewer_pressure).
             try:
                 usage = store.lease_usage()
             except Exception:
                 usage = {}
-
-            pool.sort(key=lambda m: (_reviewer_pressure(m, usage),
-                                     usage.get(m, 0)))
+            pool.sort(key=lambda m: (_reviewer_pressure(m, usage), usage.get(m, 0)))
             chosen = pool[:max(1, config.PR_REVIEWERS)]
+            items = [{"model": m, "pr": number, "round": round_n, "diff": diff,
+                      "n_reviewers": len(chosen),
+                      "prior_issues": prior_r.get("issues") or []} for m in chosen]
+            return Spawn(f"pr_reviewer_{tid}", items, f"pr_review_{tid}",
+                         result={"spawned": len(chosen), "reviewers": chosen,
+                                 "pr": number, "round": round_n})
 
-            async def one(model):
-                # Never let one reviewer take the whole graph down with it: a
-                # crashed or unbuildable reviewer is a rejection with a reason,
-                # not an exception that orphans an open PR.
-                # "pr_reviewer", not "reviewer": these are the gate on an open
-                # PR and they are the scarcest thing in the fleet (PR_REVIEWERS
-                # cross-family models per round). The dashboard separates them
-                # from the pre-PR gate reviewer so a reviewer queue is legible.
-                try:
-                    drv = _driver(model, "pr_reviewer", pol)
-                    res = await drv.run(
-                        _pr_review_prompt(t, diff, len(chosen), round_n,
-                                          prior_r.get("issues") or []),
-                        await worktree(ctx),
-                        task_id=f"{tid}-pr{round_n}")
-                except (DriverError, ValueError) as exc:
-                    # A reviewer that crashed did NOT review. Reporting that as
-                    # a rejection posted "changes requested: reviewer crashed"
-                    # to a public PR and sent the implementer back to fix
-                    # issues that did not exist — and burned one of three PR
-                    # rounds doing it, so three infrastructure blips failed a
-                    # perfectly good task.
-                    return model, {"approve": False, "crashed": True,
-                                   "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
-                verdict = _parse_approval(res.text)
-                store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
-                                       round_n, res.exit_code, res.transcript_path,
-                                       res.seconds, verdict=json.dumps(verdict)[:500])
-                return model, verdict
+        async def pr_reviewer(ctx):
+            """ONE reviewer reads the PR diff. A graph node, so it is visible,
+            checkpointed and retryable on its own."""
+            it = ctx["spawn"]
+            model = it["model"]
+            try:
+                drv = _driver(model, "pr_reviewer", pol)
+                res = await drv.run(
+                    _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
+                                      it["prior_issues"]),
+                    await worktree(ctx),
+                    task_id=f"{tid}-pr{it['round']}")
+            except (DriverError, ValueError) as exc:
+                # A reviewer that crashed did NOT review. Reported as such —
+                # never as a rejection — so the join retries the review rather
+                # than sending the implementer to fix nothing.
+                return {"model": model, "approve": False, "crashed": True,
+                        "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
+            verdict = _parse_approval(res.text)
+            store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
+                                   it["round"], res.exit_code, res.transcript_path,
+                                   res.seconds, verdict=json.dumps(verdict)[:500])
+            verdict["model"] = model
+            return verdict
 
-            outcomes = await asyncio.gather(*[one(m) for m in chosen])
+        async def pr_review(ctx):
+            """The JOIN: every reviewer is in. Tally, post to GitHub, decide."""
+            fan = ctx.get("results", {}).get(f"pr_fanout_{tid}") or {}
+            if fan.get("no_pr"):
+                return {"approved": False, "issues": fan["issues"], "approvals": [],
+                        "reviewers": [], "crashed": [], "inconclusive": False,
+                        "inconclusive_n": 0, "pr": None, "round": 0}
+            number, round_n = fan.get("pr"), fan.get("round", 1)
+            chosen = fan.get("reviewers") or []
+            prior_r = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
+            verdicts = ctx.get("results", {}).get(f"pr_reviewer_{tid}") or []
+            outcomes = [(v.get("model"), v) for v in verdicts]
             issues, approvals, crashed, approved, inconclusive = \
                 _tally_reviews(outcomes)
             prior_incon = (prior_r or {}).get("inconclusive_n", 0)
             inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
-            # The issue TEXT, not just a count. "3 issues" tells an operator
-            # nothing about whether the reviewers found something real; the
-            # dashboard could only ever show the number, so the actual verdict
-            # lived on GitHub and nowhere else.
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
                         reviewers=chosen, n_issues=len(issues),
                         issues=[i[:400] for i in issues[:10]],
                         crashed=crashed, inconclusive=inconclusive)
-            # Post each verdict AS A GITHUB REVIEW, not just internally. The
-            # approvals existed only in our event log, so a PR merged by two
-            # AI reviewers showed "0 reviews" on GitHub — the trail was
-            # invisible exactly where a human would look for it.
+            # Post each verdict AS A GITHUB REVIEW so the trail is visible where
+            # a human looks for it. A crashed reviewer gets a neutral note, never
+            # a formal rejection: it did not read the diff.
             for model, v in outcomes:
                 if v.get("crashed"):
-                    # A neutral note, never a formal rejection: this reviewer
-                    # never read the diff and must not appear to have judged it.
                     body = (f"**{model}** (round {round_n}) — review could not "
                             f"run: {'; '.join(v['issues'])[:400]}")
                 else:
                     body = (f"**{model}** (round {round_n}) — "
                             + ("approved." if v["approve"] else "changes requested:\n\n"
                                + "\n".join(f"- {i}" for i in v["issues"][:20])))
-                # A bot cannot formally approve its own repo's PR, so an
-                # approval is posted as a comment and a rejection uses
-                # --request-changes where permitted; both fall back to a plain
-                # comment so the verdict is never lost.
                 rc = 1
                 if not v.get("crashed"):
                     rc, _, _ = await gitstore._gh(
@@ -1298,9 +1300,27 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         chain = {"alloc": alloc, "implement": implement, "gate": gate,
                  "review": review, "escalate": escalate, "publish": publish,
-                 "pr_review": pr_review, "pr_merge": pr_merge, "fail": fail}
+                 "pr_fanout": pr_fanout, "pr_review": pr_review,
+                 "pr_merge": pr_merge, "fail": fail}
         for suffix, fn in chain.items():
             g.node(f"{suffix}_{tid}", fn)
+        # One reviewer per node, with the per-node policy the fan-out makes
+        # possible: a harness that dies on the way in is retried HERE, and the
+        # join only ever sees crashes that survived the retries. The timeout is
+        # a backstop above the driver's own; a reviewer cannot hold the join
+        # open indefinitely.
+        from graph import Retry
+        g.node(f"pr_reviewer_{tid}", pr_reviewer,
+               retry=Retry(attempts=3, backoff=20.0, max_backoff=120.0,
+                           on=(DriverError,)),
+               timeout=config.DRIVER_TIMEOUT + 600)
+        # Declared so validate() sees them; at runtime Spawn and the join do
+        # the routing and these two edges never fire on their own.
+        g.edge(f"pr_fanout_{tid}", f"pr_reviewer_{tid}")
+        g.edge(f"pr_reviewer_{tid}", f"pr_review_{tid}")
+        # A fanout with no PR to review goes straight to the join's rejection.
+        g.edge(f"pr_fanout_{tid}", f"pr_review_{tid}",
+               when=lambda r, c: bool(r.get("no_pr")), on_drain=True)
         g.edge(f"alloc_{tid}", f"implement_{tid}")
         g.edge(f"implement_{tid}", f"gate_{tid}")
         g.edge(f"gate_{tid}", f"review_{tid}", when=lambda r, c: r["passed"])
@@ -1319,19 +1339,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # edges still fire so the PR gets reviewed and merged instead of being
         # orphaned on GitHub. The rework edge below is deliberately not marked —
         # draining must not start a fresh implementer.
-        g.edge(f"publish_{tid}", f"pr_review_{tid}",
+        g.edge(f"publish_{tid}", f"pr_fanout_{tid}",
                when=lambda r, c: bool(r.get("published")), on_drain=True)
         g.edge(f"pr_review_{tid}", f"pr_merge_{tid}",
                when=lambda r, c: bool(r.get("approved")), on_drain=True)
         # A resync rewrote the branch, so the approval the PR already has no
         # longer covers what is on it. Back to review, not straight to merge.
-        g.edge(f"pr_merge_{tid}", f"pr_review_{tid}",
+        g.edge(f"pr_merge_{tid}", f"pr_fanout_{tid}",
                when=lambda r, c: bool(r.get("resynced")), on_drain=True)
         # An inconclusive round reached no verdict: every reviewer crashed and
         # nobody read the diff. Retry the REVIEW — sending the implementer back
         # to fix issues that do not exist wastes a model and burns a real round.
         # on_drain, because the PR is already open and this is still landing it.
-        g.edge(f"pr_review_{tid}", f"pr_review_{tid}",
+        g.edge(f"pr_review_{tid}", f"pr_fanout_{tid}",
                when=lambda r, c: r.get("inconclusive")
                and r.get("inconclusive_n", 0) < config.PR_MAX_INCONCLUSIVE,
                on_drain=True)
