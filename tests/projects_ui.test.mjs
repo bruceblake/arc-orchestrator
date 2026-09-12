@@ -234,6 +234,41 @@ if (vb) for (const m of cyc.matchAll(/<rect x="(\d+(?:\.\d+)?)"[^>]*width="(\d+)
 ok("cyclic graph: loop-back drawn, nodes stay in the viewBox",
    inside && cyc.includes('stroke="#d29922"'));
 
+// ---- project chains (project.after) ------------------------------------
+// The runner has honoured `after` for weeks; the page never showed it. A
+// chained project must say what it waits on, the upstream must say who
+// waits on it, and the chain gate must be drawn into the DAG in front of
+// the head tasks — dashed, clickable, opening the upstream project.
+const chained = mkProj("panel.json", "graph shapes panel", "chained", {
+  chain: { after: ["picker.json"], ready: false, gate: null, blocks: [],
+           deps: [{file: "picker.json", title: "repo picker", exists: true, n_tasks: 3, merged: 1, failed: [], state: "waiting"}] },
+  dag: { nodes: [{id: "after:picker.json", kind: "chain", file: "picker.json", title: "after repo picker", status: "pending", merged: 1, n_tasks: 3},
+                 {id: "api", status: "pending"}, {id: "panel", status: "pending"}],
+         edges: [{src: "after:picker.json", dst: "api", kind: "chain"}, {src: "api", dst: "panel"}] } });
+const upstream = mkProj("picker.json", "repo picker", "running", {
+  run_pid: 77, statuses: {running: 1, merged: 1}, n_tasks: 3,
+  chain: { after: [], ready: true, gate: null, deps: [], blocks: [{file: "panel.json", title: "graph shapes panel"}] } });
+const cc = api.card(chained, 0), cu = api.card(upstream, 1);
+ok("chained card names what it waits on, with progress",
+   cc.includes("waits for picker") && cc.includes("1/3") && cc.includes("chip chainwait"));
+ok("upstream card counts who waits on it", cu.includes("1 waiting on this"));
+const cdag = api.taskDag(chained.dag, {size: "full", file: "panel.json"});
+ok("chain gate drawn dashed in front of the head, clickable to the upstream project",
+   cdag.includes('data-kind="chain"') && cdag.includes('data-file="picker.json"')
+   && cdag.includes('stroke-dasharray="5 3"') && cdag.includes("1/3 merged"));
+// gate held by a live run: the node pulses like a running task
+const held = JSON.parse(JSON.stringify(chained)); held.run_pid = 99;
+held.chain.gate = {state: "waiting", ts: Date.now() / 1000};
+held.dag.nodes[0].status = "running";
+ok("a run parked at the chain gate is labelled, not 'live'",
+   api.card(held, 0).includes("waiting at chain gate"));
+// (PROJECTS is the very array pollProjects took from the fixture.)
+FIX.projects.push(chained); api.renderProjects();
+ok("chain phase has its own shelf", document.querySelector("#phase-filter").innerHTML.includes("waiting on another project"));
+FIX.projects.pop(); api.renderProjects();
+ok("…which disappears with the chained project", !document.querySelector("#phase-filter").innerHTML.includes("waiting on another project"));
+ok("a project without a chain shows no chain chip", !api.card(FIX.projects[3], 0).includes("⛓"));
+
 console.log(`projects_ui: ${good} passed, ${bad.length} failed`);
 if (bad.length) {
   console.error("projects_ui: FAIL — " + bad.join("; "));

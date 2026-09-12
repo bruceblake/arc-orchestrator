@@ -59,8 +59,23 @@ function taskDag(dag, opts) {
       const y = maxY + NH + 12 + Math.min(bi++, 2) * 7;
       s += `<path d="M${a.x + NW / 2},${a.y + NH} C${a.x + NW / 2},${y} ${b.x + NW / 2},${y} ${b.x + NW / 2},${b.y + NH}" stroke="#d29922" stroke-dasharray="4 3" fill="none"><title>loop back (cycle): ${esc(e.src)} → ${esc(e.dst)}</title></path>`;
       continue; }
-    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"${e.conditional ? ' stroke-dasharray="4 3"' : ""}/>`; }
+    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"${e.conditional || e.kind === "chain" ? ' stroke-dasharray="4 3"' : ""}/>`; }
   for (const n of nodes) { const p = pos[n.id]; if (!p) continue;
+    if (n.kind === "chain") {
+      // The chain gate (project.after): drawn dashed, in front of the heads,
+      // where chain_wait sits in the real graph. Click = open that project.
+      const c = STATUSC[n.status] || STATUSC.pending;
+      const prog = n.n_tasks != null ? `${n.merged || 0}/${n.n_tasks} merged` : "not planned yet";
+      const word = {merged: "ready", running: "waiting", failed: "blocked", pending: "waiting"}[n.status] || n.status;
+      s += `<g class="node chain" data-kind="chain" data-file="${attr(n.file || "")}" role="button" tabindex="0" aria-label="${attr(`${n.title}: ${word}, ${prog} — open that project`)}">` +
+        `<title>${esc(`${n.title}\n${word} · ${prog}\nthis project allocates no worktree until every task there is merged`)}</title>` +
+        `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="${mini ? 5 : 7}" fill="#0d1117" stroke="${c}" stroke-width="1.6" stroke-dasharray="5 3" class="${n.status === "running" ? "run" : ""}"/>` +
+        (mini && !labFs ? "" :
+        `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 12.5 : 17)}" font-size="${mini ? labFs : 11}" fill="#c9d1d9">⛓ ${esc(String(n.file || n.title).replace(/\.json$/, "").slice(0, mini ? Math.max(5, Math.floor((NW - 18) / 6)) : 24))}</text>` +
+        `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 24.5 : 33)}" font-size="${mini ? labFs : 9}" fill="${c}">${esc(word)} · ${esc(prog)}</text>`) +
+        `</g>`;
+      continue;
+    }
     const c = topo ? ((dag.starts || []).includes(n.id) ? "#58a6ff" : n.gather ? "#bc8cff" : "#8b949e") : (STATUSC[n.status] || STATUSC.pending);
     const run = !topo && (n.status === "running" || n.live);
     const att = n.attempts || 0, escn = n.escalations || 0;
@@ -97,8 +112,28 @@ function taskDag(dag, opts) {
 function bindDagClicks(sel, runsCache) {
   document.querySelectorAll(sel + " g.node").forEach(g => g.onclick = ev => {
     ev.stopPropagation();
+    if (g.dataset.kind === "chain") { if (g.dataset.file) openDetail(g.dataset.file); return; }
     openTaskTranscript(g.dataset.f, g.dataset.t, runsCache || null);
   });
+}
+
+// ---- project chains (project.after) ----
+// The runner has honoured `after` since the chain gate landed; the page never
+// showed it, so a chained project sat under "never run" with no hint that it
+// could not start, and a run parked in chain_wait looked like a run doing
+// nothing. One chip per direction: what this waits on, and who waits on it.
+function chainChips(p) {
+  const c = p.chain; if (!c) return "";
+  let out = "";
+  for (const d of (c.deps || [])) {
+    const cls = d.state === "failed" ? "failed" : d.state === "ready" ? "merged" : "chainwait";
+    const prog = d.n_tasks != null ? `${d.merged}/${d.n_tasks}` : "unplanned";
+    const word = d.state === "failed" ? "blocked by" : d.state === "ready" ? "after" : "waits for";
+    out += ` <span class="chip ${cls}" title="${attr(`project.after: allocates nothing until every task of ${d.title} is merged (${prog} merged)`)}">⛓ ${word} ${esc(d.file.replace(/\.json$/, ""))} ${d.state === "ready" ? "✓" : prog}</span>`;
+  }
+  if ((c.blocks || []).length)
+    out += ` <span class="chip pending" title="${attr((c.blocks || []).map(b => b.title).join("\n"))}">→ ${c.blocks.length} waiting on this</span>`;
+  return out;
 }
 
 // ---- projects list ----
@@ -115,7 +150,7 @@ function card(p, i) {
     <div class="prow" data-i="${i}" role="button" tabindex="0" aria-expanded="${open}" aria-label="open project ${attr(p.title)}">
       <span class="chev">▶</span>
       <span class="pc" title="${attr(p.repo || "")}">${esc(repoShort(p.repo))}</span>
-      <span class="pt"><b>${esc(p.title)}</b> ${liveBadge(p)}${p.archived ? ' <span class="chip pending" title="archived — hidden from the active list">archived</span>' : ""}</span>
+      <span class="pt"><b>${esc(p.title)}</b> ${liveBadge(p)}${chainChips(p)}${p.archived ? ' <span class="chip pending" title="archived — hidden from the active list">archived</span>' : ""}</span>
       <span class="pc"><span class="chip merged">${done}/${tot} merged</span>${failed ? ` <span class="chip failed">${failed} failed</span>` : ""}</span>
       <span class="pc">${fmtT(p.last_activity)}</span>
       <span><button class="act seg" data-arch="${attr(p.file)}" data-on="${p.archived ? 1 : 0}">${p.archived ? "restore" : "archive"}</button></span>
@@ -163,6 +198,9 @@ function progressLines(progress) {
 // process are leftovers from a killed run, which is the single most common
 // wrong state this fleet gets into. That now says so, and says what to do.
 function liveBadge(p) {
+  const g = p.chain && p.chain.gate;
+  if (p.run_pid && g && g.state === "waiting" && !p.active)
+    return `<span class="chip chainwait" title="the run is holding at the chain gate — no worktree until the upstream project is merged">⛓ waiting at chain gate</span>`;
   if (p.run_pid) return `<span class="live" title="process ${esc(p.run_pid)} is running this project">LIVE</span>`;
   if (p.active) return `<span class="chip failed" title="marked running in the database, but no process owns this task file — a run was killed. Run: main.py code reconcile">stale</span>`;
   return "";
@@ -260,6 +298,7 @@ function renderProjects() {
     ["running",   "running now"],
     ["in_review", "pull requests awaiting review"],
     ["attention", "needs attention"],
+    ["chained",   "waiting on another project"],
     ["new",       "never run"],
     ["done",      "done"],
   ];
