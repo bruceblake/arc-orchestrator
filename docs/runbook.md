@@ -759,3 +759,26 @@ dashboard.
 - [`model-tiers.md`](model-tiers.md) — model routing tiers and the cross-review matrix.
 - [`concurrency-limits.md`](concurrency-limits.md) — per-model caps and the driver semaphores.
 - [`taskfile-schema.md`](taskfile-schema.md) — exact task-file schema and validation rules.
+
+## Daily audit and database backup
+
+The dashboard server runs the audit itself, once every 24 hours, because this
+fleet lives in WSL2: there is no cron daemon, systemd is degraded, and — the
+part that makes any external scheduler moot — the box sleeps when idle. The
+dashboard is the process that is awake whenever you are.
+
+- **When:** on dashboard start if it has never run or the last run is over 24h
+  old; then every 24h. The last-run time is persisted in `logs/audit/last-run`,
+  so restarting the dashboard does not re-run it.
+- **What it does:** everything `main.py audit` does, plus `--snapshot` — a
+  copy of every taskfile to `logs/task-snapshots/` and an **online sqlite
+  backup** of `orchestrator.db` to `logs/db-backups/`, integrity-checked
+  before it counts and retained for 14 days (never fewer than 3 files).
+- **What it never does:** `reconcile --apply`. Reaping worktrees from a
+  background thread while you are mid-launch is how a cleanup becomes an
+  outage; `main.py audit --fix` stays a deliberate command.
+- **Where to read it:** `GET /api/audit` serves the newest report;
+  `logs/audit/<stamp>.json` keeps the last 30.
+- **Restoring:** `cp logs/db-backups/orchestrator-<stamp>.db orchestrator.db`
+  with the dashboard and all runs stopped. Every backup was opened and
+  `PRAGMA integrity_check`ed when it was made.

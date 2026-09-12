@@ -314,6 +314,75 @@ def audit_gates(store=None, tasks_dir=None, repo=None):
     return out
 
 
+DB_BACKUP_KEEP_DAYS = 14
+
+
+def audit_db_backup(db_path=None, snapshot=False, keep_days=DB_BACKUP_KEEP_DAYS):
+    """The database is the fleet's memory, and nothing copied it.
+
+    orchestrator.db holds every task's status, every lease, every error
+    fingerprint, every harness run. The event log rotates; the taskfiles are
+    snapshotted; the database just grew. One bad write on a full disk and the
+    fleet forgets which of eighty tasks merged.
+
+    The copy uses sqlite's online backup API, not a file copy: a file copy of a
+    WAL-mode database mid-write is corrupt, silently, and you find out when you
+    restore it. Each backup is then OPENED and integrity-checked before it is
+    counted, because a backup nobody has verified is a hope, not a backup.
+
+    Backups go to logs/db-backups/ (gitignored). Retained for `keep_days`.
+    """
+    import sqlite3
+    src = Path(db_path or config.DB_PATH)
+    dest_dir = Path(config.ROOT) / "logs" / "db-backups"
+    out = []
+    if not src.exists():
+        return [_finding("warning", "backup", "database not found", str(src), "")]
+    existing = sorted(dest_dir.glob("orchestrator-*.db")) if dest_dir.is_dir() else []
+    newest_age_h = None
+    if existing:
+        newest_age_h = (time.time() - existing[-1].stat().st_mtime) / 3600
+    if snapshot:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = dest_dir / f"orchestrator-{stamp}.db"
+        try:
+            with sqlite3.connect(str(src)) as a, sqlite3.connect(str(dest)) as b:
+                a.backup(b)
+            with sqlite3.connect(str(dest)) as chk:
+                ok = chk.execute("PRAGMA integrity_check").fetchone()[0]
+                n_tasks = chk.execute("SELECT COUNT(*) FROM code_tasks").fetchone()[0]
+            if ok != "ok":
+                dest.unlink(missing_ok=True)
+                out.append(_finding("critical", "backup",
+                                    "database backup FAILED integrity check", ok,
+                                    "the live database may itself be corrupt — "
+                                    "run PRAGMA integrity_check on it now"))
+            else:
+                out.append(_finding("info", "backup",
+                                    f"database backed up ({dest.stat().st_size // 1024} KB, "
+                                    f"{n_tasks} task rows, integrity ok)",
+                                    str(dest), ""))
+                newest_age_h = 0.0
+        except sqlite3.Error as exc:
+            out.append(_finding("critical", "backup", "database backup failed",
+                                str(exc)[:200], "check disk space and permissions"))
+        # retention: keep the last N days, never fewer than 3 files
+        cutoff = time.time() - keep_days * 86400
+        keep = sorted(dest_dir.glob("orchestrator-*.db"))
+        for old in keep[:-3]:
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+    if newest_age_h is None:
+        out.append(_finding("warning", "backup", "the database has never been backed up",
+                            str(src), "run: main.py audit --snapshot"))
+    elif newest_age_h > 48:
+        out.append(_finding("warning", "backup",
+                            f"newest database backup is {newest_age_h:.0f}h old",
+                            "", "the daily audit is not running — check the scheduler"))
+    return out
+
+
 def audit_tasks_backup(tasks_dir=None, snapshot=False):
     """Taskfiles are the DESIGN of every project and nothing versions them.
 
@@ -548,6 +617,7 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
     findings += audit_pr_collisions(store)
     findings += audit_invariants(store)
     findings += audit_tasks_backup(snapshot=snapshot)
+    findings += audit_db_backup(snapshot=snapshot)
     findings += audit_logs()
     if with_health:
         findings += audit_health()

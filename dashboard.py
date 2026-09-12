@@ -2821,6 +2821,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/queue":
                 return self._json(_queue(Handler.store))
+            if u.path == "/api/audit":
+                import scheduler_audit
+                rep = scheduler_audit.latest()
+                return self._json({"ready": rep is not None, "report": rep,
+                                   "last_run": scheduler_audit.last_run(),
+                                   "due": scheduler_audit.due()})
             if u.path == "/api/errors":
                 q = parse_qs(u.query)
                 return self._json(_errors(q.get("range", ["24h"])[0],
@@ -3050,6 +3056,16 @@ def serve(port=None, db_path=None):
             raise SystemExit(1)
         raise
     log.info("dashboard on http://0.0.0.0:%d (db=%s, events=%s)", port, db_path, config.EVENTS_LOG)
+    # The daily audit runs from here. WSL has no working cron and sleeps when
+    # idle; this server is the process that is awake when the operator is.
+    try:
+        import scheduler_audit
+        scheduler_audit.start(Handler.store)
+        nxt = scheduler_audit.last_run()
+        log.info("daily audit scheduler armed (last run: %s)",
+                 time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt)) if nxt else "never — will run now")
+    except Exception as exc:
+        log.error("daily audit scheduler did not start: %s", exc)
     print(f"dashboard: http://localhost:{port}", flush=True)
     for ip in _lan_addresses():
         print(f"  from your laptop/phone: http://{ip}:{port}  (small screens: http://{ip}:{port}/phone.html)", flush=True)
