@@ -58,8 +58,16 @@ _semaphores = {}
 
 
 def _gate(model):
+    """In-process semaphore, sized to the model's FULL cap.
+
+    The interactive reservation is enforced by the cross-process LEASE, not
+    here: that is the one every run process shares, so it is the only place a
+    reservation actually reserves anything. Sizing this to the batch cap as
+    well would double-charge the reservation and starve interactive work of
+    the slot it was held for.
+    """
     if model not in _semaphores:
-        _semaphores[model] = asyncio.Semaphore(config.driver_limit(model))
+        _semaphores[model] = asyncio.Semaphore(config.driver_limit(model, interactive=True))
     return _semaphores[model]
 
 
@@ -143,7 +151,8 @@ async def wait_for_arc(task_id=None, poll_s=30.0):
             return
 
 
-async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None):
+async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None,
+                         interactive=False):
     """Wait until this model is below its cross-process cap (store holds the
     lease). Emits driver.cap_wait roughly once a minute while waiting.
 
@@ -168,7 +177,7 @@ async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None):
     sub = _slot_subscription(model)
     try:
         return await _lease_wait_loop(model, task_id, emit_ctx, cap, shown,
-                                      deadline, sub)
+                                      deadline, sub, interactive)
     finally:
         if sub is not None:
             with contextlib.suppress(Exception):
@@ -215,10 +224,11 @@ def _slot_subscription(model):
         return None
 
 
-async def _lease_wait_loop(model, task_id, emit_ctx, cap, shown, deadline, sub):
+async def _lease_wait_loop(model, task_id, emit_ctx, cap, shown, deadline, sub,
+                           interactive=False):
     waits = 0
     while True:
-        limit = config.driver_limit(model) if cap is None else cap
+        limit = config.driver_limit(model, interactive) if cap is None else cap
         in_use = _lease_db().acquire_driver_lease(
             model, os.getpid(), task_id, limit, config.DRIVER_LEASE_TTL)
         if in_use is None:
@@ -557,6 +567,11 @@ class Driver:
     harness = "?"
     model = "?"
     role = "?"
+    # Interactive work has a HUMAN waiting on it. Batch work does not. The only
+    # thing this changes is queue position: an interactive driver takes the next
+    # free slot ahead of queued batch work rather than lining up behind it. It
+    # does not raise any cap — the provider's ceiling is the provider's ceiling.
+    interactive = False
 
     def argv(self, prompt, session_id):
         raise NotImplementedError
@@ -696,7 +711,8 @@ class Driver:
             # queue view carries a phantom entry until it ages out.
             await _lease_acquire(self.model, task_id,
                                  {"harness": self.harness, "role": self.role,
-                                  "attempt": attempt, "pid": os.getpid()})
+                                  "attempt": attempt, "pid": os.getpid()},
+                                 interactive=self.interactive)
             try:
                 hgate = _harness_gate(self.harness)
                 if hgate.locked():
@@ -903,7 +919,7 @@ class KimiDriver(Driver):
     harness = "kimi"
     model = "Kimi-K3"
 
-    def __init__(self, role, bench=False):
+    def __init__(self, role, bench=False, interactive=False):
         _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
         if not bench:
             # Kimi-K3 is withdrawn on 2026-09-19. After that this driver has
@@ -918,6 +934,7 @@ class KimiDriver(Driver):
                 raise ValueError(f"KimiDriver may hold "
                                  f"{sorted(config.MODEL_ROLES[self.model])}, not {role!r}")
         self.role = role
+        self.interactive = interactive
 
     def argv(self, prompt, session_id):
         a = ["kimi"]
@@ -932,7 +949,7 @@ class KimiDriver(Driver):
 class OpencodeDriver(Driver):
     harness = "opencode"
 
-    def __init__(self, model, role, bench=False):
+    def __init__(self, model, role, bench=False, interactive=False):
         if not bench:
             # Role permissions come from the roster (config.ROSTER), not from a
             # per-model if-chain here. The chain named models that leave on
@@ -951,6 +968,7 @@ class OpencodeDriver(Driver):
                     f"not {role!r}")
         self.model = model
         self.role = role
+        self.interactive = interactive
 
     def argv(self, prompt, session_id):
         alias = config.harness_model(self.model, "opencode") or f"ARC/{self.model}"

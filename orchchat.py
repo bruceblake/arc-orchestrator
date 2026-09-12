@@ -28,7 +28,7 @@ from pathlib import Path
 import code_tasks
 import config
 import errors
-from drivers import KimiDriver
+from drivers import KimiDriver, OpencodeDriver
 
 SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
@@ -136,6 +136,25 @@ def _history(turns, limit=HISTORY_CHARS):
         kept.append(block)
         size += len(block)
     return "\n\n".join(reversed(kept))
+
+
+def _planner_driver():
+    """The planner for CHAT, which is interactive and therefore different.
+
+    Roster-aware: Kimi-K3 today, GLM-5.3 once Kimi is withdrawn on 2026-09-19.
+    Hardcoding KimiDriver here would have failed outright that morning — the
+    governed pipeline's planner was already fixed, this one was missed.
+
+    `interactive=True` is the real point. A batch planner queueing behind three
+    implementers is fine; a HUMAN waiting on a chat reply behind them is not.
+    Interactive work jumps the driver queue (see drivers.Driver.run).
+    """
+    model = config.PLANNER_MODEL
+    if model is None:
+        raise RuntimeError("no planner-capable model on today's roster")
+    if config.MODEL_HARNESS.get(model) == "kimi":
+        return KimiDriver("planner", interactive=True)
+    return OpencodeDriver(model, "planner", interactive=True)
 
 
 def build_prompt(repo, turns):
@@ -261,7 +280,7 @@ async def run_turn(session, repo):
     # interleave with planner runs in logs/harness/.
     task_id = f"chat-{session}"
     try:
-        res = await KimiDriver("planner").run(
+        res = await _planner_driver().run(
             build_prompt(repo, turns), Path(repo), task_id=task_id)
     except Exception as exc:
         # A crashed planner did not answer. Same containment as the

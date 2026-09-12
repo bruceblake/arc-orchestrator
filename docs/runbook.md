@@ -423,6 +423,13 @@ other drivers with the connection held open. Every planner "stall" on
 4 other Kimi drivers running. That was a healthy process being killed for being
 queued, and the retry ladder then did it eight more times.
 
+**Chat does not queue behind the fleet.** `ARC_INTERACTIVE_RESERVE` (default 1)
+holds one slot on the planner model back from batch work, so a chat reply
+always has somewhere to land instead of waiting out three implementers. It is
+applied only to the planner model, and only while it still leaves batch at
+least two slots — applying it to every model took GLM and DeepSeek from 2 to 1
+and would have halved fleet throughput to protect a path neither serves.
+
 **Read this before shortening `ARC_DRIVER_IDLE_TIMEOUT`.** Silence is not a
 hang. ARC *queues* requests rather than refusing them, and time-to-first-token
 is exactly what stdout silence measures.

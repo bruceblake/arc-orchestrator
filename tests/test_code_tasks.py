@@ -734,11 +734,15 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         """
         caps = {m: config.driver_limit(m)
                 for m in ("GLM-5.3", ENTRY, STRONGEST)}
-        busiest = max(caps, key=lambda m: caps[m])
+        roomiest = max(caps.values())
+        if len({*caps.values()}) == 1:
+            self.skipTest("all caps equal today — there is no relative saturation "
+                          "to observe; the rule is exercised by the cap test below")
         # Everything at ONE in use: the model with the largest cap is the least
-        # contended and must be picked first.
+        # contended and must be picked first. Compared by CAP, not by name: a
+        # tie makes max() arbitrary, and the rule is about the ratio.
         picked = self._pick({m: 1 for m in caps})
-        self.assertEqual(picked[0], busiest)
+        self.assertEqual(caps[picked[0]], roomiest)
 
     def test_a_model_at_its_cap_is_never_preferred_to_an_idle_one(self):
         caps = {m: config.driver_limit(m)

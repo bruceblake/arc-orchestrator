@@ -446,3 +446,67 @@ class PerRoleIdleBudgets(unittest.TestCase):
         # The measured time-to-first-token tail is ~309 s unloaded; at cap the
         # request waits behind the others. The budget must clear that with room.
         self.assertGreaterEqual(config.idle_timeout_for("planner"), 900)
+
+
+class TheApiIsTheFactTheDatesAreThePlan(unittest.TestCase):
+    """A roster date is a promise someone else has to keep.
+
+    On 2026-09-12 the roster said DeepSeek-V4.1-Flash had replaced V4. The API
+    had never heard of 4.1 and still served V4. Trusting the date alone routed
+    the entire medium tier at a model that does not exist; trusting it in the
+    other direction retired the only medium model the fleet actually had.
+    """
+
+    def _roster(self, served, day="2026-09-12"):
+        import datetime
+        orig = config.available_models
+        config.available_models = lambda *a, **k: served
+        try:
+            return {m for m, *_ in config.live_roster(datetime.date.fromisoformat(day))}
+        finally:
+            config.available_models = orig
+
+    def test_a_dated_arrival_the_api_does_not_serve_is_deferred(self):
+        live = self._roster({"DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"})
+        self.assertNotIn("DeepSeek-V4.1-Flash", live)
+
+    def test_an_incumbent_stays_while_its_replacement_is_not_real(self):
+        live = self._roster({"DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"})
+        self.assertIn("DeepSeek-V4-Flash", live,
+                      "retiring it would leave the fleet with no medium tier")
+
+    def test_the_swap_happens_the_day_the_api_serves_it(self):
+        live = self._roster({"DeepSeek-V4.1-Flash", "GLM-5.3", "Kimi-K3"})
+        self.assertIn("DeepSeek-V4.1-Flash", live)
+        self.assertNotIn("DeepSeek-V4-Flash", live)
+
+    def test_unknown_availability_falls_back_to_the_dates(self):
+        # No snapshot, or the VPN is down: an unverifiable claim must not empty
+        # the roster.
+        live = self._roster(None)
+        self.assertTrue(live)
+
+    def test_an_empty_api_answer_does_not_empty_the_fleet(self):
+        live = self._roster(set())
+        self.assertTrue(live, "a bad snapshot must not leave the fleet with no models")
+
+
+class InteractiveWorkGetsAReservedSlot(unittest.TestCase):
+    """A human waiting on a chat reply must not queue behind batch work."""
+
+    def test_the_planner_holds_a_slot_back_from_batch(self):
+        p = config.PLANNER_MODEL
+        if config.driver_limit(p, interactive=True) - config.INTERACTIVE_RESERVE < config.MIN_BATCH_SLOTS:
+            self.skipTest("planner cap too small to reserve from today")
+        self.assertLess(config.driver_limit(p), config.driver_limit(p, interactive=True))
+
+    def test_no_other_model_loses_a_slot(self):
+        for m in config.IMPLEMENTER_MODELS:
+            if m == config.PLANNER_MODEL:
+                continue
+            self.assertEqual(config.driver_limit(m), config.driver_limit(m, interactive=True),
+                             f"{m} does not serve chat and must keep its full cap")
+
+    def test_batch_never_drops_below_the_floor(self):
+        for m in config.IMPLEMENTER_MODELS:
+            self.assertGreaterEqual(config.driver_limit(m), 1)

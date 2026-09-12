@@ -35,9 +35,12 @@ def _planner_cls(reply="", error=None):
     state = {"calls": 0, "prompt": None, "worktree": None, "task_id": None}
 
     class _Stub:
-        def __init__(self, role):
+        def __init__(self, role, bench=False, interactive=False):
             assert role == "planner", "chat must construct the planner role"
+            # Chat has a human waiting, so it must ask for the interactive slot.
+            assert interactive, "chat planning must be interactive"
             state["role"] = role
+            state["interactive"] = interactive
 
         async def run(self, prompt, worktree, session_id=None, task_id=None):
             state["calls"] += 1
@@ -101,7 +104,11 @@ class TestOrchChat(unittest.TestCase):
             turns = self._user_turns("please build the thing")
         self._write_turns(session, turns)
         cls, state = _planner_cls(reply, error)
-        with mock.patch.object(orchchat, "KimiDriver", cls):
+        # orchchat._planner_driver() chooses the class from the roster (Kimi
+        # today, GLM once Kimi is withdrawn), so patch the FACTORY — patching
+        # KimiDriver alone stopped covering the path the day the roster moved.
+        with mock.patch.object(orchchat, "_planner_driver",
+                               lambda: cls("planner", interactive=True)):
             code = asyncio.run(orchchat.run_turn(session, str(repo)))
         return code, state, self.chat_dir / f"{session}.jsonl"
 

@@ -360,16 +360,88 @@ def roster_date():
     return _dt.date.today()
 
 
-def live_roster(day=None):
+_AVAIL_CACHE = {"ts": 0.0, "models": None}
+
+
+def available_models(max_age_s=3600):
+    """Model ids the PROVIDER actually serves, from logs/model-availability.json.
+
+    Returns None when there is no usable snapshot — which means "unknown", not
+    "none", and callers must fall back to the dates rather than concluding the
+    fleet has no models. Refreshed by `main.py models refresh` and by the daily
+    audit; never fetched at import, because a config module that makes a
+    network call is a config module that hangs on a dead VPN.
+    """
+    import json as _json
+    import time as _time
+    if _AVAIL_CACHE["models"] is not None and _time.time() - _AVAIL_CACHE["ts"] < 60:
+        return _AVAIL_CACHE["models"]
+    path = Path(ROOT) / "logs" / "model-availability.json"
+    try:
+        d = _json.loads(path.read_text())
+        if _time.time() - float(d.get("ts", 0)) > max_age_s * 24:
+            return None                      # far too old to trust
+        models = set(d.get("models") or [])
+    except (OSError, ValueError, TypeError):
+        return None
+    _AVAIL_CACHE.update(ts=_time.time(), models=models)
+    return models
+
+
+def live_roster(day=None, check_api=True):
+    """Rows live TODAY: inside their date window AND actually served.
+
+    The dates are a plan; the API is the fact. A row whose date has arrived but
+    which the provider does not serve yet is NOT live — on 2026-09-12 the
+    roster said DeepSeek-V4.1-Flash had replaced V4, the API still served only
+    V4, and every task routed to the medium tier would have failed with an
+    unknown model. A date is a promise someone else has to keep.
+
+    When availability is unknown (no snapshot, or the VPN is down) the dates
+    are used as written: an unverifiable claim must not empty the roster.
+    """
     day = day or roster_date()
-    out = []
+    served = available_models() if check_api else None
+    out, deferred, overstayed = [], [], []
     for m, fam, harness, tier, cap, roles, start, end in ROSTER:
         if start and day < _dt.date.fromisoformat(start):
             continue
         if end and day >= _dt.date.fromisoformat(end):
+            # Its retirement date has passed. Honour that only if the provider
+            # has ACTUALLY stopped serving it: on 2026-09-12 the roster retired
+            # DeepSeek-V4-Flash for a 4.1 the API had never heard of, which
+            # would have left the fleet with no medium tier at all. An incumbent
+            # stays until its replacement is real.
+            if served is None or m not in served:
+                continue
+            overstayed.append(m)
+        if served is not None and m not in served:
+            deferred.append(m)
             continue
         out.append((m, fam, harness, tier, cap, roles))
+    if not out and served is not None:
+        # Everything scheduled is unavailable. Fall back to the dates rather
+        # than leaving the fleet with no models at all.
+        return live_roster(day, check_api=False)
+    if deferred:
+        _DEFERRED_MODELS.extend(deferred)
+    if overstayed:
+        _OVERSTAYED_MODELS.extend(overstayed)
     return out
+
+
+_DEFERRED_MODELS = []
+_OVERSTAYED_MODELS = []
+
+
+def deferred_models():
+    """Roster rows whose date has arrived but which the API does not serve."""
+    return sorted(set(_DEFERRED_MODELS))
+
+
+def overstayed_models():
+    """Rows past their retirement date that the API still serves — kept live."""
+    return sorted(set(_OVERSTAYED_MODELS))
 
 
 def roster_changes(day=None, horizon_days=14):
@@ -602,15 +674,41 @@ def harness_limit(harness):
     return _HARNESS_CAP.get(harness, 8)
 
 
-def driver_limit(model):
-    """Max concurrent harness instances for a model (ARC cap minus headroom)."""
+# A slot held back from BATCH work so interactive work always has somewhere to
+# land. Without it a chat reply queues behind a full fleet and the human waits
+# twenty minutes for a planner that is working perfectly.
+#
+# Reserved ONLY on the planner model, and only while that leaves batch at least
+# two slots. Applying it to every model took GLM and DeepSeek from 2 to 1 —
+# halving fleet throughput to protect a path neither of them serves. The cost
+# should fall on the one model chat actually uses.
+INTERACTIVE_RESERVE = int(os.getenv("ARC_INTERACTIVE_RESERVE", "1"))
+MIN_BATCH_SLOTS = 2
+
+
+def _apply_reserve(model, cap, interactive):
+    """`cap` for interactive callers; one fewer for batch, where it is affordable."""
+    if interactive or model != PLANNER_MODEL:
+        return cap
+    if cap - INTERACTIVE_RESERVE < MIN_BATCH_SLOTS:
+        return cap          # too small to give one away
+    return cap - INTERACTIVE_RESERVE
+
+
+def driver_limit(model, interactive=False):
+    """Max concurrent harness instances for a model.
+
+    Interactive callers see the full measured cap; batch callers see one fewer
+    (INTERACTIVE_RESERVE), so a chat is never stuck behind a full fleet. Never
+    returns less than 1 — reserving a slot must not make a model unusable.
+    """
     override = os.getenv(f"ARC_DRIVER_LIMIT_{MODEL_FAMILY[model].upper().replace('-', '_')}")
     if override:
         try:
-            return int(override)
+            return _apply_reserve(model, int(override), interactive)
         except ValueError:
             pass
-    return _MODEL_DRIVER_CAP[model]
+    return _apply_reserve(model, _MODEL_DRIVER_CAP[model], interactive)
 
 # --- graph admission control ------------------------------------------------
 # Bounded admission (graph.py max_in_flight) stops a run from starting every

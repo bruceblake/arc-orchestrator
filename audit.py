@@ -564,6 +564,33 @@ def audit_invariants(store=None, repo=None):
     return out
 
 
+def refresh_model_availability(timeout=20):
+    """Snapshot the model ids the provider actually serves. Returns (ok, detail).
+
+    config.live_roster consults this: a roster date is a plan, this is the fact.
+    Never raises — a refresh that fails leaves the last snapshot in place, and
+    an absent snapshot means "unknown", which falls back to the dates.
+    """
+    import urllib.error
+    import urllib.request
+    url = config.BASE_URL.rstrip("/") + "/models"
+    key = os.getenv("ARC_API_KEY", "")
+    try:
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {key}"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            d = json.loads(r.read())
+        ids = sorted(m.get("id") or m.get("name") for m in (d.get("data") or d))
+        if not ids:
+            return False, "the API returned no models"
+        path = Path(config.ROOT) / "logs" / "model-availability.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"ts": time.time(), "base_url": config.BASE_URL,
+                                    "models": ids}, indent=1))
+        return True, f"{len(ids)} models"
+    except (urllib.error.URLError, OSError, ValueError, TypeError) as exc:
+        return False, str(exc)[:160]
+
+
 def audit_roster():
     """Upcoming model transitions, and whether today's roster can staff the gate.
 
@@ -576,6 +603,10 @@ def audit_roster():
     thinner unless someone is told.
     """
     out = []
+    ok, detail = refresh_model_availability()
+    if not ok:
+        out.append(_finding("info", "roster", "could not refresh model availability",
+                            detail, "the roster falls back to its dates until this works"))
     for c in config.roster_changes(horizon_days=14):
         sev = "warning" if c["in_days"] <= 2 else "info"
         out.append(_finding(
@@ -597,6 +628,16 @@ def audit_roster():
     except Exception as exc:
         out.append(_finding("info", "roster", "could not evaluate reviewer coverage",
                             str(exc)[:120], ""))
+    for m in config.deferred_models():
+        out.append(_finding(
+            "warning", "roster", f"{m} is scheduled but the API does not serve it",
+            "", "the roster date has arrived and the provider has not — the "
+                "incumbent is being kept; refresh with `main.py models refresh` "
+                "once it appears"))
+    for m in config.overstayed_models():
+        out.append(_finding(
+            "info", "roster", f"{m} is past its retirement date but still served",
+            "", "kept live because its replacement is not available yet"))
     if not config.REVIEW_FAMILIES:
         out.append(_finding("critical", "roster", "NO review-capable model is live",
                             "", "nothing can be reviewed; the pipeline cannot merge"))
