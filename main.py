@@ -492,6 +492,7 @@ def cmd_audit(args):
     narrowly enough that a mail means something.
     """
     import audit
+    import json
     import store as _store
     st = None
     try:
