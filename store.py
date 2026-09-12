@@ -181,6 +181,13 @@ class Store:
         with self.lock:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.executescript(SCHEMA)
+            # Columns added after a database was first created. executescript
+            # is CREATE IF NOT EXISTS, so an existing orchestrator.db keeps its
+            # old shape; each entry here is idempotent.
+            have = {r[1] for r in self.conn.execute("PRAGMA table_info(code_tasks)")}
+            if "verdict" not in have:
+                # A task's probe_cmd result (JSON), read by dependents' `when`.
+                self.conn.execute("ALTER TABLE code_tasks ADD COLUMN verdict TEXT")
             self.conn.commit()
 
     def start_round(self, topic):
@@ -594,18 +601,31 @@ class Store:
                 dict(r)
                 for r in self.conn.execute(
                     "SELECT id, taskfile, title, model, reviewer, status, branch, "
-                    "worktree, error, created_at, finished_at FROM code_tasks "
+                    "worktree, error, verdict, created_at, finished_at FROM code_tasks "
                     "ORDER BY created_at DESC LIMIT ?",
                     (limit,),
                 ).fetchall()
             ]
+
+    def set_code_task_verdict(self, taskfile, tid, verdict):
+        """Record a task's probe verdict (a JSON-serialisable object or None).
+
+        Kept on the row rather than only in the event log because a
+        dependent's `when` may be evaluated by a LATER run (resume, or a
+        chained taskfile) long after this run's events have rolled over."""
+        import json as _json
+        with self.lock:
+            self.conn.execute(
+                "UPDATE code_tasks SET verdict=? WHERE taskfile=? AND id=?",
+                (None if verdict is None else _json.dumps(verdict), taskfile, tid))
+            self.conn.commit()
 
     def code_tasks_for(self, taskfile):
         with self.lock:
             return [
                 dict(r)
                 for r in self.conn.execute(
-                    "SELECT id, title, model, reviewer, status, error FROM code_tasks "
+                    "SELECT id, title, model, reviewer, status, error, verdict FROM code_tasks "
                     "WHERE taskfile=? ORDER BY id", (taskfile,),
                 ).fetchall()
             ]

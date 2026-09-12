@@ -269,6 +269,24 @@ FIX.projects.pop(); api.renderProjects();
 ok("…which disappears with the chained project", !document.querySelector("#phase-filter").innerHTML.includes("waiting on another project"));
 ok("a project without a chain shows no chain chip", !api.card(FIX.projects[3], 0).includes("⛓"));
 
+// ---- conditional deps (task.when) ---------------------------------------
+// A release edge that carries a condition is drawn dashed in the accent
+// colour with the condition as its label; a task whose condition did not
+// hold has its own status colour and glyph.
+const routerDag = { nodes: [{id: "probe", status: "merged"}, {id: "fix-fe", status: "running", live: true},
+                            {id: "fix-be", status: "skipped"}],
+                    edges: [{src: "probe", dst: "fix-fe", conditional: true, when: 'probe.area == "frontend"'},
+                            {src: "probe", dst: "fix-be", conditional: true, when: 'probe.area == "backend"'}] };
+const rd = api.taskDag(routerDag, {size: "full", file: "r.json"});
+ok("conditional edges are dashed, accent-coloured and labelled",
+   rd.includes('stroke="#bc8cff" fill="none" stroke-dasharray="4 3"') && rd.includes('only when probe.area == "frontend"')
+   && rd.includes('probe.area == "backend"'));
+ok("a skipped task is drawn in its own colour, with its word in the full DAG and its glyph in the mini one",
+   rd.includes('stroke="#6e7681"') && rd.includes(">skipped<")
+   && api.taskDag(routerDag, {size: "mini", file: "r.json"}).includes("⊘"));
+ok("a plain edge stays plain", api.taskDag(FIX.projects[0].dag, {size: "full"}).includes('stroke="#30363d" fill="none"/>')
+   || api.taskDag(FIX.projects[0].dag, {size: "full"}).includes('stroke="#30363d" fill="none"></path>'));
+
 console.log(`projects_ui: ${good} passed, ${bad.length} failed`);
 if (bad.length) {
   console.error("projects_ui: FAIL — " + bad.join("; "));

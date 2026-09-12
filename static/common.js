@@ -35,4 +35,4 @@ const COLORS = {"gpt-oss":"#3fb950","glm":"#58a6ff","kimi":"#bc8cff","deepseek":
 // Status → colour. index.html's map is canonical: phone.html's old DOT map
 // dropped the "done" state and tinted conflicts yellow (#d29922); the
 // canonical map keeps "done" and index.html's orange conflict (#f0883e).
-const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f0883e", pending: "#484f58"};
+const STATUSC = {merged: "#3fb950", done: "#3fb950", running: "#58a6ff", failed: "#f85149", conflict: "#f0883e", pending: "#484f58", skipped: "#6e7681"};

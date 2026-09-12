@@ -89,6 +89,10 @@ class FakeStore:
     def save_harness_run(self, *a, **kw):
         self.harness_runs.append((a, kw))
 
+    def set_code_task_verdict(self, taskfile, tid, verdict):
+        self.verdicts = getattr(self, "verdicts", {})
+        self.verdicts[(taskfile, tid)] = verdict
+
 
 # --- roster-aware fixture names ------------------------------------------
 # The model roster is DATED (config.ROSTER): names change on the provider's

@@ -209,12 +209,23 @@ classify --+--(medium)---> DeepSeek task
            +--(hard)-----> GLM/Kimi task
 ```
 
-Classify the work, send it down exactly one branch. Anthropic/OpenAI
-runtime routers pick the branch *while running*; **this system routes at
-plan time** — the planner is the classifier, and tier routing is the router
-(`load_taskfile` rejects a task routed to the wrong kind of model). Where
-routing cannot be decided from the goal text, use a two-phase plan: a cheap
-probe taskfile first, then the real one.
+Classify the work, send it down exactly one branch. Two ways to route here:
+
+- **At plan time** — the planner is the classifier, and tier routing is the
+  router (`load_taskfile` rejects a task routed to the wrong kind of model).
+- **At run time, inside one taskfile** — a probe task declares `probe_cmd`, a
+  shell command run in its worktree after its gate passes whose last JSON
+  object is the task's *verdict*; each branch task lists the probe in `deps`
+  and declares `when: {"dep": "probe", "key": "<field>", "equals": <value>}`
+  (`in`, `not_equals`, `truthy`, `exists` also exist). The release edge
+  carries the predicate (`graph.Edge when=`, the same mechanism as the
+  gate/review branches inside a task); a branch whose condition does not
+  hold goes to a `skip_<task>` node and is recorded **skipped**, with
+  everything downstream of it. `graph_shapes.classify` reports a taskfile
+  with any `when` as `router`.
+
+Use two taskfiles chained with `after` instead when the probe needs a human
+decision or a whole plan of its own.
 
 - **When:** bugfix vs. feature vs. docs triage; a bug whose location is
   unknown (phase 1 = probe: locate + write a failing reproduction test with
@@ -225,19 +236,29 @@ probe taskfile first, then the real one.
   edges are unconditional, so every task you emit **will run**.
 
 ```json
-{"project": {"repo": "...", "title": "probe: where does X break",
+{"project": {"repo": "...", "title": "fix X wherever it lives",
  "pattern": "router",
- "tasks": [{"id": "locate", "model": "DeepSeek-V4-Flash", "reviewer": "kimi",
-   "prompt": "Locate the fault; land a FAILING reproduction test only.",
+ "tasks": [
+  {"id": "locate", "model": "<medium tier>", "reviewer": "<cross-family>",
+   "prompt": "Locate the fault; land a FAILING reproduction test only; write {\"area\": \"frontend\"|\"backend\"} to .arc-verdict.json.",
    "verify_cmd": "! ./py -m unittest discover -s tests -t tests -k Repro",
-   "deps": []}]}}
+   "probe_cmd": "cat .arc-verdict.json", "deps": []},
+  {"id": "fix-frontend", "model": "<hard tier>", "reviewer": "<cross-family>",
+   "deps": ["locate"], "when": {"dep": "locate", "key": "area", "equals": "frontend"},
+   "prompt": "...", "verify_cmd": "./check.sh"},
+  {"id": "fix-backend", "model": "<hard tier>", "reviewer": "<cross-family>",
+   "deps": ["locate"], "when": {"dep": "locate", "key": "area", "equals": "backend"},
+   "prompt": "...", "verify_cmd": "./check.sh"}]}}
 ```
 
+Exactly one of `fix-frontend` / `fix-backend` runs; the other is recorded
+`skipped` and the project is `done` when the taken branch merges.
+
 - **Pitfalls:** a router whose probe lands code other than the reproduction
-  test contaminates phase 2's base. Keep probes read-only-plus-test. The
-  second phase is a *new* taskfile; declare `"after": ["<probe taskfile>"]`
-  in its project object so it holds at the chain gate until the probe has
-  merged (Rule 9) — that is the cross-taskfile edge.
+  test contaminates the branches' base. Keep probes read-only-plus-test. A
+  `when.key` the probe never writes skips every branch — the verdict is
+  visible in the feed (`task.verdict`) and on the row. For a two-taskfile
+  router declare `"after": ["<probe taskfile>"]` in the second (Rule 9).
 
 ## 5. Orchestrator-workers (supervisor)
 
@@ -451,13 +472,11 @@ and the dashboard renders the result; keep this list in step with it.
 
 **What a taskfile cannot yet express** (each marked *not implemented*):
 
-- *Conditional deps between tasks.* Every task you write runs; a dep cannot
-  say "only if the probe found X". Today: route at plan time, or a second
-  taskfile `after` the first (the router pattern). A task-level `when` on a
-  dep would map onto `Edge(when=)` reading the upstream task's result — the
-  predicate would need a vocabulary (gate output? a JSON verdict file the
-  task writes?) and the dashboard would need to draw an edge that may never
-  fire. *Not implemented.*
+- *Conditional deps between tasks* — **implemented** (2026-09-12): task
+  `when` + dependency `probe_cmd`, see § 4 and the schema. The predicate
+  vocabulary is the probe's JSON verdict; the dashboard draws the edge
+  dashed in the accent colour with the condition as its label, and a task
+  whose condition did not hold shows as `skipped`.
 - *Tasks spawning tasks.* A task cannot add tasks to its own taskfile at
   runtime; the planner decides the set once. Hierarchical work is rounds of
   taskfiles. A `"kind": "spawn"` task whose result is a list of task specs
@@ -471,8 +490,7 @@ and the dashboard renders the result; keep this list in step with it.
   budget like `MAX_FIX_ROUNDS` — and a branch policy for the re-run (reset
   to base, or continue on the merged result). *Not implemented.*
 
-The order to add them, if wanted: conditional deps first (smallest change,
-unlocks a one-file router), then task-level loops (reuses the fix-loop
+The order to add the rest: task-level loops next (reuses the fix-loop
 budget), then spawning (needs runtime validation).
 
 ## Sources

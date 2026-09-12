@@ -1341,6 +1341,16 @@ def _task_progress(ids):
     return out
 
 
+def _when_label(w):
+    """`task.when` as one short line for an edge label / tooltip."""
+    try:
+        import code_tasks
+        loaded = code_tasks._load_when("x", w)
+        return code_tasks.when_text(loaded) if loaded else ""
+    except Exception:
+        return f"{w.get('dep')}.{w.get('key')} ?"
+
+
 def _project_phase(statuses, ids, run_pid):
     """One word for where a project stands: running | done | attention | new.
 
@@ -1361,7 +1371,9 @@ def _project_phase(statuses, ids, run_pid):
         return "in_review"
     if statuses.get("failed") or statuses.get("conflict"):
         return "attention"
-    if total and statuses.get("merged", 0) >= total:
+    # A skipped task (its `when` did not hold) is complete, not pending: a
+    # router whose untaken branch counted as unfinished would never be done.
+    if total and statuses.get("merged", 0) + statuses.get("skipped", 0) >= total:
         return "done"
     if not statuses:
         return "new"
@@ -1680,8 +1692,21 @@ def _projects(store):
                     "conflicts": ls.get("conflicts", 0),
                     "last_verdict": ls.get("last_verdict")}
             nodes.append(node)
-        edges = [{"src": d, "dst": t["id"]} for t in tdefs if t.get("id")
-                 for d in (t.get("deps") or t.get("depends") or []) if d in ids]
+        edges = []
+        for t in tdefs:
+            if not t.get("id"):
+                continue
+            w = t.get("when") if isinstance(t.get("when"), dict) else None
+            for d in (t.get("deps") or t.get("depends") or []):
+                if d not in ids:
+                    continue
+                e = {"src": d, "dst": t["id"]}
+                if w and w.get("dep") == d:
+                    # A conditional release: drawn dashed, labelled with the
+                    # condition, like the pipeline's own when= edges.
+                    e["conditional"] = True
+                    e["when"] = _when_label(w)
+                edges.append(e)
         for n in nodes:
             if n["attempts"] > 1 or n["escalations"] > 0:
                 edges.append({"src": n["id"], "dst": n["id"], "kind": "fixloop",

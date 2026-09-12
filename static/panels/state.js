@@ -5,7 +5,7 @@ let PROJECTS = [], AGENTS = [], RECENT = [], FLEET = null;
 let CUR = null, CUR_DATA = null, CUR_PID = null, detailTimer = null, drawerFile = null;
 let FILT = {r: "", s: "", m: "", q: ""}, EXPANDED = "";
 // Glyph cue that survives greyscale (colour alone must not carry status).
-const STATUSG = {merged: " ✓", done: " ✓", running: " …", failed: " ✗", conflict: " !", pending: " ○"};
+const STATUSG = {merged: " ✓", done: " ✓", running: " …", failed: " ✗", conflict: " !", pending: " ○", skipped: " ⊘"};
 
 const fmtT = iso => { if (!iso) return "—"; const s = (Date.now() - new Date(iso).getTime())/1000;
   if (s < 60) return Math.round(s)+"s ago"; if (s < 3600) return Math.round(s/60)+"m ago";

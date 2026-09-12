@@ -59,7 +59,8 @@ function taskDag(dag, opts) {
       const y = maxY + NH + 12 + Math.min(bi++, 2) * 7;
       s += `<path d="M${a.x + NW / 2},${a.y + NH} C${a.x + NW / 2},${y} ${b.x + NW / 2},${y} ${b.x + NW / 2},${b.y + NH}" stroke="#d29922" stroke-dasharray="4 3" fill="none"><title>loop back (cycle): ${esc(e.src)} → ${esc(e.dst)}</title></path>`;
       continue; }
-    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="#30363d" fill="none"${e.conditional || e.kind === "chain" ? ' stroke-dasharray="4 3"' : ""}/>`; }
+    s += `<path d="M${a.x + NW},${a.y + NH / 2} C${a.x + NW + GX / 2},${a.y + NH / 2} ${b.x - GX / 2},${b.y + NH / 2} ${b.x},${b.y + NH / 2}" stroke="${e.when ? "#bc8cff" : "#30363d"}" fill="none"${e.conditional || e.kind === "chain" ? ' stroke-dasharray="4 3"' : ""}>${e.when ? `<title>only when ${esc(e.when)}</title>` : ""}</path>`;
+    if (e.when && !mini) s += `<text x="${(a.x + NW + b.x) / 2}" y="${(a.y + b.y) / 2 + NH / 2 - 4}" font-size="8.5" fill="#bc8cff" text-anchor="middle">${esc(e.when.slice(0, 28))}</text>`; }
   for (const n of nodes) { const p = pos[n.id]; if (!p) continue;
     if (n.kind === "chain") {
       // The chain gate (project.after): drawn dashed, in front of the heads,
