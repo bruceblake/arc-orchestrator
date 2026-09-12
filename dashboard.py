@@ -3033,6 +3033,10 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 return self._json({"events": events, "next": start + len(chunk),
                                    "reset": reset, "total": len(lines)})
+            if u.path == "/api/pipeline":
+                import pipeline_doc
+                return self._json(pipeline_doc.describe(
+                    _build_graph_topologies()["code"]))
             if u.path == "/api/graphs":
                 return self._json(_build_graph_topologies())
             if u.path == "/api/code":

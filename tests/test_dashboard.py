@@ -1074,3 +1074,112 @@ class TheRunningGraphHonoursTheOverride(unittest.TestCase):
         finally:
             ct._driver = orig
         self.assertEqual(seen.get("model"), STRONGEST)
+
+
+class ThePipelineExplainer(unittest.TestCase):
+    """Clicking a stage must explain it, and the explanation must not drift.
+
+    The prose is hand-written — what a node is for, and what goes wrong with
+    it, are things no introspection recovers. Everything else is generated from
+    the graph the fleet actually builds, because a picture that claims a node
+    retries three times while the code says ten is worse than no picture.
+    """
+
+    def _doc(self):
+        import pipeline_doc
+        return pipeline_doc.describe(dashboard._build_graph_topologies()["code"])
+
+    def test_every_node_in_the_diagram_is_explained(self):
+        d = self._doc()
+        missing = [n["id"] for n in d["nodes"] if not n["what"]]
+        self.assertEqual(missing, [], f"nodes with no explanation: {missing}")
+
+    def test_the_prose_covers_every_node_the_graph_builds(self):
+        # The guard against drift in the other direction: a node added to the
+        # pipeline with no entry here would render as a blank panel.
+        import pipeline_doc
+        built = {n["name"] for n in dashboard._build_graph_topologies()["code"]["nodes"]}
+        self.assertEqual(built - set(pipeline_doc.NODES), set(),
+                         "pipeline nodes with no entry in pipeline_doc.NODES")
+
+    def test_edges_come_from_the_real_graph_not_the_prose(self):
+        d = self._doc()
+        impl = next(n for n in d["nodes"] if n["id"] == "implement")
+        # implement is reached from many stages; that count is generated
+        self.assertGreaterEqual(len(impl["incoming"]), 4)
+        self.assertTrue(all("to" in e and "when" in e for e in impl["outgoing"]))
+
+    def test_every_edge_condition_reads_as_english(self):
+        d = self._doc()
+        vague = [(n["id"], e["to"]) for n in d["nodes"] for e in n["outgoing"]
+                 if e["when"] == "conditional"]
+        self.assertEqual(vague, [],
+                         f"edges with no plain-English reading: {vague}")
+
+    def test_loops_are_marked_as_loops(self):
+        d = self._doc()
+        rev = next(n for n in d["nodes"] if n["id"] == "pr_review")
+        back = [e for e in rev["outgoing"] if e["loop"]]
+        self.assertTrue(back, "pr_review's send-back and re-review are loops")
+
+    def test_live_stats_are_computed_from_the_event_log(self):
+        """Fed a synthetic log, not this machine's.
+
+        The first version asserted that SOME node had runs, which passed here
+        only because the developer's event log happened to be in place — it
+        would have failed on a fresh clone, and it tested the machine rather
+        than the code.
+        """
+        import pipeline_doc
+        now = time.time()
+        rows = [
+            {"type": "node_start", "node": "gate_t1", "ts": now - 100},
+            {"type": "node_end", "node": "gate_t1", "ts": now - 90},
+            {"type": "node_start", "node": "gate_t2", "ts": now - 80},
+            {"type": "node_end", "node": "gate_t2", "ts": now - 50},
+            {"type": "node_error", "node": "gate_t3", "ts": now - 40},
+        ]
+        d = Path(tempfile.mkdtemp())
+        log = d / "events.jsonl"
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        orig = config.EVENTS_LOG
+        config.EVENTS_LOG = str(log)
+        try:
+            stats = pipeline_doc._stats()
+        finally:
+            config.EVENTS_LOG = orig
+        g = stats["gate"]
+        self.assertEqual((g["runs"], g["errors"]), (2, 1))
+        self.assertEqual(g["reliability"], 67)       # 2 of 3
+        self.assertEqual(g["median_s"], 30.0)        # median of [10, 30]
+
+    def test_stats_ignore_events_outside_the_window(self):
+        import pipeline_doc
+        now = time.time()
+        rows = [{"type": "node_start", "node": "gate_old", "ts": now - 30 * 86400},
+                {"type": "node_end", "node": "gate_old", "ts": now - 30 * 86400 + 5}]
+        d = Path(tempfile.mkdtemp())
+        log = d / "events.jsonl"
+        log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+        orig = config.EVENTS_LOG
+        config.EVENTS_LOG = str(log)
+        try:
+            self.assertEqual(pipeline_doc._stats(), {})
+        finally:
+            config.EVENTS_LOG = orig
+
+    def test_the_overview_explains_the_whole_thing(self):
+        o = self._doc()["overview"]
+        self.assertGreaterEqual(len(o["paragraphs"]), 4)
+        self.assertTrue(o["reading"], "the legend must say how to read the diagram")
+
+    def test_a_node_with_no_runs_yet_still_describes_itself(self):
+        import pipeline_doc
+        orig = pipeline_doc._stats
+        pipeline_doc._stats = lambda *a, **k: {}
+        try:
+            d = self._doc()
+        finally:
+            pipeline_doc._stats = orig
+        self.assertTrue(all(n["what"] for n in d["nodes"]))
+        self.assertTrue(all(n["stats"] is None for n in d["nodes"]))

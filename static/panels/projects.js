@@ -70,7 +70,9 @@ function taskDag(dag, opts) {
       `impl: ${short(n.model)} · review: ${revShort(n.reviewer)}`,
       n.verify_cmd ? `verify: ${n.verify_cmd}` : ""].filter(Boolean).join("\n");
     s += topo
-      ? `<g class="node topo"><title>${esc(ttip)}</title>` +
+      ? `<g class="node topo" data-node="${attr(n.id)}" role="button" tabindex="0" ` +
+        `aria-label="${attr(`${n.id} — click to read what this stage does`)}">` +
+        `<title>${esc(ttip)}: click to read what it does</title>` +
         `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="7" fill="#0d1117" stroke="${c}" stroke-width="1.6"/>` +
         `<text x="${p.x + 10}" y="${p.y + 20}" font-size="11" fill="#c9d1d9">${esc(n.id.slice(0, 26))}</text>` +
         `<text x="${p.x + 10}" y="${p.y + 35}" font-size="9" fill="#8b949e">${(dag.starts || []).includes(n.id) ? "start" : n.gather ? "gather" : ""}</text>`
@@ -348,6 +350,72 @@ async function pollTopos() {
   } catch (e) { markFail("graphs", true); return; }
   renderTopos();
 }
+// ---- the pipeline explainer -------------------------------------------
+// Clicking a stage tells you what it does, what it is FOR, what goes wrong
+// with it, every edge that leaves it with the condition in plain English, and
+// how it has actually behaved over the last week. The prose is written by
+// hand; the edges and the numbers are generated, so the picture cannot claim a
+// node retries three times while the code says ten.
+let PIPE = null, PIPE_OPEN = null;
+
+async function loadPipelineDoc() {
+  if (PIPE) return PIPE;
+  try { PIPE = await jget("/api/pipeline"); } catch (e) { PIPE = null; }
+  return PIPE;
+}
+
+function pipeOverview(d) {
+  const o = (d && d.overview) || {};
+  return `<div class="pipe-overview">
+    ${(o.paragraphs || []).map(t => `<p>${esc(t)}</p>`).join("")}
+    <div class="pipe-key">${(o.reading || []).map(t => `<span>${esc(t)}</span>`).join("")}</div>
+    <p class="hint">Click any stage above to read what it does.</p>
+  </div>`;
+}
+
+function pipeNode(n) {
+  const stat = n.stats
+    ? `<div class="pipe-stats">
+         <span><b>${n.stats.runs}</b> runs</span>
+         <span><b>${n.stats.reliability}%</b> reached the next stage</span>
+         ${n.stats.median_s != null ? `<span>median <b>${tick(n.stats.median_s)}</b></span>` : ""}
+         ${n.stats.errors ? `<span class="bad"><b>${n.stats.errors}</b> errored</span>` : ""}
+       </div>`
+    : '<div class="pipe-stats"><span class="hint">no runs recorded in the last week</span></div>';
+  const outs = (n.outgoing || []).map(e =>
+    `<li><code>${esc(e.to)}</code>${e.loop ? ' <span class="tag loop">loops back</span>' : ""}
+       <span class="hint">${esc(e.when)}</span></li>`).join("");
+  const ins = (n.incoming || []).map(i => `<code>${esc(i)}</code>`).join(" ");
+  return `<div class="pipe-detail">
+    <h3>${esc(n.title)}${n.start ? ' <span class="tag">start</span>' : ""}${n.gather ? ' <span class="tag">join</span>' : ""}</h3>
+    ${stat}
+    ${n.what ? `<p><b>What it does.</b> ${esc(n.what)}</p>` : ""}
+    ${n.why ? `<p><b>Why it exists.</b> ${esc(n.why)}</p>` : ""}
+    ${n.watch ? `<p class="pipe-watch"><b>Worth knowing.</b> ${esc(n.watch)}</p>` : ""}
+    ${ins ? `<p class="hint">Reached from: ${ins}</p>` : ""}
+    ${outs ? `<div><b>Where it goes next</b><ul class="pipe-edges">${outs}</ul></div>` : ""}
+    <button class="act" data-pipe-close="1">close</button>
+  </div>`;
+}
+
+async function showPipelineNode(id) {
+  const d = await loadPipelineDoc();
+  const box = $("#topo-detail");
+  if (!box) return;
+  if (!d) { box.innerHTML = '<div class="empty">explanation unavailable</div>'; return; }
+  if (id === PIPE_OPEN) { PIPE_OPEN = null; box.innerHTML = pipeOverview(d); return; }
+  const n = (d.nodes || []).find(x => x.id === id);
+  PIPE_OPEN = n ? id : null;
+  box.innerHTML = n ? pipeNode(n) : pipeOverview(d);
+  for (const g of document.querySelectorAll("#topo .node.topo"))
+    g.classList.toggle("sel", g.dataset.node === PIPE_OPEN);
+  box.onclick = ev => {
+    if (ev.target && ev.target.dataset && ev.target.dataset.pipeClose)
+      showPipelineNode(PIPE_OPEN);
+  };
+  box.scrollIntoView({block: "nearest", behavior: "smooth"});
+}
+
 function renderTopos() {
   const tops = Object.values(TOPOS || {}).filter(t => t && Array.isArray(t.nodes));
   if (!tops.length) { $("#topo").innerHTML = '<div class="empty">no graphs available</div>'; return; }
@@ -370,6 +438,15 @@ function renderTopos() {
     return `<div class="topohead"><h3>${esc(t.name || "graph")}</h3><span class="hint">${g.nodes.length} nodes · ${g.edges.length} edges</span></div>
       <div style="overflow-x:auto">${taskDag(g, {size: "full", topo: true})}</div>`;
   }).join("");
+  for (const g of document.querySelectorAll("#topo .node.topo")) {
+    const open = () => showPipelineNode(g.dataset.node);
+    g.onclick = open;
+    g.onkeydown = ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); open(); } };
+  }
+  loadPipelineDoc().then(d => {
+    const box = $("#topo-detail");
+    if (box && !PIPE_OPEN && d) box.innerHTML = pipeOverview(d);
+  });
 }
 
 

@@ -169,6 +169,27 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .errtb summary { cursor: pointer; color: var(--dim); font-size: 11px; }
 .errtb pre { background: #0d1117; border: 1px solid var(--border); border-radius: 5px;
              padding: 7px; overflow-x: auto; font-size: 11px; margin: 4px 0 0; }
+/* --- the pipeline explainer: click a stage, read what it does --- */
+.node.topo { cursor: pointer; }
+.node.topo:hover rect { stroke-width: 2.4; }
+.node.topo:focus-visible rect { stroke: var(--accent); stroke-width: 2.6; }
+.node.topo.sel rect { stroke: var(--accent); stroke-width: 2.6; }
+.pipe { margin-top: 10px; }
+.pipe-overview p, .pipe-detail p { margin: 6px 0; line-height: 1.5; max-width: 78ch; }
+.pipe-overview .pipe-key { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.pipe-overview .pipe-key span { font-size: 11px; color: var(--dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 2px 7px; }
+.pipe-detail { border: 1px solid var(--accent); border-radius: 8px; padding: 12px 14px;
+  background: #0d1117; }
+.pipe-detail h3 { margin: 0 0 8px; font-size: 14px; }
+.pipe-stats { display: flex; flex-wrap: wrap; gap: 12px; font-size: 11px;
+  color: var(--dim); margin-bottom: 8px; }
+.pipe-stats b { color: var(--text); }
+.pipe-watch { border-left: 2px solid var(--warn); padding-left: 10px; color: var(--text); }
+.pipe-edges { margin: 6px 0 10px; padding-left: 18px; }
+.pipe-edges li { margin: 3px 0; font-size: 12px; }
+.pipe-edges code { color: var(--accent); }
+.tag.loop { border-color: var(--warn); color: var(--warn); }
 .slot.harness { background: #12171e; }
 .tagh { font-size: 9px; text-transform: uppercase; letter-spacing: .5px;
         color: var(--dim); border: 1px solid var(--border); border-radius: 8px; padding: 0 4px; }
@@ -358,6 +379,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
     <div class="panel" id="topo-panel">
       <h2>How a task moves through the pipeline <span class="hint" id="topo-meta"></span></h2>
       <div id="topo"></div>
+      <div id="topo-detail" class="pipe"></div>
     </div>
   </div>
 
