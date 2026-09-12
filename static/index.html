@@ -7,7 +7,7 @@
 <style>
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
-  --dim: #8b949e; --accent: #58a6ff; --ok: #3fb950; --warn: #d29922;
+  --dim: #8b949e; --accent: #bc8cff; --ok: #3fb950; --warn: #d29922;
   --err: #f85149; --run: #e3b341; --purple: #bc8cff; --conflict: #f0883e;
 }
 * { box-sizing: border-box; }
@@ -37,9 +37,6 @@ main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
 .prow:hover { border-color: var(--accent); }
 .prow .pt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .prow .pc { color: var(--dim); font-size: 11px; white-space: nowrap; }
-.dots { display: inline-flex; gap: 2px; flex: none; align-items: center; }
-.dot { width: 8px; height: 8px; border-radius: 2px; display: inline-block; flex: none; }
-.dot.live { animation: pulse 1.3s infinite; }
 .prows { display: flex; flex-direction: column; gap: 4px; }
 .prows .prow { margin: 0; }
 .pwrap.open > .prow { border-color: var(--accent); }
@@ -232,6 +229,12 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
                                transition: transform .12s ease; }
 .panel.foldable:not(.folded) > h2::before { transform: rotate(90deg); color: var(--accent); }
 .panel.folded > :not(h2) { display: none !important; }
+.prow.kb-sel { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
+.kb-help { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 100; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; box-shadow: 0 8px 32px rgba(0,0,0,.5); max-width: 440px; }
+.kb-help h3 { margin: 0 0 10px; font-size: 13px; color: var(--accent); }
+.kb-help ul { margin: 0; padding: 0; list-style: none; }
+.kb-help li { padding: 3px 0; }
+.kb-help kbd { display: inline-block; min-width: 18px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: #0d1117; text-align: center; margin-right: 8px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 </style>
 </head>
@@ -425,6 +428,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/detail.js"></script>
 <script src="/panels/transcript.js"></script>
 <script src="/panels/summary.js"></script>
+<script src="/panels/keyboard.js"></script>
 <script>
 // ---- boot: staggered polls so nothing fires all at once ----
 loadHash(); syncFilterControls();
