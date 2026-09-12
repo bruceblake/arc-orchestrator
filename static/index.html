@@ -77,6 +77,29 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .dialog input, .dialog textarea, .dialog select { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 10px; }
 .dialog textarea { resize: vertical; }
 .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
+/* ---- plan-with-kimi chat ---- */
+.chat-dialog { display: flex; flex-direction: column; max-height: 86vh; }
+.chat-dialog h3 { margin-bottom: 6px; }
+.chat-repo { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 8px; }
+.chat-log { flex: 1; overflow-y: auto; max-height: 60vh; min-height: 160px; display: flex; flex-direction: column; gap: 8px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: #0d1117; }
+.chat-turn { display: flex; flex-direction: column; gap: 4px; max-width: 86%; }
+.chat-turn.user { align-self: flex-end; align-items: flex-end; }
+.chat-turn.assistant { align-self: flex-start; align-items: flex-start; }
+.chat-bubble { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.chat-turn.user .chat-bubble { background: var(--accent); color: #0d1117; border-color: var(--accent); }
+.chat-bubble.dim { color: var(--dim); font-style: italic; }
+.chat-ts { font-size: 10px; color: var(--dim); }
+.chat-err { font-size: 11px; color: var(--err); }
+.chat-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
+.chat-taskcard { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--panel); }
+.chat-taskcard .ctc { font-size: 12px; color: var(--text); }
+.chat-input { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
+.chat-input input { flex: 1; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
+#c-mic.listening { border-color: var(--accent); color: var(--accent); animation: pulse 1.4s infinite; }
+.chat-thinking { display: inline-flex; align-items: center; gap: 6px; font-style: italic; }
+.chat-spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+.chat-interim { font-style: italic; color: var(--dim); font-size: 11px; margin-top: 4px; }
+@keyframes spin { to { transform: rotate(360deg); } }
 .drawer { position: fixed; top: 0; right: 0; width: min(640px, 95vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform .15s ease; display: flex; flex-direction: column; }
 .drawer.open { transform: none; }
 .drawer header { position: static; }
@@ -326,6 +349,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <span style="flex:1"></span>
         <span id="phase-filter"></span>
         <button class="act" id="btn-show-archived">show archived</button>
+        <button class="act" id="btn-chat" aria-label="Plan with Kimi-K3 in chat">💬 Chat</button>
         <button class="act primary" id="btn-new" aria-label="Create a new project">+ New project</button>
       </h2>
       <div id="projects"></div>
@@ -408,6 +432,23 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   </div>
 </div>
 
+<div class="modal" id="chatmodal">
+  <div class="dialog chat-dialog">
+    <h3>Plan with Kimi-K3 <span class="pill hint" id="c-session"></span></h3>
+    <label class="hint" for="c-repo">repo</label>
+    <select id="c-repo"></select>
+    <div class="chat-log" id="c-log"></div>
+    <div class="chat-input">
+      <button class="act" id="c-mic" title="speak" style="display:none" aria-label="Use speech input">🎤</button>
+      <input id="c-text" placeholder="Describe what you want built…" aria-label="message">
+      <button class="act primary" id="c-send">send</button>
+    </div>
+    <div id="c-interim" class="chat-interim" style="display:none"></div>
+    <div id="c-msg"></div>
+    <div style="margin-top:8px;text-align:right"><button class="act" id="c-close">close ✕</button></div>
+  </div>
+</div>
+
 <div class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
   <header>
     <h1 id="drawer-title">transcript</h1>
@@ -426,6 +467,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/github.js"></script>
 <script src="/panels/projects.js"></script>
 <script src="/panels/detail.js"></script>
+<script src="/panels/chat.js"></script>
 <script src="/panels/transcript.js"></script>
 <script src="/panels/summary.js"></script>
 <script src="/panels/keyboard.js"></script>
