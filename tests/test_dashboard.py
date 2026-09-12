@@ -14,7 +14,9 @@ from pathlib import Path
 from helpers import capture_events  # noqa: F401  (sys.path)
 
 import config
+import code_tasks
 import dashboard
+from test_code_tasks import BASIC, taskfile  # noqa: E402
 
 
 class SessionAttribution(unittest.TestCase):
@@ -927,3 +929,142 @@ class RetryActuallyRuns(unittest.TestCase):
         body = body[:body.index("\ndef ", 10)]
         for key in ('"launched_pid"', '"note"'):
             self.assertIn(key, body)
+
+
+class ManualEscalation(unittest.TestCase):
+    """The operator can move a task up a tier before the fix budget does.
+
+    The fix budget escalates only after repeated failure. An operator watching
+    a planner on gpt-oss produce thin task lists can see the problem well before
+    three rounds prove it. The override is read by cur_model() at every node
+    boundary, so a RUNNING task moves up at its very next step.
+    """
+
+    def setUp(self):
+        import shutil
+        import store as _store
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._tasks = config.TASKS_DIR
+        config.TASKS_DIR = self.dir
+        self.addCleanup(setattr, config, "TASKS_DIR", self._tasks)
+        self.tf = Path(self.dir) / "p.json"
+        self.tf.write_text(json.dumps({"project": {"repo": "/x", "title": "p", "tasks": [
+            {"id": "t1", "title": "T", "prompt": "p", "model": "gpt-oss-120b",
+             "reviewer": "kimi", "verify_cmd": "", "files_hint": [], "deps": []}]}}))
+        self._store = dashboard.Handler.store
+        dashboard.Handler.store = _store.Store(":memory:")
+        dashboard.Handler.store.upsert_code_task(str(self.tf), "t1", "T", "gpt-oss-120b",
+                                                 "kimi", "running")
+        self.addCleanup(setattr, dashboard.Handler, "store", self._store)
+        import reconcile
+        self._live = reconcile.live_runs
+        reconcile.live_runs = lambda: []
+        self.addCleanup(setattr, reconcile, "live_runs", self._live)
+
+    def _task(self):
+        return json.loads(self.tf.read_text())["project"]["tasks"][0]
+
+    def test_default_escalates_one_tier_up(self):
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertEqual(code, 200, out)
+        self.assertEqual((out["from"], out["to"]), ("gpt-oss-120b", "DeepSeek-V4-Flash"))
+
+    def test_the_taskfile_is_rewritten_so_a_fresh_run_starts_higher(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertEqual(self._task()["model"], "DeepSeek-V4-Flash")
+
+    def test_the_override_is_stored_for_the_running_graph(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": "Kimi-K3"})
+        self.assertEqual(dashboard.Handler.store.get_model_override(str(self.tf), "t1"),
+                         "Kimi-K3")
+
+    def test_the_reviewer_follows_the_implementer_across_families(self):
+        # Kimi's work must be reviewed by GLM, never by itself.
+        out, _ = dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": "Kimi-K3"})
+        self.assertEqual(out["reviewer"], "glm")
+        self.assertEqual(self._task()["reviewer"], "glm")
+
+    def test_it_refuses_to_move_down(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": "Kimi-K3"})
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1",
+                                              "to_model": "DeepSeek-V4-Flash"})
+        self.assertEqual(code, 409)
+        self.assertIn("only moves up", out["error"])
+
+    def test_the_top_tier_cannot_go_higher(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": "Kimi-K3"})
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertEqual(code, 409)
+        self.assertIn("top tier", out["error"])
+
+    def test_an_unknown_model_is_rejected(self):
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": "GPT-9"})
+        self.assertEqual(code, 400)
+
+    def test_it_says_whether_a_live_run_will_pick_it_up(self):
+        import reconcile
+        reconcile.live_runs = lambda: [{"taskfile": str(self.tf), "pid": 1}]
+        out, _ = dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertTrue(out["live"])
+        self.assertIn("next step", out["note"])
+
+    def test_the_event_is_marked_manual(self):
+        with capture_events() as ev:
+            dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        esc = [f for t, f in ev.seen if t == "task.escalated"]
+        self.assertTrue(esc and esc[0].get("manual"))
+
+
+class TheRunningGraphHonoursTheOverride(unittest.TestCase):
+    """cur_model() must see a manual override at its next call — no restart."""
+
+    def _graph_and_store(self):
+        import store as _store
+        st = _store.Store(":memory:")
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(st, ts, taskfile="tf.json")
+        return g, st
+
+    def test_an_override_wins_over_the_declared_model(self):
+        import code_tasks as ct
+        g, st = self._graph_and_store()
+        # reach cur_model through a node that exposes it: escalate's "from"
+        st.set_model_override("tf.json", "t1", "GLM-5.3", "test")
+        # implement records the model it is about to use via upsert; read it back
+        import asyncio as aio
+        orig = ct._driver
+        seen = {}
+        class FakeDrv:
+            harness = "x"
+            async def run(self_, *a, **k):
+                class R: session_id=None; exit_code=0; transcript_path=""; seconds=0.0
+                return R()
+        ct._driver = lambda model, role, pol: seen.setdefault("model", model) and FakeDrv() or FakeDrv()
+        try:
+            aio.run(g.nodes["implement_t1"].fn(
+                {"results": {"alloc_t1": {"worktree": "/tmp"}}, "runs": {}}))
+        finally:
+            ct._driver = orig
+        self.assertEqual(seen.get("model"), "GLM-5.3")
+
+    def test_the_higher_of_manual_and_automatic_wins(self):
+        import code_tasks as ct, asyncio as aio
+        g, st = self._graph_and_store()
+        st.set_model_override("tf.json", "t1", "DeepSeek-V4-Flash", "test")  # manual: medium
+        orig = ct._driver; seen = {}
+        class FakeDrv:
+            harness = "x"
+            async def run(self_, *a, **k):
+                class R: session_id=None; exit_code=0; transcript_path=""; seconds=0.0
+                return R()
+        ct._driver = lambda model, role, pol: seen.setdefault("model", model) and FakeDrv() or FakeDrv()
+        try:
+            # the graph itself already auto-escalated to Kimi: that is higher
+            aio.run(g.nodes["implement_t1"].fn(
+                {"results": {"alloc_t1": {"worktree": "/tmp"},
+                             "escalate_t1": {"to_model": "Kimi-K3"}}, "runs": {}}))
+        finally:
+            ct._driver = orig
+        self.assertEqual(seen.get("model"), "Kimi-K3")

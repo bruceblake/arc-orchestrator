@@ -2683,6 +2683,86 @@ def _retry_task(body):
             "launched_pid": launched, "note": launch_note}, 200
 
 
+def _escalate_task(body):
+    """Move ONE task to a stronger model, by the operator's judgement.
+
+    The fix budget escalates only after repeated failure. The operator can see
+    a task struggling well before that — a planner on gpt-oss producing thin
+    task lists, an implementer looping on a design problem it cannot hold in
+    context — and should not have to burn three rounds to prove it.
+
+    Two writes so the change sticks in both worlds:
+      - a `model_overrides` row, which cur_model() reads at every node boundary,
+        so a RUNNING task moves up at its very next step without a restart;
+      - the taskfile's `model` field, so a fresh run of the project starts on
+        the new model rather than rediscovering the problem from the bottom.
+    The reviewer follows automatically: it is derived from the implementer's
+    family at every call, so a cross-family reviewer stays cross-family.
+    """
+    import code_tasks
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    fname = body.get("file") or ""
+    if not re.fullmatch(r"[\w.-]+\.json", fname):
+        return {"error": "bad file name"}, 400
+    tid = body.get("task") or ""
+    path = Path(config.TASKS_DIR) / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    try:
+        doc = json.loads(path.read_text())
+        tasks = doc["project"]["tasks"]
+    except (ValueError, KeyError, TypeError) as exc:
+        return {"error": f"taskfile unreadable: {exc}"[:200]}, 500
+    t = next((x for x in tasks if x.get("id") == tid), None)
+    if t is None:
+        return {"error": "task id not found"}, 404
+
+    row = next((r for r in Handler.store.code_tasks_all()
+                if r.get("taskfile") and Path(r["taskfile"]).name == fname
+                and r.get("id") == tid), None)
+    current = (Handler.store.get_model_override(row["taskfile"], tid) if row else None) \
+        or (row or {}).get("model") or t.get("model")
+    target = body.get("to_model")
+    if not target:
+        target = code_tasks._next_tier(current)
+        if target is None:
+            return {"error": f"{current} is already the top tier"}, 409
+    if target not in config.IMPLEMENTER_MODELS:
+        return {"error": f"unknown model {target!r}; choose from "
+                         f"{sorted(config.IMPLEMENTER_MODELS)}"}, 400
+    # Escalation is monotonic: refuse to move DOWN a tier.
+    ci, ni = code_tasks._tier_index(current), code_tasks._tier_index(target)
+    ci = -1 if ci is None else ci
+    ni = -1 if ni is None else ni
+    if ni <= ci and target != current:
+        return {"error": f"{target} is not above {current}; escalation only moves up"}, 409
+    if target == current:
+        return {"error": f"already on {current}"}, 409
+
+    reason = (body.get("reason") or "operator escalation")[:200]
+    key = row["taskfile"] if row else str(path)
+    Handler.store.set_model_override(key, tid, target, reason)
+    # the taskfile too, so a fresh run starts here
+    t["model"] = target
+    t["reviewer"] = code_tasks._reviewer_for(t, target)
+    _write_taskfile_atomically(path, doc)
+    if row:
+        Handler.store.upsert_code_task(row["taskfile"], tid, row["title"], target,
+                                       t.get("reviewer") or row.get("reviewer"),
+                                       row.get("status") or "pending")
+    _emit_event("task.escalated", taskfile=str(path), task=tid, from_model=current,
+                to_model=target, manual=True, reason=reason)
+    import reconcile
+    live = any(r.get("taskfile") and Path(r["taskfile"]).name == fname
+               for r in reconcile.live_runs())
+    return {"file": fname, "task": tid, "from": current, "to": target,
+            "reviewer": t.get("reviewer"),
+            "note": ("a run is live — it will use the new model at its next step"
+                     if live else "no run is live — the next run starts on the new model"),
+            "live": live}, 200
+
+
 def _stop_project(body):
     """SIGTERM every `code run` process owning this task file.
 
@@ -2997,6 +3077,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/projects/retry-task":
                 obj, code = _retry_task(body)
+                return self._json(obj, code)
+            if u.path == "/api/projects/escalate-task":
+                obj, code = _escalate_task(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:

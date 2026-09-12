@@ -410,6 +410,47 @@ def _tally_reviews(outcomes):
     return issues, approvals, crashed, approved, bool(crashed) and not issues
 
 
+def _tier_index_m(model):
+    try:
+        return config.ESCALATION_PATH.index(model)
+    except ValueError:
+        return None
+
+def _next_tier_m(model):
+    """The next stronger model for `model`, or None at the top.
+
+    A model that is not ON the escalation path (a taskfile may still route
+    explicitly to gpt-oss-120b for mechanical work) counts as below the
+    entry tier, so it escalates INTO the path rather than being stuck
+    unable to escalate at all.
+    """
+    idx = _tier_index_m(model)
+    if idx is None:
+        return config.ESCALATION_PATH[0] if config.ESCALATION_PATH else None
+    if idx + 1 < len(config.ESCALATION_PATH):
+        return config.ESCALATION_PATH[idx + 1]
+    return None
+
+
+# Public names for the dashboard's manual escalation, so it applies the SAME
+# tier arithmetic the graph applies rather than a second copy of it.
+_tier_index = _tier_index_m
+_next_tier = _next_tier_m
+
+
+def _reviewer_for(t, model):
+    """Cross-review preserved under escalation: a strong model's work is
+    reviewed by the other strong harness; basic/medium keep the taskfile
+    reviewer. Module-level so the dashboard's manual escalation can apply the
+    same rule the graph applies — the reviewer must follow the implementer."""
+    fam = config.MODEL_FAMILY.get(model)
+    if fam == "kimi":
+        return "glm"
+    if fam == "glm":
+        return "kimi"
+    return t["reviewer"]
+
+
 def _rework_feedback(tid, results):
     """Why this task is being implemented again, most authoritative first.
 
@@ -611,37 +652,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         except Exception:
             prior = {}
 
-    def _tier_index(model):
-        try:
-            return config.ESCALATION_PATH.index(model)
-        except ValueError:
-            return None
-
-    def _next_tier(model):
-        """The next stronger model for `model`, or None at the top.
-
-        A model that is not ON the escalation path (a taskfile may still route
-        explicitly to gpt-oss-120b for mechanical work) counts as below the
-        entry tier, so it escalates INTO the path rather than being stuck
-        unable to escalate at all.
-        """
-        idx = _tier_index(model)
-        if idx is None:
-            return config.ESCALATION_PATH[0] if config.ESCALATION_PATH else None
-        if idx + 1 < len(config.ESCALATION_PATH):
-            return config.ESCALATION_PATH[idx + 1]
-        return None
-
-    def reviewer_for(t, model):
-        """Cross-review preserved under escalation: a strong model's work is
-        reviewed by the other strong harness; basic/medium keep the taskfile
-        reviewer."""
-        fam = config.MODEL_FAMILY.get(model)
-        if fam == "kimi":
-            return "glm"
-        if fam == "glm":
-            return "kimi"
-        return t["reviewer"]
+    _tier_index, _next_tier = _tier_index_m, _next_tier_m
+    reviewer_for = _reviewer_for
 
     def start_model(tid):
         """Model a (possibly resumed) run starts this task at.
@@ -771,8 +783,29 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             return wt
 
         def cur_model(ctx):
+            """Which model implements this task RIGHT NOW.
+
+            Three sources, and the HIGHEST tier among them wins, because
+            escalation is monotonic: the operator's manual override (set from
+            the dashboard, read fresh from the database at every node boundary
+            so a running task moves up at its next step), the graph's own
+            escalate node, and the taskfile's declared model.
+            """
             esc = ctx.get("results", {}).get(f"escalate_{tid}")
-            return esc["to_model"] if esc else model0
+            auto = esc["to_model"] if esc else model0
+            manual = None
+            if store is not None and taskfile:
+                try:
+                    manual = store.get_model_override(taskfile, tid)
+                except Exception:
+                    manual = None
+            if not manual or manual == auto:
+                return auto
+            ti, tm = _tier_index(auto), _tier_index(manual)
+            # An off-path model (gpt-oss) counts as below the entry tier.
+            ti = -1 if ti is None else ti
+            tm = -1 if tm is None else tm
+            return manual if tm >= ti else auto
 
         def esc_n(ctx):
             return ctx.get("runs", {}).get(f"escalate_{tid}", 0)
