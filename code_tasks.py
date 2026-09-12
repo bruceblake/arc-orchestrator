@@ -18,6 +18,7 @@ import config
 import errors
 import events
 import gitstore
+import drivers
 from drivers import DriverError, KimiDriver, OpencodeDriver, transcript_tokens
 from graph import Graph, GraphError
 
@@ -943,14 +944,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             if not cmd:
                 return {"passed": True, "output": ""}
             wt = str(await worktree(ctx))
-            proc = await asyncio.create_subprocess_shell(
-                cmd, cwd=wt,
+            # The gate is a shell pipeline (`./check.sh && ...`), and the
+            # shell is the least of what it starts: a unittest run, node, git.
+            # It is spawned like a harness — its own process group, no stdin
+            # — so a timeout kills the whole tree, not just /bin/sh. Killing
+            # only the shell left the test runner alive in the worktree,
+            # blocked on a stdout pipe nobody was reading any more.
+            proc = await drivers.spawn(
+                ["/bin/sh", "-c", cmd], cwd=wt,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
             try:
                 out, _ = await asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
+                await drivers._terminate(proc)
                 return {"passed": False, "output": f"gate timed out after {config.GATE_TIMEOUT}s",
                         "log_path": None}
             output = out.decode(errors="replace")[-2000:]

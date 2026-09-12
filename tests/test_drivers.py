@@ -1,5 +1,7 @@
 """Driver slot accounting, capacity classification, transcript parsing."""
 import asyncio
+import time
+import shutil
 import json
 import os
 import tempfile
@@ -12,6 +14,33 @@ import config
 import drivers
 from drivers import Driver, DriverError
 from store import Store
+
+
+def _gone(pid, wait_s=3.0):
+    """True once `pid` no longer exists (a zombie still exists — give init a
+    moment to reap what the killed parent left behind)."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except OSError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _reap(pid):
+    """Cleanup for a test that FAILED: do not leave the sleeper behind."""
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
 
 
 class TempLeaseDB:
@@ -224,6 +253,39 @@ class ChildTermination(unittest.TestCase):
             config.DRIVER_IDLE_TIMEOUT = orig_idle
         self.assertIsNotNone(holder["proc"].returncode,
                              "stalled harness was left running")
+
+    def test_a_timeout_kills_what_the_harness_spawned_too(self):
+        """The harness is a process GROUP. opencode runs the agent's shell
+        commands, language servers and test runners as children of its own;
+        killing only the direct child left every one of them alive in the
+        worktree, and anything mid-request still held its ARC slot."""
+        pidfile = Path(tempfile.mkdtemp(prefix="arc-qa-pg-")) / "grandchild.pid"
+        self.addCleanup(shutil.rmtree, pidfile.parent, ignore_errors=True)
+
+        class ForkingDriver(Driver):
+            harness = "sleep"
+            model = "gpt-oss-120b"
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                # a shell (the direct child) that starts a sleeper (the
+                # grandchild), records its pid, and waits on it
+                return ["sh", "-c", f"sleep 60 & echo $! > {pidfile}; wait"]
+
+        orig_idle = config.DRIVER_IDLE_TIMEOUT
+        config.DRIVER_IDLE_TIMEOUT = 0.5
+        try:
+            async def go():
+                with capture_events():
+                    with self.assertRaises(DriverError):
+                        await ForkingDriver()._once("p", Path("."), None, "t", 1)
+            asyncio.run(go())
+        finally:
+            config.DRIVER_IDLE_TIMEOUT = orig_idle
+        self.assertTrue(pidfile.is_file(), "the shell never started its child")
+        pid = int(pidfile.read_text().strip())
+        self.addCleanup(_reap, pid)
+        self.assertTrue(_gone(pid), f"grandchild {pid} survived the kill")
 
 
 class StallInstrumentation(unittest.TestCase):

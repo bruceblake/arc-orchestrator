@@ -1,6 +1,9 @@
 """Taskfile validation, reviewer-verdict parsing, resume/escalation planning,
 and project chaining (`after`)."""
 import asyncio
+import time
+import shutil
+import os
 import json
 import pathlib
 import tempfile
@@ -27,6 +30,32 @@ def taskfile(tasks, repo="/tmp", title="t", after=None, pattern=None):
     json.dump(doc, fh)
     fh.close()
     return Path(fh.name)
+
+
+def _gone(pid, wait_s=3.0):
+    """True once `pid` no longer exists (or is a zombie awaiting init)."""
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                if fh.read().rsplit(")", 1)[1].split()[0] == "Z":
+                    return True
+        except OSError:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def _reap(pid):
+    """Cleanup for a test that FAILED: do not leave the sleeper behind."""
+    try:
+        os.kill(pid, 9)
+    except OSError:
+        pass
 
 
 BASIC = {"id": "t1", "title": "T1", "prompt": "do it",
@@ -205,6 +234,40 @@ class ExtractPlanJson(unittest.TestCase):
 
     def test_returns_none_when_absent(self):
         self.assertIsNone(code_tasks._extract_plan_json('{"not": "a plan"}'))
+
+
+class GateTimeoutKillsTheWholeTree(unittest.TestCase):
+    """A verify_cmd is a shell pipeline, and the shell is the least of it.
+
+    `./check.sh && grep ...` runs a unittest suite, node and git under
+    /bin/sh. On timeout the gate killed the shell alone; the test runner it
+    had started kept running in the worktree, blocked forever on a stdout
+    pipe nobody was reading, and nothing ever reported it.
+    """
+
+    def test_a_timed_out_gate_leaves_no_grandchild_behind(self):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="arc-qa-gate-pg-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        pidfile = tmp / "grandchild.pid"
+        task = dict(BASIC, verify_cmd=f"sleep 60 & echo $! > {pidfile}; wait")
+        ts = code_tasks.load_taskfile(taskfile([task]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore(), ts, taskfile="tf.json")
+        ctx = {"results": {"alloc_t1": {"worktree": str(tmp)},
+                           "implement_t1": {"harness": "x"}}, "runs": {}}
+        orig = config.GATE_TIMEOUT
+        config.GATE_TIMEOUT = 0.5
+        try:
+            with capture_events():
+                res = asyncio.run(g.nodes["gate_t1"].fn(ctx))
+        finally:
+            config.GATE_TIMEOUT = orig
+        self.assertFalse(res["passed"])
+        self.assertIn("timed out", res["output"])
+        self.assertTrue(pidfile.is_file(), "the gate shell never started its child")
+        pid = int(pidfile.read_text().strip())
+        self.addCleanup(_reap, pid)
+        self.assertTrue(_gone(pid), f"grandchild {pid} survived the gate kill")
 
 
 if __name__ == "__main__":
