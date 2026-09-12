@@ -43,7 +43,13 @@ class _FakeRequest(dashboard.Handler):
         self.rfile = self
         self.path = path
         self._pending = body
-        self.headers = {"Content-Length": str(len(body))}
+        # Content-Type matters now: the dashboard refuses a POST that does not
+        # declare JSON (415), which is what stops a cross-origin text/plain
+        # form post from reaching a handler. These tests exercise the handlers
+        # THEMSELVES, so they send a well-formed request and let the checks
+        # they are actually about — traversal, validation — decide the status.
+        self.headers = {"Content-Length": str(len(body)),
+                        "Content-Type": "application/json"}
 
     def send_response(self, code, message=None):
         self.status = code

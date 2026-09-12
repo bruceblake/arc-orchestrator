@@ -56,7 +56,7 @@ const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setGH = v => { GH = v; };"
   + "\nglobalThis.__setSlots = v => { SLOTS = v; };"
   + "\nglobalThis.__setProjects = v => { PROJECTS = v; };"
-  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel};");
+  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY};");
 const api = mod();
 
 let n = 0;
@@ -361,6 +361,51 @@ ok(clean(grid()), "usage: model name markup does not reach the DOM as markup");
 ok(grid().includes("&lt;img"), "usage: hostile model name rendered escaped, not dropped");
 uapi.updateDriverEvents([ { type: EVIL, model: EVIL, role: EVIL, error: EVIL, ts: null } ]);
 ok(clean(document.querySelector("#drv-events").innerHTML), "usage: driver-event fields escaped");
+
+// ---- jpost: the token handshake with the server -----------------------------
+// Every POST changes state. With ARC_DASHBOARD_TOKEN set the server answers
+// 401 until the request carries the token; jpost asks once, keeps it, retries.
+{
+  const store = new Map();
+  globalThis.localStorage = { getItem: k => store.has(k) ? store.get(k) : null,
+                              setItem: (k, v) => store.set(k, v), removeItem: k => store.delete(k) };
+  const calls = [];
+  let answers = [401, 200];
+  globalThis.fetch = async (u, opts) => {
+    calls.push({u, headers: opts.headers, body: opts.body, method: opts.method});
+    const status = answers.shift();
+    return { status, json: async () => ({status}) };
+  };
+  let prompted = 0;
+  globalThis.prompt = () => { prompted++; return "  tok-123  "; };
+
+  const r = await api.jpost("/api/projects/run", {file: "p.json"});
+  ok(r.code === 200 && r.body.status === 200, "jpost: a 401 is retried once the token is supplied");
+  ok(prompted === 1, "jpost: asks for the token exactly once");
+  ok(calls.length === 2, "jpost: two requests — refused, then retried");
+  ok(calls[0].headers["Content-Type"] === "application/json", "jpost: always application/json (what forces a CORS preflight)");
+  ok(!("Authorization" in calls[0].headers), "jpost: first request carries no token when none is stored");
+  ok(calls[1].headers["Authorization"] === "Bearer tok-123", "jpost: retry carries the trimmed token as a Bearer header");
+  ok(store.get(api.TOKEN_KEY) === "tok-123", "jpost: the token is kept for next time");
+  ok(calls[1].method === "POST" && calls[1].body === JSON.stringify({file: "p.json"}), "jpost: retry resends the same body");
+
+  // next call: no prompt, the stored token goes straight on
+  answers = [200]; calls.length = 0;
+  await api.jpost("/api/projects/stop", {file: "p.json"});
+  ok(prompted === 1 && calls[0].headers["Authorization"] === "Bearer tok-123", "jpost: a stored token is sent without asking again");
+
+  // the user dismisses the prompt: the 401 is returned, nothing is retried
+  answers = [401]; calls.length = 0; store.clear();
+  globalThis.prompt = () => null;
+  const r2 = await api.jpost("/api/promote", {});
+  ok(r2.code === 401 && calls.length === 1, "jpost: a dismissed prompt returns the 401 without a retry");
+
+  // no token configured server-side: a plain 200, no prompt
+  answers = [200]; calls.length = 0; prompted = 0;
+  globalThis.prompt = () => { prompted++; return "x"; };
+  const r3 = await api.jpost("/api/promote", {});
+  ok(r3.code === 200 && prompted === 0, "jpost: no prompt when the server does not ask for a token");
+}
 
 if (failures.length) {
   console.error(`ui_render: FAIL — ${failures.length}/${n} checks failed:`);

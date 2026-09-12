@@ -40,8 +40,12 @@ cd /home/proxyie/arc-orchestrator
 nohup .venv/bin/python main.py serve --port 8787 >> logs/server.log 2>&1 &
 ```
 
-The dashboard is **read-only**: it only reads `orchestrator.db` and
-`logs/events.jsonl`, plus the harness transcripts under `logs/harness/`.
+The pages read `orchestrator.db`, `logs/events.jsonl` and the harness
+transcripts under `logs/harness/` — but the dashboard is **not read-only**:
+its buttons write task files, start and stop fleet runs, archive projects
+and open promotion PRs. It has no login. Set `ARC_DASHBOARD_TOKEN` (and, to
+limit who can reach the port at all, `ARC_DASHBOARD_BIND`) in `.env` — see
+the README section *Who can reach the dashboard*.
 
 ### 1.1 Pre-flight checks (`main.py doctor`)
 

@@ -42,7 +42,7 @@ class _FakeRequest(dashboard.Handler):
     on a real socket, reading first is what hangs the connection.
     """
 
-    def __init__(self, path, body=b"", length=None):
+    def __init__(self, path, body=b"", length=None, headers=None):
         self.status = None
         self.response_headers = {}
         self.body = b""
@@ -51,8 +51,16 @@ class _FakeRequest(dashboard.Handler):
         self.path = path
         self._pending = body
         self.reads = []
+        # What the dashboard's own jpost() sends. A request without the
+        # Content-Type is refused before the body is read (see the
+        # cross-origin tests), so every other test states it.
         self.headers = {
-            "Content-Length": str(len(body) if length is None else length)}
+            "Content-Length": str(len(body) if length is None else length),
+            "Content-Type": "application/json"}
+        if headers:
+            self.headers.update(headers)
+            for k in [k for k, v in headers.items() if v is None]:
+                del self.headers[k]
 
     def send_response(self, code, message=None):
         self.status = code
@@ -125,18 +133,18 @@ class _PostCase(unittest.TestCase):
         self.spawn_calls.append((list(argv), log_name))
         return mock.Mock(pid=4242), log_name
 
-    def _post(self, path, body, length=None):
+    def _post(self, path, body, length=None, headers=None):
         """POST raw bytes; returns (status, parsed JSON body)."""
-        req = _FakeRequest(path, body, length=length)
+        req = _FakeRequest(path, body, length=length, headers=headers)
         req.do_POST()
         return req.status, json.loads(req.body.decode("utf-8"))
 
     def _post_json(self, path, obj):
         return self._post(path, json.dumps(obj).encode("utf-8"))
 
-    def _post_raw(self, path, body, length=None):
+    def _post_raw(self, path, body, length=None, headers=None):
         """Like _post but also hands back the request (for read tracking)."""
-        req = _FakeRequest(path, body, length=length)
+        req = _FakeRequest(path, body, length=length, headers=headers)
         req.do_POST()
         return req.status, json.loads(req.body.decode("utf-8")), req
 
@@ -672,3 +680,146 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
         self.assertEqual(status, 400)
         self.assertIn("body size", resp["error"])
         self.assertEqual(req.reads, [])
+
+
+class HttpWriteRequestGuard(_PostCase):
+    """The distance between "can reach the port" and "can start a run".
+
+    The dashboard listens on every interface with no login, and every POST
+    changes state — /api/projects/create even takes a verify_cmd the gate
+    later runs as a shell command. Two things were true before this guard:
+    a web page on ANY site could POST here from the operator's browser (a
+    text/plain body is a CORS "simple request", sent without asking, and the
+    handler parsed it as JSON regardless), and any device on the wifi could
+    do the same directly. These tests pin the three checks that close that:
+    the Content-Type that forces a preflight, the Origin that must be this
+    server, and the optional token that gates every action.
+
+    Every refusal must happen BEFORE the body is read or acted on: a refused
+    request performs no spawn, writes no file.
+    """
+
+    VALID = {"file": "proj.json"}
+
+    def _valid_run(self, **kw):
+        """A POST that the run endpoint would otherwise accept."""
+        self._write_taskfile()
+        return self._post_raw("/api/projects/run", json.dumps(self.VALID).encode("utf-8"), **kw)
+
+    def _assert_untouched(self, req):
+        self.assertEqual(req.reads, [], "a refused request must not read the body")
+        self.assertEqual(self.spawn_calls, [], "a refused request must not spawn")
+
+    # -- 1. Content-Type ----------------------------------------------------
+
+    def test_missing_content_type_is_refused_before_reading_the_body(self):
+        status, resp, req = self._valid_run(headers={"Content-Type": None})
+        self.assertEqual(status, 415)
+        self.assertIn("application/json", resp["error"])
+        self._assert_untouched(req)
+
+    def test_text_plain_body_is_refused_even_when_it_is_json(self):
+        # the CSRF shape: a cross-site form/fetch that the browser sends
+        # without a preflight — the body is perfectly good JSON
+        status, resp, req = self._valid_run(headers={"Content-Type": "text/plain"})
+        self.assertEqual(status, 415)
+        self._assert_untouched(req)
+
+    def test_content_type_parameters_and_case_are_tolerated(self):
+        for ctype in ("application/json; charset=utf-8", "Application/JSON"):
+            with self.subTest(ctype=ctype):
+                status, _, _ = self._valid_run(headers={"Content-Type": ctype})
+                self.assertEqual(status, 200)
+
+    # -- 2. Origin ----------------------------------------------------------
+
+    def test_foreign_origin_is_refused(self):
+        # Host and port are compared; the scheme is not. A page cannot be
+        # served from THIS host:port by anyone but this server, so a scheme
+        # mismatch is not an attack — and a TLS proxy in front (Tailscale
+        # Serve, Caddy) legitimately produces an https Origin for this
+        # plain-http backend.
+        for origin in ("http://evil.example", "http://10.0.0.153:9999",
+                       "http://10.0.0.153", "null"):
+            with self.subTest(origin=origin):
+                self.spawn_calls.clear()
+                status, resp, req = self._valid_run(headers={
+                    "Host": "10.0.0.153:8787", "Origin": origin})
+                self.assertEqual(status, 403, origin)
+                self.assertIn("cross-origin", resp["error"])
+                self._assert_untouched(req)
+
+    def test_own_origin_is_accepted(self):
+        # what the dashboard's pages send: the origin they were served from
+        for host, origin in (("10.0.0.153:8787", "http://10.0.0.153:8787"),
+                             ("localhost:8787", "http://localhost:8787"),
+                             ("LOCALHOST:8787", "http://localhost:8787")):
+            with self.subTest(origin=origin):
+                status, _, _ = self._valid_run(headers={"Host": host, "Origin": origin})
+                self.assertEqual(status, 200)
+
+    def test_origin_without_a_host_to_compare_against_is_refused(self):
+        status, _, req = self._valid_run(headers={"Origin": "http://localhost:8787"})
+        self.assertEqual(status, 403)
+        self._assert_untouched(req)
+
+    def test_no_origin_header_is_fine(self):
+        # curl and scripts send none; that is not a cross-origin request
+        status, _, _ = self._valid_run(headers={"Host": "localhost:8787"})
+        self.assertEqual(status, 200)
+
+    # -- 3. Token -----------------------------------------------------------
+
+    def _with_token(self, token):
+        orig = config.DASHBOARD_TOKEN
+        config.DASHBOARD_TOKEN = token
+        self.addCleanup(setattr, config, "DASHBOARD_TOKEN", orig)
+
+    def test_no_token_configured_means_no_token_required(self):
+        self._with_token("")
+        status, _, _ = self._valid_run()
+        self.assertEqual(status, 200)
+
+    def test_token_configured_refuses_a_request_without_it(self):
+        self._with_token("s3cret")
+        status, resp, req = self._valid_run()
+        self.assertEqual(status, 401)
+        self.assertIn("ARC_DASHBOARD_TOKEN", resp["error"])
+        self._assert_untouched(req)
+
+    def test_wrong_or_malformed_token_is_refused(self):
+        self._with_token("s3cret")
+        for auth in ("Bearer wrong", "Bearer ", "s3cret", "Basic s3cret",
+                     "Bearer s3cret-but-longer"):
+            with self.subTest(auth=auth):
+                status, _, req = self._valid_run(headers={"Authorization": auth})
+                self.assertEqual(status, 401, auth)
+                self._assert_untouched(req)
+
+    def test_right_token_is_accepted_case_insensitive_scheme(self):
+        self._with_token("s3cret")
+        for auth in ("Bearer s3cret", "bearer s3cret", "Bearer  s3cret "):
+            with self.subTest(auth=auth):
+                status, _, _ = self._valid_run(headers={"Authorization": auth})
+                self.assertEqual(status, 200, auth)
+
+    def test_every_write_endpoint_is_behind_the_guard(self):
+        # the guard runs before routing, so an endpoint added later cannot
+        # forget it — pin that for each one that exists today
+        self._with_token("s3cret")
+        for path in ("/api/projects/create", "/api/projects/run",
+                     "/api/projects/stop", "/api/promote",
+                     "/api/projects/archive", "/api/projects/retry-task",
+                     "/api/does-not-exist"):
+            with self.subTest(path=path):
+                status, _, req = self._post_raw(path, b"{}")
+                self.assertEqual(status, 401, path)
+                self._assert_untouched(req)
+
+    def test_get_is_not_gated_by_the_token(self):
+        # the pages are meant to be glanced at from a phone without a login
+        # step; only actions need the token
+        self._with_token("s3cret")
+        req = _FakeRequest("/api/health")
+        req.do_GET()
+        self.assertEqual(req.status, 200)
