@@ -36,7 +36,8 @@ _lines_cache = {"key": None, "lines": []}
 MAX_EVENTS_PER_RESPONSE = 3000
 
 PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
-          "DeepSeek-V4-Flash": "DeepSeek V4 Flash"}
+          "DeepSeek-V4-Flash": "DeepSeek V4 Flash",
+          "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash"}
 
 # Rolling windows plus one calendar window. "today" is deliberately not a
 # synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
@@ -974,8 +975,8 @@ def _pid_alive(pid):
 
 
 def _harness_of(model):
-    """Which local harness runs this model. Mirrors code_tasks._driver."""
-    return "kimi" if model == "Kimi-K3" else "opencode"
+    """Which local harness runs this model, from the roster."""
+    return config.MODEL_HARNESS.get(model, "opencode")
 
 
 def _first_event_at_or_after(lines, ts):
@@ -2049,9 +2050,17 @@ def _create_project(body):
         for opt in ("model", "reviewer", "verify_cmd", "base"):
             if isinstance(t.get(opt), str) and t[opt].strip():
                 entry[opt] = t[opt].strip()
-        entry.setdefault("model", "DeepSeek-V4-Flash")
+        # The entry tier of TODAY'S roster, never a literal: this default
+        # would have written DeepSeek-V4-Flash into new taskfiles the morning
+        # after it was withdrawn, and every one of them would then fail
+        # validation with "must be an implementer".
+        entry.setdefault("model", config.ESCALATION_PATH[0])
         if "reviewer" not in entry:
-            entry["reviewer"] = {"Kimi-K3": "glm", "GLM-5.3": "kimi"}.get(entry["model"], "kimi")
+            # Cross-family, from the roster — the literal {Kimi: glm, GLM: kimi}
+            # map this replaces would have defaulted every task to "kimi" the
+            # day after Kimi left.
+            entry["reviewer"] = (config.cross_family_reviewer(entry["model"])
+                                 or next(iter(config.REVIEW_FAMILIES), "glm"))
         deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
         if isinstance(deps_in, list):
             deps = [d for d in deps_in if isinstance(d, str)]
@@ -2826,7 +2835,8 @@ def _build_graph_topologies():
     import code_tasks
     tf = {"project": {"repo": str(config.ROOT), "title": "shape",
                       "tasks": [{"id": "t", "title": "t", "prompt": "p",
-                                 "model": "DeepSeek-V4-Flash", "reviewer": "kimi",
+                                 "model": config.ESCALATION_PATH[0],
+                                 "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0]),
                                  "verify_cmd": "", "files_hint": [], "deps": []}]}}
     path = Path(tempfile.mkdtemp()) / "shape.json"
     path.write_text(_json.dumps(tf))

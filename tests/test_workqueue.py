@@ -14,6 +14,7 @@ import time
 import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import config
 import workqueue
@@ -282,8 +283,8 @@ class TheLeaseWaitIsPushNotified(unittest.TestCase):
         drivers._lease_store = None
         try:
             q = workqueue.Queue(self.db)
-            with q.subscribe("slot:Kimi-K3") as sub:
-                drivers._lease_release("Kimi-K3", "some-task")
+            with q.subscribe(f"slot:{STRONGEST}") as sub:
+                drivers._lease_release(STRONGEST, "some-task")
                 self.assertTrue(sub.wait(5), "a released slot did not wake its queue")
         finally:
             config.DB_PATH, drivers._lease_store = orig_db, orig_store
@@ -296,8 +297,8 @@ class TheLeaseWaitIsPushNotified(unittest.TestCase):
         drivers._lease_store = None
         try:
             q = workqueue.Queue(self.db)
-            with q.subscribe("slot:Kimi-K3") as sub:
-                drivers._lease_release("GLM-5.3", "some-task")
+            with q.subscribe(f"slot:{STRONGEST}") as sub:
+                drivers._lease_release(ENTRY, "some-task")  # a DIFFERENT model
                 self.assertFalse(sub.wait(0.3))
         finally:
             config.DB_PATH, drivers._lease_store = orig_db, orig_store
@@ -311,7 +312,7 @@ class TheLeaseWaitIsPushNotified(unittest.TestCase):
         config.DB_PATH = "/nonexistent-dir/nope.db"
         drivers._lease_store = None
         try:
-            drivers._lease_release("Kimi-K3", "t")  # must not raise
+            drivers._lease_release(STRONGEST, "t")  # must not raise
         finally:
             config.DB_PATH, drivers._lease_store = orig_db, orig_store
 
@@ -323,7 +324,7 @@ class TheLeaseWaitIsPushNotified(unittest.TestCase):
         orig = config.DB_PATH
         config.DB_PATH = "/nonexistent-dir/nope.db"
         try:
-            self.assertIsNone(drivers._slot_subscription("Kimi-K3"))
+            self.assertIsNone(drivers._slot_subscription(STRONGEST))
         finally:
             config.DB_PATH = orig
 
@@ -340,7 +341,7 @@ class TheLeaseWaitIsPushNotified(unittest.TestCase):
                 # deadline and raise rather than spin or hang.
                 with self.assertRaises(drivers.DriverError):
                     await drivers._lease_wait_loop(
-                        "Kimi-K3", "t", {}, 0, "Kimi-K3",
+                        STRONGEST, "t", {}, 0, STRONGEST,
                         time.monotonic() + 0.2, None)
             aio.run(go())
         finally:

@@ -26,6 +26,16 @@ log = logging.getLogger("code-tasks")
 _merge_lock = asyncio.Lock()
 
 
+# Where a retired model's work goes now. Callables so they read the roster at
+# call time, not at import (the roster is dated).
+RETIRED_MODELS = {
+    "gpt-oss-120b":      lambda: config.ESCALATION_PATH[0],                 # no basic tier
+    "DeepSeek-V4-Flash": lambda: next((m for m in config.ESCALATION_PATH
+                                       if m.startswith("DeepSeek")), None),
+    "Kimi-K3":           lambda: config.ESCALATION_PATH[-1],                # strongest live
+}
+
+
 def load_taskfile(path, policy=None):
     """Load + validate a taskfile. `policy` (bench variant overrides) may widen
     the allowed implementers/reviewers, permit self-review, or disable review;
@@ -34,7 +44,10 @@ def load_taskfile(path, policy=None):
     repo = Path(data["project"]["repo"]).resolve()
     pol = policy or {}
     models = set(config.IMPLEMENTER_MODELS) | set(pol.get("implementers", []))
-    reviewers = tuple(pol.get("reviewers", ("kimi", "glm")))
+    # Review-capable families, from the roster: ("kimi", "glm") until 09-19,
+    # then ("glm", "deepseek"). A taskfile written for a family that has since
+    # left is remapped below rather than rejected — the plan is still good.
+    reviewers = tuple(pol.get("reviewers", tuple(config.REVIEW_FAMILIES)))
     review_on = pol.get("review", True)
     allow_self = bool(pol.get("allow_self_review"))
     tasks = {}
@@ -48,12 +61,30 @@ def load_taskfile(path, policy=None):
         if tid in tasks:
             raise ValueError(f"duplicate task id: {tid}")
         model = t.get("model", "")
+        if model not in models and model in RETIRED_MODELS and not pol.get("implementers"):
+            # A model that LEFT the roster — gpt-oss retired 09-11, DeepSeek-V4
+            # replaced 09-12, Kimi-K3 withdrawn 09-19. The decomposition is still
+            # good; only the label is stale. Remap to where that tier's work
+            # goes now rather than failing every taskfile written before the
+            # transition.
+            model = RETIRED_MODELS[model]() or config.ESCALATION_PATH[0]
         if model not in models:
             raise ValueError(
                 f"task {tid}: model {model!r} must be an implementer ({sorted(models)})"
             )
         reviewer = t.get("reviewer", "")
-        if review_on and reviewer not in reviewers:
+        if review_on and reviewer not in reviewers and not pol.get("reviewers"):
+            # The named family is not review-capable TODAY — most likely it left
+            # the roster (kimi after 09-19) or was never one (gpt-oss). Remap to
+            # the strongest cross-family reviewer instead of failing a taskfile
+            # whose decomposition is still perfectly good.
+            remapped = config.cross_family_reviewer(model)
+            if remapped is None:
+                raise ValueError(
+                    f"task {tid}: reviewer must be one of {reviewers}, got "
+                    f"{reviewer!r}, and no cross-family reviewer exists for {model}")
+            reviewer = remapped
+        elif review_on and reviewer not in reviewers:
             raise ValueError(f"task {tid}: reviewer must be one of {reviewers}, got {reviewer!r}")
         impl_family = config.MODEL_FAMILY[model]
         rev_family = config.MODEL_FAMILY.get(reviewer, reviewer)
@@ -346,8 +377,8 @@ def _impl_prompt(t, feedback):
 
 
 def _harness_of(model):
-    """The local harness that runs this model. Mirrors _driver()'s routing."""
-    return "kimi" if model == "Kimi-K3" else "opencode"
+    """The local harness that runs this model, from the roster."""
+    return config.MODEL_HARNESS.get(model, "opencode")
 
 
 def _reviewer_pressure(model, usage):
@@ -375,7 +406,7 @@ def _eligible_pr_reviewers(impl_fam, pol):
     the PR stranded with nobody coming back for them.
     """
     out = []
-    for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash"):
+    for m in config.ESCALATION_PATH[::-1]:  # strongest first, from the roster
         if config.MODEL_FAMILY.get(m) == impl_fam:
             continue
         try:
@@ -439,16 +470,18 @@ _next_tier = _next_tier_m
 
 
 def _reviewer_for(t, model):
-    """Cross-review preserved under escalation: a strong model's work is
-    reviewed by the other strong harness; basic/medium keep the taskfile
-    reviewer. Module-level so the dashboard's manual escalation can apply the
-    same rule the graph applies — the reviewer must follow the implementer."""
+    """Cross-review preserved under escalation, from the roster.
+
+    Keep the taskfile's reviewer when it is still review-capable and still a
+    different family from the implementer; otherwise take the strongest other
+    review-capable family. Module-level so the dashboard's manual escalation
+    applies the same rule the graph does — the reviewer must follow the
+    implementer, and it must never be the implementer's own family."""
+    current = t.get("reviewer")
     fam = config.MODEL_FAMILY.get(model)
-    if fam == "kimi":
-        return "glm"
-    if fam == "glm":
-        return "kimi"
-    return t["reviewer"]
+    if current in config.REVIEW_FAMILIES and current != fam:
+        return current
+    return config.cross_family_reviewer(model) or current
 
 
 def _rework_feedback(tid, results):
@@ -596,19 +629,22 @@ def _driver(model, role, policy):
     pol = policy or {}
     harness = pol.get("harness", {}).get(model)
     if harness is None:
-        harness = "kimi" if model == "Kimi-K3" else "opencode"
+        harness = config.MODEL_HARNESS.get(model, "opencode")
     if harness == "kimi":
         return KimiDriver(role, bench=bool(pol))
     return OpencodeDriver(model, role, bench=bool(pol))
 
 
 def _reviewer_driver(t, policy):
+    """The driver for the taskfile's `reviewer:` family token.
+
+    Resolved through config.REVIEW_FAMILIES, so "glm" means GLM-5.3 and
+    "deepseek" means whichever DeepSeek is live — and "kimi" stops resolving
+    the day Kimi leaves instead of constructing a driver for a withdrawn model.
+    """
     token = t["reviewer"]
-    if token == "kimi":
-        return KimiDriver("reviewer", bench=bool(policy))
-    if token == "glm":
-        return OpencodeDriver("GLM-5.3", "reviewer", bench=bool(policy))
-    return _driver(token, "reviewer", policy)
+    model = config.REVIEW_FAMILIES.get(token, token)
+    return _driver(model, "reviewer", policy)
 
 
 # Failure reasons that mean "this model could not do the task" and so justify
@@ -1143,6 +1179,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 usage = {}
             pool.sort(key=lambda m: (_reviewer_pressure(m, usage), usage.get(m, 0)))
             chosen = pool[:max(1, config.PR_REVIEWERS)]
+            if len(chosen) < config.PR_REVIEWERS_WANTED:
+                # The roster cannot field PR_REVIEWERS cross-family readers for
+                # this implementer — after Kimi-K3 leaves on 09-19 there are
+                # two families, so every task gets exactly one. The gate still
+                # requires unanimity among those who review; one genuine
+                # cross-family read beats a same-family pair for the property
+                # cross-review protects. But it is a weaker gate than the
+                # config asked for, and that must be visible, not silent.
+                events.emit("task.pr_review_thin", task=tid, pr=number,
+                            wanted=config.PR_REVIEWERS_WANTED, got=len(chosen),
+                            reviewers=chosen, implementer=cur_model(ctx))
             items = [{"model": m, "pr": number, "round": round_n, "diff": diff,
                       "n_reviewers": len(chosen),
                       "prior_issues": prior_r.get("issues") or []} for m in chosen]
@@ -1472,14 +1519,50 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     return g
 
 
-PLAN_SCHEMA_HINT = """\
-{"project": {"repo": "<abs path>", "title": "<short>",
- "pattern": "<name from the graph-pattern library, e.g. fan-out-fan-in>",
- "tasks": [{"id": "<kebab-id>", "title": "...", "prompt": "<detailed spec>",
-            "model": "gpt-oss-120b" | "DeepSeek-V4-Flash" | "GLM-5.3" | "Kimi-K3",
-            "reviewer": "kimi" | "glm",
-            "verify_cmd": "<shell cmd run in the worktree, empty ok>",
-            "files_hint": ["path/..."], "deps": ["<id>", ...]}]}}"""
+def _routing_tiers_prose():
+    """The planner's routing instructions, written from today's roster."""
+    tiers = config.IMPLEMENT_TIERS
+    lines = ["ROUTING TIERS (enforced — a task file that violates these is rejected):\n"]
+    if tiers.get("medium"):
+        lines.append(f"- {' or '.join(tiers['medium'])}: medium tasks (a self-contained "
+                     "feature, a new endpoint, moderate refactor of one file) AND the "
+                     "mechanical ones (rename, small HTML/CSS, wiring, config) — there is "
+                     "no lower tier.\n")
+    if tiers.get("hard"):
+        lines.append(f"- {' or '.join(tiers['hard'])}: hard tasks that need deep "
+                     "understanding, multi-file reasoning, delicate architecture, or "
+                     "subtle debugging.\n")
+    fams = list(config.REVIEW_FAMILIES)
+    pairs = []
+    for m in config.ESCALATION_PATH:
+        r = config.cross_family_reviewer(m)
+        if r:
+            pairs.append(f"work by {m} is reviewed by {r}")
+    lines.append(f"- reviewer is one of {' or '.join(fams)}. Cross-review rule: "
+                 + "; ".join(pairs) + ". Spread reviews across the review-capable "
+                 "families so none idles or saturates.\n\n")
+    return "".join(lines)
+
+
+def plan_schema_hint():
+    """The taskfile schema the planner is shown, with TODAY'S models in it.
+
+    A string literal here named gpt-oss and Kimi long after either should have
+    appeared in a plan. Generated from the roster so the planner is never told
+    to route work to a model that left."""
+    models = " | ".join(f'"{m}"' for m in config.ESCALATION_PATH)
+    reviewers = " | ".join(f'"{f}"' for f in config.REVIEW_FAMILIES)
+    return (
+        '{"project": {"repo": "<abs path>", "title": "<short>",\n'
+        ' "pattern": "<name from the graph-pattern library, e.g. fan-out-fan-in>",\n'
+        ' "tasks": [{"id": "<kebab-id>", "title": "...", "prompt": "<detailed spec>",\n'
+        f'            "model": {models},\n'
+        f'            "reviewer": {reviewers},\n'
+        '            "verify_cmd": "<shell cmd run in the worktree, empty ok>",\n'
+        '            "files_hint": ["path/..."], "deps": ["<id>", ...]}]}}')
+
+
+PLAN_SCHEMA_HINT = plan_schema_hint()
 
 
 def _balanced_span(text, start):
@@ -1608,17 +1691,7 @@ async def plan_tasks(goal, repo, out_path=None):
         "the model routing (who implements), the reviewer, and the verify "
         "gate for every task. Design it well; there is no later triage.\n\n"
         f"GOAL: {goal}\nTARGET REPO: {repo}\n\n"
-        "ROUTING TIERS (enforced — a task file that violates these is rejected):\n"
-        "- gpt-oss-120b: very basic, mechanical tasks (rename, small HTML/CSS, "
-        "append a function, wiring, config).\n"
-        "- DeepSeek-V4-Flash: medium tasks (a self-contained feature, a new "
-        "endpoint, moderate refactor of one file).\n"
-        "- GLM-5.3 or Kimi-K3: hard tasks that need deep understanding, "
-        "multi-file reasoning, delicate architecture, or subtle debugging.\n"
-        "- reviewer is kimi or glm. Cross-review rule: work by Kimi-K3 is "
-        "reviewed by glm; work by GLM-5.3 is reviewed by kimi; gpt-oss/"
-        "DeepSeek work may be reviewed by either. Split reviews between "
-        "kimi and glm so neither idles nor saturates.\n\n"
+        + _routing_tiers_prose() +
         "GRAPH DESIGN (maximize safe parallelism):\n"
         "- First choose ONE graph pattern for the plan from the pattern "
         "library in docs/graph-patterns.md of the orchestrator repo: chain, "
@@ -1678,7 +1751,9 @@ async def plan_tasks(goal, repo, out_path=None):
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )
-    res = await KimiDriver("planner").run(prompt, Path(repo), task_id="plan")
+    # The strongest live model that may plan — Kimi-K3 until 09-19, GLM after.
+    res = await _driver(config.PLANNER_MODEL, "planner", None).run(
+        prompt, Path(repo), task_id="plan")
     raw = _plan_json_from_run(res)
     if raw is None:
         raise RuntimeError(f"planner produced no usable JSON; transcript: {res.transcript_path}")

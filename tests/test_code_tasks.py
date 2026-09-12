@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 
 from helpers import FakeStore, capture_events
+from helpers import needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: E402,F401
+from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
 
 import code_tasks
 import config
@@ -28,7 +30,7 @@ def taskfile(tasks, repo="/tmp", title="t", after=None, pattern=None):
 
 
 BASIC = {"id": "t1", "title": "T1", "prompt": "do it",
-         "model": "gpt-oss-120b", "reviewer": "kimi"}
+         "model": config.ESCALATION_PATH[0], "reviewer": "kimi"}
 
 
 class LoadTaskfile(unittest.TestCase):
@@ -43,7 +45,7 @@ class LoadTaskfile(unittest.TestCase):
         self.assertIn("must be an implementer", str(cm.exception))
 
     def test_rejects_same_family_review(self):
-        bad = {**BASIC, "model": "Kimi-K3", "reviewer": "kimi"}
+        bad = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         with self.assertRaises(ValueError) as cm:
             code_tasks.load_taskfile(taskfile([bad]))
         self.assertIn("must not be the harness", str(cm.exception))
@@ -66,10 +68,10 @@ class LoadTaskfile(unittest.TestCase):
         self.assertIn("cycle", str(cm.exception))
 
     def test_bench_policy_may_relax_self_review(self):
-        same = {**BASIC, "model": "Kimi-K3", "reviewer": "kimi"}
+        same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         ts = code_tasks.load_taskfile(taskfile([same]),
                                       policy={"allow_self_review": True})
-        self.assertEqual(ts["tasks"]["t1"]["reviewer"], "kimi")
+        self.assertEqual(ts["tasks"]["t1"]["reviewer"], STRONGEST_FAMILY)
 
     def test_passes_through_project_pattern(self):
         ts = code_tasks.load_taskfile(taskfile([BASIC], pattern="chain"))
@@ -91,16 +93,16 @@ class PlannerPatternLibrary(unittest.TestCase):
         seen = {}
 
         class FakeDriver:
-            def __init__(self, role):
-                pass
-
             async def run(self, prompt, cwd, task_id=None):
                 seen["prompt"] = prompt
                 return object()
 
-        orig_driver = code_tasks.KimiDriver
+        # The planner is whichever model the roster says may plan today — Kimi
+        # until 09-19, GLM after — resolved through _driver. Stub THAT, not a
+        # specific driver class, or the test breaks the day the roster moves.
+        orig_driver = code_tasks._driver
         orig_extract = code_tasks._plan_json_from_run
-        code_tasks.KimiDriver = FakeDriver
+        code_tasks._driver = lambda model, role, pol: FakeDriver()
         code_tasks._plan_json_from_run = (
             lambda res: '{"project": {"repo": "/tmp", "tasks": []}}')
         try:
@@ -108,7 +110,7 @@ class PlannerPatternLibrary(unittest.TestCase):
                 asyncio.run(code_tasks.plan_tasks(
                     "g", "/tmp", out_path=Path(d) / "plan.json"))
         finally:
-            code_tasks.KimiDriver = orig_driver
+            code_tasks._driver = orig_driver
             code_tasks._plan_json_from_run = orig_extract
         self.assertIn("docs/graph-patterns.md", seen["prompt"])
         self.assertIn('"pattern"', seen["prompt"])
@@ -163,21 +165,21 @@ class ResumePlanning(unittest.TestCase):
         return ev.first("run.resume") or {}
 
     def test_merged_task_is_skipped(self):
-        p = self.plan([{"id": "t1", "status": "merged", "model": "gpt-oss-120b",
+        p = self.plan([{"id": "t1", "status": "merged", "model": config.ESCALATION_PATH[0],
                         "error": None}])
         self.assertEqual(p["skipped_merged"], ["t1"])
         self.assertEqual(p["retried"], [])
 
     def test_capability_failure_escalates_one_tier(self):
-        p = self.plan([{"id": "t1", "status": "failed", "model": "gpt-oss-120b",
+        p = self.plan([{"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
                         "error": "exhausted fix rounds"}])
         self.assertEqual(p["escalated_on_resume"],
-                         {"t1": config.ESCALATION_PATH[0]},
-                         "gpt-oss-120b is off the path, so it escalates into it")
+                         {"t1": config.ESCALATION_PATH[1]},
+                         "a capability failure at the entry tier moves up one")
 
     def test_killed_run_resumes_at_the_same_tier(self):
         """The regression that put four tasks on Kimi-K3 at once."""
-        p = self.plan([{"id": "t1", "status": "failed", "model": "gpt-oss-120b",
+        p = self.plan([{"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
                         "error": "reset-stale: owning run process died"}])
         self.assertEqual(p["escalated_on_resume"], {},
                          "an interrupted run is not evidence the model was too weak")
@@ -250,10 +252,10 @@ class PlanExtraction(unittest.TestCase):
     """
 
     PLAN = {"project": {"repo": "/tmp", "title": "T", "tasks": [
-        {"id": "a", "title": "A", "prompt": "x" * 200, "model": "gpt-oss-120b",
+        {"id": "a", "title": "A", "prompt": "x" * 200, "model": config.ESCALATION_PATH[0],
          "reviewer": "kimi"}]}}
     DECOY = {"project": {"repo": "/tmp", "title": "T", "tasks": [
-        {"id": "a", "title": "A", "prompt": "...", "model": "gpt-oss-120b",
+        {"id": "a", "title": "A", "prompt": "...", "model": config.ESCALATION_PATH[0],
          "reviewer": "kimi"}]}}
 
     def _run(self, transcript_lines, text=""):
@@ -314,11 +316,14 @@ class OffPathModelsCanStillEscalate(unittest.TestCase):
         return ev.first("run.resume") or {}
 
     def test_a_model_off_the_path_escalates_into_the_entry_tier(self):
-        self.assertNotIn("gpt-oss-120b", config.ESCALATION_PATH)
-        p = self.plan([{"id": "t1", "status": "failed", "model": "gpt-oss-120b",
-                        "error": "exhausted fix rounds"}])
-        self.assertEqual(p["escalated_on_resume"],
-                         {"t1": config.ESCALATION_PATH[0]})
+        """A model that is not ON the escalation path counts as below its entry
+        tier, so it escalates INTO the path rather than being stuck. gpt-oss was
+        the live example; it is retired, so _next_tier is checked directly."""
+        self.assertEqual(code_tasks._next_tier("some-off-path-model"),
+                         config.ESCALATION_PATH[0])
+        self.assertEqual(code_tasks._next_tier(config.ESCALATION_PATH[0]),
+                         config.ESCALATION_PATH[1])
+        self.assertIsNone(code_tasks._next_tier(config.ESCALATION_PATH[-1]))
 
     def test_the_top_tier_still_does_not_escalate(self):
         top = config.ESCALATION_PATH[-1]
@@ -426,11 +431,11 @@ class ProjectChaining(unittest.TestCase):
         p.write_text(json.dumps({"project": {
             "repo": "/tmp", "title": name, "tasks": [
                 {"id": i, "title": i, "prompt": "x",
-                 "model": "gpt-oss-120b", "reviewer": "kimi"} for i in ids]}}))
+                 "model": config.ESCALATION_PATH[0], "reviewer": "kimi"} for i in ids]}}))
         return str(p.resolve())
 
     def _row(self, tid, status):
-        return {"id": tid, "status": status, "model": "gpt-oss-120b",
+        return {"id": tid, "status": status, "model": config.ESCALATION_PATH[0],
                 "error": None}
 
     def _graph(self, ts, store, taskfile_arg="tf.json"):
@@ -492,7 +497,7 @@ class ProjectChaining(unittest.TestCase):
     def test_conflict_repair_head_is_gated_too(self):
         ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
         g = self._graph(ts, FakeStore([{"id": "t1", "status": "conflict",
-                                        "model": "gpt-oss-120b",
+                                        "model": config.ESCALATION_PATH[0],
                                         "error": "merge failed"}]))
         self.assertEqual(g.starts, ["chain_wait"])
         self.assertIsNotNone(self._edge(g, "chain_wait", "publish_t1"))
@@ -500,7 +505,7 @@ class ProjectChaining(unittest.TestCase):
     def test_merged_skip_head_is_gated_too(self):
         ts = code_tasks.load_taskfile(taskfile([BASIC], after=["ghost.json"]))
         g = self._graph(ts, FakeStore([{"id": "t1", "status": "merged",
-                                        "model": "gpt-oss-120b",
+                                        "model": config.ESCALATION_PATH[0],
                                         "error": None}]))
         self.assertEqual(g.starts, ["chain_wait"])
         self.assertIsNotNone(self._edge(g, "chain_wait", "publish_t1"))
@@ -646,15 +651,15 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
     """
 
     def _pick(self, usage, impl_family=None, n=2):
-        pool = [m for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash")
+        pool = [m for m in (STRONGEST, "GLM-5.3", ENTRY)
                 if config.MODEL_FAMILY.get(m) != impl_family]
         pool.sort(key=lambda m: (usage.get(m, 0) / max(1, config.driver_limit(m)),
                                  usage.get(m, 0)))
         return pool[:n]
 
     def test_the_idle_model_is_preferred_over_saturated_ones(self):
-        picked = self._pick({"Kimi-K3": 3, "GLM-5.3": 4, "DeepSeek-V4-Flash": 0})
-        self.assertEqual(picked[0], "DeepSeek-V4-Flash")
+        picked = self._pick({STRONGEST: 3, "GLM-5.3": 4, ENTRY: 0})
+        self.assertEqual(picked[0], ENTRY)
 
     def test_saturation_is_relative_to_each_cap_not_absolute(self):
         """The same absolute count means different things at different caps.
@@ -665,7 +670,7 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         the constants, not the rule.
         """
         caps = {m: config.driver_limit(m)
-                for m in ("GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3")}
+                for m in ("GLM-5.3", ENTRY, STRONGEST)}
         busiest = max(caps, key=lambda m: caps[m])
         # Everything at ONE in use: the model with the largest cap is the least
         # contended and must be picked first.
@@ -674,8 +679,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
 
     def test_a_model_at_its_cap_is_never_preferred_to_an_idle_one(self):
         caps = {m: config.driver_limit(m)
-                for m in ("GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3")}
-        full, idle = "GLM-5.3", "Kimi-K3"
+                for m in ("GLM-5.3", ENTRY, STRONGEST)}
+        full, idle = "GLM-5.3", STRONGEST
         picked = self._pick({full: caps[full], idle: 0})
         self.assertEqual(picked[0], idle)
 
@@ -684,6 +689,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
             picked = self._pick({}, impl_family=fam, n=2)
             for m in picked:
                 self.assertNotEqual(config.MODEL_FAMILY[m], fam)
+
+    @needs_three_families
 
     def test_enough_reviewers_remain_after_excluding_the_implementer(self):
         """PR_REVIEWERS must be satisfiable from the remaining families."""
@@ -704,7 +711,7 @@ class ResumingAnOpenPullRequest(unittest.TestCase):
 
     def _graph(self, status):
         ts = code_tasks.load_taskfile(taskfile([BASIC]))
-        prior = [{"id": "t1", "status": status, "model": "gpt-oss-120b", "error": None}]
+        prior = [{"id": "t1", "status": status, "model": config.ESCALATION_PATH[0], "error": None}]
         with capture_events():
             return code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
 
@@ -741,12 +748,12 @@ class ReviewersSendingAPullRequestBack(unittest.TestCase):
         fb = self._feedback({
             "review_t1": {"pass": True, "issues": []},
             "gate_t1": {"passed": True, "output": ""},
-            "pr_review_t1": {"approved": False, "reviewers": ["Kimi-K3", "GLM-5.3"],
-                             "issues": ["[Kimi-K3] leaks a file handle"]},
+            "pr_review_t1": {"approved": False, "reviewers": [STRONGEST, ENTRY],
+                             "issues": [f"[{STRONGEST}] leaks a file handle"]},
         })
         self.assertTrue(fb)
         self.assertIn("leaks a file handle", fb)
-        self.assertIn("Kimi-K3, GLM-5.3", fb)
+        self.assertIn(f"{STRONGEST}, {ENTRY}", fb)
 
     def test_it_tells_the_implementer_not_to_call_the_task_done(self):
         fb = self._feedback({"pr_review_t1": {"approved": False, "issues": ["x"]}})
@@ -784,6 +791,8 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
     requests were stranded that way in a single run — branch pushed, PR open,
     nobody coming back. Eligibility is now decided by building the driver.
     """
+
+    @needs_three_families
 
     def test_every_implementer_family_has_enough_reviewers(self):
         for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
@@ -825,22 +834,27 @@ class ReviewerContention(unittest.TestCase):
         usage = {"GLM-5.3": config.driver_limit("GLM-5.3"), "harness:opencode": 0}
         self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
 
+    @needs_kimi
+
     def test_kimi_is_preferred_when_the_opencode_pool_is_full(self):
-        usage = {"Kimi-K3": 1, "GLM-5.3": 1, "DeepSeek-V4-Flash": 1,
+        usage = {STRONGEST: 1, "GLM-5.3": 1, ENTRY: 1,
                  "harness:opencode": config.harness_limit("opencode"),
                  "harness:kimi": 1}
-        order = sorted(["GLM-5.3", "DeepSeek-V4-Flash", "Kimi-K3"],
+        order = sorted(["GLM-5.3", ENTRY, STRONGEST],
                        key=lambda m: code_tasks._reviewer_pressure(m, usage))
-        self.assertEqual(order[0], "Kimi-K3")
+        self.assertEqual(order[0], STRONGEST)
 
     def test_an_idle_fleet_scores_everything_zero(self):
-        for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash"):
+        for m in (STRONGEST, "GLM-5.3", ENTRY):
             self.assertEqual(code_tasks._reviewer_pressure(m, {}), 0.0)
 
+    @needs_kimi
+
     def test_kimi_routes_to_the_kimi_harness_and_the_rest_to_opencode(self):
-        self.assertEqual(code_tasks._harness_of("Kimi-K3"), "kimi")
-        for m in ("GLM-5.3", "DeepSeek-V4-Flash", "gpt-oss-120b"):
-            self.assertEqual(code_tasks._harness_of(m), "opencode")
+        self.assertEqual(code_tasks._harness_of(STRONGEST), "kimi")
+        for m, h in config.MODEL_HARNESS.items():
+            self.assertEqual(code_tasks._harness_of(m), h)
+        self.assertEqual(code_tasks._harness_of("GLM-5.3"), "opencode")
 
 
 class EveryTaskEventNamesItsTask(unittest.TestCase):
@@ -1018,7 +1032,7 @@ class ResumingAConflictedTask(unittest.TestCase):
 
     def _graph(self, status):
         ts = code_tasks.load_taskfile(taskfile([BASIC]))
-        prior = [{"id": "t1", "status": status, "model": "gpt-oss-120b", "error": None}]
+        prior = [{"id": "t1", "status": status, "model": config.ESCALATION_PATH[0], "error": None}]
         with capture_events():
             return code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
 
@@ -1319,11 +1333,11 @@ class AJoinWaitsForEveryDependency(unittest.TestCase):
     """
 
     def _graph(self, deps, merged=()):
-        tasks = [{"id": "a", "title": "a", "prompt": "p", "model": "gpt-oss-120b", "reviewer": "kimi"},
-                 {"id": "b", "title": "b", "prompt": "p", "model": "gpt-oss-120b", "reviewer": "kimi"},
-                 {"id": "c", "title": "c", "prompt": "p", "model": "gpt-oss-120b", "reviewer": "kimi",
+        tasks = [{"id": "a", "title": "a", "prompt": "p", "model": config.ESCALATION_PATH[0], "reviewer": "kimi"},
+                 {"id": "b", "title": "b", "prompt": "p", "model": config.ESCALATION_PATH[0], "reviewer": "kimi"},
+                 {"id": "c", "title": "c", "prompt": "p", "model": config.ESCALATION_PATH[0], "reviewer": "kimi",
                   "deps": deps}]
-        prior = [{"id": m, "status": "merged", "model": "gpt-oss-120b", "error": None} for m in merged]
+        prior = [{"id": m, "status": "merged", "model": config.ESCALATION_PATH[0], "error": None} for m in merged]
         ts = code_tasks.load_taskfile(taskfile(tasks))
         with capture_events():
             return code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
@@ -1407,6 +1421,8 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
         self.assertEqual(n.retry.on, (code_tasks.DriverError,))
         self.assertGreater(n.timeout, config.DRIVER_TIMEOUT)
 
+    @needs_three_families
+
     def test_the_fanout_returns_a_spawn_with_one_item_per_reviewer(self):
         """Run the real pr_fanout node against stubbed git/store."""
         import asyncio as aio
@@ -1484,3 +1500,29 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
         names = {n["name"] for n in topo["nodes"]}
         self.assertIn("pr_fanout", names)
         self.assertIn("pr_reviewer", names)
+
+
+class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
+    """A taskfile written before a roster transition is still a good plan.
+
+    gpt-oss retired 09-11, DeepSeek-V4 replaced 09-12, Kimi-K3 withdrawn 09-19.
+    Fourteen taskfiles on disk named gpt-oss the morning after it left; failing
+    every one of them with "must be an implementer" would have thrown away
+    fourteen decompositions over a stale label.
+    """
+
+    def test_a_retired_model_loads_as_its_replacement(self):
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": "gpt-oss-120b"}]))
+        self.assertEqual(ts["tasks"]["t1"]["model"], config.ESCALATION_PATH[0])
+
+    def test_a_model_that_was_never_real_is_still_rejected(self):
+        with self.assertRaises(ValueError):
+            code_tasks.load_taskfile(taskfile([{**BASIC, "model": "GPT-9-Ultra"}]))
+
+    def test_every_retired_name_has_a_live_destination(self):
+        for name, where in code_tasks.RETIRED_MODELS.items():
+            dest = where()
+            if name in config.IMPLEMENTER_MODELS:
+                continue  # not retired yet on this roster date
+            self.assertIn(dest, config.IMPLEMENTER_MODELS,
+                          f"{name} remaps to {dest!r}, which is not live")

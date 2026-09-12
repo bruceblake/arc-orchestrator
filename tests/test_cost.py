@@ -8,9 +8,11 @@ table, and junk in either input must never raise — a crash here would take the
 whole usage/pages API down with it.
 """
 import os
+import re
 import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import config
 
@@ -29,7 +31,7 @@ class CostOfArithmetic(unittest.TestCase):
 
     def test_known_token_count_times_price_equals_cost(self):
         """A known token count at a known price must return that product."""
-        model = "gpt-oss-120b"
+        model = config.ESCALATION_PATH[0]
         p, c = config.MODEL_PRICING[model]["prompt_per_mtok"], \
             config.MODEL_PRICING[model]["completion_per_mtok"]
         prompt, completion = 1_500_000, 750_000
@@ -80,18 +82,20 @@ class CostOfEnvOverride(unittest.TestCase):
 
     def test_env_override_is_honoured(self):
         """ARC_PRICE_<MODEL>_PROMPT/COMPLETION replace the table for that model."""
-        os.environ["ARC_PRICE_KIMI_K3_PROMPT"] = "0.9"
-        os.environ["ARC_PRICE_KIMI_K3_COMPLETION"] = "1.1"
-        self.assertAlmostEqual(config.cost_of("Kimi-K3", 1_000_000, 0), 0.9, places=8)
-        self.assertAlmostEqual(config.cost_of("Kimi-K3", 0, 5_000_000), 5.5, places=8)
+        key = re.sub(r"[^A-Z0-9]+", "_", STRONGEST.upper())  # the key cost_of derives
+        os.environ[f"ARC_PRICE_{key}_PROMPT"] = "0.9"
+        os.environ[f"ARC_PRICE_{key}_COMPLETION"] = "1.1"
+        self.assertAlmostEqual(config.cost_of(STRONGEST, 1_000_000, 0), 0.9, places=8)
+        self.assertAlmostEqual(config.cost_of(STRONGEST, 0, 5_000_000), 5.5, places=8)
 
     def test_a_partial_override_falls_back_for_the_unset_half(self):
         """Setting only one rate must not zero the other; the unset half keeps
         the table value."""
-        os.environ["ARC_PRICE_DEEPSEEK_V4_FLASH_PROMPT"] = "0.3"
-        table_c = config.MODEL_PRICING["DeepSeek-V4-Flash"]["completion_per_mtok"]
-        self.assertAlmostEqual(config.cost_of("DeepSeek-V4-Flash", 2_000_000, 0), 0.6, places=8)
-        self.assertAlmostEqual(config.cost_of("DeepSeek-V4-Flash", 0, 1_000_000), table_c, places=8)
+        key = re.sub(r"[^A-Z0-9]+", "_", ENTRY.upper())
+        os.environ[f"ARC_PRICE_{key}_PROMPT"] = "0.3"
+        table_c = config.MODEL_PRICING[ENTRY]["completion_per_mtok"]
+        self.assertAlmostEqual(config.cost_of(ENTRY, 2_000_000, 0), 0.6, places=8)
+        self.assertAlmostEqual(config.cost_of(ENTRY, 0, 1_000_000), table_c, places=8)
 
     def test_a_junk_override_falls_back_rather_than_crashing(self):
         """A non-numeric override value falls back to the table, and must not
@@ -102,8 +106,9 @@ class CostOfEnvOverride(unittest.TestCase):
 
     def test_override_key_uses_model_uppercased_with_underscores(self):
         """The env key normalises the model name (Kimi-K3 -> ARC_PRICE_KIMI_K3_*)."""
-        os.environ["ARC_PRICE_KIMI_K3_COMPLETION"] = "1.4"
-        self.assertAlmostEqual(config.cost_of("Kimi-K3", 0, 1_000_000), 1.4, places=8)
+        key = re.sub(r"[^A-Z0-9]+", "_", STRONGEST.upper())
+        os.environ[f"ARC_PRICE_{key}_COMPLETION"] = "1.4"
+        self.assertAlmostEqual(config.cost_of(STRONGEST, 0, 1_000_000), 1.4, places=8)
 
 
 if __name__ == "__main__":

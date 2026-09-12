@@ -208,7 +208,15 @@ def promotion_configured():
     and offering the button implies a gate that does not exist.
     """
     return BASE_BRANCH != PROD_BRANCH
-PR_REVIEWERS = int(os.getenv("ARC_PR_REVIEWERS", "2"))
+# What the operator ASKED for: two independent cross-family readings per PR.
+PR_REVIEWERS_WANTED = int(os.getenv("ARC_PR_REVIEWERS", "2"))
+# What the roster can DELIVER: an implementer's PR can only be read by the
+# other PR-review-capable families (pr_reviewer role — a superset of the
+# pre-merge `reviewer` role), so the ceiling is (families - 1). Three
+# families -> 2; after Kimi-K3 leaves on 09-19, two families -> 1. The
+# effective value is the smaller, so the config never promises a gate the
+# fleet cannot staff; the audit compares delivered against wanted and says so.
+# PR_REVIEWERS (the effective value) is computed after the roster below.
 # How many times a PR may go back to the implementer before the task fails.
 PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "8"))
 # Retries of a review that reached NO verdict (every reviewer crashed).
@@ -245,7 +253,10 @@ CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
 # governed code pipeline: no worktree, no gate, no publish. Only Kimi-K3 and
 # GLM-5.3 may hold the gh roles (driver validation enforces it), every command
 # previews by default, and --apply-labels/--create/--post are the only writes.
-GH_MODEL = os.getenv("ARC_GH_MODEL", "Kimi-K3")
+# Default None: gh_ops falls back to PLANNER_MODEL, which follows the roster
+# (Kimi-K3 until 09-19, GLM-5.3 after). A hardcoded default here would name a
+# withdrawn model the morning after it left.
+GH_MODEL = os.getenv("ARC_GH_MODEL") or None
 GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "60"))
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
@@ -266,9 +277,136 @@ GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "60"))
 # actual scarce resource. Cheap retries paid for with expensive reviews is a
 # bad trade. gpt-oss stays available for explicitly-routed mechanical work
 # (docs, one-line edits); it is just no longer where every task starts.
+# ---------------------------------------------------------------------------
+# THE MODEL ROSTER — the one table every other model constant derives from.
+#
+# Models come and go on dates the provider sets, not on dates we choose:
+#   - gpt-oss-120b is retired from this fleet now (operator decision, 09-11).
+#   - DeepSeek-V4-Flash is replaced by DeepSeek-V4.1-Flash on 2026-09-12.
+#   - Kimi-K3 is withdrawn on 2026-09-19.
+# Each row carries the window it is available in. Everything below — tiers,
+# families, the escalation path, concurrency caps, harness routing — is
+# computed from the rows that are live TODAY, so a transition is a date in
+# this table rather than an edit in six places on the morning it happens.
+#
+# ARC_ROSTER_DATE=YYYY-MM-DD previews any day's roster without waiting for it.
+# That is how the 09-12 and 09-19 states were tested before they arrived.
+# ---------------------------------------------------------------------------
+import datetime as _dt
+
+# (model, family, harness, tier, measured_concurrency, roles, from, until)
+# `from` inclusive, `until` exclusive; None = open-ended.
+#
+# roles: which of implementer / reviewer / pr_reviewer / planner the model may
+# hold. DeepSeek-V4-Flash may review an open PR but not gate or plan (judging
+# a bounded diff is a smaller job than authoring; planning is not). Its 4.1
+# successor gets the full set — after Kimi-K3 leaves on 09-19 it is the ONLY
+# cross-family reviewer GLM's work can have, and a fleet with one reviewable
+# family has no cross-review at all.
+ALL_ROLES = ("implementer", "reviewer", "pr_reviewer", "planner")
+ROSTER = [
+    ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
+     ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
+    ("DeepSeek-V4.1-Flash", "deepseek", "opencode", "medium", 5,
+     ALL_ROLES,                                            "2026-09-12", None),
+    ("GLM-5.3",             "glm",      "opencode", "hard",   4,
+     ALL_ROLES,                                            None,         None),
+    ("Kimi-K3",             "kimi",     "kimi",     "hard",   3,
+     ALL_ROLES,                                            None,         "2026-09-19"),
+]
+TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
+
+
+def roster_date():
+    """Today, or ARC_ROSTER_DATE for previewing a future roster."""
+    override = os.getenv("ARC_ROSTER_DATE")
+    if override:
+        return _dt.date.fromisoformat(override)
+    return _dt.date.today()
+
+
+def live_roster(day=None):
+    day = day or roster_date()
+    out = []
+    for m, fam, harness, tier, cap, roles, start, end in ROSTER:
+        if start and day < _dt.date.fromisoformat(start):
+            continue
+        if end and day >= _dt.date.fromisoformat(end):
+            continue
+        out.append((m, fam, harness, tier, cap, roles))
+    return out
+
+
+def roster_changes(day=None, horizon_days=14):
+    """Transitions inside the next `horizon_days`, for the audit to announce."""
+    day = day or roster_date()
+    out = []
+    for m, fam, harness, tier, cap, roles, start, end in ROSTER:
+        for kind, d in (("arrives", start), ("leaves", end)):
+            if not d:
+                continue
+            dd = _dt.date.fromisoformat(d)
+            if day <= dd <= day + _dt.timedelta(days=horizon_days):
+                out.append({"model": m, "change": kind, "on": d,
+                            "in_days": (dd - day).days})
+    return sorted(out, key=lambda c: c["on"])
+
+
+_LIVE = live_roster()
+IMPLEMENTER_MODELS = {m for m, _f, _h, _t, _c, roles in _LIVE if "implementer" in roles}
+IMPLEMENT_TIERS = {tier: [m for m, _f, _h, t, _c, _r in _LIVE if t == tier]
+                   for tier in TIER_ORDER}
+IMPLEMENT_TIERS = {k: v for k, v in IMPLEMENT_TIERS.items() if v}
+MODEL_FAMILY = {m: fam for m, fam, *_ in _LIVE}
+MODEL_HARNESS = {m: h for m, _f, h, *_ in _LIVE}
+MODEL_ROLES = {m: set(roles) for m, _f, _h, _t, _c, roles in _LIVE}
+_MEASURED_CONCURRENCY = {m: cap for m, _f, _h, _t, cap, _r in _LIVE}
+# Strongest first: the roster is ordered weakest tier -> strongest, and within
+# a tier by preference, so reversing it yields "the best available" first.
+_STRONGEST_FIRST = [row for tier in reversed(TIER_ORDER)
+                    for row in reversed(_LIVE) if row[3] == tier]
+# Families that can hold the pre-merge `reviewer` role, and the model each one
+# reviews with, STRONGEST FIRST. A taskfile's `reviewer:` names a family here.
+REVIEW_FAMILIES = {}
+for _m, _fam, _h, _t, _c, _roles in _STRONGEST_FIRST:
+    if "reviewer" in _roles and _fam not in REVIEW_FAMILIES:
+        REVIEW_FAMILIES[_fam] = _m
+PLANNER_MODEL = next((m for m, _f, _h, _t, _c, roles in _STRONGEST_FIRST
+                      if "planner" in roles), None)
+# Families that may review an OPEN PR. A superset of REVIEW_FAMILIES: DeepSeek
+# V4 may judge a bounded diff (pr_reviewer) but not gate or plan (reviewer).
+PR_REVIEW_FAMILIES = {fam for _m, fam, _h, _t, _c, roles in _LIVE if "pr_reviewer" in roles}
+# Weakest live tier first. Within a tier, the order in ROSTER.
+_DEFAULT_PATH = [m for tier in TIER_ORDER for m, _f, _h, t, _c, _r in _LIVE if t == tier]
+
+
+PR_REVIEWERS = max(1, min(PR_REVIEWERS_WANTED, len(PR_REVIEW_FAMILIES) - 1))
+
+
+def model_may(model, role):
+    """May this model hold this role today? Unknown model -> False."""
+    return role in MODEL_ROLES.get(model, set())
+
+
+def cross_family_reviewer(impl_model):
+    """The family token that reviews `impl_model`'s work, or None.
+
+    Cross-review means a DIFFERENT family. Deterministic: the STRONGEST
+    review-capable family that is not the implementer's. Before 09-19 that
+    pairs kimi<->glm as it always did — DeepSeek 4.1 arriving on 09-12 does not
+    demote GLM's reviewer a week early; after 09-19, glm<->deepseek.
+    """
+    fam = MODEL_FAMILY.get(impl_model)
+    for f in REVIEW_FAMILIES:
+        if f != fam:
+            return f
+    return None
+
 ESCALATION_PATH = [m.strip() for m in os.getenv(
-    "ARC_ESCALATION_PATH",
-    "DeepSeek-V4-Flash,GLM-5.3,Kimi-K3").split(",") if m.strip()]
+    "ARC_ESCALATION_PATH", ",".join(_DEFAULT_PATH)).split(",") if m.strip()]
+# An override naming a model that is not live today is a misconfiguration
+# that would route work to a withdrawn model; drop those rather than try.
+ESCALATION_PATH = [m for m in ESCALATION_PATH if m in IMPLEMENTER_MODELS] or _DEFAULT_PATH
 MAX_ESCALATIONS = int(os.getenv("ARC_MAX_ESCALATIONS",
                                 str(max(0, len(ESCALATION_PATH) - 1))))
 
@@ -352,15 +490,6 @@ def kimi_plan_mode_on():
     return False
 
 
-IMPLEMENTER_MODELS = {"gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"}
-IMPLEMENT_TIERS = {"basic": ["gpt-oss-120b"], "medium": ["DeepSeek-V4-Flash"],
-                   "hard": ["GLM-5.3", "Kimi-K3"]}
-MODEL_FAMILY = {
-    "gpt-oss-120b": "gpt-oss",
-    "DeepSeek-V4-Flash": "deepseek",
-    "GLM-5.3": "glm",
-    "Kimi-K3": "kimi",
-}
 # Measured 2026-09-10 by ramping concurrent requests until ARC rejected, with
 # the fleet's own usage counted in:
 #
@@ -376,8 +505,6 @@ MODEL_FAMILY = {
 # Driver caps now equal the measured ceiling. ARC_DRIVER_HEADROOM reserves
 # slots for interactive use of the same account — set it to 1 if you want to
 # run an interactive `kimi` alongside the fleet without contending.
-_MEASURED_CONCURRENCY = {"Kimi-K3": 3, "GLM-5.3": 4,
-                         "gpt-oss-120b": 5, "DeepSeek-V4-Flash": 5}
 
 # ONE HARNESS PROCESS IS NOT ONE ARC SESSION.
 #
@@ -426,7 +553,7 @@ _MODEL_DRIVER_CAP = {
 # "opencode exited 1: " and retried four times per task — burning the retry
 # ladder on self-inflicted contention and blaming the provider for it. The
 # kimi CLI has no shared store, so its limit is just Kimi-K3's own cap.
-_HARNESS_CAP = {"opencode": 5, "kimi": _MEASURED_CONCURRENCY["Kimi-K3"]}
+_HARNESS_CAP = {"opencode": 5, "kimi": _MEASURED_CONCURRENCY.get("Kimi-K3", 3)}
 
 
 def harness_limit(harness):
@@ -485,8 +612,15 @@ def max_tasks_in_flight():
 # from a fresh prompt token, so any figure derived from it is an UPPER BOUND,
 # not an exact charge.
 MODEL_PRICING = {
+    # Retired 2026-09-11 but kept here: the event log holds thousands of its
+    # runs and the usage page prices history, not just today's roster.
     "gpt-oss-120b": {"prompt_per_mtok": 0.20, "completion_per_mtok": 0.20},
     "DeepSeek-V4-Flash": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
+    # 4.1 replaces V4 on 2026-09-12. Priced the same until the provider says
+    # otherwise — an unpriced model reports $0.00, which is worse than an
+    # estimate with a note. Override with ARC_PRICE_DEEPSEEK_V4_1_FLASH_PROMPT
+    # and ARC_PRICE_DEEPSEEK_V4_1_FLASH_COMPLETION.
+    "DeepSeek-V4.1-Flash": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
     "GLM-5.3": {"prompt_per_mtok": 1.00, "completion_per_mtok": 2.00},
     "Kimi-K3": {"prompt_per_mtok": 0.50, "completion_per_mtok": 2.00},
 }

@@ -20,6 +20,7 @@ import unittest
 from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path + event redirect)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import code_tasks
 import config
@@ -28,7 +29,7 @@ import drivers
 from store import Store
 
 
-GOOD_TASK = {"id": "t1", "prompt": "p", "model": "gpt-oss-120b",
+GOOD_TASK = {"id": "t1", "prompt": "p", "model": config.ESCALATION_PATH[0],
              "reviewer": "glm", "verify_cmd": "true"}
 
 
@@ -292,7 +293,7 @@ class CorruptStateEventLogTests(unittest.TestCase):
             ">>>>>>> task/abc",
             json.dumps({"ts": 3, "type": "driver.done", "task": "t1",
                         "tokens": 7, "seconds": 1.5, "harness": "kimi",
-                        "model": "Kimi-K3", "role": "implementer",
+                        "model": STRONGEST, "role": "implementer",
                         "attempt": 1}),
         ])
         out = dashboard._projects(st)

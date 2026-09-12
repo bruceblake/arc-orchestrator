@@ -564,6 +564,45 @@ def audit_invariants(store=None, repo=None):
     return out
 
 
+def audit_roster():
+    """Upcoming model transitions, and whether today's roster can staff the gate.
+
+    The roster is dated (config.ROSTER): models arrive and leave on the
+    provider's schedule. Two things an operator needs to hear before the day,
+    not after: WHAT changes in the next two weeks, and whether the fleet left
+    behind can still field PR_REVIEWERS cross-family reviewers for every
+    implementer. After Kimi-K3 leaves on 2026-09-19 it cannot — two families
+    means one cross-family reviewer each — and the merge gate quietly gets
+    thinner unless someone is told.
+    """
+    out = []
+    for c in config.roster_changes(horizon_days=14):
+        sev = "warning" if c["in_days"] <= 2 else "info"
+        out.append(_finding(
+            sev, "roster", f"{c['model']} {c['change']} on {c['on']} ({c['in_days']}d)",
+            "", "run the suite under ARC_ROSTER_DATE=%s before then" % c["on"]))
+    try:
+        import code_tasks
+        for m in config.ESCALATION_PATH:
+            fam = config.MODEL_FAMILY.get(m)
+            pool = code_tasks._eligible_pr_reviewers(fam, None)
+            if len(pool) < config.PR_REVIEWERS_WANTED:
+                out.append(_finding(
+                    "warning", "roster",
+                    f"{m}'s PRs get {len(pool)} cross-family reviewer(s), "
+                    f"config asks for {config.PR_REVIEWERS_WANTED}",
+                    f"eligible: {pool}",
+                    "the gate still needs unanimity among those who review; "
+                    "lower PR_REVIEWERS to match, or add a review-capable family"))
+    except Exception as exc:
+        out.append(_finding("info", "roster", "could not evaluate reviewer coverage",
+                            str(exc)[:120], ""))
+    if not config.REVIEW_FAMILIES:
+        out.append(_finding("critical", "roster", "NO review-capable model is live",
+                            "", "nothing can be reviewed; the pipeline cannot merge"))
+    return out
+
+
 def audit_logs():
     out = []
     p = Path(config.EVENTS_LOG)
@@ -616,6 +655,7 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
     findings += audit_gates(store)
     findings += audit_pr_collisions(store)
     findings += audit_invariants(store)
+    findings += audit_roster()
     findings += audit_tasks_backup(snapshot=snapshot)
     findings += audit_db_backup(snapshot=snapshot)
     findings += audit_logs()
