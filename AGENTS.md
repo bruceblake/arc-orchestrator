@@ -40,8 +40,11 @@ Every project is two graphs, and they are owned by different parties:
    `pipeline_doc.py` (dashboard: "How a task moves through the pipeline"),
    and **nobody chooses it per project** — not the planner, not a taskfile.
 2. **The graph between tasks — designed per project by the planner.** Which
-   tasks exist, which run in parallel (`deps: []`), which wait (`deps`), and
-   which whole projects wait on others (`project.after`, Rule 9). The
+   tasks exist, which run in parallel (`deps: []`), which wait (`deps`),
+   which run only if a dependency's probe verdict says so (`when` +
+   `probe_cmd` — a branch whose condition fails is recorded `skipped`, with
+   everything downstream), and which whole projects wait on others
+   (`project.after`, Rule 9). The
    planner picks a shape for it from the catalogue in `graph_shapes.PATTERNS`
    (single, chain, fanout, diamond, router, debate, hierarchical; the
    evaluator and escalate loops are built into graph 1 and never chosen) by

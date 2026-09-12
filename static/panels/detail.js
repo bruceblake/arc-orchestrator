@@ -83,6 +83,17 @@ function renderChain(d) {
   };
 }
 
+// task.when as the one-line condition the API labels edges with.
+function whenText(w) {
+  if (!w || !w.dep || !w.key) return "";
+  if ("equals" in w) return `${w.dep}.${w.key} == ${JSON.stringify(w.equals)}`;
+  if ("not_equals" in w) return `${w.dep}.${w.key} != ${JSON.stringify(w.not_equals)}`;
+  if ("in" in w) return `${w.dep}.${w.key} in ${JSON.stringify(w.in)}`;
+  if ("truthy" in w) return `${w.dep}.${w.key} ${w.truthy ? "is" : "is not"} truthy`;
+  if ("exists" in w) return `${w.dep}.${w.key} ${w.exists ? "is" : "is not"} exists`;
+  return `${w.dep}.${w.key} ?`;
+}
+
 function renderDag(d) {
   const tasks = d.tasks || [];
   if (!tasks.length) { $("#dag").innerHTML = '<div class="empty">no tasks in this file</div>'; return; }
@@ -95,8 +106,13 @@ function renderDag(d) {
             last_verdict: row.last_verdict || null, verify_cmd: t.verify_cmd || ""};
   });
   const edges = [];
-  for (const t of tasks) for (const dep of (t.deps || t.depends || []))
-    if (rowsById[dep] !== undefined || tasks.some(x => x.id === dep)) edges.push({src: dep, dst: t.id});
+  for (const t of tasks) for (const dep of (t.deps || t.depends || [])) {
+    if (!(rowsById[dep] !== undefined || tasks.some(x => x.id === dep))) continue;
+    const e = {src: dep, dst: t.id};
+    const w = t.when;
+    if (w && w.dep === dep) { e.conditional = true; e.when = whenText(w); }
+    edges.push(e);
+  }
   // The chain gate, drawn where it really sits: in front of every head.
   const c = d.chain;
   if (c && (c.deps || []).length) {
@@ -160,6 +176,8 @@ function friendly(e) {
     case "driver.slot_wait": return `<span class="warn">⏳ ${m} queued · ${task} <span class="hint">(${esc(e.scope)} pool full)</span></span>`;
     case "task.pr_opened": return `<span class="good">⇪ PR opened · ${task} ${cut(e.url, 80)}</span>`;
     case "task.pr_skipped": return `<span class="hint">PR skipped · ${task}: ${cut(e.reason, 100)}</span>`;
+    case "task.verdict": return `⌘ verdict · ${task}: <code>${esc(JSON.stringify(e.verdict || {}).slice(0, 140))}</code>`;
+    case "task.skipped": return `<span class="hint">⊘ skipped · ${task}${e.because ? ` (depends on skipped ${esc(e.because)})` : `: ${cut(e.reason, 120)}`}</span>`;
     case "run.resume": return `↻ resumed: skipped ${(e.skipped_merged || []).length} merged, retried ${(e.retried || []).length}`;
     case "run.interrupted": return `<span class="warn">↯ run interrupted — ${(e.tasks || []).length} task(s) marked failed</span>`;
     case "run.stopped": return `<span class="warn">■ run stopped by operator</span>`;
