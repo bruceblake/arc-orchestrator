@@ -68,19 +68,23 @@ class RoutingInvariants(unittest.TestCase):
                 "a harness slot and any task routed to it would stall")
 
     def test_escalation_path_runs_weakest_to_strongest(self):
-        """Escalation only makes sense if later tiers are scarcer/stronger.
+        """Escalation must climb TIERS, not scarcity.
 
-        Asserted on SESSIONS, not processes. A driver cap is sessions divided
-        by how many an opencode process holds at once, and that divisor differs
-        between harnesses — so in process terms Kimi (3, via the kimi CLI at
-        one session each) now outnumbers GLM (2, via opencode at two each)
-        without being any less scarce. Sessions are the resource ARC rations
-        and therefore the unit this invariant is about.
+        This used to assert the path ran from most plentiful to scarcest, on
+        the assumption that a stronger model is always a scarcer one. DeepSeek
+        4.1-thinking-max broke that: it sits in the hard tier and is no less
+        available than the medium one. Scarcity was a proxy for strength and
+        the proxy stopped holding; the rule the system actually depends on is
+        that a task escalates into a HIGHER tier, never sideways or down.
         """
-        caps = [config._MEASURED_CONCURRENCY[m] for m in config.ESCALATION_PATH]
-        self.assertEqual(caps, sorted(caps, reverse=True),
-                         f"escalation path {config.ESCALATION_PATH} should move "
-                         f"toward scarcer models, got session caps {caps}")
+        order = {t: i for i, t in enumerate(config.TIER_ORDER)}
+        tier_of = {m: t for t, ms in config.IMPLEMENT_TIERS.items() for m in ms}
+        tiers = [order[tier_of[m]] for m in config.ESCALATION_PATH]
+        self.assertEqual(tiers, sorted(tiers),
+                         f"escalation path must not move down a tier: "
+                         f"{config.ESCALATION_PATH}")
+        self.assertEqual(tier_of[config.ESCALATION_PATH[-1]], config.TIER_ORDER[-1],
+                         "the last step must land in the strongest tier")
 
     def test_a_driver_cap_never_over_subscribes_its_session_budget(self):
         """The bug this unit change fixes: caps set equal to the session limit.
@@ -394,8 +398,11 @@ class HarnessConcurrencyCeiling(unittest.TestCase):
     @needs_kimi
 
     def test_kimi_is_not_throttled_below_its_model_cap(self):
+        # About KIMI specifically — the kimi CLI serves one model, so its
+        # harness cap must not sit below that model's own. STRONGEST stopped
+        # meaning Kimi the day DeepSeek 4.1-thinking-max took the top tier.
         self.assertGreaterEqual(config.harness_limit("kimi"),
-                                config.driver_limit(STRONGEST))
+                                config.driver_limit("Kimi-K3"))
 
     def test_an_unknown_harness_still_gets_a_finite_cap(self):
         self.assertGreater(config.harness_limit("nope"), 0)
@@ -468,7 +475,7 @@ class TheApiIsTheFactTheDatesAreThePlan(unittest.TestCase):
 
     def test_a_dated_arrival_the_api_does_not_serve_is_deferred(self):
         live = self._roster({"DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"})
-        self.assertNotIn("DeepSeek-V4.1-Flash", live)
+        self.assertNotIn("DeepSeek-V4.1-Flash-thinking-max", live)
 
     def test_an_incumbent_stays_while_its_replacement_is_not_real(self):
         live = self._roster({"DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"})
@@ -476,8 +483,8 @@ class TheApiIsTheFactTheDatesAreThePlan(unittest.TestCase):
                       "retiring it would leave the fleet with no medium tier")
 
     def test_the_swap_happens_the_day_the_api_serves_it(self):
-        live = self._roster({"DeepSeek-V4.1-Flash", "GLM-5.3", "Kimi-K3"})
-        self.assertIn("DeepSeek-V4.1-Flash", live)
+        live = self._roster({"DeepSeek-V4.1-Flash-thinking-max", "GLM-5.3", "Kimi-K3"})
+        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", live)
         self.assertNotIn("DeepSeek-V4-Flash", live)
 
     def test_unknown_availability_falls_back_to_the_dates(self):

@@ -16,14 +16,22 @@ class Roles:
         self.i = 0
 
     def next(self):
+        """Rotate the four round roles across the live families.
+
+        The modulus is len(FAMILY_ORDER), not the literal 4 it was written as:
+        the roster had four families when this was written, has three since
+        gpt-oss was removed (2026-09-12), and `fams[i % 4]` raised IndexError
+        on the very first node of every round the moment it did not.
+        """
         i = self.i
         self.i += 1
         fams = FAMILY_ORDER
+        n = len(fams)
         return {
-            "questions": fams[i % 4],
-            "synthesize": fams[(i + 1) % 4],
-            "verify": fams[(i + 2) % 4],
-            "seeds": fams[(i + 3) % 4],
+            "questions": fams[i % n],
+            "synthesize": fams[(i + 1) % n],
+            "verify": fams[(i + 2) % n],
+            "seeds": fams[(i + 3) % n],
         }
 
 

@@ -11,20 +11,22 @@ that enforces it. Everything here is true of the code as it exists today.
 
 ## 1. Mission
 
-This repo is a **multi-model coding orchestrator**. A fleet of four models
+This repo is a **multi-model coding orchestrator**. A fleet of three models
 builds software — and this repo itself — as a directed graph of small tasks:
 
-- **Kimi-K3**, running in the **`kimi` CLI harness** (`drivers.KimiDriver`), is
-  the main orchestrator/planner: it breaks a project goal into 2–6 small
-  tasks, decides the graph fanout (which tasks run in parallel), the
+- **DeepSeek-V4.1-Flash-thinking-max** — the fleet's strongest model, running
+  in **`opencode`** (`drivers.OpencodeDriver`) — is the main
+  orchestrator/planner (`config.PLANNER_MODEL`): it breaks a project goal into
+  2–6 small tasks, decides the graph fanout (which tasks run in parallel), the
   dependency order, the model routing (who implements what tier), and the
   reviewer pairing, via `main.py code plan` (`code_tasks.plan_tasks`).
-- **GLM-5.3**, **gpt-oss-120b**, and **DeepSeek-V4-Flash**, running in
-  **`opencode`** (`drivers.OpencodeDriver`), implement — plus GLM-5.3 and
-  Kimi-K3 themselves take the hard implementation tasks.
+- All three models implement: **GLM-5.3** (also in `opencode`) takes the
+  medium/mechanical tasks; **Kimi-K3** (in the **`kimi` CLI harness**,
+  `drivers.KimiDriver`) and **DeepSeek-V4.1-Flash-thinking-max** take the
+  hard ones, with DS-max preferred for the hardest.
 - **Every implementation is gated and cross-reviewed before merge**: a
-  deterministic `verify_cmd` gate runs first, then a reviewer model from the
-  *other* strong harness reviews the full diff, and only then does the
+  deterministic `verify_cmd` gate runs first, then a reviewer model from a
+  *different model family* reviews the full diff, and only then does the
   orchestrator (the only git actor) commit, push, and open a pull request against `config.BASE_BRANCH` (`main` by default) under a
   process-wide lock.
 
@@ -68,35 +70,46 @@ event log and the dashboard.
 
 ## 2. Model fleet and roles
 
-Routing is decided at plan time (by Kimi-K3 in `main.py code plan`, or by
-whoever writes a taskfile by hand) and is **enforced again by the loader**,
+Routing is decided at plan time (by DeepSeek-V4.1-Flash-thinking-max in
+`main.py code plan`, or by whoever writes a taskfile by hand) and is
+**enforced again by the loader**,
 `code_tasks.load_taskfile`. There is no runtime triage. Full reference:
 [docs/model-tiers.md](docs/model-tiers.md).
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement, Plan, Review, PR-review | 4 | 2 |
 | Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review, PR-review | 3 | 3 |
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
-| gpt-oss-120b | `opencode` (`OpencodeDriver`) | basic | **Implement only** | 10 | 5 |
-| DeepSeek-V4-Flash | `opencode` (`OpencodeDriver`) | medium | **Implement, PR-review** | 10 | 5 |
+| DeepSeek-V4.1-Flash-thinking-max | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 5 |
 
-- **Tiers** (`config.IMPLEMENT_TIERS`): `basic` → gpt-oss-120b (very basic /
-  mechanical work only), `medium` → DeepSeek-V4-Flash (moderate work only),
-  `hard` → GLM-5.3 or Kimi-K3 (multi-file reasoning, delicate design,
-  architectural judgment — on top of their planning/reviewing duties).
-- **Only GLM-5.3 and Kimi-K3 may plan or review.** `drivers.OpencodeDriver`
-  raises `ValueError` if gpt-oss-120b or DeepSeek-V4-Flash is constructed with
-  a `planner` or `reviewer` role; `KimiDriver` only accepts
-  `planner|reviewer|implementer`.
-- `main.py code plan` uses Kimi-K3 as the planner. The planner prompt
-  (`code_tasks.plan_tasks`) instructs it to spread work across all four models
-  so independent tasks run in parallel, keep tasks small (<30 min for one
-  agent), add `deps` only when one task truly needs another's output, and give
-  every task a meaningful `verify_cmd`.
+**DeepSeek-V4.1-Flash-thinking-max (DS-max below) is the fleet's strongest
+model** — operator decision 2026-09-12, benchmarks ahead of GLM and Kimi per
+operator research. Its cap of 10 is the provider-published figure for V4.1
+(provider docs updated 2026-09-12), not a measurement of ours.
+
+- **Tiers** (`config.IMPLEMENT_TIERS`): `medium` → GLM-5.3 (moderate /
+  mechanical work), `hard` → Kimi-K3 or DeepSeek-V4.1-Flash-thinking-max
+  (multi-file reasoning, delicate design, architectural judgment — on top of
+  their planning/reviewing duties, with DS-max preferred for the hardest).
+- **Role enforcement is roster-driven** (`config.MODEL_ROLES` / `model_may`),
+  not a per-model if-chain: all three live models may implement, plan, review,
+  and PR-review, and the driver constructors raise `ValueError` for a model
+  off today's roster or a role outside `MODEL_ROLES` (gh_ops roles require
+  planner permission).
+- **Retired models still load.** gpt-oss-120b left the fleet before this
+  change; DeepSeek-V4-Flash was retired 2026-09-12 (the provider removed it
+  from the API; the DeepSeek-V4.1 line replaced it). A taskfile naming a
+  retired model is remapped onto the escalation path by
+  `code_tasks.RETIRED_MODELS`, so old taskfiles still run.
+- `main.py code plan` uses DeepSeek-V4.1-Flash-thinking-max as the planner.
+  The planner prompt (`code_tasks.plan_tasks`) instructs it to spread work
+  across all three models so independent tasks run in parallel, keep tasks
+  small (<30 min for one agent), add `deps` only when one task truly needs
+  another's output, and give every task a meaningful `verify_cmd`.
 - Thinking variants (`*-thinking-low/high/max`) and the
   `*-legacy-tool-calling` websearch models registered in `config.FAMILIES`
   belong to the research/build workloads; the code workload routes only the
-  four base model names above.
+  roster names above (its one thinking variant is DS-max itself).
 
 ---
 
@@ -108,44 +121,51 @@ are where to look when a rule surprises you.
 ### Rule 1 — Tier routing is mandatory and loader-enforced
 
 A task's `model` MUST be one of `config.IMPLEMENTER_MODELS`
-(`gpt-oss-120b`, `DeepSeek-V4-Flash`, `GLM-5.3`, `Kimi-K3`) and MUST match the
+(`GLM-5.3`, `Kimi-K3`, `DeepSeek-V4.1-Flash-thinking-max`) and MUST match the
 difficulty tier it was planned for (`config.IMPLEMENT_TIERS`).
 
 - `code_tasks.load_taskfile` (code_tasks.py:35) raises `ValueError` if a
-  task's model is not in `config.IMPLEMENTER_MODELS`.
-- `drivers.OpencodeDriver.__init__` (drivers.py:215) raises `ValueError` if
-  gpt-oss-120b or DeepSeek-V4-Flash is given any role other than
-  `implementer`.
+  task's model is not in `config.IMPLEMENTER_MODELS` and is not a retired
+  model remappable by `code_tasks.RETIRED_MODELS` (Rule §2: retired names are
+  remapped onto the escalation path).
+- `drivers.OpencodeDriver.__init__` (drivers.py:215) raises `ValueError` if a
+  model is off the roster or is given a role outside its `config.MODEL_ROLES`
+  entry (`model_may`) — role enforcement is roster-driven, not a per-model
+  if-chain.
 - The planner prompt (code_tasks.py:333) assigns implementers by tier:
-  gpt-oss-120b for very basic/mechanical tasks, DeepSeek-V4-Flash for medium,
-  GLM-5.3 or Kimi-K3 for hard.
+  GLM-5.3 for medium/mechanical tasks, Kimi-K3 or
+  DeepSeek-V4.1-Flash-thinking-max for hard.
 
-Never route a basic-tier task to a strong model or a hard task to a basic one.
-Tier reference: [docs/model-tiers.md](docs/model-tiers.md).
+Never route a medium-tier task up to the hard tier or a hard task down to the
+medium tier. Tier reference: [docs/model-tiers.md](docs/model-tiers.md).
 
-### Rule 2 — Cross-review is mandatory and loader-enforced; never same-harness self-review
+### Rule 2 — Cross-review is mandatory and loader-enforced; never same-family self-review
 
-Every task MUST be reviewed, and the reviewer MUST NOT share a harness with
-the implementer it reviews when a strong model implemented.
+Every task MUST be reviewed, and the reviewer MUST NOT be from the same model
+family as the implementer it reviews — family-based, not harness-based
+(DS-max and GLM-5.3 share the opencode harness, and that is fine).
 
 - `code_tasks.load_taskfile` (code_tasks.py:41) raises `ValueError` unless
-  `reviewer` is exactly `"kimi"` or `"glm"`, and again (code_tasks.py:44) if
-  the implementer's family is `kimi` or `glm` and the reviewer is the same
-  one: **Kimi-K3 code is reviewed by GLM-5.3 and vice versa.**
-  (gpt-oss-120b / DeepSeek-V4-Flash implementations may be reviewed by
-  either `kimi` or `glm` — never by themselves, since they cannot review at
-  all.)
-- The review node instantiates `KimiDriver("reviewer")` or
-  `OpencodeDriver("GLM-5.3", "reviewer")` accordingly and sends the full
+  `reviewer` is exactly one of `"kimi"`, `"glm"`, or `"deepseek"` — the
+  families of `config.REVIEW_FAMILIES` — and again (code_tasks.py:44) if the
+  reviewer family is the implementer's own. The cross-review pairing:
+  **GLM-5.3 work is reviewed by deepseek; Kimi-K3 work is reviewed by
+  deepseek; DeepSeek-V4.1-Flash-thinking-max work is reviewed by kimi.**
+- The review node resolves the token through `config.REVIEW_FAMILIES`
+  (deepseek → DeepSeek-V4.1-Flash-thinking-max, kimi → Kimi-K3, glm →
+  GLM-5.3) and instantiates `KimiDriver("reviewer")` or
+  `OpencodeDriver(<model>, "reviewer")` accordingly, sending the full
   diff (`gitstore.diff_full`) with the original spec; the verdict must be
   JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
 - **`reviewer` and `pr_reviewer` are different roles.** `reviewer` is this
-  pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5),
-  and `DeepSeek-V4-Flash` may hold it even though it may not hold `reviewer`:
+  pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5):
   judging a bounded diff against a spec is a much smaller job than authoring
-  the change, and with three cross-family-eligible models a two-reviewer merge
-  gate is otherwise unreachable whenever Kimi or GLM implemented — which is
-  most tasks. `gpt-oss-120b` stays implement-only.
+  the change. On today's roster all three live models may hold either role;
+  the constraint is the cross-family pairing, and the `config.PR_REVIEWERS`
+  (default 2) merge gate still needs two reviewers from families other than
+  the implementer's. (This bullet once documented a narrower roster where
+  DeepSeek-V4-Flash could PR-review but never gate-review; that exception
+  retired with the model.)
 - **Never keep a second list of who may review.** Eligibility is decided by
   CONSTRUCTING the driver (`code_tasks._eligible_pr_reviewers`). A hand-kept
   pool and the drivers' own role rules drifted apart once and it cost seven
@@ -213,14 +233,13 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   as feedback while `runs <= config.MAX_FIX_ROUNDS` (3, override
   `ARC_MAX_FIX_ROUNDS`). Exhausting the fix rounds does **not** fail the task
   yet: it **escalates one tier up `config.ESCALATION_PATH`** (default
-  `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`, overrides
+  `GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max`, overrides
   `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS`) — an `escalate_<tid>` graph
   node routes back to `implement_<tid>` with a **fresh fix budget**, carrying
   the latest gate/review failure as feedback. Cross-review holds on
-  escalation (`code_tasks.build_code_graph`): when the new implementer's
-  family is `kimi` or `glm` the reviewer token flips to the other one
-  (glm implementer → kimi reviewer, kimi → glm); basic/medium models keep
-  the taskfile's reviewer. Each escalation emits `task.escalated`
+  escalation (`code_tasks.build_code_graph`): the reviewer token flips to the
+  family-paired reviewer of the new implementer (glm implementer → deepseek,
+  kimi → deepseek, deepseek → kimi). Each escalation emits `task.escalated`
   `{from_model, to_model, n}`; the `code_tasks` row is updated with the
   current model/reviewer and `harness_runs` rows record the model actually
   used. On **resume**, escalation is conditional: only a row whose recorded
@@ -231,7 +250,7 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   interrupted task to the scarcest tier simultaneously.
   Only when the last tier exhausts is the task marked `failed`, and
   the failure message names the last model tried (`exhausted escalation up
-  to Kimi-K3`, code_tasks.py:243). Concurrency footnote: worst-case harness
+  to DeepSeek-V4.1-Flash-thinking-max`, code_tasks.py:243). Concurrency footnote: worst-case harness
   runs per task multiply by tier count (fix rounds × tiers); all caps of
   Rule 6 still apply.
 - The loader permits an empty `verify_cmd` (it then passes trivially,
@@ -321,14 +340,17 @@ merged work.
 
 ### Rule 6 — Concurrency caps are THREE-layer; know all three before launching anything
 
-| Layer | Where | gpt-oss | deepseek | glm | kimi | Override |
-|---|---|---|---|---|---|---|
-| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
-| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 2 | 2 | 2 | 3 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode: **5** total | ← shared | ← shared | kimi: 3 | `ARC_HARNESS_LIMIT_<HARNESS>` |
+| Layer | Where | deepseek | glm | kimi | Override |
+|---|---|---|---|---|---|
+| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
+| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 2 | 3 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode: **5** total | ← shared | kimi: 3 | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
-on this fleet are gpt-oss 5, DeepSeek 5, GLM 4, Kimi 3 — but an opencode run
+on this fleet were gpt-oss 5, DeepSeek(V4-Flash) 5, GLM 4, Kimi 3 — that was
+the retired fleet: gpt-oss-120b has since left the fleet, and DeepSeek's
+current 10 is the provider-published figure for V4.1 (provider docs updated
+2026-09-12), not a measurement of ours. An opencode run
 issues parallel tool calls and holds about TWO sessions at once, so a driver
 cap set equal to the session limit over-subscribes by that factor. Measured
 from the event log: 23 capacity rejections in four hours, GLM-5.3 refused with
@@ -341,8 +363,9 @@ provider.
 **The harness layer is the one people forget, and it is often the binding
 one.** Every opencode-backed model runs through ONE local binary backed by ONE
 ~240MB sqlite store in `~/.local/share/opencode`. The per-model caps permit
-GLM 4 + DeepSeek 5 + gpt-oss 5 = **14** concurrent opencode processes against
-it. Measured with an identical prompt and a warm cache:
+GLM 2 + DeepSeek 5 = **7** concurrent opencode processes against it (gpt-oss
+is gone) — still above the opencode harness pool of 5. Measured with an
+identical prompt and a warm cache:
 
 | concurrent | 3 | 4 | 5 | 6 | 10 |
 |---|---|---|---|---|---|
@@ -591,7 +614,7 @@ Standalone `gh`-CLI agents for GitHub housekeeping — NOT part of the governed
 code pipeline (no worktree, no gate, no publish; Rules 1–8 do not apply):
 
 - **`issue-triager`** — `main.py gh triage <repo> [--apply-labels] [--model
-  Kimi-K3|GLM-5.3]`: classifies open issues (kind bug|feature|question|docs,
+  <roster-model>]`: classifies open issues (kind bug|feature|question|docs,
   size S|M|L, recommended tier per `config.IMPLEMENT_TIERS`), prints a triage
   table, and writes a ready-to-run taskfile to `~/tasks/<repo>-issues.json`
   with correct cross-review pairing (fill in each `verify_cmd` and dry-run
@@ -602,11 +625,13 @@ code pipeline (no worktree, no gate, no publish; Rules 1–8 do not apply):
   under the same verdict JSON contract as internal review (it reuses
   `code_tasks._parse_verdict`; see docs/orchestration-contract.md).
 
-Only **Kimi-K3** and **GLM-5.3** may hold these three roles —
+Any model **trusted to plan on today's roster** may hold these three roles —
+gh roles require planner permission, which today all three live models have;
 `drivers.KimiDriver.__init__` / `drivers.OpencodeDriver.__init__` raise
-`ValueError` if gpt-oss-120b or DeepSeek-V4-Flash is given one (same
-enforcement pattern as Rule 2). Default model `config.GH_MODEL`
-(`ARC_GH_MODEL`, default Kimi-K3); each `gh` subprocess is bounded by
+`ValueError` for a model off the roster or one lacking the permission (same
+roster-driven enforcement as Rule 2). Default model `config.GH_MODEL`
+(`ARC_GH_MODEL` env), falling back to `config.PLANNER_MODEL` =
+DeepSeek-V4.1-Flash-thinking-max; each `gh` subprocess is bounded by
 `config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 60 s).
 
 **Preview by default.** `--apply-labels`, `--create`, and `--post` are the
@@ -627,7 +652,7 @@ Top-level Python modules (one role each):
 |---|---|
 | `build_work.py` | Minecraft-style browser-game build workload: planner → 6 parallel module producers (each an implement → syntax gate → contract check → cross-model review → fix gauntlet) → assemble → bounded integration-review cycle |
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
-| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
+| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the DeepSeek-V4.1-Flash-thinking-max planner prompt (`plan_tasks`, model `config.PLANNER_MODEL`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
 | `graph_shapes.py` | The graph BETWEEN tasks (§1 "Two graphs"): the pattern catalogue as data (`PATTERNS`, with a drawable sketch each), `normalize_pattern` (label aliases → catalogue id, used by the loader), `classify` (the shape a taskfile's `deps` actually form: single/chain/fanout/fanin/diamond/hierarchical/mixed, width, depth, declared-vs-detected mismatch), `planner_prose` (the GRAPH DESIGN block of the planner prompt, from the catalogue and today's caps), `describe` (→ `GET /api/graph-shapes`: patterns, every taskfile classified, what the engine can and cannot express) |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local-only `git init` + one commit), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
@@ -674,7 +699,8 @@ The full operator runbook, with troubleshooting, is
 [docs/runbook.md](docs/runbook.md). The loop:
 
 1. **Plan** — `.venv/bin/python main.py code plan "<goal>" /path/to/repo`
-   (Kimi-K3 drafts a taskfile into `~/tasks/<slug>.json` and prints the
+   (DeepSeek-V4.1-Flash-thinking-max drafts a taskfile into
+   `~/tasks/<slug>.json` and prints the
    resolved DAG).
 2. **Review the taskfile** — read and hand-edit `~/tasks/<slug>.json`:
    check tier routing, reviewer pairing, deps, and that every `verify_cmd` is

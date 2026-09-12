@@ -11,8 +11,9 @@ import unittest
 from pathlib import Path
 
 from helpers import FakeStore, capture_events
-from helpers import needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: E402,F401
+from helpers import needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST, DISTINCT_MODELS, MODEL_OF  # noqa: E402,F401
 from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
+from helpers import KIMI_HARNESS_MODEL, needs_kimi_harness  # noqa: E402,F401
 
 import code_tasks
 import config
@@ -760,7 +761,11 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
     """
 
     def _pick(self, usage, impl_family=None, n=2):
-        pool = [m for m in (STRONGEST, "GLM-5.3", ENTRY)
+        # One model per FAMILY. The old pool was (STRONGEST, "GLM-5.3", ENTRY),
+        # positional aliases that both resolved into the glm family once the
+        # roster reordered — so "three families" quietly became two and the
+        # reviewer pool could not be filled.
+        pool = [m for m in DISTINCT_MODELS
                 if config.MODEL_FAMILY.get(m) != impl_family]
         pool.sort(key=lambda m: (usage.get(m, 0) / max(1, config.driver_limit(m)),
                                  usage.get(m, 0)))
@@ -947,15 +952,19 @@ class ReviewerContention(unittest.TestCase):
         usage = {"GLM-5.3": config.driver_limit("GLM-5.3"), "harness:opencode": 0}
         self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
 
-    @needs_kimi
-
+    @needs_kimi_harness
     def test_kimi_is_preferred_when_the_opencode_pool_is_full(self):
-        usage = {STRONGEST: 1, "GLM-5.3": 1, ENTRY: 1,
-                 "harness:opencode": config.harness_limit("opencode"),
-                 "harness:kimi": 1}
-        order = sorted(["GLM-5.3", ENTRY, STRONGEST],
+        # The point is HARNESS contention, not model strength: every opencode
+        # model inherits the saturated pool's pressure, so the model on the
+        # other harness must sort first however the roster is ordered.
+        kimi = KIMI_HARNESS_MODEL
+        others = [m for m in DISTINCT_MODELS if m != kimi]
+        usage = {m: 1 for m in DISTINCT_MODELS}
+        usage["harness:opencode"] = config.harness_limit("opencode")
+        usage["harness:kimi"] = 1
+        order = sorted(others + [kimi],
                        key=lambda m: code_tasks._reviewer_pressure(m, usage))
-        self.assertEqual(order[0], STRONGEST)
+        self.assertEqual(order[0], kimi)
 
     def test_an_idle_fleet_scores_everything_zero(self):
         for m in (STRONGEST, "GLM-5.3", ENTRY):
@@ -964,10 +973,12 @@ class ReviewerContention(unittest.TestCase):
     @needs_kimi
 
     def test_kimi_routes_to_the_kimi_harness_and_the_rest_to_opencode(self):
-        self.assertEqual(code_tasks._harness_of(STRONGEST), "kimi")
+        # Routing follows the roster, whatever is on it today.
         for m, h in config.MODEL_HARNESS.items():
             self.assertEqual(code_tasks._harness_of(m), h)
         self.assertEqual(code_tasks._harness_of("GLM-5.3"), "opencode")
+        if "Kimi-K3" in config.MODEL_HARNESS:
+            self.assertEqual(code_tasks._harness_of("Kimi-K3"), "kimi")
 
 
 class EveryTaskEventNamesItsTask(unittest.TestCase):

@@ -2,7 +2,7 @@
 
 Three dedicated roles — 'issue-triager', 'issue-maker', 'pr-reviewer' — held
 only by Kimi-K3 or GLM-5.3 (drivers.py role validation rejects them for
-gpt-oss-120b / DeepSeek-V4-Flash). These are standalone tools, NOT the
+gpt-oss-120b / DeepSeek-V4.1-Flash-thinking-max). These are standalone tools, NOT the
 governed code pipeline: no worktree, no gate, no publish. Every command
 previews by default; --apply-labels / --create / --post are the ONLY paths
 that write to GitHub. Every gh-touching command checks `gh auth status` first
@@ -119,12 +119,11 @@ def _triage_prompt(repo, issues_json):
         f"REPO: {repo}\nOPEN ISSUES (JSON):\n{issues_json}\n\n"
         "Classify EACH issue: kind (bug|feature|question|docs), size (S|M|L), "
         "and the implementer per these routing tiers (enforced downstream):\n"
-        "- basic -> gpt-oss-120b: very basic, mechanical fixes only\n"
-        "- medium -> DeepSeek-V4-Flash: a self-contained feature, one endpoint\n"
-        "- hard -> GLM-5.3 or Kimi-K3: multi-file reasoning, delicate design\n"
+        "- medium -> GLM-5.3: a self-contained feature, one endpoint, mechanical fixes\n"
+        "- hard -> DeepSeek-V4.1-Flash-thinking-max or Kimi-K3: multi-file reasoning, delicate design\n"
         "Reply with STRICT JSON only, no prose:\n"
         '{"issues": [{"number": 1, "title": "short title", "kind": "bug", '
-        '"size": "S", "tier": "basic", "model": "gpt-oss-120b", '
+        '"size": "S", "tier": "medium", "model": "GLM-5.3", '
         '"actionable": true, "summary": "one line: what to do"}]}\n'
         "actionable=false for questions, and for issues too vague to implement."
     )
@@ -149,7 +148,7 @@ def _write_taskfile(repo, rows):
         model = r.get("model")
         if model not in config.IMPLEMENTER_MODELS:
             model = config.IMPLEMENT_TIERS.get(r.get("tier", "medium"),
-                                               ["DeepSeek-V4-Flash"])[-1]
+                                               ["DeepSeek-V4.1-Flash-thinking-max"])[-1]
         n = r.get("number", i)
         view = f"gh issue view {n}" if cwd else \
             f"gh issue view {n} --repo {repo}"

@@ -9,7 +9,7 @@
 // Model display names. phone.html used to abbreviate harder ("K3", "GLM",
 // "120B", "V4"); index.html's longer labels are canonical, so the phone page
 // now spells model names out too.
-const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash"};
+const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash","DeepSeek-V4.1-Flash":"DeepSeek V4.1 Flash","DeepSeek-V4.1-Flash-thinking-max":"DeepSeek V4.1 Flash max"};
 const short = m => SHORT[m] || m || "—";
 
 // Seconds → "45s" / "12m" / "1.4h". index.html's, verbatim.

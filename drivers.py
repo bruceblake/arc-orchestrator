@@ -1,7 +1,7 @@
 """Headless CLI drivers for the coding harnesses (kimi, opencode).
 
 Role map (hard rule): gpt-oss-120b handles very basic implementation,
-DeepSeek-V4-Flash medium implementation, and GLM-5.3 / Kimi-K3 (kimi CLI) the
+DeepSeek-V4.1-Flash-thinking-max medium implementation, and GLM-5.3 / Kimi-K3 (kimi CLI) the
 hard tasks plus all planning and reviewing. A task is always reviewed by the
 *other* of kimi/glm when a strong model implemented it. ARC rejects over-limit
 requests per model, so per-model semaphores cap concurrent harness instances

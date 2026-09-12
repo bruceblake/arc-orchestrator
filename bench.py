@@ -386,7 +386,7 @@ SOLVERS = {
 }
 
 _MODEL_COLUMN = {"gpt-oss": "gpt-oss-120b", "glm": "GLM-5.3",
-                 "kimi": "Kimi-K3", "deepseek": "DeepSeek-V4-Flash"}
+                 "kimi": "Kimi-K3", "deepseek": "DeepSeek-V4.1-Flash-thinking-max"}
 
 
 def expand_jobs(tasks, specs, harnesses, *, n=1):

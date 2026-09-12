@@ -14,6 +14,7 @@ from pathlib import Path
 from helpers import capture_events  # noqa: F401  (sys.path)
 from helpers import needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: E402,F401
 from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
+from helpers import KIMI_HARNESS_MODEL, needs_kimi_harness, PRICE_PAIR, needs_two_rates  # noqa: E402,F401
 
 import config
 import code_tasks
@@ -816,36 +817,42 @@ class ProjectTaskModelPricing(unittest.TestCase):
                 return n
         self.fail("t1 node not found")
 
+    @needs_two_rates
     def test_each_models_tokens_are_priced_at_its_own_rate(self):
-        # The reviewer must be a DIFFERENT model than the implementer, or the
-        # two rates coincide and the test proves nothing — and which model
-        # that is depends on today's roster (the entry tier was GLM itself
-        # the day the provider dropped DeepSeek).
-        entry = config.ESCALATION_PATH[0]
-        rev_fam = config.cross_family_reviewer(entry)
-        reviewer = config.REVIEW_FAMILIES[rev_fam]
-        self._taskfile(reviewer=rev_fam)
+        """One task, two models, two rates -- not one blended rate.
+
+        The pair must be picked BY PRICE: naming the implementer and the
+        reviewer positionally (ESCALATION_PATH[0] and "GLM-5.3") made the test
+        vacuous the day the roster reordered and both names resolved to the
+        same model, at which point it could no longer fail.
+        """
+        impl, rev = PRICE_PAIR
+        self._taskfile(model=impl, reviewer=config.MODEL_FAMILY[rev])
         self._events(
             {"type": "driver.done", "task": "t1", "harness": "opencode",
-             "model": entry, "role": "implementer",
+             "model": impl, "role": "implementer",
              "tokens": 1000, "prompt_tokens": 800, "completion_tokens": 200,
              "seconds": 60},
             {"type": "driver.done", "task": "t1", "harness": "opencode",
-             "model": reviewer, "role": "reviewer",
+             "model": rev, "role": "reviewer",
              "tokens": 100, "prompt_tokens": 50, "completion_tokens": 50,
              "seconds": 30},
         )
         node = self._node()
-        expected = (config.cost_of(entry, 800, 200)
-                    + config.cost_of(reviewer, 50, 50))
+        expected = config.cost_of(impl, 800, 200) + config.cost_of(rev, 50, 50)
         self.assertEqual(node["cost"], round(expected, 4))
-        old = config.cost_of(entry, 850, 250)
-        if config.cost_of(entry, 1, 1) != config.cost_of(reviewer, 1, 1):
-            self.assertNotEqual(node["cost"], round(old, 4),
-                                "reviewer tokens must not be priced at the implementer's rate")
+        blended = config.cost_of(impl, 850, 250)
+        self.assertNotEqual(node["cost"], round(blended, 4),
+                            f"{rev} reviewer tokens must not be priced at "
+                            f"{impl}'s rate")
 
+    @needs_kimi_harness
     def test_kimi_wire_extra_is_priced_at_kimi_completion_rate(self):
-        self._taskfile(model=STRONGEST, reviewer="glm")
+        # The wire log belongs to the kimi HARNESS, so its tokens price at the
+        # kimi-harness model's rate. This asserted STRONGEST's rate, which was
+        # only ever right because Kimi-K3 happened to be the top tier.
+        kimi = KIMI_HARNESS_MODEL
+        self._taskfile(model=kimi, reviewer=config.cross_family_reviewer(kimi))
         dashboard._kimi_tokens_by_task = lambda: {"t1": 2000}
         # No driver.done for kimi: the wire log is the only source of its tokens,
         # and it carries no prompt/completion split.
@@ -853,7 +860,7 @@ class ProjectTaskModelPricing(unittest.TestCase):
         node = self._node()
         self.assertEqual(node["tokens"], 2000)
         self.assertEqual(node["tokens_source"], "kimi-wire")
-        self.assertEqual(node["cost"], round(config.cost_of(STRONGEST, 0, 2000), 4))
+        self.assertEqual(node["cost"], round(config.cost_of(kimi, 0, 2000), 4))
 
 
 class TheServerKnowsWhenItIsStale(unittest.TestCase):

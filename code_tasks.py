@@ -1,6 +1,6 @@
 """Multi-harness code workload: JSON task files -> task graph -> worktrees.
 
-Per task: alloc worktree -> implement (opencode: gpt-oss-120b / DeepSeek-V4-Flash)
+Per task: alloc worktree -> implement (opencode: gpt-oss-120b / DeepSeek-V4.1-Flash-thinking-max)
 -> deterministic verify gate (verify_cmd) -> cross-family review (Kimi-K3 via
 kimi CLI, or GLM-5.3 via opencode) -> bounded fix loop -> publish commit ->
 merge to main (serialized) -> cleanup. Reviews are mandatory and cross-family
@@ -47,9 +47,10 @@ def load_taskfile(path, policy=None):
     repo = Path(data["project"]["repo"]).resolve()
     pol = policy or {}
     models = set(config.IMPLEMENTER_MODELS) | set(pol.get("implementers", []))
-    # Review-capable families, from the roster: ("kimi", "glm") until 09-19,
-    # then ("glm", "deepseek"). A taskfile written for a family that has since
-    # left is remapped below rather than rejected — the plan is still good.
+    # Review-capable families, from the roster: all three today (deepseek,
+    # kimi, glm) since DeepSeek-V4.1-Flash-thinking-max took the hard tier on
+    # 2026-09-12. A taskfile written for a family that has since left is
+    # remapped below rather than rejected — the plan is still good.
     reviewers = tuple(pol.get("reviewers", tuple(config.REVIEW_FAMILIES)))
     review_on = pol.get("review", True)
     allow_self = bool(pol.get("allow_self_review"))
@@ -1559,6 +1560,8 @@ def _routing_tiers_prose():
         lines.append(f"- {' or '.join(tiers['hard'])}: hard tasks that need deep "
                      "understanding, multi-file reasoning, delicate architecture, or "
                      "subtle debugging.\n")
+    lines.append(f"- {config.ESCALATION_PATH[-1]} is the fleet's strongest model "
+                 "(the last escalation stage) — prefer it for the hardest tasks.\n")
     fams = list(config.REVIEW_FAMILIES)
     pairs = []
     for m in config.ESCALATION_PATH:

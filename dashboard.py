@@ -38,7 +38,8 @@ MAX_EVENTS_PER_RESPONSE = 3000
 
 PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
           "DeepSeek-V4-Flash": "DeepSeek V4 Flash",
-          "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash"}
+          "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash",
+          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max"}
 
 # Rolling windows plus one calendar window. "today" is deliberately not a
 # synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
@@ -1655,11 +1656,13 @@ def _projects(store):
             # and cross-review plus tier escalation mix several under one task
             # id. Only the excess a split cannot account for — the kimi-wire
             # tokens, which carry no prompt/completion split — is priced here,
-            # at Kimi's completion rate, since it is kimi's wire log.
+            # at the kimi-harness model's completion rate, since it is that
+            # harness's wire log (NOT the node's declared model: a node can
+            # name any model and still have kimi wire tokens under it).
             extra = max(0, tot - (ptok + ctok))
             node_cost = ev.get("cost", 0.0)
             if extra:
-                node_cost += config.cost_of("Kimi-K3", 0, extra)
+                node_cost += config.cost_of(config.kimi_wire_model(), 0, extra)
             node = {"id": tid, "title": t.get("title") or tid,
                     "model": node_model, "reviewer": t.get("reviewer"),
                     "status": per_task.get(tid, "pending"),

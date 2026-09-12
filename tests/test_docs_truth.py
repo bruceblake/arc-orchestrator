@@ -158,9 +158,12 @@ class TestDocsTruthArcEnvVars(unittest.TestCase):
             with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
                 src += fh.read() + "\n"
         defined = set(re.findall(r"ARC_[A-Z0-9_]+", src))
+        # Derived from the registry, not listed here: a literal list kept
+        # minting a gpt-oss driver-limit knob after it was removed from
+        # FAMILIES, so the suite demanded docs for a knob nothing reads.
         for prefix in ("ARC_LIMIT_", "ARC_DRIVER_LIMIT_"):
-            for family in ("GPT_OSS", "GLM", "KIMI", "DEEPSEEK"):
-                defined.add(prefix + family)
+            for family in config.FAMILIES:
+                defined.add(prefix + family.upper().replace("-", "_"))
         # config.harness_limit builds its override name the same way
         # driver_limit does — os.getenv(f"ARC_HARNESS_LIMIT_{harness.upper()}")
         # — so the literal never appears in config.py and the scan cannot see

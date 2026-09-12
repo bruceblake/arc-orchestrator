@@ -171,7 +171,7 @@ const queue = {
     {model: "GLM-5.3", pretty: "GLM 5.3", cap: 4, running: 1, waiting: 1, free: 3, reviewers_waiting: 0},
     // saturated but nobody blocked behind it — amber, not red
     {model: "gpt-oss-120b", pretty: "gpt-oss 120B", cap: 5, running: 5, waiting: 0, free: 0, reviewers_waiting: 0},
-    {model: "DeepSeek-V4-Flash", pretty: "DeepSeek V4 Flash", cap: 5, running: 0, waiting: 0, free: 5, reviewers_waiting: 0},
+    {model: "DeepSeek-V4.1-Flash-thinking-max", pretty: "DeepSeek V4 Flash", cap: 5, running: 0, waiting: 0, free: 5, reviewers_waiting: 0},
   ],
   harnesses: [{harness: "opencode", cap: 5, running: 5, waiting: 2, free: 0},
               {harness: "kimi", cap: 3, running: 1, waiting: 0, free: 2}],
@@ -231,7 +231,7 @@ const FIX = { projects: [
   mkProj("bench.json", "orchestration bench", "done", { models: ["gpt-oss-120b"],
     statuses: {merged: 2}, progress: {done: 2, total: 2},
     dag: {nodes: [{id: "b-one", status: "merged"}, {id: "b-two", status: "merged"}], edges: []} }),
-  mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4-Flash"],
+  mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4.1-Flash-thinking-max"],
     statuses: {in_review: 1, pending: 1},
     dag: {nodes: [{id: "w-a", status: "pending"}, {id: "w-b", status: "pending"}], edges: []} }),
 ]};
@@ -282,7 +282,7 @@ ok("no token stats on cards", !pr().includes("⛁"));
 const filter = hash => { location.hash = hash; api.loadHash(); api.renderProjects(); };
 filter("#q=game");
 ok("text filter", document.querySelector("#f-hint").textContent === "1 of 3 projects" && pr().includes('data-file="ui.json"'));
-filter("#m=DeepSeek-V4-Flash");
+filter("#m=DeepSeek-V4.1-Flash-thinking-max");
 ok("model filter", pr().includes('data-file="web.json"') && !pr().includes('data-file="ui.json"'));
 filter("#r=acme%2Fbench");
 ok("repo filter", document.querySelector("#f-repo").value === "acme/bench" && document.querySelector("#f-hint").textContent === "1 of 3 projects");

@@ -82,7 +82,7 @@ const FIX = { projects: [
     dag: {nodes: [{id: "t-clean", status: "merged"}, {id: "t-tests", status: "running", live: true}],
           edges: [{src: "t-clean", dst: "t-tests"}]}, tokens: 4200,
     last_activity: NOW }),
-  mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4-Flash"],
+  mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4.1-Flash-thinking-max"],
     statuses: {in_review: 1, pending: 1},
     dag: {nodes: [{id: "w-a", status: "pending"}, {id: "w-b", status: "pending"}], edges: []} }),
   mkProj("flaky.json", "flaky tests", "attention", { models: ["gpt-oss-120b"], repo: "acme/other-repo",
@@ -173,7 +173,7 @@ filter("#q=game");
 ok("text search matches the title", JSON.stringify(files()) === '["ui.json"]' && hint() === "1 of 4 projects");
 filter("#q=flaky");
 ok("text search matches the task file", JSON.stringify(files()) === '["flaky.json"]');
-filter("#m=DeepSeek-V4-Flash");
+filter("#m=DeepSeek-V4.1-Flash-thinking-max");
 ok("model filter", JSON.stringify(files()) === '["web.json"]');
 filter("#r=acme%2Fother-repo");
 ok("repo filter", JSON.stringify(files()) === '["flaky.json"]');
@@ -196,7 +196,7 @@ ok("repo picker offered when >1 repo",
    && document.querySelector("#f-repo").innerHTML.includes("All repos"));
 const modelOpts = document.querySelector("#f-model").innerHTML;
 ok("model picker lists the fleet",
-   ["gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"].every(m => modelOpts.includes(`value="${m}"`)));
+   ["gpt-oss-120b", "DeepSeek-V4.1-Flash-thinking-max", "GLM-5.3", "Kimi-K3"].every(m => modelOpts.includes(`value="${m}"`)));
 const fstat = src.slice(src.indexOf('id="f-status"'), src.indexOf('id="f-model"'));
 ok("status picker offers running/failed/merged",
    ['value="running"', 'value="failed"', 'value="merged"'].every(v => fstat.includes(v)));

@@ -12,8 +12,6 @@ API_KEY = os.getenv("ARC_API_KEY", "")
 BASE_URL = os.getenv("ARC_BASE_URL", "https://llm-api.arc.vt.edu/api/v1")
 DB_PATH = os.getenv("ARC_DB_PATH") or str(ROOT / "orchestrator.db")
 
-FAMILY_ORDER = ["gpt-oss", "glm", "kimi", "deepseek"]
-
 
 @dataclass(frozen=True)
 class Family:
@@ -23,17 +21,12 @@ class Family:
     websearch_model: str = ""
 
 
+# gpt-oss was removed here on 2026-09-12, not just retired from ROSTER: while
+# it stayed in this registry `main.py ask --family gpt-oss` still reached it,
+# and it still minted a per-family driver-limit env knob for a model the fleet
+# is not allowed to run. Its historical rate stays in MODEL_PRICING, which is
+# what prices the event log's thousands of past gpt-oss runs.
 FAMILIES = {
-    "gpt-oss": Family(
-        "gpt-oss",
-        5,
-        {
-            "default": "gpt-oss-120b",
-            "low": "gpt-oss-120b-thinking-low",
-            "high": "gpt-oss-120b-thinking-high",
-        },
-        websearch_model="gpt-oss-120b-thinking-high-legacy-tool-calling",
-    ),
     "glm": Family(
         "glm",
         4,
@@ -57,13 +50,19 @@ FAMILIES = {
         "deepseek",
         5,
         {
-            "default": "DeepSeek-V4-Flash",
-            "low": "DeepSeek-V4-Flash-thinking-low",
-            "max": "DeepSeek-V4-Flash-thinking-max",
+            "default": "DeepSeek-V4.1-Flash",
+            "low": "DeepSeek-V4.1-Flash-thinking-low",
+            "max": "DeepSeek-V4.1-Flash-thinking-max",
         },
-        websearch_model="DeepSeek-V4-Flash-thinking-max-legacy-tool-calling",
+        websearch_model="DeepSeek-V4.1-Flash-thinking-max-legacy-tool-calling",
     ),
 }
+
+# Derived, never hand-written: a literal list here kept naming gpt-oss after it
+# was removed from FAMILIES, and every consumer (pool semaphores, the dashboard
+# capacity row, work.py's round-robin) then asked family_limit() for a family
+# that no longer existed and raised KeyError on import.
+FAMILY_ORDER = list(FAMILIES)
 
 QUESTIONS_PER_ROUND = int(os.getenv("ARC_QUESTIONS_PER_ROUND", "10"))
 SEEDS_PER_ROUND = int(os.getenv("ARC_SEEDS_PER_ROUND", "3"))
@@ -124,10 +123,11 @@ def family_limit(name):
     return FAMILIES[name].limit
 
 # --- multi-harness code workload -------------------------------------------
-# Implementation is tiered by task difficulty: gpt-oss-120b takes very basic
-# tasks, DeepSeek-V4-Flash takes medium ones, and GLM-5.3 / Kimi-K3 take the
-# hard tasks on top of their planning and reviewing duties. Every task is
-# reviewed by kimi or glm, never by the same harness that implemented it.
+# Implementation is tiered by task difficulty (see ROSTER below): GLM-5.3
+# takes the medium and mechanical tasks (no lower tier), and Kimi-K3 /
+# DeepSeek-V4.1-Flash-thinking-max take the hard ones on top of their
+# planning and reviewing duties. Review comes from a family other than the
+# implementer's own.
 # ARC rejects over-limit requests per model, so driver caps reserve headroom
 # for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
@@ -342,12 +342,22 @@ ALL_ROLES = ("implementer", "reviewer", "pr_reviewer", "planner")
 ROSTER = [
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
-    ("DeepSeek-V4.1-Flash", "deepseek", "opencode", "medium", 5,
-     ALL_ROLES,                                            "2026-09-12", None),
-    ("GLM-5.3",             "glm",      "opencode", "hard",   4,
+    ("GLM-5.3",             "glm",      "opencode", "medium", 4,
      ALL_ROLES,                                            None,         None),
     ("Kimi-K3",             "kimi",     "kimi",     "hard",   3,
      ALL_ROLES,                                            None,         "2026-09-19"),
+    # Operator decision (2026-09-12): DeepSeek-V4.1-Flash-thinking-max is the
+    # fleet's strongest model — hard tier, last escalation stage, planner.
+    # The fleet runs the thinking-MAX variant, not the base model; the 10 is
+    # provider-published concurrency (docs), not a ramped measurement like the
+    # V4 figure above.
+    # 5, not 10: the concurrency here is CARRIED OVER from DeepSeek-V4-Flash,
+    # which was measured at 5 on this backend. 4.1 has never run — zero events —
+    # so any number above that is a guess, and guessing high is how the fleet
+    # generates its own 400s and blames the provider. Raise it when
+    # `main.py code bench` has actually ramped it.
+    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "opencode", "hard", 5,
+     ALL_ROLES,                                            "2026-09-12", None),
 ]
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
 
@@ -605,6 +615,14 @@ def kimi_plan_mode_on():
 #     GLM-5.3            4 concurrent
 #     Kimi-K3            3 concurrent
 #
+# DeepSeek-V4.1-Flash-thinking-max arrived 2026-09-12 and has NOT been measured
+# on this account — the event log holds zero runs of it. It carries V4-Flash's
+# measured 5 because it is the same family behind the same ARC endpoint, and an
+# unmeasured cap is a guess either way: guessing LOW costs throughput, guessing
+# HIGH makes the fleet generate its own 400s and blame the provider (which is
+# exactly what the over-subscribed gpt-oss/DeepSeek caps below did). Re-ramp it
+# once `main.py capacity` has real rejection data for it.
+#
 # gpt-oss and DeepSeek were OVER-subscribed: 8 drivers against a real ceiling
 # of 5, so the fleet generated its own 400s under load and blamed the provider.
 # GLM and Kimi were UNDER-subscribed by one slot each.
@@ -661,6 +679,20 @@ _MODEL_DRIVER_CAP = {
 # ladder on self-inflicted contention and blaming the provider for it. The
 # kimi CLI has no shared store, so its limit is just Kimi-K3's own cap.
 _HARNESS_CAP = {"opencode": 5, "kimi": _MEASURED_CONCURRENCY.get("Kimi-K3", 3)}
+
+
+def kimi_wire_model():
+    """The model whose rate prices tokens read from the kimi CLI's wire log.
+
+    The wire log is the ONLY token source for kimi-harness runs (its
+    transcripts carry no usage) and it records no model name, so the reader
+    has to supply one. Derive it from the roster rather than writing
+    "Kimi-K3" at the call site: the literal was correct only while Kimi-K3
+    was the sole kimi-harness model, and would silently price a successor at
+    $0.00. Falls back to Kimi-K3 so historical wire tokens still price after
+    it is withdrawn.
+    """
+    return next((m for m, h in MODEL_HARNESS.items() if h == "kimi"), "Kimi-K3")
 
 
 def harness_limit(harness):
@@ -754,6 +786,9 @@ MODEL_PRICING = {
     # estimate with a note. Override with ARC_PRICE_DEEPSEEK_V4_1_FLASH_PROMPT
     # and ARC_PRICE_DEEPSEEK_V4_1_FLASH_COMPLETION.
     "DeepSeek-V4.1-Flash": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
+    # The fleet actually routes the thinking-max variant (ROSTER). Same price
+    # assumption: thinking tokens are completion tokens.
+    "DeepSeek-V4.1-Flash-thinking-max": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
     "GLM-5.3": {"prompt_per_mtok": 1.00, "completion_per_mtok": 2.00},
     "Kimi-K3": {"prompt_per_mtok": 0.50, "completion_per_mtok": 2.00},
 }

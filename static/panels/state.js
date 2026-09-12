@@ -69,7 +69,7 @@ $("#f-repo").onchange = e => { FILT.r = e.target.value; saveHash(); renderProjec
 $("#f-status").onchange = e => { FILT.s = e.target.value; saveHash(); renderProjects(); };
 $("#f-model").onchange = e => { FILT.m = e.target.value; saveHash(); renderProjects(); renderAgents(); };
 $("#f-q").oninput = e => { FILT.q = e.target.value; saveHash(); renderProjects(); };
-const FOUR_MODELS = ["gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"];
+const FOUR_MODELS = ["gpt-oss-120b", "DeepSeek-V4.1-Flash-thinking-max", "GLM-5.3", "Kimi-K3"];
 function rebuildFilterOptions() {
   const repos = [...new Set(PROJECTS.map(p => p.repo || ""))].sort();
   $("#f-repo").style.display = repos.length > 1 ? "" : "none";
