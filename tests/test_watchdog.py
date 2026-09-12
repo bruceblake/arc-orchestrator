@@ -17,6 +17,7 @@ import unittest
 from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path + event redirect)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import config
 import dashboard
@@ -215,7 +216,7 @@ class QueuedButNoneStarted(WatchdogCase):
     def test_all_queued_none_started(self):
         self._write(self._ev("driver.slot_wait", task="t1", model="GLM-5.3",
                              age=300),
-                    self._ev("driver.slot_wait", task="t2", model="Kimi-K3",
+                    self._ev("driver.slot_wait", task="t2", model=STRONGEST,
                              age=290))
         live = [{"pid": os.getpid(), "taskfile": "/tmp/x.json"}]
         w = self._wd(_Store(), live=live)

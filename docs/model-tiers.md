@@ -106,3 +106,44 @@ for the other; a junk override value is ignored rather than crashing.
 - [concurrency-limits.md](concurrency-limits.md)
 - [taskfile-schema.md](taskfile-schema.md)
 - [runbook.md](runbook.md)
+
+## The roster is dated (`config.ROSTER`)
+
+Models arrive and leave on dates the provider sets. Every model constant in
+`config` — `IMPLEMENTER_MODELS`, `IMPLEMENT_TIERS`, `MODEL_FAMILY`,
+`MODEL_HARNESS`, `MODEL_ROLES`, `REVIEW_FAMILIES`, `PLANNER_MODEL`, the
+default `ESCALATION_PATH`, the measured concurrency caps — is derived from the
+rows of `ROSTER` that are live **today**, so a transition is a date in one
+table, not an edit in six places on the morning it happens.
+
+| model | tier | roles | live |
+|---|---|---|---|
+| DeepSeek-V4-Flash | medium | implement, PR-review | until 2026-09-12 |
+| DeepSeek-V4.1-Flash | medium | all | from 2026-09-12 |
+| GLM-5.3 | hard | all | — |
+| Kimi-K3 | hard | all | until 2026-09-19 |
+
+gpt-oss-120b was retired on 2026-09-11 (operator decision). There is no
+"basic" tier: mechanical work routes to the medium tier.
+
+**Preview any date** with `ARC_ROSTER_DATE=YYYY-MM-DD` — the whole test suite
+is run under both transition dates before they arrive:
+
+```bash
+ARC_ROSTER_DATE=2026-09-19 ./py -m unittest discover -s tests -t tests
+```
+
+What changes on **2026-09-19** when Kimi-K3 leaves: the escalation path
+shrinks to two tiers (`MAX_ESCALATIONS` becomes 1), the planner becomes
+GLM-5.3, GLM's cross-family reviewer becomes DeepSeek 4.1 (which is why 4.1
+carries the full role set — a fleet with one reviewable family has no
+cross-review at all), and `KimiDriver` refuses to construct. Taskfiles that
+still say `"reviewer": "kimi"` are remapped to the strongest cross-family
+reviewer at load time rather than rejected; their decomposition is still good.
+
+Prices live in `config.MODEL_PRICING` and can be overridden per model with
+`ARC_PRICE_<MODEL>_PROMPT` / `ARC_PRICE_<MODEL>_COMPLETION` (USD per million
+tokens; the key is the model name upper-cased with non-alphanumerics as `_`,
+e.g. `ARC_PRICE_DEEPSEEK_V4_1_FLASH_PROMPT` and `ARC_PRICE_DEEPSEEK_V4_1_FLASH_COMPLETION`). DeepSeek-V4.1-Flash is priced the
+same as V4 until the provider publishes a rate; gpt-oss-120b stays in the table
+because the event log prices history, not just today's roster.

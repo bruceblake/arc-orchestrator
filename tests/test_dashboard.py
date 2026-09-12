@@ -12,9 +12,13 @@ import unittest
 from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: E402,F401
+from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
 
 import config
+import code_tasks
 import dashboard
+from test_code_tasks import BASIC, taskfile  # noqa: E402
 
 
 class SessionAttribution(unittest.TestCase):
@@ -71,7 +75,7 @@ class InflightAttribution(unittest.TestCase):
     def test_an_unmatched_driver_start_counts_as_one_agent(self):
         now = time.time()
         self.write_events({"ts": now - 30, "type": "driver.start", "harness": "kimi",
-                           "model": "Kimi-K3", "role": "implementer",
+                           "model": STRONGEST, "role": "implementer",
                            "task": "t1", "attempt": 1})
         rows, _ = dashboard._collect_inflight(now, None)
         self.assertEqual(len(rows), 1)
@@ -79,7 +83,7 @@ class InflightAttribution(unittest.TestCase):
 
     def test_a_settled_driver_counts_as_none(self):
         now = time.time()
-        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 30, "type": "driver.start", **base},
                           {"ts": now - 5, "type": "driver.done", **base})
@@ -89,7 +93,7 @@ class InflightAttribution(unittest.TestCase):
     def test_a_cancelled_driver_settles_too(self):
         """Without driver.cancelled this lingered as a phantom for ~19 min."""
         now = time.time()
-        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 30, "type": "driver.start", **base},
                           {"ts": now - 5, "type": "driver.cancelled", **base})
@@ -100,7 +104,7 @@ class InflightAttribution(unittest.TestCase):
         now = time.time()
         self.write_events({"ts": now - dashboard.DRIVER_STALE_S - 60,
                            "type": "driver.start", "harness": "kimi",
-                           "model": "Kimi-K3", "role": "implementer",
+                           "model": STRONGEST, "role": "implementer",
                            "task": "t1", "attempt": 1})
         rows, _ = dashboard._collect_inflight(now, None)
         self.assertEqual(rows, [], "a killed run's start event must not count forever")
@@ -109,7 +113,7 @@ class InflightAttribution(unittest.TestCase):
         """last_event_s must read the newest liveness event, not the start —
         a live agent shows a fresh heartbeat age, not its total runtime."""
         now = time.time()
-        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 12, "type": "driver.heartbeat", **base})
@@ -120,7 +124,7 @@ class InflightAttribution(unittest.TestCase):
 
     def test_a_stalled_driver_is_flagged(self):
         now = time.time()
-        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 12, "type": "driver.stalled", **base})
@@ -133,7 +137,7 @@ class InflightAttribution(unittest.TestCase):
         past the 300s stall threshold it must flag the row even with no
         driver.stalled event."""
         now = time.time()
-        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 5, "type": "driver.progress",
@@ -145,7 +149,7 @@ class InflightAttribution(unittest.TestCase):
         """driver.done must clear the liveness record with the start — a
         settled run must not keep reporting a heartbeat age."""
         now = time.time()
-        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 30, "type": "driver.heartbeat", **base},
@@ -168,7 +172,7 @@ class KimiSessionExclusion(unittest.TestCase):
              / "agents" / "main")
         d.mkdir(parents=True)
         now_ms = time.time() * 1000
-        lines = [{"type": "llm.request", "model": "Kimi-K3",
+        lines = [{"type": "llm.request", "model": STRONGEST,
                   "modelAlias": "arc/kimi-k3", "agentId": "main", "time": now_ms}]
         if answered:
             lines.append({"type": "usage.record", "model": "arc/kimi-k3",
@@ -417,14 +421,14 @@ class LiveQueueView(unittest.TestCase):
         return S()
 
     def test_a_queued_attempt_with_no_start_is_waiting(self):
-        self._write(self._ev("driver.queued", "t1", "Kimi-K3"))
+        self._write(self._ev("driver.queued", "t1", STRONGEST))
         q = dashboard._queue(self._store())
         self.assertEqual(q["totals"]["waiting"], 1)
         self.assertEqual(q["waiting"][0]["task"], "t1")
 
     def test_driver_start_settles_the_wait(self):
-        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=9),
-                    self._ev("driver.start", "t1", "Kimi-K3", age=8))
+        self._write(self._ev("driver.queued", "t1", STRONGEST, age=9),
+                    self._ev("driver.start", "t1", STRONGEST, age=8))
         self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
 
     def test_done_and_error_also_settle_it(self):
@@ -437,13 +441,13 @@ class LiveQueueView(unittest.TestCase):
                     dashboard._queue(self._store())["totals"]["waiting"], 0)
 
     def test_a_wait_left_by_a_dead_run_is_not_shown(self):
-        e = self._ev("driver.queued", "t1", "Kimi-K3")
+        e = self._ev("driver.queued", "t1", STRONGEST)
         e["pid"] = 2 ** 22  # never a live pid
         self._write(e)
         self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
 
     def test_a_wait_that_has_gone_quiet_is_not_shown(self):
-        self._write(self._ev("driver.queued", "t1", "Kimi-K3",
+        self._write(self._ev("driver.queued", "t1", STRONGEST,
                              age=dashboard.WAIT_STALE_S + 60))
         self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
 
@@ -454,34 +458,34 @@ class LiveQueueView(unittest.TestCase):
         self.assertEqual(scopes, {"t1": "process", "t2": "fleet"})
 
     def test_pr_reviewers_are_counted_separately_from_implementers(self):
-        self._write(self._ev("driver.queued", "t1", "Kimi-K3", role="pr_reviewer"),
-                    self._ev("driver.queued", "t2", "Kimi-K3", role="implementer"))
+        self._write(self._ev("driver.queued", "t1", STRONGEST, role="pr_reviewer"),
+                    self._ev("driver.queued", "t2", STRONGEST, role="implementer"))
         q = dashboard._queue(self._store())
         self.assertEqual(q["totals"]["waiting"], 2)
         self.assertEqual(q["totals"]["reviewers_waiting"], 1)
-        kimi = next(m for m in q["models"] if m["model"] == "Kimi-K3")
+        kimi = next(m for m in q["models"] if m["model"] == STRONGEST)
         self.assertEqual(kimi["reviewers_waiting"], 1)
 
     def test_running_comes_from_live_leases_and_reports_free_slots(self):
-        self._write(self._ev("driver.start", "t1", "Kimi-K3", role="pr_reviewer"))
+        self._write(self._ev("driver.start", "t1", STRONGEST, role="pr_reviewer"))
         q = dashboard._queue(self._store([
-            {"id": 1, "model": "Kimi-K3", "pid": os.getpid(), "task": "t1",
+            {"id": 1, "model": STRONGEST, "pid": os.getpid(), "task": "t1",
              "acquired_at": time.time() - 30}]))
         self.assertEqual(q["totals"]["running"], 1)
         self.assertEqual(q["running"][0]["role_label"], "PR review")
-        kimi = next(m for m in q["models"] if m["model"] == "Kimi-K3")
+        kimi = next(m for m in q["models"] if m["model"] == STRONGEST)
         self.assertEqual((kimi["running"], kimi["free"]), (1, kimi["cap"] - 1))
 
     def test_a_lease_whose_run_died_does_not_pin_a_slot(self):
         q = dashboard._queue(self._store([
-            {"id": 1, "model": "Kimi-K3", "pid": 2 ** 22, "task": "t1",
+            {"id": 1, "model": STRONGEST, "pid": 2 ** 22, "task": "t1",
              "acquired_at": time.time() - 30}]))
         self.assertEqual(q["totals"]["running"], 0)
 
     def test_every_known_model_appears_even_when_idle(self):
         self._write()
         models = {m["model"] for m in dashboard._queue(self._store())["models"]}
-        self.assertIn("Kimi-K3", models)
+        self.assertIn(STRONGEST, models)
         self.assertIn("GLM-5.3", models)
 
     def test_a_harness_wait_is_shown_under_the_real_model(self):
@@ -536,15 +540,15 @@ class LiveQueueView(unittest.TestCase):
     def test_a_start_settles_a_cap_wait_from_the_same_attempt(self):
         # cap_wait and driver.start must key identically, or the wait is never
         # cleared and the panel shows a queue that has already been served.
-        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=30),
-                    self._ev("driver.cap_wait", "t1", "Kimi-K3", age=20,
+        self._write(self._ev("driver.queued", "t1", STRONGEST, age=30),
+                    self._ev("driver.cap_wait", "t1", STRONGEST, age=20,
                              in_use=3, cap=3),
-                    self._ev("driver.start", "t1", "Kimi-K3", age=10))
+                    self._ev("driver.start", "t1", STRONGEST, age=10))
         self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 0)
 
     def test_a_cap_wait_with_no_start_is_still_a_wait(self):
-        self._write(self._ev("driver.queued", "t1", "Kimi-K3", age=30),
-                    self._ev("driver.cap_wait", "t1", "Kimi-K3", age=20,
+        self._write(self._ev("driver.queued", "t1", STRONGEST, age=30),
+                    self._ev("driver.cap_wait", "t1", STRONGEST, age=20,
                              in_use=3, cap=3))
         self.assertEqual(dashboard._queue(self._store())["totals"]["waiting"], 1)
 
@@ -792,7 +796,7 @@ class ProjectTaskModelPricing(unittest.TestCase):
         os.environ.update(self._env)
         self._dir.cleanup()
 
-    def _taskfile(self, model="gpt-oss-120b", reviewer="glm"):
+    def _taskfile(self, model=config.ESCALATION_PATH[0], reviewer="glm"):
         tf = Path(config.TASKS_DIR) / "mixed.json"
         tf.write_text(json.dumps({"project": {"repo": "/x", "title": "mixed", "tasks": [
             {"id": "t1", "title": "t1", "model": model, "reviewer": reviewer,
@@ -816,7 +820,7 @@ class ProjectTaskModelPricing(unittest.TestCase):
         self._taskfile()
         self._events(
             {"type": "driver.done", "task": "t1", "harness": "opencode",
-             "model": "gpt-oss-120b", "role": "implementer",
+             "model": config.ESCALATION_PATH[0], "role": "implementer",
              "tokens": 1000, "prompt_tokens": 800, "completion_tokens": 200,
              "seconds": 60},
             {"type": "driver.done", "task": "t1", "harness": "opencode",
@@ -825,15 +829,16 @@ class ProjectTaskModelPricing(unittest.TestCase):
              "seconds": 30},
         )
         node = self._node()
-        expected = (config.cost_of("gpt-oss-120b", 800, 200)
+        entry = config.ESCALATION_PATH[0]  # my sed pointed the event here too
+        expected = (config.cost_of(entry, 800, 200)
                     + config.cost_of("GLM-5.3", 50, 50))
         self.assertEqual(node["cost"], round(expected, 4))
-        old = config.cost_of("gpt-oss-120b", 850, 250)
+        old = config.cost_of(entry, 850, 250)
         self.assertNotEqual(node["cost"], round(old, 4),
-                            "GLM reviewer tokens must not be priced at gpt-oss rates")
+                            "GLM reviewer tokens must not be priced at the implementer's rate")
 
     def test_kimi_wire_extra_is_priced_at_kimi_completion_rate(self):
-        self._taskfile(model="Kimi-K3", reviewer="glm")
+        self._taskfile(model=STRONGEST, reviewer="glm")
         dashboard._kimi_tokens_by_task = lambda: {"t1": 2000}
         # No driver.done for kimi: the wire log is the only source of its tokens,
         # and it carries no prompt/completion split.
@@ -841,7 +846,7 @@ class ProjectTaskModelPricing(unittest.TestCase):
         node = self._node()
         self.assertEqual(node["tokens"], 2000)
         self.assertEqual(node["tokens_source"], "kimi-wire")
-        self.assertEqual(node["cost"], round(config.cost_of("Kimi-K3", 0, 2000), 4))
+        self.assertEqual(node["cost"], round(config.cost_of(STRONGEST, 0, 2000), 4))
 
 
 class TheServerKnowsWhenItIsStale(unittest.TestCase):
@@ -927,3 +932,145 @@ class RetryActuallyRuns(unittest.TestCase):
         body = body[:body.index("\ndef ", 10)]
         for key in ('"launched_pid"', '"note"'):
             self.assertIn(key, body)
+
+
+class ManualEscalation(unittest.TestCase):
+    """The operator can move a task up a tier before the fix budget does.
+
+    The fix budget escalates only after repeated failure. An operator watching
+    a planner on gpt-oss produce thin task lists can see the problem well before
+    three rounds prove it. The override is read by cur_model() at every node
+    boundary, so a RUNNING task moves up at its very next step.
+    """
+
+    def setUp(self):
+        import shutil
+        import store as _store
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._tasks = config.TASKS_DIR
+        config.TASKS_DIR = self.dir
+        self.addCleanup(setattr, config, "TASKS_DIR", self._tasks)
+        self.tf = Path(self.dir) / "p.json"
+        self.tf.write_text(json.dumps({"project": {"repo": "/x", "title": "p", "tasks": [
+            {"id": "t1", "title": "T", "prompt": "p", "model": config.ESCALATION_PATH[0],
+             "reviewer": "kimi", "verify_cmd": "", "files_hint": [], "deps": []}]}}))
+        self._store = dashboard.Handler.store
+        dashboard.Handler.store = _store.Store(":memory:")
+        dashboard.Handler.store.upsert_code_task(str(self.tf), "t1", "T", config.ESCALATION_PATH[0],
+                                                 "kimi", "running")
+        self.addCleanup(setattr, dashboard.Handler, "store", self._store)
+        import reconcile
+        self._live = reconcile.live_runs
+        reconcile.live_runs = lambda: []
+        self.addCleanup(setattr, reconcile, "live_runs", self._live)
+
+    def _task(self):
+        return json.loads(self.tf.read_text())["project"]["tasks"][0]
+
+    def test_default_escalates_one_tier_up(self):
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertEqual(code, 200, out)
+        self.assertEqual((out["from"], out["to"]),
+                         (config.ESCALATION_PATH[0], config.ESCALATION_PATH[1]))
+
+    def test_the_taskfile_is_rewritten_so_a_fresh_run_starts_higher(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertEqual(self._task()["model"], config.ESCALATION_PATH[1])
+
+    def test_the_override_is_stored_for_the_running_graph(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": STRONGEST})
+        self.assertEqual(dashboard.Handler.store.get_model_override(str(self.tf), "t1"),
+                         STRONGEST)
+
+    def test_the_reviewer_follows_the_implementer_across_families(self):
+        # The strongest model's work must be reviewed by another family, never
+        # by itself — kimi->glm today, glm->deepseek after Kimi leaves.
+        out, _ = dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": STRONGEST})
+        self.assertEqual(out["reviewer"], STRONGEST_REVIEWER)
+        self.assertNotEqual(out["reviewer"], STRONGEST_FAMILY)
+        self.assertEqual(self._task()["reviewer"], STRONGEST_REVIEWER)
+
+    def test_it_refuses_to_move_down(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": STRONGEST})
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1",
+                                              "to_model": ENTRY})
+        self.assertEqual(code, 409)
+        self.assertIn("only moves up", out["error"])
+
+    def test_the_top_tier_cannot_go_higher(self):
+        dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": STRONGEST})
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertEqual(code, 409)
+        self.assertIn("top tier", out["error"])
+
+    def test_an_unknown_model_is_rejected(self):
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": "GPT-9"})
+        self.assertEqual(code, 400)
+
+    def test_it_says_whether_a_live_run_will_pick_it_up(self):
+        import reconcile
+        reconcile.live_runs = lambda: [{"taskfile": str(self.tf), "pid": 1}]
+        out, _ = dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertTrue(out["live"])
+        self.assertIn("next step", out["note"])
+
+    def test_the_event_is_marked_manual(self):
+        with capture_events() as ev:
+            dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        esc = [f for t, f in ev.seen if t == "task.escalated"]
+        self.assertTrue(esc and esc[0].get("manual"))
+
+
+class TheRunningGraphHonoursTheOverride(unittest.TestCase):
+    """cur_model() must see a manual override at its next call — no restart."""
+
+    def _graph_and_store(self):
+        import store as _store
+        st = _store.Store(":memory:")
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            g = code_tasks.build_code_graph(st, ts, taskfile="tf.json")
+        return g, st
+
+    def test_an_override_wins_over_the_declared_model(self):
+        import code_tasks as ct
+        g, st = self._graph_and_store()
+        # reach cur_model through a node that exposes it: escalate's "from"
+        st.set_model_override("tf.json", "t1", "GLM-5.3", "test")
+        # implement records the model it is about to use via upsert; read it back
+        import asyncio as aio
+        orig = ct._driver
+        seen = {}
+        class FakeDrv:
+            harness = "x"
+            async def run(self_, *a, **k):
+                class R: session_id=None; exit_code=0; transcript_path=""; seconds=0.0
+                return R()
+        ct._driver = lambda model, role, pol: seen.setdefault("model", model) and FakeDrv() or FakeDrv()
+        try:
+            aio.run(g.nodes["implement_t1"].fn(
+                {"results": {"alloc_t1": {"worktree": "/tmp"}}, "runs": {}}))
+        finally:
+            ct._driver = orig
+        self.assertEqual(seen.get("model"), "GLM-5.3")
+
+    def test_the_higher_of_manual_and_automatic_wins(self):
+        import code_tasks as ct, asyncio as aio
+        g, st = self._graph_and_store()
+        st.set_model_override("tf.json", "t1", ENTRY, "test")  # manual: medium
+        orig = ct._driver; seen = {}
+        class FakeDrv:
+            harness = "x"
+            async def run(self_, *a, **k):
+                class R: session_id=None; exit_code=0; transcript_path=""; seconds=0.0
+                return R()
+        ct._driver = lambda model, role, pol: seen.setdefault("model", model) and FakeDrv() or FakeDrv()
+        try:
+            # the graph itself already auto-escalated to Kimi: that is higher
+            aio.run(g.nodes["implement_t1"].fn(
+                {"results": {"alloc_t1": {"worktree": "/tmp"},
+                             "escalate_t1": {"to_model": STRONGEST}}, "runs": {}}))
+        finally:
+            ct._driver = orig
+        self.assertEqual(seen.get("model"), STRONGEST)

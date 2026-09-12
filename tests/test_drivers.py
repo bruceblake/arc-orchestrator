@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import capture_events, needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: F401  (sys.path)
 
 import config
 import drivers
@@ -32,7 +32,7 @@ class TempLeaseDB:
 
 class FakeDriver(Driver):
     harness = "fake"
-    model = "gpt-oss-120b"
+    model = config.ESCALATION_PATH[0]
     role = "implementer"
 
     def __init__(self, raiser):
@@ -151,7 +151,7 @@ class ChildTermination(unittest.TestCase):
 
     class SleeperDriver(Driver):
         harness = "sleep"
-        model = "gpt-oss-120b"
+        model = config.ESCALATION_PATH[0]
         role = "implementer"
 
         def argv(self, prompt, session_id):
@@ -273,7 +273,7 @@ class StallInstrumentation(unittest.TestCase):
 
         class Sleeper(Driver):
             harness = "sleep"
-            model = "gpt-oss-120b"
+            model = config.ESCALATION_PATH[0]
             role = "implementer"
 
             def argv(self, prompt, session_id):
@@ -307,7 +307,7 @@ class StallInstrumentation(unittest.TestCase):
 
         class Sleeper(Driver):
             harness = "sleep"
-            model = "gpt-oss-120b"
+            model = config.ESCALATION_PATH[0]
             role = "implementer"
 
             def argv(self, prompt, session_id):
@@ -339,7 +339,7 @@ class StallInstrumentation(unittest.TestCase):
 
         class Sleeper(Driver):
             harness = "sleep"
-            model = "gpt-oss-120b"
+            model = config.ESCALATION_PATH[0]
             role = "implementer"
 
             def argv(self, prompt, session_id):
@@ -422,10 +422,10 @@ class RoleGuards(unittest.TestCase):
 
     def test_weak_model_cannot_review(self):
         with self.assertRaises(ValueError):
-            drivers.OpencodeDriver("gpt-oss-120b", "reviewer")
+            drivers.OpencodeDriver("gpt-oss-120b", "reviewer")  # retired: refused
 
     def test_weak_model_may_implement(self):
-        drivers.OpencodeDriver("gpt-oss-120b", "implementer")
+        drivers.OpencodeDriver(config.ESCALATION_PATH[0], "implementer")
 
     def test_unknown_model_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -448,7 +448,7 @@ class FleetContextConfig(unittest.TestCase):
             src = Path(d) / "opencode.json"
             src.write_text(json.dumps({
                 "provider": {"ARC": {"options": {"apiKey": "secret"}, "models": {
-                    "Kimi-K3": {"name": "Kimi-K3",
+                    STRONGEST: {"name": STRONGEST,
                                 "limit": {"context": 131072, "output": 16384}}}}},
                 "model": "ARC/Kimi-K3"}))
             orig_src, orig_out = config.OPENCODE_CONFIG, config.OPENCODE_FLEET_CONFIG
@@ -460,7 +460,7 @@ class FleetContextConfig(unittest.TestCase):
                 self.assertIsNotNone(path)
                 doc = json.loads(Path(path).read_text())
                 arc = doc["provider"]["ARC"]
-                self.assertEqual(arc["models"]["Kimi-K3"]["limit"]["context"],
+                self.assertEqual(arc["models"][STRONGEST]["limit"]["context"],
                                  config.OPENCODE_CONTEXT)
                 self.assertEqual(arc["options"]["apiKey"], "secret",
                                  "provider settings must carry over")
@@ -468,7 +468,7 @@ class FleetContextConfig(unittest.TestCase):
                 # the operator's own config must be left alone
                 self.assertEqual(
                     json.loads(src.read_text())["provider"]["ARC"]["models"]
-                    ["Kimi-K3"]["limit"]["context"], 131072)
+                    [STRONGEST]["limit"]["context"], 131072)
             finally:
                 config.OPENCODE_CONFIG, config.OPENCODE_FLEET_CONFIG = orig_src, orig_out
                 drivers._fleet_cfg.update(key=None, path=None)
@@ -499,9 +499,9 @@ class LeaseWaitIsBounded(unittest.TestCase):
 
     def test_gives_up_after_the_configured_wait(self):
         with TempLeaseDB() as store:
-            cap = config.driver_limit("Kimi-K3")
+            cap = config.driver_limit(STRONGEST)
             for i in range(cap):          # saturate the model
-                store.acquire_driver_lease("Kimi-K3", os.getpid(), f"other{i}",
+                store.acquire_driver_lease(STRONGEST, os.getpid(), f"other{i}",
                                            cap, config.DRIVER_LEASE_TTL)
             orig_wait, orig_sleep = config.DRIVER_LEASE_WAIT, drivers.asyncio.sleep
             config.DRIVER_LEASE_WAIT = 0.2
@@ -514,7 +514,7 @@ class LeaseWaitIsBounded(unittest.TestCase):
                 with capture_events() as ev:
                     async def go():
                         with self.assertRaises(DriverError) as cm:
-                            await drivers._lease_acquire("Kimi-K3", "mine", {})
+                            await drivers._lease_acquire(STRONGEST, "mine", {})
                         return cm.exception
                     exc = asyncio.run(go())
             finally:
@@ -527,7 +527,7 @@ class LeaseWaitIsBounded(unittest.TestCase):
     def test_acquires_immediately_when_a_slot_is_free(self):
         with TempLeaseDB() as store:
             async def go():
-                await drivers._lease_acquire("Kimi-K3", "mine", {})
+                await drivers._lease_acquire(STRONGEST, "mine", {})
             with capture_events():
                 asyncio.run(go())
             self.assertEqual(len(store.driver_lease_rows()), 1)
@@ -568,9 +568,9 @@ class InflightIsCountedOnlyWhenHoldingASlot(unittest.TestCase):
     def test_an_attempt_that_never_gets_a_slot_emits_no_start(self):
         """A driver that times out waiting must not look like it ran."""
         with TempLeaseDB() as store, capture_events() as ev:
-            cap = config.driver_limit("Kimi-K3")
+            cap = config.driver_limit(STRONGEST)
             for i in range(cap):
-                store.acquire_driver_lease("Kimi-K3", os.getpid(), f"o{i}",
+                store.acquire_driver_lease(STRONGEST, os.getpid(), f"o{i}",
                                            cap, config.DRIVER_LEASE_TTL)
             orig_wait, orig_sleep = config.DRIVER_LEASE_WAIT, drivers.asyncio.sleep
             config.DRIVER_LEASE_WAIT = 0.2
@@ -582,7 +582,7 @@ class InflightIsCountedOnlyWhenHoldingASlot(unittest.TestCase):
             try:
                 async def go():
                     with self.assertRaises(DriverError):
-                        await drivers._lease_acquire("Kimi-K3", "mine", {})
+                        await drivers._lease_acquire(STRONGEST, "mine", {})
                 asyncio.run(go())
             finally:
                 config.DRIVER_LEASE_WAIT = orig_wait
@@ -594,23 +594,27 @@ class InflightIsCountedOnlyWhenHoldingASlot(unittest.TestCase):
 class ReviewingAnOpenPullRequest(unittest.TestCase):
     """Which models may hold the pr_reviewer role."""
 
+    @needs_kimi
+
     def test_kimi_and_glm_may_review_a_pr(self):
         self.assertEqual(drivers.KimiDriver("pr_reviewer").role, "pr_reviewer")
         self.assertEqual(
             drivers.OpencodeDriver("GLM-5.3", "pr_reviewer").role, "pr_reviewer")
 
+    @needs_deepseek_v4
+
     def test_deepseek_may_review_a_pr_but_not_gate_or_plan(self):
         self.assertEqual(
-            drivers.OpencodeDriver("DeepSeek-V4-Flash", "pr_reviewer").role,
+            drivers.OpencodeDriver(ENTRY, "pr_reviewer").role,
             "pr_reviewer")
         for role in ("reviewer", "planner"):
             with self.assertRaises(ValueError):
-                drivers.OpencodeDriver("DeepSeek-V4-Flash", role)
+                drivers.OpencodeDriver(ENTRY, role)
 
     def test_gpt_oss_stays_implement_only(self):
         for role in ("pr_reviewer", "reviewer", "planner"):
             with self.assertRaises(ValueError):
-                drivers.OpencodeDriver("gpt-oss-120b", role)
+                drivers.OpencodeDriver("gpt-oss-120b", role)  # not on the roster at all
 
 
 class GitHubOpsRoles(unittest.TestCase):
@@ -620,6 +624,8 @@ class GitHubOpsRoles(unittest.TestCase):
     own role rules."""
 
     GH_ROLES = ("issue-triager", "issue-maker", "pr-reviewer")
+
+    @needs_kimi
 
     def test_kimi_may_hold_every_gh_role(self):
         for role in self.GH_ROLES:
@@ -633,14 +639,18 @@ class GitHubOpsRoles(unittest.TestCase):
     def test_gpt_oss_may_hold_no_gh_role(self):
         for role in self.GH_ROLES:
             with self.assertRaises(ValueError):
-                drivers.OpencodeDriver("gpt-oss-120b", role)
+                drivers.OpencodeDriver("gpt-oss-120b", role)  # not on the roster at all
+
+    @needs_deepseek_v4
 
     def test_deepseek_may_hold_no_gh_role(self):
         # pr_reviewer (an open-PR merge review) is allowed for DeepSeek; the
         # hyphenated gh_ops 'pr-reviewer' is a different role and is not.
         for role in self.GH_ROLES:
             with self.assertRaises(ValueError):
-                drivers.OpencodeDriver("DeepSeek-V4-Flash", role)
+                drivers.OpencodeDriver(ENTRY, role)
+
+    @needs_kimi
 
     def test_existing_roles_still_construct(self):
         # The gh roles were added without breaking planner|reviewer|implementer.

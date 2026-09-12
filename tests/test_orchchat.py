@@ -22,6 +22,7 @@ os.environ["ARC_CHAT_DIR"] = os.path.join(_TMP, "chat")
 os.environ["ARC_TASKS_DIR"] = os.path.join(_TMP, "tasks")
 
 from helpers import capture_events  # noqa: F401,E402  (env/DB redirect)
+from helpers import ENTRY, STRONGEST, STRONGEST_FAMILY  # noqa: E402,F401
 import config  # noqa: E402
 import orchchat  # noqa: E402
 from drivers import DriverResult  # noqa: E402
@@ -45,7 +46,7 @@ def _planner_cls(reply="", error=None):
             state["task_id"] = task_id
             if error is not None:
                 raise error
-            return DriverResult(harness="kimi", model="Kimi-K3",
+            return DriverResult(harness="kimi", model=STRONGEST,
                                 role="planner", exit_code=0, text=reply)
 
     return _Stub, state
@@ -113,7 +114,7 @@ class TestOrchChat(unittest.TestCase):
 
     @staticmethod
     def _plan(title="Build A Widget", repo="/home/proxyie/r",
-              model="DeepSeek-V4-Flash", reviewer="glm", tid="make-widget"):
+              model=ENTRY, reviewer="glm", tid="make-widget"):
         return {
             "project": {"repo": repo, "title": title,
                         "tasks": [{"id": tid, "title": title,
@@ -204,7 +205,7 @@ class TestOrchChatHappy(TestOrchChat):
 class TestOrchChatRejections(TestOrchChat):
     def test_same_harness_review_pairing_rejected(self):
         repo = self._make_repo()
-        plan = self._plan(repo=str(repo), model="Kimi-K3", reviewer="kimi")
+        plan = self._plan(repo=str(repo), model=STRONGEST, reviewer=STRONGEST_FAMILY)
         code, state, spath = self._run(reply=self._reply(plan), repo=repo)
         self.assertEqual(code, 0)
         self.assertEqual(self._taskfiles(), [])
@@ -317,13 +318,13 @@ class TestOrchChatReplyText(unittest.TestCase):
             with open(tpath, "w", encoding="utf-8") as f:
                 f.write(json.dumps({"role": "user", "content": "prompt"}) + "\n")
                 f.write(json.dumps({"role": "assistant", "content": big}) + "\n")
-            res = DriverResult(harness="kimi", model="Kimi-K3", role="planner",
+            res = DriverResult(harness="kimi", model=STRONGEST, role="planner",
                                exit_code=0, text=big[-3000:],
                                transcript_path=str(tpath))
             self.assertEqual(orchchat._reply_text(res), big)
 
     def test_falls_back_to_capped_text(self):
-        res = DriverResult(harness="kimi", model="Kimi-K3", role="planner",
+        res = DriverResult(harness="kimi", model=STRONGEST, role="planner",
                            exit_code=0, text="short")
         self.assertEqual(orchchat._reply_text(res), "short")
 

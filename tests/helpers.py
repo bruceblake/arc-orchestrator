@@ -88,3 +88,22 @@ class FakeStore:
 
     def save_harness_run(self, *a, **kw):
         self.harness_runs.append((a, kw))
+
+
+# --- roster-aware fixture names ------------------------------------------
+# The model roster is DATED (config.ROSTER): names change on the provider's
+# schedule. A fixture that hard-codes "Kimi-K3" is a test that breaks on
+# 2026-09-19 for a reason unrelated to what it tests. Use these instead, and
+# run the suite under ARC_ROSTER_DATE=<date> before each transition.
+import unittest as _ut
+
+ENTRY = config.ESCALATION_PATH[0]        # weakest live implementer
+STRONGEST = config.ESCALATION_PATH[-1]   # strongest live implementer
+KIMI_LIVE = "Kimi-K3" in config.IMPLEMENTER_MODELS
+DEEPSEEK_V4_LIVE = "DeepSeek-V4-Flash" in config.IMPLEMENTER_MODELS
+needs_kimi = _ut.skipUnless(KIMI_LIVE, "tests Kimi-K3 behaviour; Kimi-K3 is not on today's roster")
+needs_deepseek_v4 = _ut.skipUnless(DEEPSEEK_V4_LIVE, "tests DeepSeek-V4-Flash's restricted roles; not live")
+needs_three_families = _ut.skipUnless(len(config.REVIEW_FAMILIES) >= 2 and len(config.IMPLEMENTER_MODELS) >= 3,
+                                      "needs three implementer families on the roster")
+STRONGEST_FAMILY = config.MODEL_FAMILY[STRONGEST]      # for "same-family reviewer" fixtures
+STRONGEST_REVIEWER = config.cross_family_reviewer(STRONGEST)  # its correct cross-family reviewer

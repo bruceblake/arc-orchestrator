@@ -24,6 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import capture_events  # noqa: F401  (sys.path + event redirect)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import config
 import dashboard
@@ -213,8 +214,9 @@ class HttpWriteCreateEndpoint(_PostCase):
         t1, t2 = doc["project"]["tasks"]
         # code_tasks.load_taskfile rejects tasks with no model or an unknown
         # reviewer, so create must always fill both in
-        self.assertEqual(t1["model"], "DeepSeek-V4-Flash")
-        self.assertEqual(t1["reviewer"], "kimi")
+        self.assertEqual(t1["model"], ENTRY)
+        # the cross-family default for the entry model, whatever the roster says
+        self.assertEqual(t1["reviewer"], config.cross_family_reviewer(ENTRY))
         self.assertEqual(t2["deps"], ["t1"])
         self.assertEqual(self.spawn_calls, [])
 
@@ -518,7 +520,7 @@ class HttpWriteArchiveEndpoint(_PostCase):
     def test_archive_warns_when_tasks_ended_failed_or_conflict(self):
         path = self._write_taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", "DeepSeek-V4-Flash", "kimi", "failed")
+            str(path), "t1", "one", ENTRY, "kimi", "failed")
         status, resp = self._post_json("/api/projects/archive",
                                        {"file": "proj.json"})
         self.assertEqual(status, 200)
@@ -581,9 +583,9 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
     def test_retry_resets_exactly_one_task_to_pending(self):
         path = self._write_taskfile()
         store = dashboard.Handler.store
-        store.upsert_code_task(str(path), "t1", "one", "DeepSeek-V4-Flash",
+        store.upsert_code_task(str(path), "t1", "one", ENTRY,
                                "kimi", "failed")
-        store.upsert_code_task(str(path), "t2", "two", "DeepSeek-V4-Flash",
+        store.upsert_code_task(str(path), "t2", "two", ENTRY,
                                "kimi", "merged")
         status, resp = self._post_json("/api/projects/retry-task",
                                        {"file": "proj.json", "task": "t1"})
@@ -603,7 +605,7 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
     def test_retry_unknown_task_id_returns_404(self):
         path = self._write_taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", "DeepSeek-V4-Flash", "kimi", "failed")
+            str(path), "t1", "one", ENTRY, "kimi", "failed")
         status, resp = self._post_json("/api/projects/retry-task",
                                        {"file": "proj.json", "task": "ghost"})
         self.assertEqual(status, 404)
@@ -613,7 +615,7 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
         path = self._write_taskfile()
         # the row must exist: the 404 lookup runs before the live check
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", "DeepSeek-V4-Flash", "kimi", "failed")
+            str(path), "t1", "one", ENTRY, "kimi", "failed")
         self.live_runs.return_value = [{"pid": 7, "taskfile": str(path)}]
         status, resp = self._post_json("/api/projects/retry-task",
                                        {"file": "proj.json", "task": "t1"})

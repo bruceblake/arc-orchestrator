@@ -9,7 +9,7 @@ import pathlib
 import os
 import unittest
 
-from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import capture_events, needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: F401  (sys.path)
 
 import config
 
@@ -139,12 +139,12 @@ class HarnessContextBudget(unittest.TestCase):
     def test_kimi_gets_an_alias_only_when_the_config_defines_it(self):
         """A missing alias must degrade to the default model, not fail the run
         with 'model not found'."""
-        real = config.harness_model("Kimi-K3", "kimi")
+        real = config.harness_model(STRONGEST, "kimi")
         self.assertIn(real, (None, "arc/kimi-k3-fleet"))
         orig = config.KIMI_CONFIG
         config.KIMI_CONFIG = pathlib.Path("/nonexistent/config.toml")
         try:
-            self.assertIsNone(config.harness_model("Kimi-K3", "kimi"))
+            self.assertIsNone(config.harness_model(STRONGEST, "kimi"))
         finally:
             config.KIMI_CONFIG = orig
 
@@ -158,7 +158,7 @@ class HarnessContextBudget(unittest.TestCase):
         orig = config.USE_FLEET_ALIASES
         config.USE_FLEET_ALIASES = False
         try:
-            self.assertIsNone(config.harness_model("Kimi-K3", "kimi"))
+            self.assertIsNone(config.harness_model(STRONGEST, "kimi"))
         finally:
             config.USE_FLEET_ALIASES = orig
 
@@ -242,15 +242,24 @@ class PRReviewerCountInvariants(unittest.TestCase):
     """
 
     def test_pr_reviewers_support_cross_review(self):
-        self.assertGreaterEqual(config.PR_REVIEWERS, 2,
-                                "fewer than two reviewers means no independent second read")
+        # Two independent readings is the POLICY (PR_REVIEWERS_WANTED). Whether
+        # today's roster can deliver it is a separate fact: after Kimi-K3 leaves
+        # there is one other family per implementer, and the effective count
+        # honestly drops to 1 — the roster audit reports the gap.
+        self.assertGreaterEqual(config.PR_REVIEWERS_WANTED, 2,
+                                "the operator's policy is two independent reads")
+        if len(config.PR_REVIEW_FAMILIES) >= 3:
+            self.assertEqual(config.PR_REVIEWERS, 2, "three families can deliver two")
 
     def test_pr_reviewers_do_not_exceed_review_capable_families(self):
-        review_capable = {config.MODEL_FAMILY[m]
-                          for m in config.IMPLEMENT_TIERS["hard"]
-                          if m in config.MODEL_FAMILY}
-        self.assertLessEqual(config.PR_REVIEWERS, len(review_capable),
-                             "not enough review-capable families to fill the reviewer pool")
+        # An implementer's PR can only be read by the OTHER review-capable
+        # families, so the effective count must fit in (families - 1). The
+        # operator's wish (PR_REVIEWERS_WANTED) may exceed it — the roster audit
+        # reports that — but the effective value must never promise a gate the
+        # fleet cannot staff.
+        self.assertLessEqual(config.PR_REVIEWERS, max(1, len(config.PR_REVIEW_FAMILIES) - 1))
+        self.assertGreaterEqual(config.PR_REVIEWERS, 1)
+        self.assertLessEqual(config.PR_REVIEWERS, config.PR_REVIEWERS_WANTED)
 
 
 class PRRoundsInvariants(unittest.TestCase):
@@ -366,17 +375,27 @@ class HarnessConcurrencyCeiling(unittest.TestCase):
     fleet logged as "opencode exited 1: " and retried four times per task.
     """
 
-    def test_opencode_is_capped_below_the_sum_of_its_models_caps(self):
-        served = [m for m in ("GLM-5.3", "DeepSeek-V4-Flash", "gpt-oss-120b")]
-        self.assertLess(config.harness_limit("opencode"),
+    def test_effective_opencode_concurrency_never_exceeds_the_measured_ceiling(self):
+        """Whichever cap binds — the harness's or the sum of its models' — the
+        number of opencode processes that can run at once must stay at or
+        under the measured ceiling of 5. Which one binds is roster-dependent:
+        with gpt-oss retired and the sessions-per-process divisor applied, the
+        model caps (2+2) now sit BELOW the harness cap, and asserting the
+        harness was 'below the sum' encoded yesterday's roster as a law."""
+        served = [m for m, h in config.MODEL_HARNESS.items() if h == "opencode"]
+        effective = min(config.harness_limit("opencode"),
                         sum(config.driver_limit(m) for m in served))
+        self.assertLessEqual(effective, 5)
+        self.assertGreater(effective, 0)
 
     def test_opencode_sits_at_the_measured_ceiling(self):
         self.assertEqual(config.harness_limit("opencode"), 5)
 
+    @needs_kimi
+
     def test_kimi_is_not_throttled_below_its_model_cap(self):
         self.assertGreaterEqual(config.harness_limit("kimi"),
-                                config.driver_limit("Kimi-K3"))
+                                config.driver_limit(STRONGEST))
 
     def test_an_unknown_harness_still_gets_a_finite_cap(self):
         self.assertGreater(config.harness_limit("nope"), 0)

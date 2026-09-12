@@ -25,7 +25,7 @@ def taskfile(tasks, repo="/tmp"):
 
 
 BASIC = {"id": "t1", "title": "T1", "prompt": "do it",
-         "model": "gpt-oss-120b", "reviewer": "kimi"}
+         "model": config.ESCALATION_PATH[0], "reviewer": "kimi"}
 
 
 def rejected(result):

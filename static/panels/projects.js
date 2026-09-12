@@ -355,7 +355,7 @@ function renderTopos() {
   // Counting "any edge into a node that can be a loop target" was wrong: it
   // called alloc->implement a loop because implement is where fix rounds land.
   const ORDER = ["alloc", "implement", "gate", "review", "escalate", "publish",
-                 "pr_review", "pr_merge", "fail"];
+                 "pr_fanout", "pr_reviewer", "pr_review", "pr_merge", "fail"];
   const pos = n => { const i = ORDER.indexOf(n); return i < 0 ? 99 : i; };
   const loops = tops.reduce((n, t) => n + (t.edges || [])
     .filter(e => e.src === e.dst || pos(e.dst) < pos(e.src)).length, 0);

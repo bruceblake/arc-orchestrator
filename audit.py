@@ -314,6 +314,75 @@ def audit_gates(store=None, tasks_dir=None, repo=None):
     return out
 
 
+DB_BACKUP_KEEP_DAYS = 14
+
+
+def audit_db_backup(db_path=None, snapshot=False, keep_days=DB_BACKUP_KEEP_DAYS):
+    """The database is the fleet's memory, and nothing copied it.
+
+    orchestrator.db holds every task's status, every lease, every error
+    fingerprint, every harness run. The event log rotates; the taskfiles are
+    snapshotted; the database just grew. One bad write on a full disk and the
+    fleet forgets which of eighty tasks merged.
+
+    The copy uses sqlite's online backup API, not a file copy: a file copy of a
+    WAL-mode database mid-write is corrupt, silently, and you find out when you
+    restore it. Each backup is then OPENED and integrity-checked before it is
+    counted, because a backup nobody has verified is a hope, not a backup.
+
+    Backups go to logs/db-backups/ (gitignored). Retained for `keep_days`.
+    """
+    import sqlite3
+    src = Path(db_path or config.DB_PATH)
+    dest_dir = Path(config.ROOT) / "logs" / "db-backups"
+    out = []
+    if not src.exists():
+        return [_finding("warning", "backup", "database not found", str(src), "")]
+    existing = sorted(dest_dir.glob("orchestrator-*.db")) if dest_dir.is_dir() else []
+    newest_age_h = None
+    if existing:
+        newest_age_h = (time.time() - existing[-1].stat().st_mtime) / 3600
+    if snapshot:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        dest = dest_dir / f"orchestrator-{stamp}.db"
+        try:
+            with sqlite3.connect(str(src)) as a, sqlite3.connect(str(dest)) as b:
+                a.backup(b)
+            with sqlite3.connect(str(dest)) as chk:
+                ok = chk.execute("PRAGMA integrity_check").fetchone()[0]
+                n_tasks = chk.execute("SELECT COUNT(*) FROM code_tasks").fetchone()[0]
+            if ok != "ok":
+                dest.unlink(missing_ok=True)
+                out.append(_finding("critical", "backup",
+                                    "database backup FAILED integrity check", ok,
+                                    "the live database may itself be corrupt — "
+                                    "run PRAGMA integrity_check on it now"))
+            else:
+                out.append(_finding("info", "backup",
+                                    f"database backed up ({dest.stat().st_size // 1024} KB, "
+                                    f"{n_tasks} task rows, integrity ok)",
+                                    str(dest), ""))
+                newest_age_h = 0.0
+        except sqlite3.Error as exc:
+            out.append(_finding("critical", "backup", "database backup failed",
+                                str(exc)[:200], "check disk space and permissions"))
+        # retention: keep the last N days, never fewer than 3 files
+        cutoff = time.time() - keep_days * 86400
+        keep = sorted(dest_dir.glob("orchestrator-*.db"))
+        for old in keep[:-3]:
+            if old.stat().st_mtime < cutoff:
+                old.unlink(missing_ok=True)
+    if newest_age_h is None:
+        out.append(_finding("warning", "backup", "the database has never been backed up",
+                            str(src), "run: main.py audit --snapshot"))
+    elif newest_age_h > 48:
+        out.append(_finding("warning", "backup",
+                            f"newest database backup is {newest_age_h:.0f}h old",
+                            "", "the daily audit is not running — check the scheduler"))
+    return out
+
+
 def audit_tasks_backup(tasks_dir=None, snapshot=False):
     """Taskfiles are the DESIGN of every project and nothing versions them.
 
@@ -495,6 +564,45 @@ def audit_invariants(store=None, repo=None):
     return out
 
 
+def audit_roster():
+    """Upcoming model transitions, and whether today's roster can staff the gate.
+
+    The roster is dated (config.ROSTER): models arrive and leave on the
+    provider's schedule. Two things an operator needs to hear before the day,
+    not after: WHAT changes in the next two weeks, and whether the fleet left
+    behind can still field PR_REVIEWERS cross-family reviewers for every
+    implementer. After Kimi-K3 leaves on 2026-09-19 it cannot — two families
+    means one cross-family reviewer each — and the merge gate quietly gets
+    thinner unless someone is told.
+    """
+    out = []
+    for c in config.roster_changes(horizon_days=14):
+        sev = "warning" if c["in_days"] <= 2 else "info"
+        out.append(_finding(
+            sev, "roster", f"{c['model']} {c['change']} on {c['on']} ({c['in_days']}d)",
+            "", "run the suite under ARC_ROSTER_DATE=%s before then" % c["on"]))
+    try:
+        import code_tasks
+        for m in config.ESCALATION_PATH:
+            fam = config.MODEL_FAMILY.get(m)
+            pool = code_tasks._eligible_pr_reviewers(fam, None)
+            if len(pool) < config.PR_REVIEWERS_WANTED:
+                out.append(_finding(
+                    "warning", "roster",
+                    f"{m}'s PRs get {len(pool)} cross-family reviewer(s), "
+                    f"config asks for {config.PR_REVIEWERS_WANTED}",
+                    f"eligible: {pool}",
+                    "the gate still needs unanimity among those who review; "
+                    "lower PR_REVIEWERS to match, or add a review-capable family"))
+    except Exception as exc:
+        out.append(_finding("info", "roster", "could not evaluate reviewer coverage",
+                            str(exc)[:120], ""))
+    if not config.REVIEW_FAMILIES:
+        out.append(_finding("critical", "roster", "NO review-capable model is live",
+                            "", "nothing can be reviewed; the pipeline cannot merge"))
+    return out
+
+
 def audit_logs():
     out = []
     p = Path(config.EVENTS_LOG)
@@ -547,7 +655,9 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
     findings += audit_gates(store)
     findings += audit_pr_collisions(store)
     findings += audit_invariants(store)
+    findings += audit_roster()
     findings += audit_tasks_backup(snapshot=snapshot)
+    findings += audit_db_backup(snapshot=snapshot)
     findings += audit_logs()
     if with_health:
         findings += audit_health()
