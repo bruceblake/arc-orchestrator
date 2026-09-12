@@ -28,6 +28,35 @@ builds software — and this repo itself — as a directed graph of small tasks:
   orchestrator (the only git actor) commit, push, and open a pull request against `config.BASE_BRANCH` (`main` by default) under a
   process-wide lock.
 
+### Two graphs
+
+Every project is two graphs, and they are owned by different parties:
+
+1. **The per-task pipeline — static, in code.** Every task runs
+   `alloc → implement → gate(verify_cmd) → cross-family review → publish →
+   PR → unanimous PR review → merge`, with the bounded fix loop (Rule 4)
+   and tier escalation (`config.ESCALATION_PATH`) as conditional edges. It
+   is built by `code_tasks.build_code_graph`, documented per node by
+   `pipeline_doc.py` (dashboard: "How a task moves through the pipeline"),
+   and **nobody chooses it per project** — not the planner, not a taskfile.
+2. **The graph between tasks — designed per project by the planner.** Which
+   tasks exist, which run in parallel (`deps: []`), which wait (`deps`), and
+   which whole projects wait on others (`project.after`, Rule 9). The
+   planner picks a shape for it from the catalogue in `graph_shapes.PATTERNS`
+   (single, chain, fanout, diamond, router, debate, hierarchical; the
+   evaluator and escalate loops are built into graph 1 and never chosen) by
+   the kind of work, records it as `project.pattern`, and writes `deps` that
+   form it. `graph_shapes.classify` derives the shape a taskfile's `deps`
+   actually form; `code_tasks.describe` (printed after `code plan` and on
+   every dry run) reports both and flags a **mismatch**. The dashboard serves
+   the same view at `GET /api/graph-shapes`.
+
+The planner prompt (`code_tasks.plan_tasks`) is generated from that
+catalogue plus today's roster and driver caps (`graph_shapes.planner_prose`)
+and lists the repo's existing projects with their merge state, so a plan
+that builds on unmerged work declares `after` instead of assuming code that
+is still on a branch. Prose reference: [docs/graph-patterns.md](docs/graph-patterns.md).
+
 The code workload is the primary occupant of this repo, but the same
 orchestrator core (`graph.py`, `pool.py`, `events.py`, `store.py`) also runs
 two other workloads: a 24/7 research-question round workload
@@ -513,6 +542,10 @@ upstream taskfile paths (bare filenames resolve under `~/tasks`). Never use
   requeue instead of blocking a slot; `main.py code status` reports per-file
   chain readiness under `chains`. Full semantics:
   [docs/taskfile-schema.md](docs/taskfile-schema.md) § "Project chaining".
+- The dashboard shows the chain in both directions (`_project_chain`,
+  dashboard.py): a chained project sits under "waiting on another project",
+  its DAG starts with a dashed ⛓ gate node per upstream taskfile (click =
+  that project), and a run holding at the gate is labelled so — never "live".
 
 ### Benchmarking exception — the bench `policy` escape hatch
 
@@ -596,6 +629,7 @@ Top-level Python modules (one role each):
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
 | `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
+| `graph_shapes.py` | The graph BETWEEN tasks (§1 "Two graphs"): the pattern catalogue as data (`PATTERNS`, with a drawable sketch each), `normalize_pattern` (label aliases → catalogue id, used by the loader), `classify` (the shape a taskfile's `deps` actually form: single/chain/fanout/fanin/diamond/hierarchical/mixed, width, depth, declared-vs-detected mismatch), `planner_prose` (the GRAPH DESIGN block of the planner prompt, from the catalogue and today's caps), `describe` (→ `GET /api/graph-shapes`: patterns, every taskfile classified, what the engine can and cannot express) |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local-only `git init` + one commit), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
@@ -617,7 +651,7 @@ Everything else at the top level:
 | `static/usage.html` | Dashboard usage/tokens view |
 | `static/phone.html` | Small-screen dashboard page (add `/phone.html` to the URL) |
 | `start.sh` / `stop.sh` | Start/stop the dashboard (`nohup .venv/bin/python main.py serve` → `logs/server.log`; `pkill -f "main\.py serve"` — never touches an orchestrator process) |
-| `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the pattern library the planner consults |
+| `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the prose behind `graph_shapes.PATTERNS` (the planner is handed the catalogue from code, not the doc) |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
 | `production/minecraft` | Build-workload output dir (`config.BUILD_OUTPUT_DIR`) |
 | `requirements.txt` | Python dependencies (openai, python-dotenv) — install into `.venv`; the system `python3` lacks them |

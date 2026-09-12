@@ -22,7 +22,7 @@ os.environ["ARC_CHAT_DIR"] = os.path.join(_TMP, "chat")
 os.environ["ARC_TASKS_DIR"] = os.path.join(_TMP, "tasks")
 
 from helpers import capture_events  # noqa: F401,E402  (env/DB redirect)
-from helpers import ENTRY, STRONGEST, STRONGEST_FAMILY  # noqa: E402,F401
+from helpers import ENTRY, ENTRY_REVIEWER, STRONGEST, STRONGEST_FAMILY  # noqa: E402,F401
 import config  # noqa: E402
 import orchchat  # noqa: E402
 from drivers import DriverResult  # noqa: E402
@@ -121,7 +121,7 @@ class TestOrchChat(unittest.TestCase):
 
     @staticmethod
     def _plan(title="Build A Widget", repo="/home/proxyie/r",
-              model=ENTRY, reviewer="glm", tid="make-widget"):
+              model=ENTRY, reviewer=ENTRY_REVIEWER, tid="make-widget"):
         return {
             "project": {"repo": repo, "title": title,
                         "tasks": [{"id": tid, "title": title,

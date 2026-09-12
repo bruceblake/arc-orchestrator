@@ -107,3 +107,4 @@ needs_three_families = _ut.skipUnless(len(config.REVIEW_FAMILIES) >= 2 and len(c
                                       "needs three implementer families on the roster")
 STRONGEST_FAMILY = config.MODEL_FAMILY[STRONGEST]      # for "same-family reviewer" fixtures
 STRONGEST_REVIEWER = config.cross_family_reviewer(STRONGEST)  # its correct cross-family reviewer
+ENTRY_REVIEWER = config.cross_family_reviewer(ENTRY)          # the entry tier's — "glm" only while ENTRY is not GLM

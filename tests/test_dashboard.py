@@ -817,25 +817,32 @@ class ProjectTaskModelPricing(unittest.TestCase):
         self.fail("t1 node not found")
 
     def test_each_models_tokens_are_priced_at_its_own_rate(self):
-        self._taskfile()
+        # The reviewer must be a DIFFERENT model than the implementer, or the
+        # two rates coincide and the test proves nothing — and which model
+        # that is depends on today's roster (the entry tier was GLM itself
+        # the day the provider dropped DeepSeek).
+        entry = config.ESCALATION_PATH[0]
+        rev_fam = config.cross_family_reviewer(entry)
+        reviewer = config.REVIEW_FAMILIES[rev_fam]
+        self._taskfile(reviewer=rev_fam)
         self._events(
             {"type": "driver.done", "task": "t1", "harness": "opencode",
-             "model": config.ESCALATION_PATH[0], "role": "implementer",
+             "model": entry, "role": "implementer",
              "tokens": 1000, "prompt_tokens": 800, "completion_tokens": 200,
              "seconds": 60},
             {"type": "driver.done", "task": "t1", "harness": "opencode",
-             "model": "GLM-5.3", "role": "reviewer",
+             "model": reviewer, "role": "reviewer",
              "tokens": 100, "prompt_tokens": 50, "completion_tokens": 50,
              "seconds": 30},
         )
         node = self._node()
-        entry = config.ESCALATION_PATH[0]  # my sed pointed the event here too
         expected = (config.cost_of(entry, 800, 200)
-                    + config.cost_of("GLM-5.3", 50, 50))
+                    + config.cost_of(reviewer, 50, 50))
         self.assertEqual(node["cost"], round(expected, 4))
         old = config.cost_of(entry, 850, 250)
-        self.assertNotEqual(node["cost"], round(old, 4),
-                            "GLM reviewer tokens must not be priced at the implementer's rate")
+        if config.cost_of(entry, 1, 1) != config.cost_of(reviewer, 1, 1):
+            self.assertNotEqual(node["cost"], round(old, 4),
+                                "reviewer tokens must not be priced at the implementer's rate")
 
     def test_kimi_wire_extra_is_priced_at_kimi_completion_rate(self):
         self._taskfile(model=STRONGEST, reviewer="glm")

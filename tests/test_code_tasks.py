@@ -106,17 +106,32 @@ class LoadTaskfile(unittest.TestCase):
         ts = code_tasks.load_taskfile(taskfile([BASIC], pattern="chain"))
         self.assertEqual(ts["pattern"], "chain")
 
+    def test_pattern_aliases_normalize_to_the_catalogue_id(self):
+        # Planners wrote "fan-out-fan-in" and "orchestrator-workers" for the
+        # same shape; the dashboard and describe() compare labels to detected
+        # shapes, so the label must be canonical. Unknown names pass through.
+        for raw, want in (("fan-out-fan-in", "fanout"), ("Orchestrator Workers", "fanout"),
+                          ("evaluator-optimizer", "evaluator"), ("debate-vote", "debate"),
+                          ("something-new", "something-new")):
+            with self.subTest(raw=raw):
+                ts = code_tasks.load_taskfile(taskfile([BASIC], pattern=raw))
+                self.assertEqual(ts["pattern"], want)
+
     def test_pattern_defaults_to_empty_when_absent(self):
         ts = code_tasks.load_taskfile(taskfile([BASIC]))
         self.assertEqual(ts["pattern"], "")
 
 
 class PlannerPatternLibrary(unittest.TestCase):
-    """The planner is told to pick a named pattern from the library doc."""
+    """The planner designs the graph BETWEEN tasks: it is handed the catalogue
+    (graph_shapes.PATTERNS), the decision table, today's fan-out caps, and
+    the other projects for the repo it may chain `after`."""
 
-    def test_schema_hint_carries_the_pattern_field(self):
+    def test_schema_hint_carries_the_pattern_and_after_fields(self):
         self.assertIn('"pattern"', code_tasks.PLAN_SCHEMA_HINT)
-        self.assertIn("graph-pattern library", code_tasks.PLAN_SCHEMA_HINT)
+        self.assertIn('"after"', code_tasks.PLAN_SCHEMA_HINT)
+        for pid in ("chain", "fanout", "diamond", "router"):
+            self.assertIn(pid, code_tasks.PLAN_SCHEMA_HINT)
 
     def test_planner_prompt_points_at_the_pattern_library(self):
         seen = {}
@@ -141,8 +156,39 @@ class PlannerPatternLibrary(unittest.TestCase):
         finally:
             code_tasks._driver = orig_driver
             code_tasks._plan_json_from_run = orig_extract
-        self.assertIn("docs/graph-patterns.md", seen["prompt"])
-        self.assertIn('"pattern"', seen["prompt"])
+        import graph_shapes
+        p = seen["prompt"]
+        # The catalogue itself is in the prompt — a planner working on another
+        # repo cannot read this repo's docs/graph-patterns.md.
+        for pat in graph_shapes.PATTERNS:
+            if pat["id"] not in ("evaluator", "escalate"):
+                self.assertIn(f"{pat['id']}: {pat['gist']}", p)
+        self.assertIn("Decision table", p)
+        self.assertIn("Joins are real", p)
+        self.assertIn('"after"', p)
+        # The per-task pipeline is stated as fixed, so the planner designs
+        # only the graph above it.
+        self.assertIn("fixed per-task pipeline", p)
+        self.assertIn('"pattern"', p)
+        # Fan-out arithmetic quotes today's slots, not a typed number.
+        for m in config.ESCALATION_PATH:
+            self.assertIn(f"{m} {config.driver_limit(m)}", p)
+
+    def test_planner_sees_existing_projects_for_the_repo_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            orig = config.TASKS_DIR
+            config.TASKS_DIR = d
+            try:
+                (Path(d) / "mine.json").write_text(json.dumps({"project": {
+                    "repo": "/tmp/repo-a", "title": "Mine", "tasks": [BASIC]}}))
+                (Path(d) / "other.json").write_text(json.dumps({"project": {
+                    "repo": "/tmp/repo-b", "title": "Other", "tasks": [BASIC]}}))
+                prose = code_tasks._existing_projects_prose("/tmp/repo-a")
+            finally:
+                config.TASKS_DIR = orig
+        self.assertIn("mine.json: Mine (1 tasks", prose)
+        self.assertNotIn("other.json", prose)
+        self.assertIn('"after"', prose)
 
 
 class ParseVerdict(unittest.TestCase):
@@ -1593,3 +1639,31 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
                 continue  # not retired yet on this roster date
             self.assertIn(dest, config.IMPLEMENTER_MODELS,
                           f"{name} remaps to {dest!r}, which is not live")
+
+
+class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
+    """A retired model's task lands on a live tier; if that tier's family is
+    the task's reviewer, the reviewer flips. On 2026-09-12 the provider
+    stopped serving DeepSeek: every old DeepSeek task with reviewer "glm"
+    remapped to GLM-5.3 and then failed as a self-review, and check.sh's
+    taskfile-validity step was red for the whole tasks directory."""
+
+    def test_remapped_task_flips_a_now_same_family_reviewer(self):
+        import config as cfg
+        retired = next((m for m in code_tasks.RETIRED_MODELS
+                        if m not in cfg.IMPLEMENTER_MODELS), None)
+        if retired is None:
+            self.skipTest("every model in RETIRED_MODELS is live today")
+        target = code_tasks.RETIRED_MODELS[retired]() or cfg.ESCALATION_PATH[0]
+        same = cfg.MODEL_FAMILY[target]
+        if same not in cfg.REVIEW_FAMILIES:
+            self.skipTest(f"{target}'s family cannot review, nothing to collide with")
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
+        t = ts["tasks"]["t1"]
+        self.assertEqual(t["model"], target)
+        self.assertNotEqual(cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"]), same)
+
+    def test_a_live_model_with_its_own_family_as_reviewer_is_still_rejected(self):
+        same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
+        with self.assertRaises(ValueError):
+            code_tasks.load_taskfile(taskfile([same]))

@@ -304,3 +304,16 @@ class HttpReadEndpoints(unittest.TestCase):
         self._seed_project()
         status, body = self._get("/api/projects")
         self.assertIsNone(body["projects"][0]["chain"])
+
+    # ---- /api/graph-shapes ----------------------------------------------
+    def test_graph_shapes_serves_catalogue_projects_and_engine(self):
+        self._seed_project()
+        status, body = self._get("/api/graph-shapes")
+        self.assertEqual(status, 200)
+        for key in ("patterns", "projects", "engine", "decisions", "caps"):
+            self.assertIn(key, body)
+        self.assertEqual(body["projects"][0]["file"], "proj.json")
+        self.assertEqual(body["projects"][0]["detected"]["shape"], "fanout")
+        ids = [p["id"] for p in body["patterns"]]
+        for want in ("chain", "fanout", "diamond", "router"):
+            self.assertIn(want, ids)

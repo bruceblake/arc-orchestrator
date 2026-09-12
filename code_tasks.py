@@ -30,8 +30,11 @@ log = logging.getLogger("code-tasks")
 # call time, not at import (the roster is dated).
 RETIRED_MODELS = {
     "gpt-oss-120b":      lambda: config.ESCALATION_PATH[0],                 # no basic tier
+    # ...or, the day the provider serves no DeepSeek at all (09-12, 12:22),
+    # the entry tier — never None: a retired name must always land somewhere.
     "DeepSeek-V4-Flash": lambda: next((m for m in config.ESCALATION_PATH
-                                       if m.startswith("DeepSeek")), None),
+                                       if m.startswith("DeepSeek")),
+                                      config.ESCALATION_PATH[0]),
     "Kimi-K3":           lambda: config.ESCALATION_PATH[-1],                # strongest live
 }
 
@@ -61,6 +64,7 @@ def load_taskfile(path, policy=None):
         if tid in tasks:
             raise ValueError(f"duplicate task id: {tid}")
         model = t.get("model", "")
+        planned_model = model
         if model not in models and model in RETIRED_MODELS and not pol.get("implementers"):
             # A model that LEFT the roster — gpt-oss retired 09-11, DeepSeek-V4
             # replaced 09-12, Kimi-K3 withdrawn 09-19. The decomposition is still
@@ -88,6 +92,16 @@ def load_taskfile(path, policy=None):
             raise ValueError(f"task {tid}: reviewer must be one of {reviewers}, got {reviewer!r}")
         impl_family = config.MODEL_FAMILY[model]
         rev_family = config.MODEL_FAMILY.get(reviewer, reviewer)
+        if (review_on and not allow_self and impl_family == rev_family
+                and model != planned_model):
+            # The remap above moved a retired model's task onto a family that
+            # happens to be its own reviewer (DeepSeek → GLM with reviewer
+            # "glm", the morning the provider stopped serving DeepSeek). The
+            # plan was cross-family when written; keep it cross-family now by
+            # flipping the reviewer, not by failing every old taskfile.
+            flipped = config.cross_family_reviewer(model)
+            if flipped is not None:
+                reviewer, rev_family = flipped, config.MODEL_FAMILY.get(flipped, flipped)
         if review_on and not allow_self and impl_family == rev_family:
             raise ValueError(
                 f"task {tid}: reviewer {reviewer!r} must not be the harness that "
@@ -127,8 +141,19 @@ def load_taskfile(path, policy=None):
             raise ValueError(f"project.after lists this taskfile itself: {a!r}")
         if k not in after:
             after.append(k)
+    # The planner's label for the graph between tasks. Normalized to the
+    # catalogue id (fan-out-fan-in, orchestrator-workers -> fanout); an
+    # unknown name is kept as written and logged, never rejected — the deps
+    # are the graph, the label is what the planner MEANT, and describe()
+    # says whether the two agree.
+    import graph_shapes
+    raw_pattern = data.get("project", {}).get("pattern", "") or ""
+    pattern = graph_shapes.normalize_pattern(raw_pattern) or raw_pattern
+    if raw_pattern and pattern == raw_pattern and raw_pattern not in graph_shapes.PATTERN_IDS:
+        log.warning("%s: pattern %r is not in the catalogue (%s)",
+                    Path(path).name, raw_pattern, ", ".join(graph_shapes.PATTERN_IDS))
     return {"repo": repo, "tasks": tasks, "title": data.get("project", {}).get("title", ""),
-"pattern": data.get("project", {}).get("pattern", ""),
+            "pattern": pattern,
             "policy": pol, "after": after}
 
 
@@ -151,10 +176,21 @@ def _topo(tasks):
 
 
 def describe(taskset):
+    import graph_shapes
     lines = [f"repo: {taskset['repo']}"]
     if taskset.get("after"):
         lines.append("after: " + ", ".join(
             Path(k).name for k in taskset["after"]))
+    # The graph between tasks, as declared and as the deps actually form it.
+    # A plan that says "diamond" and wires a chain has a bug worth one line
+    # here — the planner reads this after `code plan`, the operator on a
+    # dry run.
+    shape = graph_shapes.classify({"tasks": list(taskset["tasks"].values()),
+                                   "pattern": taskset.get("pattern") or ""})
+    decl = taskset.get("pattern") or "(none declared)"
+    note = " — MISMATCH: the deps do not form the declared pattern" if shape["mismatch"] else ""
+    lines.append(f"graph: {shape['shape']} (declared {decl}; width {shape['width']}, "
+                 f"depth {shape['depth']}) — {shape['reason']}{note}")
     for tid in _topo(taskset["tasks"]):
         t = taskset["tasks"][tid]
         impl_fam = config.MODEL_FAMILY[t["model"]]
@@ -1545,7 +1581,8 @@ def plan_schema_hint():
     reviewers = " | ".join(f'"{f}"' for f in config.REVIEW_FAMILIES)
     return (
         '{"project": {"repo": "<abs path>", "title": "<short>",\n'
-        ' "pattern": "<name from the graph-pattern library, e.g. fan-out-fan-in>",\n'
+        ' "pattern": "<catalogue id: single|chain|fanout|diamond|router|debate|hierarchical>",\n'
+        ' "after": ["<taskfile name this whole plan must wait for; omit when none>"],\n'
         ' "tasks": [{"id": "<kebab-id>", "title": "...", "prompt": "<detailed spec>",\n'
         f'            "model": {models},\n'
         f'            "reviewer": {reviewers},\n'
@@ -1673,7 +1710,40 @@ def _plan_json_from_run(res):
     return _extract_plan_json(res.text or "")
 
 
-async def plan_tasks(goal, repo, out_path=None):
+def _existing_projects_prose(repo, store=None):
+    """Other taskfiles for this repo, with their state, so the planner can
+    chain a new plan `after` one that has not merged yet instead of writing
+    tasks that assume code which is still on a branch."""
+    repo_key = str(Path(repo).resolve())
+    d = Path(config.TASKS_DIR)
+    rows = []
+    files = sorted(d.glob("*.json"), key=lambda f: f.stat().st_mtime) if d.is_dir() else []
+    for f in files[-12:]:  # the dozen most recent — the ones a new plan may build on
+        try:
+            proj = json.loads(f.read_text(encoding="utf-8")).get("project") or {}
+        except Exception:
+            continue
+        if str(Path(str(proj.get("repo") or "")).resolve()) != repo_key:
+            continue
+        ids = [t.get("id") for t in proj.get("tasks") or [] if isinstance(t, dict)]
+        state = "state unknown"
+        if store is not None:
+            try:
+                st = {r["id"]: r["status"] for r in store.code_tasks_for(str(f.resolve()))}
+                merged = sum(1 for i in ids if st.get(i) == "merged")
+                state = ("merged" if ids and merged == len(ids) else
+                         "not started" if not st else f"{merged}/{len(ids)} merged")
+            except Exception:
+                pass
+        rows.append(f"    {f.name}: {proj.get('title') or f.stem} ({len(ids)} tasks, {state})")
+    if not rows:
+        return ""
+    return ('EXISTING PROJECTS FOR THIS REPO (name one in "after" if this plan '
+            "builds on it and it is not merged yet):\n" + "\n".join(rows) + "\n\n")
+
+
+async def plan_tasks(goal, repo, out_path=None, store=None):
+    import graph_shapes
     prompt = (
         "You are the ORCHESTRATOR of a multi-model coding fleet. Your output "
         "is the execution graph itself: the runner below you executes exactly "
@@ -1682,21 +1752,10 @@ async def plan_tasks(goal, repo, out_path=None):
         "the model routing (who implements), the reviewer, and the verify "
         "gate for every task. Design it well; there is no later triage.\n\n"
         f"GOAL: {goal}\nTARGET REPO: {repo}\n\n"
-        + _routing_tiers_prose() +
-        "GRAPH DESIGN (maximize safe parallelism):\n"
-        "- First choose ONE graph pattern for the plan from the pattern "
-        "library in docs/graph-patterns.md of the orchestrator repo: chain, "
-        "fan-out-fan-in, diamond, router, orchestrator-workers, "
-        "evaluator-optimizer, debate-vote, hierarchical. Record your choice "
-        "as \"pattern\": \"<name>\" in the project object (a label only — "
-        "the deps are still the whole graph).\n"
-        "- 2-8 tasks. Fan out: every task that does NOT consume another "
-        "task's output gets no deps and starts immediately at t=0.\n"
-        "- Add a dep ONLY when a task truly reads code another task writes "
-        "(e.g. uses a new API). Never chain tasks for stylistic order — "
-        "chains serialize and waste the fleet.\n"
-        "- Keep files_hint disjoint across independent tasks so parallel "
-        "implementers never edit the same file (merge conflicts fail tasks).\n"
+        + _routing_tiers_prose()
+        + graph_shapes.planner_prose()
+        + _existing_projects_prose(repo, store) +
+        "TASK DESIGN:\n"
         "- Each task prompt must be fully self-contained: the implementer "
         "sees ONLY its prompt and the repo, never this goal. Include file "
         "paths, function names, acceptance criteria.\n"
