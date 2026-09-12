@@ -311,6 +311,19 @@ def cmd_code(args):
         # configured". Roughly eight minutes of model time to discover a fact
         # `git remote` answers instantly.
         gh = await gitstore.github_status(taskset["repo"])
+        if not gh.get("ready") and gh.get("reason") == "no git remote configured":
+            # The missing remote is the one refusal gh can cure on its own —
+            # same machine, same auth, one `gh repo create`. Only if that too
+            # fails is the run really stuck, and the refusal then says what
+            # ensure_remote said instead of the bare git fact.
+            ok, url_or_reason = await gitstore.ensure_remote(taskset["repo"])
+            if ok:
+                events.emit("repo.remote_created", taskfile=tf, url=url_or_reason)
+                log.info("created GitHub remote for %s: %s",
+                         taskset["repo"], url_or_reason)
+                gh = await gitstore.github_status(taskset["repo"])
+            else:
+                gh = {"ready": False, "reason": url_or_reason}
         if not gh.get("ready"):
             log.error(
                 "%s cannot complete a task: %s.\n"

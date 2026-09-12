@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import capture_events  # noqa: F401  (sys.path)
 
@@ -607,6 +608,37 @@ class DriftConflictsArePreventable(unittest.TestCase):
         self.assertTrue(before)
         asyncio.run(gitstore.sync_with_base(wt, "main"))
         self.assertEqual(asyncio.run(gitstore.head(wt)), before)
+
+
+class EnsureRemote(unittest.TestCase):
+    """Remote creation is gh-backed but never raises: a missing remote is the
+    one refusal gh can cure on its own (the 09-12 minecraft-test run lost
+    eight minutes of model work to it), so it must fail softly everywhere."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.repo = Path(self._dir.name) / "proj"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+
+    def test_gh_absent_reports_a_reason_without_raising(self):
+        # No gh on PATH: a plain reason, not an exception — the dashboard
+        # shows it as a note and `code run` quotes it in its refusal.
+        with mock.patch("shutil.which", return_value=None):
+            ok, why = asyncio.run(gitstore.ensure_remote(self.repo))
+        self.assertFalse(ok)
+        self.assertIn("gh", why)
+
+    def test_existing_origin_is_returned_untouched(self):
+        # An origin that is already there wins before gh is ever consulted:
+        # patching gh away proves it was never needed.
+        git(self.repo, "remote", "add", "origin",
+            "https://github.com/owner/proj.git")
+        with mock.patch("shutil.which", return_value=None):
+            ok, url = asyncio.run(gitstore.ensure_remote(self.repo))
+        self.assertTrue(ok)
+        self.assertEqual(url, "https://github.com/owner/proj.git")
 
 
 if __name__ == "__main__":

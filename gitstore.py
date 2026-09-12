@@ -296,6 +296,41 @@ async def _gh(args, cwd, timeout=90):
         return 127, "", str(exc)
 
 
+async def ensure_remote(repo, name=None, private=True):
+    """Make sure `origin` exists, creating the GitHub repo with gh if needed.
+
+    Returns (ok, url_or_reason) and NEVER raises — callers surface the reason
+    as a note or a refusal line, not a stack trace. The 09-12 minecraft-test
+    run threw away eight minutes of model work because publish found no
+    remote on a machine where `gh auth status` was green the whole time: the
+    dead end was pure bookkeeping. If gh created the GitHub repo but its
+    trailing `--push` failed, the remote still exists — report success and
+    let the run's own push retry.
+    """
+    import shutil
+    repo = Path(repo).resolve()
+    rc, out, _ = await _git(["remote", "get-url", "origin"], cwd=repo, check=False)
+    if rc == 0 and out.strip():
+        return True, out.strip()
+    if not shutil.which("gh"):
+        return False, "gh CLI not installed"
+    rc, _, _ = await _gh(["auth", "status"], cwd=repo)
+    if rc != 0:
+        return False, "gh not authenticated"
+    name = name or repo.name
+    visibility = "--private" if private else "--public"
+    rc, out, err = await _gh(
+        ["repo", "create", name, visibility,
+         f"--source={repo}", "--remote=origin", "--push"],
+        cwd=repo, timeout=90)
+    # gh exits non-zero when its --push fails even though the GitHub repo and
+    # the origin remote were created — which is all a run needs to push itself.
+    rc2, url, _ = await _git(["remote", "get-url", "origin"], cwd=repo, check=False)
+    if rc2 == 0 and url.strip():
+        return True, url.strip()
+    return False, (err.strip() or out.strip() or f"gh repo create exited {rc}")[:200]
+
+
 async def ensure_base_branch(repo, base=None, prod=None):
     """Make sure the integration branch exists locally and on origin."""
     repo = Path(repo).resolve()

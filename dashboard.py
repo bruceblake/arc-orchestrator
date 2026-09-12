@@ -2217,12 +2217,43 @@ def _git_quick(path, *args):
     return r.stdout if r.returncode == 0 else None
 
 
+def _taskfiles_on(path):
+    """How many taskfiles in TASKS_DIR target this checkout. The repo picker
+    needs it to say how much governed work lives on each repo; a taskfile
+    that will not parse simply does not count."""
+    try:
+        files = list(Path(config.TASKS_DIR).glob("*.json"))
+    except OSError:
+        return 0
+    n = 0
+    for f in files:
+        try:
+            repo = json.loads(f.read_text(encoding="utf-8"))["project"]["repo"]
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        if Path(repo).resolve() == Path(path).resolve():
+            n += 1
+    return n
+
+
 def _repo_entry(name, path):
     branch = _git_quick(path, "rev-parse", "--abbrev-ref", "HEAD")
     remotes = _git_quick(path, "remote")
+    url = _git_quick(path, "remote", "get-url", "origin")
+    head = _git_quick(path, "log", "-1", "--format=%ct %s")
+    last_commit = last_subject = None
+    if head:
+        ts, _, subject = head.strip().partition(" ")
+        if ts.isdigit():
+            last_commit = int(ts)
+            last_subject = subject.strip()[:80] or None
     return {"name": name, "path": str(path),
             "branch": (branch or "").strip(),
-            "remote": bool((remotes or "").strip())}
+            "remote": bool((remotes or "").strip()),
+            "remote_url": url.strip() if url else None,
+            "last_commit": last_commit,
+            "last_subject": last_subject,
+            "projects": _taskfiles_on(path)}
 
 
 def _list_repos():
@@ -2240,16 +2271,35 @@ def _list_repos():
     return repos
 
 
+# Module-level hook so tests patch remote creation and never hit GitHub.
+# The 09-12 minecraft-test run threw away eight minutes of model work because
+# publish found no remote the dashboard could have created at repo birth.
+_ensure_remote = lambda path, name=None, private=True: asyncio.run(
+    gitstore.ensure_remote(path, name, private))
+
+
+def _short_remote(url):
+    """github.com/owner/name — the note shows the short form, not the URL."""
+    return re.sub(r"^(https?://|git@)", "", url).removesuffix(".git")
+
+
 def _create_repo(body):
     if not isinstance(body, dict):
         return {"error": "JSON body required"}, 400
     name = body.get("name")
     if not isinstance(name, str) or not _REPO_NAME_RE.fullmatch(name):
         return {"error": "bad repo name (expected ^[a-z0-9][a-z0-9-]{0,40}$)"}, 400
+    private = body.get("private", True)
+    if not isinstance(private, bool):
+        return {"error": "private must be a boolean"}, 400
+    want_remote = body.get("remote", True)
+    if not isinstance(want_remote, bool):
+        return {"error": "remote must be a boolean"}, 400
     path = _repos_dir() / name
     if path.exists():
         return {"error": f"{path} already exists", "exists": True}, 409
-    # Local only: git init + one initial commit. No GitHub remote, no push.
+    # Local first: git init + one initial commit. The GitHub remote comes
+    # after, best-effort — a machine without gh still gets its local repo.
     try:
         path.mkdir(parents=True)
         (path / "README.md").write_text(f"# {name}\n", encoding="utf-8")
@@ -2266,7 +2316,44 @@ def _create_repo(body):
         import shutil
         shutil.rmtree(path, ignore_errors=True)  # a failed repo retries by name
         return {"error": f"git setup failed: {exc}"}, 500
-    return {"name": name, "path": str(path)}, 200
+    remote_url, remote_note = None, None
+    if want_remote:
+        try:
+            ok, url_or_reason = _ensure_remote(path, name, private)
+        except Exception as exc:  # a broken gh must not bury the local repo
+            ok, url_or_reason = False, f"ensure_remote failed: {exc}"[:200]
+        if ok:
+            remote_url = url_or_reason
+            remote_note = f"created {_short_remote(url_or_reason)}"
+        else:
+            # NOT a 500: the local repo stays, and `code run` retries the
+            # remote itself before ever refusing (main.py).
+            remote_note = f"{url_or_reason} — local only"
+    return {"name": name, "path": str(path),
+            "remote_url": remote_url, "remote_note": remote_note}, 200
+
+
+def _repo_remote(body):
+    """POST /api/repos/remote — create the GitHub remote for an EXISTING
+    checkout. Same allowlist rule as /api/chat/start (Rule 6b): the repo must
+    be one of the /api/repos entries, never an arbitrary path."""
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    allowed = {r["path"] for r in _list_repos()}
+    repo = body.get("repo")
+    if not isinstance(repo, str) or repo not in allowed:
+        return {"error": "repo is not one of the /api/repos entries"}, 400
+    private = body.get("private", True)
+    if not isinstance(private, bool):
+        return {"error": "private must be a boolean"}, 400
+    try:
+        ok, url_or_reason = _ensure_remote(repo, Path(repo).name, private)
+    except Exception as exc:
+        return {"error": f"ensure_remote failed: {exc}"[:400]}, 500
+    if ok:
+        return {"remote_url": url_or_reason,
+                "note": f"created {_short_remote(url_or_reason)}"}, 200
+    return {"remote_url": None, "note": url_or_reason}, 200
 
 
 def _chat_key(session):
@@ -3177,6 +3264,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/repos/create":
                 obj, code = _create_repo(body)
+                return self._json(obj, code)
+            if u.path == "/api/repos/remote":
+                obj, code = _repo_remote(body)
                 return self._json(obj, code)
             if u.path == "/api/chat/start":
                 obj, code = _chat_start(body)

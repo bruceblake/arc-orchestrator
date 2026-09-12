@@ -373,11 +373,16 @@ processes and move git refs on the same terms.
   no reverse proxy to the public internet.
 - Do NOT add a route that widens this — nothing that takes a path, a command,
   or a git ref from the request body without an allowlist.
-- `/api/repos/create` and `/api/chat/*` (and the read-only `/api/repos`)
-  already live inside that discipline: `/api/chat/start` accepts a `repo`
-  only byte-identical to an entry of `GET /api/repos` and spawns one fixed
-  argv (`main.py chat ...`), and `/api/repos/create` makes local-only git
-  checkouts under `~/repos` — no remotes, no pushes.
+- `/api/repos/create`, `/api/repos/remote` and `/api/chat/*` (and the
+  read-only `/api/repos`) already live inside that discipline: `/api/chat/start`
+  accepts a `repo` only byte-identical to an entry of `GET /api/repos` and
+  spawns one fixed argv (`main.py chat ...`); `/api/repos/create` makes a
+  local git checkout under `~/repos` (git init + one commit) and then
+  best-effort asks `gh repo create` for a remote — a machine without gh
+  keeps its local repo, with the reason as a note; `/api/repos/remote` does
+  the same for an existing checkout and accepts a `repo` only
+  byte-identical to a `/api/repos` entry. The only body values that reach
+  `gh` are the repo name and a private flag — the argv stays fixed.
 - If the trust assumption ever stops holding, the two mechanisms already
   designed for it are: bind the loopback address instead of `0.0.0.0` (which
   would need a new bind-address setting in `main.py serve`), and require a
@@ -596,7 +601,7 @@ Top-level Python modules (one role each):
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
 | `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the Kimi-K3 planner prompt (`plan_tasks`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
-| `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local-only `git init` + one commit), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
+| `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local `git init` + one commit, then best-effort gh remote creation), `POST /api/repos/remote` (gh remote for an existing allowlisted checkout), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
 | `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
