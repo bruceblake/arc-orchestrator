@@ -231,6 +231,27 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .donerow .who { min-width: 190px; color: var(--text); }
 .donerow.bad .who { color: var(--err); }
 .agentrow.has-t:hover { background: #1c2128; }
+/* ---- summary tier: one glance, then progressive disclosure ---- */
+#summary-line { font-size: 12px; margin: 2px 0 8px; }
+.grid.summary { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+                display: grid; gap: 8px; margin-bottom: 4px; }
+.sumfig { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+          background: #0d1117; cursor: pointer; display: flex; flex-direction: column; gap: 2px; }
+.sumfig:hover, .sumfig:focus-visible { border-color: var(--accent); }
+.sumfig b { font-size: 16px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.sumfig .k { color: var(--dim); font-size: 10px; text-transform: uppercase; letter-spacing: .4px; }
+.sumfig .d { color: var(--dim); font-size: 11px; }
+.sumfig .d .rev { color: var(--purple); }
+.sumfig.run b { color: var(--accent); }
+.sumfig.warn b { color: var(--warn); }
+.sumfig.err b { color: var(--err); }
+.sumfig.ok b { color: var(--ok); }
+.sumfig.dim b { color: var(--dim); }
+.panel.foldable > h2 { cursor: pointer; }
+.panel.foldable > h2::before { content: "▸"; color: var(--dim); font-size: 10px;
+                               transition: transform .12s ease; }
+.panel.foldable:not(.folded) > h2::before { transform: rotate(90deg); color: var(--accent); }
+.panel.folded > :not(h2) { display: none !important; }
 .prow.kb-sel { border-color: var(--accent); box-shadow: inset 0 0 0 2px var(--accent); }
 .kb-help { position: fixed; top: 50%; left: 50%; transform: translate(-50%,-50%); z-index: 100; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; box-shadow: 0 8px 32px rgba(0,0,0,.5); max-width: 440px; }
 .kb-help h3 { margin: 0 0 10px; font-size: 13px; color: var(--accent); }
@@ -273,6 +294,11 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   <div class="panel err" id="vpn-banner" style="display:none" role="alert"></div>
   <div class="panel err" id="stale-banner" style="display:none"></div>
   <div id="view-list">
+    <div class="panel" id="summary-panel">
+      <h2>Summary <span class="hint">is everything OK?</span></h2>
+      <div class="hint" id="summary-line">waiting for fleet data…</div>
+      <div class="grid summary" id="summary"></div>
+    </div>
     <div class="panel" id="health-panel">
       <h2>Fleet <span class="hint" id="health-meta"></span>
         <span style="flex:1"></span>
@@ -318,7 +344,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       </h2>
       <div id="gh-prs"></div>
     </div>
-    <div class="panel">
+    <div class="panel" id="projects-panel">
       <h2>Projects <span class="hint" id="proj-meta"></span>
         <span style="flex:1"></span>
         <span id="phase-filter"></span>
@@ -443,6 +469,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/detail.js"></script>
 <script src="/panels/chat.js"></script>
 <script src="/panels/transcript.js"></script>
+<script src="/panels/summary.js"></script>
 <script src="/panels/keyboard.js"></script>
 <script>
 // ---- boot: staggered polls so nothing fires all at once ----
