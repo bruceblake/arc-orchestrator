@@ -1,0 +1,51 @@
+# The repo's own gate, run where a pull request can see it.
+#
+# check.sh is what every fleet task that edits this repo runs inside its
+# worktree before review, and what an operator runs by hand. Until now that
+# was the ONLY place it ran: a pull request carried no status, so a merge
+# that skipped the gate (a human merging from the GitHub UI, a resync that
+# rewrote the branch after its review) landed unchecked. This runs the same
+# script on every push to main and every pull request, so the answer to "did
+# this pass check.sh?" is on the PR itself.
+#
+# What is different in CI, and why it still works:
+#   * there is no .venv — check.sh takes the interpreter from $PY;
+#   * ~/tasks does not exist — the taskfile steps skip an absent directory;
+#   * no dashboard is listening — the live render check skips itself;
+#   * node IS installed, so the JavaScript checks run rather than skip.
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v7
+        with:
+          # Matches the interpreter the fleet runs on (3.14). Older minors
+          # are not tested here on purpose: one truth, not a matrix.
+          python-version: "3.14"
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+
+      - name: Install the project dependencies
+        run: python -m pip install --quiet -r requirements.txt
+
+      - name: Run the repo gate
+        run: PY="$(command -v python)" ./check.sh

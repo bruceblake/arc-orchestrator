@@ -116,6 +116,12 @@ def family_limit(name):
 # for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
 TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
+# The only directory tree the dashboard will accept a project repo from
+# (/api/projects/create and every taskfile it runs). A network client can
+# name any path in a POST body; this is the fence. It was the operator's
+# literal home directory, which made the dashboard — and its tests — refuse
+# every path on any other machine.
+REPO_ROOT = os.getenv("ARC_REPO_ROOT") or str(Path.home())
 # Outer backstop only. DRIVER_IDLE_TIMEOUT below is the instrument that
 # actually detects a hung harness, and it is the precise one: it measures
 # silence. This wall clock exists for the pathological case where a harness

@@ -1168,9 +1168,21 @@ def _task_slug(text):
 
 
 def _valid_repo(p):
-    if not isinstance(p, str) or not p.startswith("/home/proxyie/"):
+    """The repo path if it is an existing directory under config.REPO_ROOT.
+
+    Resolved before the prefix check, so `<root>/../elsewhere` cannot walk
+    out of the fence, and compared as a path, not a string prefix, so
+    `<root>-evil` is not mistaken for something under `<root>`.
+    """
+    if not isinstance(p, str) or not p or not os.path.isabs(p):
         return None
-    path = Path(p)
+    root = Path(config.REPO_ROOT).resolve()
+    try:
+        path = Path(p).resolve()
+    except OSError:
+        return None
+    if path == root or not path.is_relative_to(root):
+        return None
     return path if path.is_dir() else None
 
 
@@ -2004,7 +2016,7 @@ def _create_project(body):
         return {"error": "JSON body required"}, 400
     repo = _valid_repo(body.get("repo"))
     if repo is None:
-        return {"error": "repo must be an existing absolute path under /home/proxyie"}, 400
+        return {"error": f"repo must be an existing absolute path under {config.REPO_ROOT}"}, 400
     problem = _repo_problem(repo)
     if problem:
         return {"error": problem}, 400

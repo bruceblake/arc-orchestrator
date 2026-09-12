@@ -282,6 +282,7 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_MAX_INTEGRATION_ROUNDS` | 3 | wiring_fix ⇄ integration_review cycles |
 | `ARC_REVIEW_PASS_SCORE` | 6.5 | cross-model review score required to ship |
 | `ARC_DASHBOARD_PORT` | 8787 | dashboard port |
+| `ARC_REPO_ROOT` | `~` | the only directory tree the dashboard accepts a project repo from (`/api/projects/create`, and every task file it runs) |
 | `ARC_DRIVER_LEASE_WAIT` | 1800 | max seconds a task waits for a driver lease before failing on capacity |
 | `ARC_DRIVER_CAPACITY_BACKOFF_CAP` | 300 | max capacity-backoff sleep on a harness retry (seconds) |
 | `ARC_BASE_URL` | https://llm-api.arc.vt.edu/api/v1 | ARC API base URL |
