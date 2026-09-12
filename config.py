@@ -123,11 +123,11 @@ def family_limit(name):
     return FAMILIES[name].limit
 
 # --- multi-harness code workload -------------------------------------------
-# Implementation is tiered by task difficulty (see ROSTER below): GLM-5.3
-# takes the medium and mechanical tasks (no lower tier), and Kimi-K3 /
-# DeepSeek-V4.1-Flash-thinking-max take the hard ones on top of their
-# planning and reviewing duties. Review comes from a family other than the
-# implementer's own.
+# Implementation is tiered by task difficulty (see ROSTER below):
+# DeepSeek-V4.1-Flash-thinking-max takes the medium and mechanical tasks and
+# reviews (the fast workhorse), GLM-5.3 takes the hard tier on top of its
+# planning and reviewing duties (the fleet's strongest model). Review comes
+# from a family other than the implementer's own.
 # ARC rejects over-limit requests per model, so driver caps reserve headroom
 # for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
@@ -285,11 +285,12 @@ CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
 
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
-# governed code pipeline: no worktree, no gate, no publish. Only Kimi-K3 and
-# GLM-5.3 may hold the gh roles (driver validation enforces it), every command
-# previews by default, and --apply-labels/--create/--post are the only writes.
+# governed code pipeline: no worktree, no gate, no publish. A model trusted
+# to plan on today's roster may hold the gh roles (GLM-5.3 only today — the
+# only roster model with planner permission; driver validation enforces it), and
+# every command previews by default — --apply-labels/--create/--post are the only writes.
 # Default None: gh_ops falls back to PLANNER_MODEL, which follows the roster
-# (Kimi-K3 until 09-19, GLM-5.3 after). A hardcoded default here would name a
+# (GLM-5.3 since 2026-09-12). A hardcoded default here would name a
 # withdrawn model the morning after it left.
 GH_MODEL = os.getenv("ARC_GH_MODEL") or None
 GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "60"))
@@ -340,24 +341,26 @@ import datetime as _dt
 # family has no cross-review at all.
 ALL_ROLES = ("implementer", "reviewer", "pr_reviewer", "planner")
 ROSTER = [
+    # Kimi-K3: RETIRED EARLY by operator decision 2026-09-12. The provider had
+    # scheduled its withdrawal for 2026-09-19 and still serves it today, so a
+    # date-ended row would NOT retire it — live_roster keeps a date-retired
+    # model alive while the API still serves it ("an incumbent stays until its
+    # replacement is real"). An early-out must be a deletion. RIP.
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
-    ("GLM-5.3",             "glm",      "opencode", "medium", 4,
+    # Operator decision (2026-09-12): GLM-5.3 is the fleet's strongest model —
+    # hard tier, the planner, the last escalation stage.
+    ("GLM-5.3",             "glm",      "opencode", "hard",   4,
      ALL_ROLES,                                            None,         None),
-    ("Kimi-K3",             "kimi",     "kimi",     "hard",   3,
-     ALL_ROLES,                                            None,         "2026-09-19"),
     # Operator decision (2026-09-12): DeepSeek-V4.1-Flash-thinking-max is the
-    # fleet's strongest model — hard tier, last escalation stage, planner.
-    # The fleet runs the thinking-MAX variant, not the base model; the 10 is
-    # provider-published concurrency (docs), not a ramped measurement like the
-    # V4 figure above.
-    # 5, not 10: the concurrency here is CARRIED OVER from DeepSeek-V4-Flash,
-    # which was measured at 5 on this backend. 4.1 has never run — zero events —
-    # so any number above that is a guess, and guessing high is how the fleet
-    # generates its own 400s and blames the provider. Raise it when
-    # `main.py code bench` has actually ramped it.
-    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "opencode", "hard", 5,
-     ALL_ROLES,                                            "2026-09-12", None),
+    # medium-tier workhorse — it implements and reviews/PR-reviews, never
+    # plans. It is far faster than GLM-5.3, so it carries the implementation
+    # load. The 10 is the provider-published per-account concurrency on the
+    # refreshed ARC docs page (docs.arc.vt.edu, 2026-09-12), per the operator —
+    # not the carried-over measured 5; the driver semaphore stays the derived
+    # 10 // 2 = 5 while opencode holds ~2 API sessions per process.
+    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "opencode", "medium", 10,
+     ("implementer", "reviewer", "pr_reviewer"),           "2026-09-12", None),
 ]
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
 
@@ -509,9 +512,9 @@ def cross_family_reviewer(impl_model):
     """The family token that reviews `impl_model`'s work, or None.
 
     Cross-review means a DIFFERENT family. Deterministic: the STRONGEST
-    review-capable family that is not the implementer's. Before 09-19 that
-    pairs kimi<->glm as it always did — DeepSeek 4.1 arriving on 09-12 does not
-    demote GLM's reviewer a week early; after 09-19, glm<->deepseek.
+    review-capable family that is not the implementer's. With the 2026-09-12
+    two-model fleet that pairs glm<->deepseek in both directions: GLM-5.3
+    (the fleet's strongest) reviews DeepSeek work, DeepSeek reviews GLM work.
     """
     fam = MODEL_FAMILY.get(impl_model)
     for f in REVIEW_FAMILIES:
