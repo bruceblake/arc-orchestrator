@@ -119,6 +119,25 @@ a { color: var(--accent); text-decoration: none; }
   border: 1px dashed var(--border); border-radius: 12px; padding: 14px 8px;
 }
 
+/* Plan chat: transcript bubbles and the live-mic state. */
+.plan-tx {
+  display: flex; flex-direction: column; gap: 8px;
+  max-height: 220px; overflow-y: auto; overflow-wrap: anywhere;
+  background: var(--panel); border: 1px solid var(--border);
+  border-radius: 12px; padding: 8px; margin: 0 0 8px;
+}
+.plan-turn {
+  max-width: 86%; padding: 7px 10px; border-radius: 12px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 11.5px; line-height: 1.4;
+}
+.plan-turn small { display: block; color: var(--dim); font-size: 9.5px; margin-bottom: 2px; }
+.plan-turn.user { align-self: flex-end; background: var(--accent); color: #fff; }
+.plan-turn.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
+.plan-turn.err { border: 1px solid var(--err); color: var(--err); background: var(--panel); }
+@keyframes micpulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
+.mic-live { animation: micpulse 1s ease-in-out infinite; background: var(--accent); color: #0d1117; }
+
 /* Keyboard users must be able to see focus. */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
@@ -153,6 +172,19 @@ a { color: var(--accent); text-decoration: none; }
   <div class="stack" id="fleet"></div>
 </section>
 
+<section id="view-plan" class="view" aria-label="Plan">
+  <h1>Plan</h1>
+  <p class="sub" id="plan-sub">Select a repo to start planning</p>
+  <select class="fsel" id="plan-repo" aria-label="Repository"></select>
+  <div id="plan-transcript" class="empty">no chat yet</div>
+  <div class="kv" style="margin-top:8px;">
+    <input type="text" id="plan-input" placeholder="Ask Kimi‑K3" style="flex:1;" aria-label="Chat message" />
+    <button class="act" id="plan-send">Send</button>
+    <button class="act" id="plan-mic" style="display:none;">🎤</button>
+  </div>
+  <div id="plan-taskcard"></div>
+</section>
+
 </main>
 
 <nav class="bnav" aria-label="Primary">
@@ -160,6 +192,7 @@ a { color: var(--accent); text-decoration: none; }
   <button type="button" id="nav-projects" class="tap"><span class="ic" aria-hidden="true">▦</span>Projects</button>
   <button type="button" id="nav-prs" class="tap"><span class="ic" aria-hidden="true">⇄</span>PRs</button>
   <button type="button" id="nav-fleet" class="tap"><span class="ic" aria-hidden="true">☰</span>Fleet</button>
+  <button type="button" id="nav-plan" class="tap"><span class="ic" aria-hidden="true">✎</span>Plan</button>
 </nav>
 
 <script src="/common.js"></script>
@@ -190,7 +223,7 @@ var S = {
   open: { now: "", projects: "", prs: "", fleet: "" }
 };
 
-var VIEWIDS = ["now", "projects", "prs", "fleet"];
+var VIEWIDS = ["now", "projects", "prs", "fleet", "plan"];
 
 function $(s) {
   return document.getElementById(s.startsWith("#") ? s.slice(1) : s);
@@ -403,6 +436,7 @@ function projectCard(p) {
       kv("reviewers", esc((p.reviewers || []).join(", "))) +
       kv("tokens", fmtK(p.tokens)) +
       kv("harness time", tick(p.seconds)) +
+      (p.file ? '<button class="act" data-run-file="' + esc(p.file) + '">▶ run</button>' : '') +
       (p.errors && p.errors.length ? kv("errors", esc(p.errors.map(function(e) {
         return e && typeof e === "object" ? (e.error || e.id || e.status || "?") : String(e);
       }).join(" · "))) : "") +
@@ -541,6 +575,7 @@ function renderProjects() {
   var box = $("#projects");
   if (box) box.innerHTML = ps.length ? ps.map(projectCard).join("") : '<div class="empty">no projects yet</div>';
   wire("#projects", "projects");
+  wireRun("#projects");
 }
 
 function renderPRs() {
@@ -615,11 +650,19 @@ function showView(v) {
     sec.className = "view" + on;
     btn.className = "tap" + on;
   }
+  if (v === "plan") {
+    loadPlanRepos();
+  }
 }
 
 async function j(url) {
   var res = await fetch(url);
   return res.json();
+}
+
+async function jpost(u, body) {
+  const r = await fetch(u, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  return {code: r.status, body: await r.json()};
 }
 
 async function poll() {
@@ -668,8 +711,253 @@ function init() {
   $("#nav-projects").onclick = function () { showView("projects"); };
   $("#nav-prs").onclick = function () { showView("prs"); };
   $("#nav-fleet").onclick = function () { showView("fleet"); };
+  $("#nav-plan").onclick = function () { showView("plan"); };
   startTimers();
   poll();
+  // Initialize plan view
+  // Defer loading repos to avoid premature fetch in test environments
+  $("#plan-send").onclick = sendPlanMessage;
+  $("#plan-input").onkeydown = function(e){ if(e.key==='Enter'){ e.preventDefault(); sendPlanMessage(); } };
+    // Speech recognition setup
+    const mic = $("#plan-mic");
+    if (window.SpeechRecognition || window.webkitSpeechRecognition) {
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      mic.style.display = "inline-block";
+      const rec = new SR();
+      rec.continuous = true;
+      rec.interimResults = true;
+      rec.lang = "en-US";
+      let listening = false;
+      mic.onclick = function(){
+        if (listening) { rec.stop(); }
+        else { rec.start(); }
+      };
+      rec.onresult = handleSpeechResult;
+      rec.onstart = function(){ listening = true; setMicLive(true); };
+      rec.onend = function(){ listening = false; setMicLive(false); };
+      rec.onerror = function(){ listening = false; setMicLive(false); };
+    } else {
+      mic.style.display = "none";
+    }
+}
+
+function handleSpeechResult(event){
+  var input = $("#plan-input");
+  if (!input) return;
+  var interim = "";
+  var final = "";
+  for (var i = event.resultIndex; i < event.results.length; ++i) {
+    var res = event.results[i];
+    var transcript = res[0].transcript;
+    if (res.isFinal) final += transcript;
+    else interim += transcript;
+  }
+  if (final) {
+    var v = input.value || "";
+    input.value = v ? v.replace(/\s+$/, "") + " " + final : final;
+  }
+  input.placeholder = interim ? "Ask Kimi‑K3 · " + interim : "Ask Kimi‑K3";
+}
+
+function setMicLive(live){
+  var mic = $("#plan-mic");
+  if (!mic) return;
+  if (live){
+    mic.classList.add("mic-live");
+    mic.textContent = "🔴";
+  } else {
+    mic.classList.remove("mic-live");
+    mic.textContent = "🎤";
+    var input = $("#plan-input");
+    if (input) input.placeholder = "Ask Kimi‑K3";
+  }
+}
+
+function loadPlanRepos(selectPath) {
+  j("/api/repos").then(function (data) {
+    const sel = $("#plan-repo");
+    if (!sel) return;
+    const repos = (data && data.repos) || [];
+    const opts = repos.map(function (r) {
+      return '<option value="' + esc(r.path) + '">' + esc(r.name) + "</option>";
+    }).join("") + '<option value="__new__">new repo…</option>';
+    sel.innerHTML = opts;
+    let target = selectPath || planRepoPath;
+    sel.value = target;
+    if (!sel.value || sel.value === "__new__") {
+      sel.value = repos.length ? repos[0].path : "__new__";
+    }
+    planRepoPath = sel.value;
+    sel.onchange = onPlanRepoChange;
+    loadPlanHistory();
+  }).catch(function () {});
+}
+
+function onPlanRepoChange() {
+  const sel = $("#plan-repo");
+  if (!sel) return;
+  if (sel.value === "__new__") {
+    const name = prompt("Repo kebab name:");
+    if (!name) { loadPlanRepos(); return; }
+    jpost("/api/repos/create", { name: name }).then(res => {
+      if (res.code === 200) loadPlanRepos(res.body.path); else alert("Repo exists");
+    });
+    return;
+  }
+  planRepoPath = sel.value;
+  stopPlanPoll();
+  loadPlanHistory();
+}
+
+let planSession = null;
+let planTurns = [];
+let planPollTimer = null;
+let planRepoPath = "";
+
+function kebabSlug(s) {
+  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+function getPlanSession() {
+  const repoPath = $("#plan-repo").value;
+  if (!repoPath || repoPath === "__new__") return null;
+  let slug = kebabSlug(repoPath.split("/").filter(Boolean).pop());
+  if (!slug) return null;
+  if (slug.length > 35) slug = slug.slice(0, 35).replace(/-+$/, "");
+  return "plan-" + slug;
+}
+
+function setPlanBusy(busy) {
+  const send = $("#plan-send");
+  if (send) send.disabled = busy;
+  const sub = $("#plan-sub");
+  if (sub) sub.textContent = busy ? "Kimi‑K3 is thinking…" : "";
+}
+
+function startPlanPoll() {
+  if (planPollTimer === null) planPollTimer = setInterval(pollPlan, 3000);
+}
+
+function stopPlanPoll() {
+  if (planPollTimer !== null) {
+    clearInterval(planPollTimer);
+    planPollTimer = null;
+  }
+}
+
+function sendPlanMessage() {
+  const input = $("#plan-input");
+  const msg = input ? input.value.trim() : "";
+  if (!msg) return;
+  const repoEl = $("#plan-repo");
+  const repo = repoEl ? repoEl.value : "";
+  if (!repo || repo === "__new__") { alert("Select repo"); return; }
+  planSession = getPlanSession();
+  planTurns = [];
+  if (input) input.value = "";
+  setPlanBusy(true);
+  jpost("/api/chat/start", { session: planSession, repo: repo, message: msg }).then(res => {
+    if (res && res.code === 200) {
+      startPlanPoll();
+      pollPlan();
+    } else {
+      setPlanBusy(false);
+      alert("Error starting chat");
+    }
+  }).catch(function () {
+    setPlanBusy(false);
+    alert("Error starting chat");
+  });
+}
+
+async function pollPlan() {
+  if (!planSession) planSession = getPlanSession();
+  if (!planSession) { setPlanBusy(false); stopPlanPoll(); return; }
+  const data = await j("/api/chat/poll?session=" + encodeURIComponent(planSession) + "&since=" + planTurns.length).catch(() => null);
+  if (!data) return;
+  const turns = data.turns || [];
+  if (turns.length) planTurns = planTurns.concat(turns);
+  renderPlanTranscript();
+  renderPlanTaskcard();
+  if (data.running) {
+    setPlanBusy(true);
+    startPlanPoll();
+  } else {
+    setPlanBusy(false);
+    stopPlanPoll();
+  }
+}
+
+function renderPlanTranscript() {
+  const box = $("#plan-transcript");
+  if (!box) return;
+  if (!planTurns.length) {
+    box.className = "empty";
+    box.innerHTML = "no chat yet";
+    return;
+  }
+  box.className = "plan-tx";
+  box.innerHTML = planTurns.map(function (t) {
+    const cls = t.error ? "err" : (t.role === "assistant" ? "assistant" : "user");
+    let time = "";
+    if (t.ts) { try { time = new Date(t.ts * 1000).toLocaleTimeString(); } catch (e) {} }
+    return '<div class="plan-turn ' + cls + '">' +
+      (time ? "<small>" + esc(time) + "</small>" : "") +
+      "<div>" + esc(t.text || "") + "</div></div>";
+  }).join("");
+}
+
+function renderPlanTaskcard() {
+  const card = $("#plan-taskcard");
+  if (!card) return;
+  let latest = null;
+  for (let i = planTurns.length - 1; i >= 0; i--) {
+    if (planTurns[i].role === "assistant" && planTurns[i].taskfile) { latest = planTurns[i]; break; }
+  }
+  if (!latest) { card.innerHTML = ""; return; }
+  const file = latest.taskfile;
+  card.innerHTML = '<div class="card"><div class="card-body" style="display:grid;">' +
+    '<div>plan ready: ' + esc(file) + "</div>" +
+    '<button class="act" data-run-file="' + esc(file) + '">▶ run</button>' +
+    "</div></div>";
+  wireRun("#plan-taskcard");
+}
+
+function loadPlanHistory() {
+  planSession = getPlanSession();
+  if (!planSession) return;
+  planTurns = [];
+  j("/api/chat/poll?session=" + encodeURIComponent(planSession) + "&since=0").then(function (data) {
+    planTurns = (data && data.turns) || [];
+    renderPlanTranscript();
+    renderPlanTaskcard();
+    if (data && data.running) {
+      setPlanBusy(true);
+      startPlanPoll();
+    } else {
+      setPlanBusy(false);
+      stopPlanPoll();
+    }
+  }).catch(function () {});
+}
+
+function wireRun(sel) {
+  const list = document.querySelectorAll(sel + " [data-run-file]");
+  for (let i = 0; i < list.length; i++) {
+    let btn = list[i];
+    btn.onclick = function () {
+      runProject(btn.getAttribute("data-run-file"));
+    };
+  }
+}
+
+function runProject(file) {
+  if (confirm("Running this will spend model tokens and mutate branches. Continue?")) {
+    jpost("/api/projects/run", { file: file }).then(r => {
+      if (r && r.code === 200) alert(JSON.stringify(r.body));
+      else alert("Project run failed");
+    }).catch(function () { alert("Project run failed"); });
+  }
 }
 
 init();
