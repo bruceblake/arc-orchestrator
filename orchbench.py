@@ -11,7 +11,6 @@ disjoint files, full fanout) is stamped as a fresh git repo per variant, the
 real graph engine runs the DAG under the variant's policy, and results are
 aggregated from the governed evidence tables (code_tasks, harness_runs).
 """
-import asyncio
 import json
 import logging
 import shutil
@@ -22,7 +21,6 @@ from pathlib import Path
 import code_tasks
 import config
 import events
-import gitstore
 
 log = logging.getLogger("orchbench")
 

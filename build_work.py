@@ -12,7 +12,6 @@ exactly once per build; the bounded cycle only loops integration_review/wiring_f
 import logging
 import re
 import subprocess
-from pathlib import Path
 
 import config
 import events
