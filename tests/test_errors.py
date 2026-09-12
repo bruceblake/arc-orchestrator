@@ -868,3 +868,154 @@ class InvariantsCheckedAgainstReality(unittest.TestCase):
         finally:
             audit._sh, reconcile.live_runs = orig_sh, orig_live
         self.assertFalse(any("no PR is open" in x["what"] for x in f))
+
+
+class TheDatabaseIsBackedUp(unittest.TestCase):
+    """The database is the fleet's memory and nothing copied it.
+
+    The copy must use sqlite's online backup API — a file copy of a WAL-mode
+    database mid-write is silently corrupt — and must be OPENED and
+    integrity-checked before it counts. A backup nobody verified is a hope.
+    """
+
+    def setUp(self):
+        import shutil, sqlite3
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.db = os.path.join(self.dir, "orch.db")
+        con = sqlite3.connect(self.db)
+        con.execute("PRAGMA journal_mode=WAL")
+        con.execute("CREATE TABLE code_tasks(id TEXT, status TEXT)")
+        con.executemany("INSERT INTO code_tasks VALUES(?,?)",
+                        [("a", "merged"), ("b", "failed"), ("c", "merged")])
+        con.commit(); con.close()
+        self._root = config.ROOT
+        config.ROOT = self.dir
+        self.addCleanup(setattr, config, "ROOT", self._root)
+
+    def _backups(self):
+        import pathlib
+        return sorted(pathlib.Path(self.dir, "logs", "db-backups").glob("*.db"))
+
+    def test_a_snapshot_writes_a_verified_copy(self):
+        import audit
+        f = audit.audit_db_backup(db_path=self.db, snapshot=True)
+        self.assertTrue(any("integrity ok" in x["what"] for x in f), f)
+        self.assertEqual(len(self._backups()), 1)
+
+    def test_the_copy_restores_the_same_rows(self):
+        import audit, sqlite3
+        audit.audit_db_backup(db_path=self.db, snapshot=True)
+        rows = sqlite3.connect(str(self._backups()[0])).execute(
+            "SELECT id, status FROM code_tasks ORDER BY id").fetchall()
+        self.assertEqual(rows, [("a", "merged"), ("b", "failed"), ("c", "merged")])
+
+    def test_never_backed_up_is_a_warning_not_silence(self):
+        import audit
+        f = audit.audit_db_backup(db_path=self.db, snapshot=False)
+        self.assertTrue(any("never been backed up" in x["what"] for x in f))
+
+    def test_a_stale_backup_is_flagged(self):
+        import audit, os as _os, time as _time
+        audit.audit_db_backup(db_path=self.db, snapshot=True)
+        old = _time.time() - 72 * 3600
+        for b in self._backups():
+            _os.utime(b, (old, old))
+        f = audit.audit_db_backup(db_path=self.db, snapshot=False)
+        self.assertTrue(any("old" in x["what"] for x in f))
+
+    def test_retention_keeps_recent_and_never_fewer_than_three(self):
+        import audit, os as _os, time as _time
+        for _ in range(5):
+            audit.audit_db_backup(db_path=self.db, snapshot=True, keep_days=1)
+            _time.sleep(1.05)  # distinct timestamps in the filename
+        # age everything past retention
+        for b in self._backups():
+            _os.utime(b, (_time.time() - 5 * 86400,) * 2)
+        audit.audit_db_backup(db_path=self.db, snapshot=True, keep_days=1)
+        self.assertGreaterEqual(len(self._backups()), 3)
+
+    def test_a_missing_database_is_reported_not_crashed(self):
+        import audit
+        f = audit.audit_db_backup(db_path=os.path.join(self.dir, "nope.db"), snapshot=True)
+        self.assertTrue(any("not found" in x["what"] for x in f))
+
+
+class TheDailyAuditSchedulesItself(unittest.TestCase):
+    """WSL has no cron and sleeps when idle; the dashboard runs the audit.
+
+    The semantics that matter are the ones that survive restarts: the last run
+    time is persisted, so restarting the dashboard ten times does not run ten
+    audits, and a dashboard that was down when the audit was due runs it on the
+    next start rather than waiting another day.
+    """
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._root = config.ROOT
+        config.ROOT = self.dir
+        self.addCleanup(setattr, config, "ROOT", self._root)
+
+    def test_never_run_means_due(self):
+        import scheduler_audit as sa
+        self.assertTrue(sa.due())
+
+    def test_a_run_persists_its_time_and_is_then_not_due(self):
+        import scheduler_audit as sa, audit
+        orig = audit.run
+        audit.run = lambda *a, **k: {"ts": 1000.0, "counts": {"critical": 0, "warning": 0, "info": 0},
+                                     "findings": [], "since_s": 1}
+        try:
+            sa.run_once(None, snapshot=False)
+        finally:
+            audit.run = orig
+        self.assertEqual(sa.last_run(), 1000.0)
+        self.assertFalse(sa.due(now=1000.0 + 3600))
+        self.assertTrue(sa.due(now=1000.0 + sa.INTERVAL_S + 1))
+
+    def test_the_report_is_written_and_served_as_latest(self):
+        import scheduler_audit as sa, audit
+        orig = audit.run
+        audit.run = lambda *a, **k: {"ts": 5.0, "counts": {"critical": 1, "warning": 0, "info": 0},
+                                     "findings": [{"severity": "critical", "area": "x",
+                                                   "what": "boom", "detail": "", "action": ""}],
+                                     "since_s": 1}
+        try:
+            sa.run_once(None, snapshot=False)
+        finally:
+            audit.run = orig
+        rep = sa.latest()
+        self.assertEqual(rep["counts"]["critical"], 1)
+        self.assertEqual(rep["findings"][0]["what"], "boom")
+
+    def test_a_failing_audit_does_not_kill_the_scheduler_thread(self):
+        import scheduler_audit as sa, audit, time as _time
+        orig = audit.run
+        calls = []
+        def boom(*a, **k):
+            calls.append(1); raise RuntimeError("audit exploded")
+        audit.run = boom
+        try:
+            t = sa.start(None, interval=0, check_every=0.05)
+            _time.sleep(0.3)
+        finally:
+            audit.run = orig
+        self.assertGreater(len(calls), 1, "the thread must keep ticking after a failure")
+        self.assertTrue(t.is_alive())
+
+    def test_old_reports_are_pruned(self):
+        import scheduler_audit as sa, audit, pathlib
+        orig = audit.run
+        audit.run = lambda *a, **k: {"ts": 1.0, "counts": {"critical": 0, "warning": 0, "info": 0},
+                                     "findings": [], "since_s": 1}
+        try:
+            d = pathlib.Path(self.dir, "logs", "audit"); d.mkdir(parents=True)
+            for i in range(sa.KEEP_REPORTS + 5):
+                (d / f"2026010{i % 10}-00000{i}.json").write_text("{}")
+            sa.run_once(None, snapshot=False)
+        finally:
+            audit.run = orig
+        self.assertLessEqual(len(list(pathlib.Path(self.dir, "logs", "audit").glob("2*.json"))),
+                             sa.KEEP_REPORTS)

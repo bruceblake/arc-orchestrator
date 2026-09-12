@@ -242,11 +242,23 @@ const DET = { file: "ui.json", title: "game UI polish", repo: "acme/arc-orchestr
   runs: [{task_id: "t-tests", model: "GLM-5.3", role: "implementer", harness: "opencode",
           attempt: 2, exit_code: 0, seconds: 12, verdict: "", transcript: "logs/harness/t-tests-x2.jsonl"}],
   task_progress: {}, git: {branch: "task/t-tests", dirty: [], worktrees: []} };
-const GRAPHS = { round: { name: "research round", starts: ["q1", "q2"],
-    nodes: [{name: "q1"}, {name: "q2"}, {name: "synth", gather: true}, {name: "verify"}],
-    edges: [{src: "q1", dst: "synth"}, {src: "q2", dst: "synth"}, {src: "synth", dst: "verify", conditional: true}] },
-  build: { name: "build graph", starts: ["plan"],
-    nodes: [{name: "plan"}, {name: "assemble", gather: true}], edges: [{src: "plan", dst: "assemble"}] } };
+// One diagram now: the code-tasks pipeline, with its loops. Shaped like the
+// real /api/graphs payload, including the back-edges the renderer must draw
+// as amber loops — a fix round back to implement, and pr_review's self-retry.
+const GRAPHS = { code: { name: "code-tasks pipeline", starts: ["alloc"],
+    nodes: [{name: "alloc"}, {name: "implement"}, {name: "gate"}, {name: "review"},
+            {name: "publish"}, {name: "pr_fanout"}, {name: "pr_reviewer"},
+            {name: "pr_review"}, {name: "pr_merge"}, {name: "fail"}],
+    edges: [{src: "alloc", dst: "implement"}, {src: "implement", dst: "gate"},
+            {src: "gate", dst: "review", conditional: true},
+            {src: "gate", dst: "implement", conditional: true},
+            {src: "review", dst: "publish", conditional: true},
+            {src: "publish", dst: "pr_fanout", conditional: true},
+            {src: "pr_fanout", dst: "pr_reviewer"}, {src: "pr_reviewer", dst: "pr_review"},
+            {src: "pr_review", dst: "pr_merge", conditional: true},
+            {src: "pr_review", dst: "implement", conditional: true},
+            {src: "pr_review", dst: "pr_fanout", conditional: true},
+            {src: "pr_review", dst: "fail", conditional: true}] } };
 
 // Route the page's pollers at the fixtures; unknown URLs get {} like the
 // old stub, so guarded pollers (health, fleet) stay on their empty path.
@@ -293,9 +305,11 @@ ok("detail closes", document.querySelector("#view-detail").style.display === "no
 
 await api.pollTopos();
 const tp = document.querySelector("#topo").innerHTML;
-ok("topology section", tp.includes("topohead") && tp.includes("research round") && tp.includes("build graph"));
-ok("topology meta", document.querySelector("#topo-meta").textContent === "2 workload graphs · dashed = conditional edge");
-ok("topology counts", tp.includes("4 nodes · 3 edges") && tp.includes("2 nodes · 1 edges"));
+ok("topology section shows the real pipeline", tp.includes("topohead") && tp.includes("code-tasks pipeline"));
+ok("topology no longer shows the stale workloads", !tp.includes("research round") && !tp.includes("build graph"));
+// 3 loops in the fixture: gate->implement, pr_review->implement, pr_review->pr_review
+ok("topology meta counts the loops", document.querySelector("#topo-meta").textContent.includes("3 of them"));
+ok("topology counts", tp.includes("10 nodes · 12 edges"));
 ok("conditional edge dashed", tp.includes('stroke-dasharray="4 3"'));
 ok("topo node class", tp.includes('class="node topo"'));
 const tsvg = api.taskDag({starts: ["a"], nodes: [{id: "a"}, {id: "b", gather: true}],

@@ -5,7 +5,8 @@ import time
 import unittest
 from pathlib import Path
 
-from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import capture_events
+import config  # noqa: E402  # noqa: F401  (sys.path)
 
 from store import Store
 
@@ -70,7 +71,7 @@ class DriverLeases(TempStore):
 
 
 class CodeTaskLifecycle(TempStore):
-    def add(self, tid, taskfile, status="running", model="gpt-oss-120b"):
+    def add(self, tid, taskfile, status="running", model=config.ESCALATION_PATH[0]):
         self.store.upsert_code_task(taskfile, tid, tid, model, "kimi", status)
 
     def test_running_rows_are_listed_and_scoped(self):
@@ -108,7 +109,7 @@ class CodeTaskLifecycle(TempStore):
     def test_escalation_updates_the_recorded_model(self):
         """The escalate node re-upserts at a stronger tier; if that is dropped,
         the next resume restarts the task at the tier it already outgrew."""
-        self.add("a", "f1.json", model="gpt-oss-120b")
+        self.add("a", "f1.json", model=config.ESCALATION_PATH[0])
         self.store.upsert_code_task("f1.json", "a", "a", "GLM-5.3", "kimi", "running")
         row = self.store.code_tasks_for("f1.json")[0]
         self.assertEqual(row["model"], "GLM-5.3")

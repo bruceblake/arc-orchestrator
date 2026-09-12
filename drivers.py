@@ -868,12 +868,19 @@ class KimiDriver(Driver):
     model = "Kimi-K3"
 
     def __init__(self, role, bench=False):
-        if not bench and role not in ("planner", "reviewer", "pr_reviewer",
-                                      "implementer", "issue-triager",
-                                      "issue-maker", "pr-reviewer"):
-            raise ValueError("KimiDriver role must be planner|reviewer|"
-                             "pr_reviewer|implementer|issue-triager|"
-                             f"issue-maker|pr-reviewer, got {role!r}")
+        _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
+        if not bench:
+            # Kimi-K3 is withdrawn on 2026-09-19. After that this driver has
+            # no model to drive; constructing it must fail loudly rather than
+            # send a request to a model that no longer exists.
+            if self.model not in config.MODEL_ROLES:
+                raise ValueError("Kimi-K3 is not on today's roster — it was "
+                                 "withdrawn; route this role to config.PLANNER_MODEL "
+                                 "or another live model")
+            need = "planner" if role in _GH_OPS else role
+            if not config.model_may(self.model, need):
+                raise ValueError(f"KimiDriver may hold "
+                                 f"{sorted(config.MODEL_ROLES[self.model])}, not {role!r}")
         self.role = role
 
     def argv(self, prompt, session_id):
@@ -891,25 +898,21 @@ class OpencodeDriver(Driver):
 
     def __init__(self, model, role, bench=False):
         if not bench:
-            # DeepSeek may also review an OPEN PR. Judging a bounded diff
-            # against a spec is a materially smaller job than authoring the
-            # change, and with only three cross-family-eligible models a
-            # two-reviewer merge gate is otherwise unreachable whenever the
-            # implementer is Kimi or GLM — which is most tasks. gpt-oss-120b
-            # stays implement-only.
-            if model == "gpt-oss-120b" and role != "implementer":
-                raise ValueError(f"{model} may only implement, not {role!r}")
-            if model == "DeepSeek-V4-Flash" and role not in ("implementer", "pr_reviewer"):
+            # Role permissions come from the roster (config.ROSTER), not from a
+            # per-model if-chain here. The chain named models that leave on
+            # dates the provider chooses, and forgot one every time the roster
+            # changed. gh-ops roles are harness capabilities, not model tiers.
+            _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
+            if model not in config.MODEL_ROLES:
+                raise ValueError(f"{model!r} is not on today's roster "
+                                 f"({sorted(config.MODEL_ROLES)})")
+            # gh-ops (triage issues, draft issues, review PRs from the CLI) is
+            # judgement work: it needs a model the roster trusts to PLAN.
+            need = "planner" if role in _GH_OPS else role
+            if not config.model_may(model, need):
                 raise ValueError(
-                    f"{model} may only implement or review a PR, not {role!r}")
-            if model == "GLM-5.3" and role not in ("planner", "reviewer",
-                                                   "pr_reviewer", "implementer",
-                                                   "issue-triager", "issue-maker",
-                                                   "pr-reviewer"):
-                raise ValueError(
-                    f"GLM-5.3 may only plan/review/implement/gh-ops, not {role!r}")
-            if model not in config.IMPLEMENTER_MODELS:
-                raise ValueError(f"unmapped opencode model: {model!r}")
+                    f"{model} may hold {sorted(config.MODEL_ROLES[model])}, "
+                    f"not {role!r}")
         self.model = model
         self.role = role
 

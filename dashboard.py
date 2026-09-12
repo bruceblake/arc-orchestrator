@@ -36,7 +36,8 @@ _lines_cache = {"key": None, "lines": []}
 MAX_EVENTS_PER_RESPONSE = 3000
 
 PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
-          "DeepSeek-V4-Flash": "DeepSeek V4 Flash"}
+          "DeepSeek-V4-Flash": "DeepSeek V4 Flash",
+          "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash"}
 
 # Rolling windows plus one calendar window. "today" is deliberately not a
 # synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
@@ -974,8 +975,8 @@ def _pid_alive(pid):
 
 
 def _harness_of(model):
-    """Which local harness runs this model. Mirrors code_tasks._driver."""
-    return "kimi" if model == "Kimi-K3" else "opencode"
+    """Which local harness runs this model, from the roster."""
+    return config.MODEL_HARNESS.get(model, "opencode")
 
 
 def _first_event_at_or_after(lines, ts):
@@ -1735,8 +1736,13 @@ def _agents(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
     _prune_registry()
-    runs = [{"taskfile": k, **v} for k, v in _launch_registry.items()]
-    return {"now": now, "agents": inflight, "runs": runs,
+    # chat entries are not harness runs; keep them out of `runs` (the
+    # dashboard counts that list as "harness runs today")
+    runs = [{"taskfile": k, **v} for k, v in _launch_registry.items()
+            if v.get("kind") != "chat"]
+    chats = [{"session": k, **v} for k, v in _launch_registry.items()
+             if v.get("kind") == "chat"]
+    return {"now": now, "agents": inflight, "runs": runs, "chats": chats,
             "recent": _recent_agent_runs(store)}
 
 
@@ -2044,9 +2050,17 @@ def _create_project(body):
         for opt in ("model", "reviewer", "verify_cmd", "base"):
             if isinstance(t.get(opt), str) and t[opt].strip():
                 entry[opt] = t[opt].strip()
-        entry.setdefault("model", "DeepSeek-V4-Flash")
+        # The entry tier of TODAY'S roster, never a literal: this default
+        # would have written DeepSeek-V4-Flash into new taskfiles the morning
+        # after it was withdrawn, and every one of them would then fail
+        # validation with "must be an implementer".
+        entry.setdefault("model", config.ESCALATION_PATH[0])
         if "reviewer" not in entry:
-            entry["reviewer"] = {"Kimi-K3": "glm", "GLM-5.3": "kimi"}.get(entry["model"], "kimi")
+            # Cross-family, from the roster — the literal {Kimi: glm, GLM: kimi}
+            # map this replaces would have defaulted every task to "kimi" the
+            # day after Kimi left.
+            entry["reviewer"] = (config.cross_family_reviewer(entry["model"])
+                                 or next(iter(config.REVIEW_FAMILIES), "glm"))
         deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
         if isinstance(deps_in, list):
             deps = [d for d in deps_in if isinstance(d, str)]
@@ -2116,6 +2130,143 @@ def _run_project(body):
     _launch_registry[key] = {"pid": proc.pid, "log": log_name, "started": time.time(),
                              "dry_run": dry_run, "kind": "run"}
     return {"pid": proc.pid, "log": log_name, "dry_run": dry_run}, 200
+
+
+# --- Orchestrator chat + repo listing -------------------------------------
+# Rule 6b: the dashboard is unauthenticated, so these routes are deliberately
+# narrow — /api/chat/start accepts a repo ONLY as a byte-identical member of
+# the /api/repos allowlist and spawns one fixed argv; the message text goes
+# into the session jsonl and the model prompt, never into a shell string.
+
+_SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")       # orchchat.SESSION_RE
+_REPO_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+
+
+def _chat_dir():
+    """$ARC_CHAT_DIR, default logs/chat — resolved at call time, same rule
+    as orchchat.chat_dir, so both processes always see the same sessions."""
+    return Path(os.getenv("ARC_CHAT_DIR") or Path.cwd() / "logs" / "chat")
+
+
+def _repos_dir():
+    """$ARC_REPOS_DIR, default ~/repos — the root GET /api/repos scans."""
+    return Path(os.getenv("ARC_REPOS_DIR") or str(Path.home() / "repos")).expanduser()
+
+
+def _git_quick(path, *args):
+    """git stdout with a hard 2 s cap, None on any failure — one wedged or
+    half-built repo must never slow down the whole scan."""
+    try:
+        r = subprocess.run(["git", "-C", str(path), *args],
+                           capture_output=True, text=True, timeout=2)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def _repo_entry(name, path):
+    branch = _git_quick(path, "rev-parse", "--abbrev-ref", "HEAD")
+    remotes = _git_quick(path, "remote")
+    return {"name": name, "path": str(path),
+            "branch": (branch or "").strip(),
+            "remote": bool((remotes or "").strip())}
+
+
+def _list_repos():
+    """The repo allowlist: this repo first, then every git checkout directly
+    under ARC_REPOS_DIR, sorted by name."""
+    repos = [_repo_entry("arc-orchestrator", config.ROOT)]
+    try:
+        children = sorted((c for c in _repos_dir().iterdir() if c.is_dir()),
+                          key=lambda c: c.name)
+    except OSError:
+        children = []
+    for c in children:
+        if (c / ".git").exists():
+            repos.append(_repo_entry(c.name, c))
+    return repos
+
+
+def _create_repo(body):
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    name = body.get("name")
+    if not isinstance(name, str) or not _REPO_NAME_RE.fullmatch(name):
+        return {"error": "bad repo name (expected ^[a-z0-9][a-z0-9-]{0,40}$)"}, 400
+    path = _repos_dir() / name
+    if path.exists():
+        return {"error": f"{path} already exists", "exists": True}, 409
+    # Local only: git init + one initial commit. No GitHub remote, no push.
+    try:
+        path.mkdir(parents=True)
+        (path / "README.md").write_text(f"# {name}\n", encoding="utf-8")
+        for argv in (["git", "init", "-q", "-b", "main"],
+                     ["git", "add", "README.md"],
+                     ["git", "-c", "user.name=arc-orchestrator",
+                      "-c", "user.email=arc-orchestrator@localhost",
+                      "commit", "-q", "-m", "init"]):
+            r = subprocess.run(argv, cwd=path, capture_output=True, text=True,
+                               timeout=30)
+            if r.returncode != 0:
+                raise RuntimeError(f"{' '.join(argv[:2])} failed: {r.stderr.strip()}")
+    except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
+        import shutil
+        shutil.rmtree(path, ignore_errors=True)  # a failed repo retries by name
+        return {"error": f"git setup failed: {exc}"}, 500
+    return {"name": name, "path": str(path)}, 200
+
+
+def _chat_key(session):
+    return f"chat:{session}"
+
+
+def _chat_running(session):
+    _prune_registry()  # reaps dead pids, chat entries included
+    return _chat_key(session) in _launch_registry
+
+
+def _chat_start(body):
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    session = body.get("session")
+    if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
+        return {"error": "bad session id (expected ^[a-z0-9][a-z0-9-]{0,39}$)"}, 400
+    message = body.get("message")
+    if not isinstance(message, str) or not 1 <= len(message) <= 8000:
+        return {"error": "message must be a string of 1..8000 characters"}, 400
+    repo = body.get("repo")
+    allowed = {r["path"] for r in _list_repos()}
+    if not isinstance(repo, str) or repo not in allowed:
+        return {"error": "repo is not one of the /api/repos entries"}, 400
+    if _chat_running(session):
+        return {"error": "a chat turn is already running for this session"}, 409
+    path = _chat_dir() / f"{session}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"role": "user", "ts": time.time(),
+                            "text": message}) + "\n")
+    argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py",
+            "chat", "--session", session, "--repo", repo]
+    proc, log_name = _spawn_logged(argv, f"chat-{session}.log")
+    _launch_registry[_chat_key(session)] = {
+        "pid": proc.pid, "log": log_name, "started": time.time(), "kind": "chat"}
+    return {"pid": proc.pid}, 200
+
+
+def _chat_poll(session, since):
+    path = _chat_dir() / f"{session}.jsonl"
+    turns = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line:
+                turns.append(json.loads(line))
+    except (OSError, ValueError):
+        turns = []
+    taskfile = next((t["taskfile"] for t in reversed(turns)
+                     if t.get("role") == "assistant" and t.get("taskfile")), None)
+    return {"turns": turns[since:], "running": _chat_running(session),
+            "taskfile": taskfile}
 
 
 _HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
@@ -2541,6 +2692,86 @@ def _retry_task(body):
             "launched_pid": launched, "note": launch_note}, 200
 
 
+def _escalate_task(body):
+    """Move ONE task to a stronger model, by the operator's judgement.
+
+    The fix budget escalates only after repeated failure. The operator can see
+    a task struggling well before that — a planner on gpt-oss producing thin
+    task lists, an implementer looping on a design problem it cannot hold in
+    context — and should not have to burn three rounds to prove it.
+
+    Two writes so the change sticks in both worlds:
+      - a `model_overrides` row, which cur_model() reads at every node boundary,
+        so a RUNNING task moves up at its very next step without a restart;
+      - the taskfile's `model` field, so a fresh run of the project starts on
+        the new model rather than rediscovering the problem from the bottom.
+    The reviewer follows automatically: it is derived from the implementer's
+    family at every call, so a cross-family reviewer stays cross-family.
+    """
+    import code_tasks
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    fname = body.get("file") or ""
+    if not re.fullmatch(r"[\w.-]+\.json", fname):
+        return {"error": "bad file name"}, 400
+    tid = body.get("task") or ""
+    path = Path(config.TASKS_DIR) / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    try:
+        doc = json.loads(path.read_text())
+        tasks = doc["project"]["tasks"]
+    except (ValueError, KeyError, TypeError) as exc:
+        return {"error": f"taskfile unreadable: {exc}"[:200]}, 500
+    t = next((x for x in tasks if x.get("id") == tid), None)
+    if t is None:
+        return {"error": "task id not found"}, 404
+
+    row = next((r for r in Handler.store.code_tasks_all()
+                if r.get("taskfile") and Path(r["taskfile"]).name == fname
+                and r.get("id") == tid), None)
+    current = (Handler.store.get_model_override(row["taskfile"], tid) if row else None) \
+        or (row or {}).get("model") or t.get("model")
+    target = body.get("to_model")
+    if not target:
+        target = code_tasks._next_tier(current)
+        if target is None:
+            return {"error": f"{current} is already the top tier"}, 409
+    if target not in config.IMPLEMENTER_MODELS:
+        return {"error": f"unknown model {target!r}; choose from "
+                         f"{sorted(config.IMPLEMENTER_MODELS)}"}, 400
+    # Escalation is monotonic: refuse to move DOWN a tier.
+    ci, ni = code_tasks._tier_index(current), code_tasks._tier_index(target)
+    ci = -1 if ci is None else ci
+    ni = -1 if ni is None else ni
+    if ni <= ci and target != current:
+        return {"error": f"{target} is not above {current}; escalation only moves up"}, 409
+    if target == current:
+        return {"error": f"already on {current}"}, 409
+
+    reason = (body.get("reason") or "operator escalation")[:200]
+    key = row["taskfile"] if row else str(path)
+    Handler.store.set_model_override(key, tid, target, reason)
+    # the taskfile too, so a fresh run starts here
+    t["model"] = target
+    t["reviewer"] = code_tasks._reviewer_for(t, target)
+    _write_taskfile_atomically(path, doc)
+    if row:
+        Handler.store.upsert_code_task(row["taskfile"], tid, row["title"], target,
+                                       t.get("reviewer") or row.get("reviewer"),
+                                       row.get("status") or "pending")
+    _emit_event("task.escalated", taskfile=str(path), task=tid, from_model=current,
+                to_model=target, manual=True, reason=reason)
+    import reconcile
+    live = any(r.get("taskfile") and Path(r["taskfile"]).name == fname
+               for r in reconcile.live_runs())
+    return {"file": fname, "task": tid, "from": current, "to": target,
+            "reviewer": t.get("reviewer"),
+            "note": ("a run is live — it will use the new model at its next step"
+                     if live else "no run is live — the next run starts on the new model"),
+            "live": live}, 200
+
+
 def _stop_project(body):
     """SIGTERM every `code run` process owning this task file.
 
@@ -2585,16 +2816,49 @@ def _graph_topology(g):
 
 
 def _build_graph_topologies():
-    from pool import ArcPool
-    from work import Roles, build_round_graph
-    from build_work import build_build_graph
+    """The shape of the pipeline the fleet ACTUALLY runs, derived from the code.
 
-    pool = ArcPool(dry_run=True)
-    store = Store(":memory:")
-    round_g = build_round_graph(pool, store, Roles(), {})
-    build_g = build_build_graph(pool, store, build_id=0, iteration=1, mode="create",
-                                out_dir=Path("."), current_files={})
-    return {"round": _graph_topology(round_g), "build": _graph_topology(build_g)}
+    This used to render two other workloads — the research round and the
+    Minecraft build — as static diagrams, on the one page an operator watches.
+    Neither had run in days, and the code-tasks pipeline that had run all day
+    was not depicted at all.
+
+    The topology is built from code_tasks.build_code_graph on a one-task
+    synthetic taskfile and the per-task suffix stripped, so the diagram is
+    generated from the same code that constructs the live graph and cannot
+    drift from it. The loops it shows — fix, escalation, send-back, resync,
+    inconclusive retry — are exactly the ones that are not obvious from the
+    happy path and that a reader most needs to see.
+    """
+    import json as _json
+    import tempfile
+    import code_tasks
+    tf = {"project": {"repo": str(config.ROOT), "title": "shape",
+                      "tasks": [{"id": "t", "title": "t", "prompt": "p",
+                                 "model": config.ESCALATION_PATH[0],
+                                 "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0]),
+                                 "verify_cmd": "", "files_hint": [], "deps": []}]}}
+    path = Path(tempfile.mkdtemp()) / "shape.json"
+    path.write_text(_json.dumps(tf))
+    try:
+        tasks = code_tasks.load_taskfile(path)
+        g = code_tasks.build_code_graph(None, tasks, taskfile=None)
+    finally:
+        try:
+            path.unlink()
+            path.parent.rmdir()
+        except OSError:
+            pass
+    topo = _graph_topology(g)
+
+    def strip(n):
+        return n[:-2] if n.endswith("_t") else n
+    topo["name"] = "code-tasks pipeline"
+    topo["starts"] = [strip(n) for n in topo["starts"]]
+    topo["nodes"] = [{"name": strip(n["name"]), "gather": n["gather"]} for n in topo["nodes"]]
+    topo["edges"] = [{"src": strip(e["src"]), "dst": strip(e["dst"]),
+                      "conditional": e["conditional"]} for e in topo["edges"]]
+    return {"code": topo}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2647,12 +2911,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/queue":
                 return self._json(_queue(Handler.store))
+            if u.path == "/api/audit":
+                import scheduler_audit
+                rep = scheduler_audit.latest()
+                return self._json({"ready": rep is not None, "report": rep,
+                                   "last_run": scheduler_audit.last_run(),
+                                   "due": scheduler_audit.due()})
             if u.path == "/api/errors":
                 q = parse_qs(u.query)
                 return self._json(_errors(q.get("range", ["24h"])[0],
                                           int(q.get("limit", ["40"])[0])))
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
+            if u.path == "/api/repos":
+                return self._json({"repos": _list_repos()})
+            if u.path == "/api/chat/poll":
+                q = parse_qs(u.query)
+                session = q.get("session", [""])[0]
+                if not _SESSION_RE.fullmatch(session):
+                    return self._json({"error": "bad session id"}, 400)
+                try:
+                    since = max(int(q.get("since", ["0"])[0]), 0)
+                except ValueError:
+                    since = 0
+                return self._json(_chat_poll(session, since))
             if u.path == "/api/project":
                 q = parse_qs(u.query)
                 obj, code = _project_detail(Handler.store, q.get("file", [""])[0])
@@ -2777,6 +3059,12 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/projects/run":
                 obj, code = _run_project(body)
                 return self._json(obj, code)
+            if u.path == "/api/repos/create":
+                obj, code = _create_repo(body)
+                return self._json(obj, code)
+            if u.path == "/api/chat/start":
+                obj, code = _chat_start(body)
+                return self._json(obj, code)
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)
                 return self._json(obj, code)
@@ -2799,6 +3087,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/projects/retry-task":
                 obj, code = _retry_task(body)
+                return self._json(obj, code)
+            if u.path == "/api/projects/escalate-task":
+                obj, code = _escalate_task(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
@@ -2858,6 +3149,16 @@ def serve(port=None, db_path=None):
             raise SystemExit(1)
         raise
     log.info("dashboard on http://0.0.0.0:%d (db=%s, events=%s)", port, db_path, config.EVENTS_LOG)
+    # The daily audit runs from here. WSL has no working cron and sleeps when
+    # idle; this server is the process that is awake when the operator is.
+    try:
+        import scheduler_audit
+        scheduler_audit.start(Handler.store)
+        nxt = scheduler_audit.last_run()
+        log.info("daily audit scheduler armed (last run: %s)",
+                 time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt)) if nxt else "never — will run now")
+    except Exception as exc:
+        log.error("daily audit scheduler did not start: %s", exc)
     print(f"dashboard: http://localhost:{port}", flush=True)
     for ip in _lan_addresses():
         print(f"  from your laptop/phone: http://{ip}:{port}  (small screens: http://{ip}:{port}/phone.html)", flush=True)

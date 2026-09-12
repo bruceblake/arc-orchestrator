@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import config
 import dashboard
@@ -204,7 +205,7 @@ class ArchivedAttentionArchiveApi(unittest.TestCase):
     def test_warns_but_still_archives_a_project_with_failed_tasks(self):
         path = self._taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", "DeepSeek-V4-Flash", "kimi", "failed")
+            str(path), "t1", "one", ENTRY, "kimi", "failed")
         resp, code = dashboard._archive_project({"file": "proj.json", "archived": True})
         self.assertEqual(code, 200)
         self.assertIn("warning", resp)

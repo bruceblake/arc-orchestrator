@@ -16,6 +16,7 @@ import unittest
 from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path + event log redirect)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 from graph import Graph
 from store import Store
@@ -145,12 +146,12 @@ class ConcurrencyLeaseVisibility(unittest.TestCase):
         goes through the same code path)."""
         a, b = self._store(), self._store()
         a.upsert_code_task("A.json", "a1", "a1", "GLM-5.3", "kimi", "running")
-        b.upsert_code_task("B.json", "b1", "b1", "Kimi-K3", "glm", "running")
+        b.upsert_code_task("B.json", "b1", "b1", STRONGEST, "glm", "running")
         stop = threading.Event()
 
         def live_run_b():  # the other process, still heartbeating its row
             while not stop.is_set():
-                b.upsert_code_task("B.json", "b1", "b1", "Kimi-K3", "glm", "running")
+                b.upsert_code_task("B.json", "b1", "b1", STRONGEST, "glm", "running")
                 time.sleep(0.002)
 
         t = threading.Thread(target=live_run_b)
@@ -180,8 +181,8 @@ class ConcurrencyUpsertSameTask(TempDB):
     stranded tasks on resume at a tier they had already outgrown, and a torn
     pair would report a model with the wrong reviewer."""
 
-    TIERS = [("gpt-oss-120b", "kimi"), ("DeepSeek-V4-Flash", "glm"),
-             ("GLM-5.3", "kimi"), ("Kimi-K3", "glm")]
+    TIERS = [("gpt-oss-120b", "kimi"), (ENTRY, "glm"),
+             ("GLM-5.3", "kimi"), (STRONGEST, "glm")]
 
     def test_one_row_survives_and_the_last_write_wins(self):
         self.store.upsert_code_task("f.json", "t1", "t1", *self.TIERS[0], "running")
@@ -205,9 +206,9 @@ class ConcurrencyUpsertSameTask(TempDB):
         self.assertIn((rows[0]["model"], rows[0]["reviewer"]), self.TIERS)
         # Deterministically pin last-write-wins: a final (escalation) upsert
         # must replace the recorded tier, not be dropped on conflict.
-        self.store.upsert_code_task("f.json", "t1", "t1", "Kimi-K3", "glm", "running")
+        self.store.upsert_code_task("f.json", "t1", "t1", STRONGEST, "glm", "running")
         row = self.store.code_tasks_for("f.json")[0]
-        self.assertEqual((row["model"], row["reviewer"]), ("Kimi-K3", "glm"))
+        self.assertEqual((row["model"], row["reviewer"]), (STRONGEST, "glm"))
 
 
 class ConcurrencyGraph(unittest.TestCase):

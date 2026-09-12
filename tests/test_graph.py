@@ -568,3 +568,302 @@ class DrainLandingUnderTheLimit(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             run(g)
         self.assertEqual(seen, [])
+
+
+class DynamicFanOut(unittest.TestCase):
+    """Spawn: width decided at runtime from data — LangGraph's Send(), Prefect's map.
+
+    The PR reviewers fanned out INSIDE one node via asyncio.gather, which made
+    them invisible to the graph: not in the diagram, not checkpointed, not
+    individually retryable. A crashed reviewer surfaced only as a field on its
+    parent's result.
+    """
+
+    def _run(self, items, fail_on=None):
+        from graph import Spawn
+        g = Graph("spawn")
+        seen = []
+
+        async def plan(ctx):
+            return Spawn("worker", items, "join")
+
+        async def worker(ctx):
+            seen.append(ctx["spawn"])
+            if ctx["spawn"] == fail_on:
+                raise RuntimeError(f"worker {ctx['spawn']} died")
+            return {"did": ctx["spawn"] * 10}
+
+        joined = []
+
+        async def join(ctx):
+            joined.append(ctx["results"]["worker"])
+            return {"n": len(ctx["results"]["worker"])}
+
+        g.node("plan", plan); g.node("worker", worker); g.node("join", join)
+        g.edge("plan", "worker"); g.edge("worker", "join")  # declared for validate()
+        g.start("plan")
+        out = run(g)
+        return seen, joined, out
+
+    def test_one_child_per_item_all_run(self):
+        seen, _, _ = self._run([1, 2, 3])
+        self.assertEqual(sorted(seen), [1, 2, 3])
+
+    def test_the_join_fires_once_with_results_in_item_order(self):
+        _, joined, _ = self._run([3, 1, 2])
+        self.assertEqual(len(joined), 1)
+        self.assertEqual(joined[0], [{"did": 30}, {"did": 10}, {"did": 20}])
+
+    def test_the_join_does_not_fire_before_every_child_finishes(self):
+        import asyncio as aio
+        from graph import Spawn
+        g = Graph("spawn-wait")
+        release = aio.Event(); joined = []
+
+        async def plan(ctx): return Spawn("w", ["fast", "slow"], "j")
+        async def w(ctx):
+            if ctx["spawn"] == "slow": await release.wait()
+            return {"k": ctx["spawn"]}
+        async def j(ctx): joined.append(ctx["results"]["w"]); return {}
+        g.node("plan", plan); g.node("w", w); g.node("j", j)
+        g.edge("plan", "w"); g.edge("w", "j"); g.start("plan")
+
+        async def go():
+            t = aio.create_task(g.run({}))
+            await aio.sleep(0.05)
+            self.assertEqual(joined, [], "join fired with a child still running")
+            release.set(); await t
+        aio.run(go())
+        self.assertEqual(joined, [[{"k": "fast"}, {"k": "slow"}]])
+
+    def test_zero_items_fires_the_join_immediately_with_an_empty_list(self):
+        _, joined, _ = self._run([])
+        self.assertEqual(joined, [[]])
+
+    def test_a_failing_child_drains_like_any_other_node(self):
+        with self.assertRaises(RuntimeError):
+            self._run([1, 2], fail_on=2)
+
+    def test_the_spawning_node_records_how_many_it_spawned(self):
+        _, _, out = self._run([1, 2, 3])
+        self.assertEqual(out["results"]["plan"], {"spawned": 3})
+
+    def test_a_spawn_to_an_unknown_node_fails_loudly(self):
+        from graph import Spawn
+        g = Graph("bad")
+        async def plan(ctx): return Spawn("nope", [1], "join")
+        async def join(ctx): return {}
+        g.node("plan", plan); g.node("join", join); g.edge("plan", "join"); g.start("plan")
+        with self.assertRaises(GraphError):
+            run(g)
+
+
+class PerNodeRetry(unittest.TestCase):
+    """Retries belonged to the driver layer; a transiently failing node drained the graph."""
+
+    def _flaky(self, fail_times, retry, on=(RuntimeError,)):
+        from graph import Retry
+        g = Graph("retry"); calls = []
+
+        async def node(ctx):
+            calls.append(1)
+            if len(calls) <= fail_times:
+                raise RuntimeError("transient")
+            return {"ok": True}
+        g.node("n", node, retry=Retry(attempts=retry, backoff=0.001, on=on))
+        g.start("n")
+        return g, calls
+
+    def test_a_transient_failure_is_retried_and_succeeds(self):
+        g, calls = self._flaky(fail_times=2, retry=3)
+        out = run(g)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(out["results"]["n"], {"ok": True})
+
+    def test_exhausting_the_policy_fails_the_node(self):
+        g, calls = self._flaky(fail_times=5, retry=3)
+        with self.assertRaises(RuntimeError):
+            run(g)
+        self.assertEqual(len(calls), 3)
+
+    def test_only_listed_exceptions_are_retried(self):
+        # Retrying a programming error is how a bug gets to run three times.
+        from graph import Retry
+        g = Graph("retry-on"); calls = []
+
+        async def node(ctx):
+            calls.append(1); raise KeyError("bug")
+        g.node("n", node, retry=Retry(attempts=5, backoff=0.001, on=(RuntimeError,)))
+        g.start("n")
+        with self.assertRaises(KeyError):
+            run(g)
+        self.assertEqual(len(calls), 1, "a KeyError must not be retried under on=(RuntimeError,)")
+
+    def test_each_retry_is_announced(self):
+        with capture_events() as ev:
+            g, _ = self._flaky(fail_times=2, retry=3)
+            run(g)
+        retries = [f for t, f in ev.seen if t == "node_retry"]
+        self.assertEqual([r["attempt"] for r in retries], [1, 2])
+
+    def test_backoff_grows_and_is_capped(self):
+        from graph import Retry
+        r = Retry(attempts=10, backoff=1.0, max_backoff=5.0)
+        self.assertEqual([r.delay(i) for i in (1, 2, 3, 4, 5)], [1.0, 2.0, 4.0, 5.0, 5.0])
+
+
+class PerNodeTimeout(unittest.TestCase):
+    def test_a_node_that_overruns_fails_with_a_readable_error(self):
+        g = Graph("timeout")
+
+        async def slow(ctx):
+            await asyncio.sleep(5)
+            return {}
+        g.node("slow", slow, timeout=0.05); g.start("slow")
+        with self.assertRaises(GraphError) as cm:
+            run(g)
+        self.assertIn("timed out", str(cm.exception))
+
+    def test_a_timeout_can_be_retried(self):
+        from graph import Retry
+        g = Graph("timeout-retry"); calls = []
+
+        async def sometimes_slow(ctx):
+            calls.append(1)
+            if len(calls) == 1:
+                await asyncio.sleep(5)
+            return {"ok": True}
+        g.node("n", sometimes_slow, timeout=0.05,
+               retry=Retry(attempts=2, backoff=0.001, on=(GraphError,)))
+        g.start("n")
+        self.assertEqual(run(g)["results"]["n"], {"ok": True})
+        self.assertEqual(len(calls), 2)
+
+
+class ErrorHandlerNodes(unittest.TestCase):
+    """on_error routes a failure to a node instead of draining the graph."""
+
+    def _graph(self, handler_name="recover"):
+        g = Graph("on_error"); seen = []
+
+        async def risky(ctx): raise RuntimeError("it broke")
+        async def recover(ctx):
+            seen.append(ctx["error"]); return {"recovered": True}
+        async def after(ctx):
+            seen.append("after"); return {}
+        g.node("risky", risky, on_error=handler_name)
+        g.node("recover", recover); g.node("after", after)
+        g.edge("recover", "after"); g.start("risky")
+        return g, seen
+
+    def test_the_handler_runs_instead_of_the_graph_failing(self):
+        g, seen = self._graph()
+        out = run(g)  # must NOT raise
+        self.assertEqual(out["results"]["recover"], {"recovered": True})
+
+    def test_the_handler_is_told_what_failed_and_why(self):
+        g, seen = self._graph()
+        run(g)
+        err = seen[0]
+        self.assertEqual(err["node"], "risky")
+        self.assertEqual(err["kind"], "RuntimeError")
+        self.assertIn("it broke", err["message"])
+
+    def test_downstream_of_the_handler_still_runs(self):
+        g, seen = self._graph()
+        run(g)
+        self.assertIn("after", seen)
+
+    def test_an_unknown_handler_is_rejected_at_validation(self):
+        g, _ = self._graph(handler_name="does-not-exist")
+        with self.assertRaises(GraphError):
+            run(g)
+
+    def test_the_handler_runs_after_retries_are_exhausted_not_before(self):
+        from graph import Retry
+        g = Graph("retry-then-handle"); calls = []; handled = []
+
+        async def risky(ctx):
+            calls.append(1); raise RuntimeError("still broken")
+        async def recover(ctx):
+            handled.append(1); return {}
+        g.node("risky", risky, retry=Retry(attempts=3, backoff=0.001), on_error="recover")
+        g.node("recover", recover); g.start("risky")
+        run(g)
+        self.assertEqual((len(calls), len(handled)), (3, 1))
+
+
+class Subgraphs(unittest.TestCase):
+    """A node that is itself a graph: one retryable, drainable unit."""
+
+    def test_the_inner_graph_runs_and_its_results_are_recorded(self):
+        inner = Graph("inner")
+        async def a(ctx): return {"a": 1}
+        async def b(ctx): return {"b": ctx["results"]["a"]["a"] + 1}
+        inner.node("a", a); inner.node("b", b); inner.edge("a", "b"); inner.start("a")
+
+        outer = Graph("outer")
+        outer.subgraph("sub", inner)
+        async def done(ctx): return {"saw": ctx["results"]["sub"]["results"]["b"]}
+        outer.node("done", done); outer.edge("sub", "done"); outer.start("sub")
+        out = run(outer)
+        self.assertEqual(out["results"]["done"], {"saw": {"b": 2}})
+
+    def test_an_inner_failure_is_the_outer_nodes_failure(self):
+        inner = Graph("inner")
+        async def boom(ctx): raise ValueError("inner died")
+        inner.node("boom", boom); inner.start("boom")
+        outer = Graph("outer"); outer.subgraph("sub", inner); outer.start("sub")
+        with self.assertRaises(ValueError):
+            run(outer)
+
+    def test_the_outers_on_error_catches_an_inner_failure(self):
+        inner = Graph("inner")
+        async def boom(ctx): raise ValueError("inner died")
+        inner.node("boom", boom); inner.start("boom")
+        outer = Graph("outer"); handled = []
+        async def recover(ctx): handled.append(ctx["error"]["kind"]); return {}
+        outer.subgraph("sub", inner, on_error="recover"); outer.node("recover", recover)
+        outer.start("sub")
+        run(outer)
+        self.assertEqual(handled, ["ValueError"])
+
+
+class ARaisingEdgePredicateCannotHangTheGraph(unittest.TestCase):
+    """Everything after the node fn ran outside the try/except.
+
+    A `when=` lambda that hit a missing key escaped the worker coroutine, killed
+    it silently, and left in_flight un-settled: the graph hung forever with no
+    error and no event. This predates Spawn; Spawn merely made it reachable
+    from a test. The failure must be a failure, not a hang.
+    """
+
+    def test_a_when_that_raises_fails_the_graph_rather_than_hanging(self):
+        import asyncio as aio
+        g = Graph("bad-when")
+        async def a(ctx): return {}
+        async def b(ctx): return {}
+        g.node("a", a); g.node("b", b)
+        g.edge("a", "b", when=lambda r, c: r["no_such_key"])  # KeyError at routing time
+        g.start("a")
+
+        async def go():
+            with self.assertRaises(KeyError):
+                await aio.wait_for(g.run({}), 5)
+        aio.run(go())
+
+    def test_the_routing_failure_is_captured_with_its_node(self):
+        import asyncio as aio
+        g = Graph("bad-when-2")
+        async def a(ctx): return {}
+        g.node("a", a); g.node("b", a)
+        g.edge("a", "b", when=lambda r, c: 1 / 0)
+        g.start("a")
+        with capture_events() as ev:
+            async def go():
+                with self.assertRaises(ZeroDivisionError):
+                    await aio.wait_for(g.run({}), 5)
+            aio.run(go())
+        errs = [f for t, f in ev.seen if t == "node_error"]
+        self.assertEqual(len(errs), 1)
+        self.assertIn("routing after a", errs[0]["error"])

@@ -147,6 +147,14 @@ CREATE TABLE IF NOT EXISTS project_state(
   archived_at TEXT,
   note TEXT
 );
+CREATE TABLE IF NOT EXISTS model_overrides(
+  taskfile TEXT NOT NULL,
+  task_id  TEXT NOT NULL,
+  model    TEXT NOT NULL,
+  set_at   REAL NOT NULL,
+  reason   TEXT,
+  PRIMARY KEY (taskfile, task_id)
+);
 CREATE TABLE IF NOT EXISTS driver_leases(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   model TEXT NOT NULL,
@@ -517,6 +525,37 @@ class Store:
                 "VALUES (?,?,?,?)", (model, pid, task, now))
             self.conn.commit()
             return None
+
+    # ---- manual model escalation ----------------------------------------
+    # The operator can see a task struggling before the fix budget does — a
+    # planner on gpt-oss producing thin task lists, an implementer looping on a
+    # design problem — and should not have to wait for three failed rounds to
+    # move it up a tier. An override is read by cur_model() at every node
+    # boundary, so a RUNNING task picks it up at its next step.
+
+    def set_model_override(self, taskfile, task_id, model, reason=None):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO model_overrides(taskfile, task_id, model, set_at, reason)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(taskfile, task_id) DO UPDATE SET"
+                " model=excluded.model, set_at=excluded.set_at, reason=excluded.reason",
+                (str(taskfile), task_id, model, time.time(), reason))
+            self.conn.commit()
+
+    def get_model_override(self, taskfile, task_id):
+        with self.lock:
+            r = self.conn.execute(
+                "SELECT model FROM model_overrides WHERE taskfile=? AND task_id=?",
+                (str(taskfile), task_id)).fetchone()
+        return r["model"] if r else None
+
+    def clear_model_override(self, taskfile, task_id):
+        with self.lock:
+            cur = self.conn.execute(
+                "DELETE FROM model_overrides WHERE taskfile=? AND task_id=?",
+                (str(taskfile), task_id))
+            self.conn.commit()
+        return cur.rowcount > 0
 
     def release_driver_lease(self, model, pid, task):
         with self.lock:

@@ -65,14 +65,18 @@ def _repo_target(repo):
 
 
 def _driver(model, role):
-    """Only Kimi-K3 or GLM-5.3 may hold a gh role; drivers raise otherwise."""
-    model = model or config.GH_MODEL
-    if model == "Kimi-K3":
+    """A gh role needs a model the roster trusts to PLAN; the driver enforces it.
+
+    Resolved through the roster so this stops naming Kimi the day it leaves:
+    with no ARC_GH_MODEL set, the planner-capable strongest model is used.
+    """
+    model = model or config.GH_MODEL or config.PLANNER_MODEL
+    if model not in config.MODEL_HARNESS:
+        raise ValueError(f"gh role {role!r}: {model!r} is not on today's roster "
+                         f"({sorted(config.MODEL_HARNESS)}); set ARC_GH_MODEL")
+    if config.MODEL_HARNESS[model] == "kimi":
         return KimiDriver(role)
-    if model == "GLM-5.3":
-        return OpencodeDriver("GLM-5.3", role)
-    raise ValueError(f"gh role {role!r} may only be held by Kimi-K3 or "
-                     f"GLM-5.3, got {model!r} (set ARC_GH_MODEL)")
+    return OpencodeDriver(model, role)
 
 
 def _json_from(text, key):
@@ -93,12 +97,18 @@ def _json_from(text, key):
 
 
 def _reviewer_for(model, i):
-    """Cross-review pairing (Rule 2): glm<->kimi; others alternate."""
-    if model == "GLM-5.3":
-        return "kimi"
-    if model == "Kimi-K3":
-        return "glm"
-    return ("glm", "kimi")[i % 2]
+    """Cross-review pairing (Rule 2), from the roster.
+
+    A strong model gets the strongest OTHER review-capable family; a model
+    below the top tier alternates across every review-capable family that is
+    not its own, so neither idles nor saturates."""
+    fam = config.MODEL_FAMILY.get(model)
+    others = [f for f in config.REVIEW_FAMILIES if f != fam]
+    if not others:
+        return config.cross_family_reviewer(model)
+    if fam in config.REVIEW_FAMILIES:          # a strong model: strongest other
+        return others[0]
+    return others[i % len(others)]
 
 
 # --- issue-triager ------------------------------------------------------------

@@ -26,6 +26,16 @@ log = logging.getLogger("code-tasks")
 _merge_lock = asyncio.Lock()
 
 
+# Where a retired model's work goes now. Callables so they read the roster at
+# call time, not at import (the roster is dated).
+RETIRED_MODELS = {
+    "gpt-oss-120b":      lambda: config.ESCALATION_PATH[0],                 # no basic tier
+    "DeepSeek-V4-Flash": lambda: next((m for m in config.ESCALATION_PATH
+                                       if m.startswith("DeepSeek")), None),
+    "Kimi-K3":           lambda: config.ESCALATION_PATH[-1],                # strongest live
+}
+
+
 def load_taskfile(path, policy=None):
     """Load + validate a taskfile. `policy` (bench variant overrides) may widen
     the allowed implementers/reviewers, permit self-review, or disable review;
@@ -34,7 +44,10 @@ def load_taskfile(path, policy=None):
     repo = Path(data["project"]["repo"]).resolve()
     pol = policy or {}
     models = set(config.IMPLEMENTER_MODELS) | set(pol.get("implementers", []))
-    reviewers = tuple(pol.get("reviewers", ("kimi", "glm")))
+    # Review-capable families, from the roster: ("kimi", "glm") until 09-19,
+    # then ("glm", "deepseek"). A taskfile written for a family that has since
+    # left is remapped below rather than rejected — the plan is still good.
+    reviewers = tuple(pol.get("reviewers", tuple(config.REVIEW_FAMILIES)))
     review_on = pol.get("review", True)
     allow_self = bool(pol.get("allow_self_review"))
     tasks = {}
@@ -48,12 +61,30 @@ def load_taskfile(path, policy=None):
         if tid in tasks:
             raise ValueError(f"duplicate task id: {tid}")
         model = t.get("model", "")
+        if model not in models and model in RETIRED_MODELS and not pol.get("implementers"):
+            # A model that LEFT the roster — gpt-oss retired 09-11, DeepSeek-V4
+            # replaced 09-12, Kimi-K3 withdrawn 09-19. The decomposition is still
+            # good; only the label is stale. Remap to where that tier's work
+            # goes now rather than failing every taskfile written before the
+            # transition.
+            model = RETIRED_MODELS[model]() or config.ESCALATION_PATH[0]
         if model not in models:
             raise ValueError(
                 f"task {tid}: model {model!r} must be an implementer ({sorted(models)})"
             )
         reviewer = t.get("reviewer", "")
-        if review_on and reviewer not in reviewers:
+        if review_on and reviewer not in reviewers and not pol.get("reviewers"):
+            # The named family is not review-capable TODAY — most likely it left
+            # the roster (kimi after 09-19) or was never one (gpt-oss). Remap to
+            # the strongest cross-family reviewer instead of failing a taskfile
+            # whose decomposition is still perfectly good.
+            remapped = config.cross_family_reviewer(model)
+            if remapped is None:
+                raise ValueError(
+                    f"task {tid}: reviewer must be one of {reviewers}, got "
+                    f"{reviewer!r}, and no cross-family reviewer exists for {model}")
+            reviewer = remapped
+        elif review_on and reviewer not in reviewers:
             raise ValueError(f"task {tid}: reviewer must be one of {reviewers}, got {reviewer!r}")
         impl_family = config.MODEL_FAMILY[model]
         rev_family = config.MODEL_FAMILY.get(reviewer, reviewer)
@@ -346,8 +377,8 @@ def _impl_prompt(t, feedback):
 
 
 def _harness_of(model):
-    """The local harness that runs this model. Mirrors _driver()'s routing."""
-    return "kimi" if model == "Kimi-K3" else "opencode"
+    """The local harness that runs this model, from the roster."""
+    return config.MODEL_HARNESS.get(model, "opencode")
 
 
 def _reviewer_pressure(model, usage):
@@ -375,7 +406,7 @@ def _eligible_pr_reviewers(impl_fam, pol):
     the PR stranded with nobody coming back for them.
     """
     out = []
-    for m in ("Kimi-K3", "GLM-5.3", "DeepSeek-V4-Flash"):
+    for m in config.ESCALATION_PATH[::-1]:  # strongest first, from the roster
         if config.MODEL_FAMILY.get(m) == impl_fam:
             continue
         try:
@@ -408,6 +439,49 @@ def _tally_reviews(outcomes):
             issues.extend(f"[{model}] {i}" for i in v["issues"])
     approved = bool(outcomes) and len(approvals) == len(outcomes)
     return issues, approvals, crashed, approved, bool(crashed) and not issues
+
+
+def _tier_index_m(model):
+    try:
+        return config.ESCALATION_PATH.index(model)
+    except ValueError:
+        return None
+
+def _next_tier_m(model):
+    """The next stronger model for `model`, or None at the top.
+
+    A model that is not ON the escalation path (a taskfile may still route
+    explicitly to gpt-oss-120b for mechanical work) counts as below the
+    entry tier, so it escalates INTO the path rather than being stuck
+    unable to escalate at all.
+    """
+    idx = _tier_index_m(model)
+    if idx is None:
+        return config.ESCALATION_PATH[0] if config.ESCALATION_PATH else None
+    if idx + 1 < len(config.ESCALATION_PATH):
+        return config.ESCALATION_PATH[idx + 1]
+    return None
+
+
+# Public names for the dashboard's manual escalation, so it applies the SAME
+# tier arithmetic the graph applies rather than a second copy of it.
+_tier_index = _tier_index_m
+_next_tier = _next_tier_m
+
+
+def _reviewer_for(t, model):
+    """Cross-review preserved under escalation, from the roster.
+
+    Keep the taskfile's reviewer when it is still review-capable and still a
+    different family from the implementer; otherwise take the strongest other
+    review-capable family. Module-level so the dashboard's manual escalation
+    applies the same rule the graph does — the reviewer must follow the
+    implementer, and it must never be the implementer's own family."""
+    current = t.get("reviewer")
+    fam = config.MODEL_FAMILY.get(model)
+    if current in config.REVIEW_FAMILIES and current != fam:
+        return current
+    return config.cross_family_reviewer(model) or current
 
 
 def _rework_feedback(tid, results):
@@ -555,19 +629,22 @@ def _driver(model, role, policy):
     pol = policy or {}
     harness = pol.get("harness", {}).get(model)
     if harness is None:
-        harness = "kimi" if model == "Kimi-K3" else "opencode"
+        harness = config.MODEL_HARNESS.get(model, "opencode")
     if harness == "kimi":
         return KimiDriver(role, bench=bool(pol))
     return OpencodeDriver(model, role, bench=bool(pol))
 
 
 def _reviewer_driver(t, policy):
+    """The driver for the taskfile's `reviewer:` family token.
+
+    Resolved through config.REVIEW_FAMILIES, so "glm" means GLM-5.3 and
+    "deepseek" means whichever DeepSeek is live — and "kimi" stops resolving
+    the day Kimi leaves instead of constructing a driver for a withdrawn model.
+    """
     token = t["reviewer"]
-    if token == "kimi":
-        return KimiDriver("reviewer", bench=bool(policy))
-    if token == "glm":
-        return OpencodeDriver("GLM-5.3", "reviewer", bench=bool(policy))
-    return _driver(token, "reviewer", policy)
+    model = config.REVIEW_FAMILIES.get(token, token)
+    return _driver(model, "reviewer", policy)
 
 
 # Failure reasons that mean "this model could not do the task" and so justify
@@ -611,37 +688,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         except Exception:
             prior = {}
 
-    def _tier_index(model):
-        try:
-            return config.ESCALATION_PATH.index(model)
-        except ValueError:
-            return None
-
-    def _next_tier(model):
-        """The next stronger model for `model`, or None at the top.
-
-        A model that is not ON the escalation path (a taskfile may still route
-        explicitly to gpt-oss-120b for mechanical work) counts as below the
-        entry tier, so it escalates INTO the path rather than being stuck
-        unable to escalate at all.
-        """
-        idx = _tier_index(model)
-        if idx is None:
-            return config.ESCALATION_PATH[0] if config.ESCALATION_PATH else None
-        if idx + 1 < len(config.ESCALATION_PATH):
-            return config.ESCALATION_PATH[idx + 1]
-        return None
-
-    def reviewer_for(t, model):
-        """Cross-review preserved under escalation: a strong model's work is
-        reviewed by the other strong harness; basic/medium keep the taskfile
-        reviewer."""
-        fam = config.MODEL_FAMILY.get(model)
-        if fam == "kimi":
-            return "glm"
-        if fam == "glm":
-            return "kimi"
-        return t["reviewer"]
+    _tier_index, _next_tier = _tier_index_m, _next_tier_m
+    reviewer_for = _reviewer_for
 
     def start_model(tid):
         """Model a (possibly resumed) run starts this task at.
@@ -698,6 +746,34 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             events.emit("task.pr_skipped", task=tid,
                         reason=f"pr hook: {exc}"[:200], fingerprint=fp)
 
+    def wire_deps(t, target):
+        """Gate `target` on EVERY dependency merging, not just the last one.
+
+        This used to be `g.edge(f"pr_merge_{t['deps'][-1]}", target)` — the
+        LAST dep only. A task declaring deps ["a", "b"] waited for b and
+        started the moment b merged, whether or not a had; if a was the slower
+        of the two, the dependent branched from a base missing the code it
+        depended on. That is not a join, and the engine has had a real one
+        (gather=True) the whole time — the research and build graphs use it,
+        the code graph never did.
+
+        One dep keeps the direct edge. Two or more get a gather node that
+        waits for all of them.
+        """
+        deps = t["deps"]
+        if len(deps) == 1:
+            g.edge(f"pr_merge_{deps[0]}", target)
+            return
+        join = f"join_{t['id']}"
+
+        async def joined(ctx):
+            return {"joined": list(deps)}
+
+        g.node(join, joined, gather=True)
+        for d in deps:
+            g.edge(f"pr_merge_{d}", join)
+        g.edge(join, target)
+
     def make_skip(t):
         """Merged task: collapse to a stub publish so dependents see it as done."""
         tid = t["id"]
@@ -712,7 +788,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         g.node(f"pr_merge_{tid}", pr_merge)
         g.edge(f"publish_{tid}", f"pr_merge_{tid}")
         if t["deps"]:
-            g.edge(f"pr_merge_{t['deps'][-1]}", f"publish_{tid}")
+            wire_deps(t, f"publish_{tid}")
         else:
             heads.append(f"publish_{tid}")
 
@@ -743,8 +819,29 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             return wt
 
         def cur_model(ctx):
+            """Which model implements this task RIGHT NOW.
+
+            Three sources, and the HIGHEST tier among them wins, because
+            escalation is monotonic: the operator's manual override (set from
+            the dashboard, read fresh from the database at every node boundary
+            so a running task moves up at its next step), the graph's own
+            escalate node, and the taskfile's declared model.
+            """
             esc = ctx.get("results", {}).get(f"escalate_{tid}")
-            return esc["to_model"] if esc else model0
+            auto = esc["to_model"] if esc else model0
+            manual = None
+            if store is not None and taskfile:
+                try:
+                    manual = store.get_model_override(taskfile, tid)
+                except Exception:
+                    manual = None
+            if not manual or manual == auto:
+                return auto
+            ti, tm = _tier_index(auto), _tier_index(manual)
+            # An off-path model (gpt-oss) counts as below the entry tier.
+            ti = -1 if ti is None else ti
+            tm = -1 if tm is None else tm
+            return manual if tm >= ti else auto
 
         def esc_n(ctx):
             return ctx.get("runs", {}).get(f"escalate_{tid}", 0)
@@ -1049,12 +1146,24 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         head=head, note=note)
             return {"published": True, "pr": number, "url": url, "head": head}
 
-        async def pr_review(ctx):
-            """N independent reviewers read the real PR diff. All must approve."""
+        async def pr_fanout(ctx):
+            """Pick the reviewers and SPAWN one graph node per reviewer.
+
+            The reviewers used to fan out inside a single node via
+            asyncio.gather, which made them invisible to the graph: not in
+            the diagram, not checkpointed, not individually retryable, and a
+            crashed reviewer surfaced only as a field on its parent's result.
+            Each is now a real node — pr_reviewer_<tid> — with its own retry
+            policy and timeout, joined at pr_review_<tid>. Width is decided
+            here at runtime from the eligible pool, which is what dynamic
+            fan-out is for.
+            """
+            from graph import Spawn
             pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
             number = pub.get("pr")
             if not number:
-                return {"approved": False, "issues": ["no pull request to review"]}
+                return {"no_pr": True, "approved": False,
+                        "issues": ["no pull request to review"]}
             round_n = ctx.get("runs", {}).get(f"pr_review_{tid}", 0) + 1
             prior_r = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
             diff = await gitstore.pr_diff(repo, number)
@@ -1062,88 +1171,89 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # other, so two approvals mean two genuinely separate readings.
             impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
             pool = _eligible_pr_reviewers(impl_fam, pol)
-            # Pick the LEAST CONTENDED eligible models, not a fixed order.
-            # The fixed order sent every review to Kimi and GLM while DeepSeek
-            # sat idle, so tasks waited 30 minutes for a slot another model
-            # could have served at once (260 cap_wait events in one hour).
-            #
-            # Contention is whichever ceiling binds FIRST — the model's own cap
-            # or its harness's. Sorting on the model alone sent reviews to GLM
-            # and DeepSeek while the single opencode pool they share sat at 5/5
-            # with seven reviewers queued behind it and the kimi harness idle at
-            # 1/3. A model under its own cap is not available if its harness
-            # is full.
+            # Least-contended first; contention is whichever ceiling binds
+            # first, the model's own cap or its harness's (_reviewer_pressure).
             try:
                 usage = store.lease_usage()
             except Exception:
                 usage = {}
-
-            pool.sort(key=lambda m: (_reviewer_pressure(m, usage),
-                                     usage.get(m, 0)))
+            pool.sort(key=lambda m: (_reviewer_pressure(m, usage), usage.get(m, 0)))
             chosen = pool[:max(1, config.PR_REVIEWERS)]
+            if len(chosen) < config.PR_REVIEWERS_WANTED:
+                # The roster cannot field PR_REVIEWERS cross-family readers for
+                # this implementer — after Kimi-K3 leaves on 09-19 there are
+                # two families, so every task gets exactly one. The gate still
+                # requires unanimity among those who review; one genuine
+                # cross-family read beats a same-family pair for the property
+                # cross-review protects. But it is a weaker gate than the
+                # config asked for, and that must be visible, not silent.
+                events.emit("task.pr_review_thin", task=tid, pr=number,
+                            wanted=config.PR_REVIEWERS_WANTED, got=len(chosen),
+                            reviewers=chosen, implementer=cur_model(ctx))
+            items = [{"model": m, "pr": number, "round": round_n, "diff": diff,
+                      "n_reviewers": len(chosen),
+                      "prior_issues": prior_r.get("issues") or []} for m in chosen]
+            return Spawn(f"pr_reviewer_{tid}", items, f"pr_review_{tid}",
+                         result={"spawned": len(chosen), "reviewers": chosen,
+                                 "pr": number, "round": round_n})
 
-            async def one(model):
-                # Never let one reviewer take the whole graph down with it: a
-                # crashed or unbuildable reviewer is a rejection with a reason,
-                # not an exception that orphans an open PR.
-                # "pr_reviewer", not "reviewer": these are the gate on an open
-                # PR and they are the scarcest thing in the fleet (PR_REVIEWERS
-                # cross-family models per round). The dashboard separates them
-                # from the pre-PR gate reviewer so a reviewer queue is legible.
-                try:
-                    drv = _driver(model, "pr_reviewer", pol)
-                    res = await drv.run(
-                        _pr_review_prompt(t, diff, len(chosen), round_n,
-                                          prior_r.get("issues") or []),
-                        await worktree(ctx),
-                        task_id=f"{tid}-pr{round_n}")
-                except (DriverError, ValueError) as exc:
-                    # A reviewer that crashed did NOT review. Reporting that as
-                    # a rejection posted "changes requested: reviewer crashed"
-                    # to a public PR and sent the implementer back to fix
-                    # issues that did not exist — and burned one of three PR
-                    # rounds doing it, so three infrastructure blips failed a
-                    # perfectly good task.
-                    return model, {"approve": False, "crashed": True,
-                                   "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
-                verdict = _parse_approval(res.text)
-                store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
-                                       round_n, res.exit_code, res.transcript_path,
-                                       res.seconds, verdict=json.dumps(verdict)[:500])
-                return model, verdict
+        async def pr_reviewer(ctx):
+            """ONE reviewer reads the PR diff. A graph node, so it is visible,
+            checkpointed and retryable on its own."""
+            it = ctx["spawn"]
+            model = it["model"]
+            try:
+                drv = _driver(model, "pr_reviewer", pol)
+                res = await drv.run(
+                    _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
+                                      it["prior_issues"]),
+                    await worktree(ctx),
+                    task_id=f"{tid}-pr{it['round']}")
+            except (DriverError, ValueError) as exc:
+                # A reviewer that crashed did NOT review. Reported as such —
+                # never as a rejection — so the join retries the review rather
+                # than sending the implementer to fix nothing.
+                return {"model": model, "approve": False, "crashed": True,
+                        "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
+            verdict = _parse_approval(res.text)
+            store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
+                                   it["round"], res.exit_code, res.transcript_path,
+                                   res.seconds, verdict=json.dumps(verdict)[:500])
+            verdict["model"] = model
+            return verdict
 
-            outcomes = await asyncio.gather(*[one(m) for m in chosen])
+        async def pr_review(ctx):
+            """The JOIN: every reviewer is in. Tally, post to GitHub, decide."""
+            fan = ctx.get("results", {}).get(f"pr_fanout_{tid}") or {}
+            if fan.get("no_pr"):
+                return {"approved": False, "issues": fan["issues"], "approvals": [],
+                        "reviewers": [], "crashed": [], "inconclusive": False,
+                        "inconclusive_n": 0, "pr": None, "round": 0}
+            number, round_n = fan.get("pr"), fan.get("round", 1)
+            chosen = fan.get("reviewers") or []
+            prior_r = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
+            verdicts = ctx.get("results", {}).get(f"pr_reviewer_{tid}") or []
+            outcomes = [(v.get("model"), v) for v in verdicts]
             issues, approvals, crashed, approved, inconclusive = \
                 _tally_reviews(outcomes)
             prior_incon = (prior_r or {}).get("inconclusive_n", 0)
             inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
-            # The issue TEXT, not just a count. "3 issues" tells an operator
-            # nothing about whether the reviewers found something real; the
-            # dashboard could only ever show the number, so the actual verdict
-            # lived on GitHub and nowhere else.
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
                         reviewers=chosen, n_issues=len(issues),
                         issues=[i[:400] for i in issues[:10]],
                         crashed=crashed, inconclusive=inconclusive)
-            # Post each verdict AS A GITHUB REVIEW, not just internally. The
-            # approvals existed only in our event log, so a PR merged by two
-            # AI reviewers showed "0 reviews" on GitHub — the trail was
-            # invisible exactly where a human would look for it.
+            # Post each verdict AS A GITHUB REVIEW so the trail is visible where
+            # a human looks for it. A crashed reviewer gets a neutral note, never
+            # a formal rejection: it did not read the diff.
             for model, v in outcomes:
                 if v.get("crashed"):
-                    # A neutral note, never a formal rejection: this reviewer
-                    # never read the diff and must not appear to have judged it.
                     body = (f"**{model}** (round {round_n}) — review could not "
                             f"run: {'; '.join(v['issues'])[:400]}")
                 else:
                     body = (f"**{model}** (round {round_n}) — "
                             + ("approved." if v["approve"] else "changes requested:\n\n"
                                + "\n".join(f"- {i}" for i in v["issues"][:20])))
-                # A bot cannot formally approve its own repo's PR, so an
-                # approval is posted as a comment and a rejection uses
-                # --request-changes where permitted; both fall back to a plain
-                # comment so the verdict is never lost.
                 rc = 1
                 if not v.get("crashed"):
                     rc, _, _ = await gitstore._gh(
@@ -1270,9 +1380,27 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         chain = {"alloc": alloc, "implement": implement, "gate": gate,
                  "review": review, "escalate": escalate, "publish": publish,
-                 "pr_review": pr_review, "pr_merge": pr_merge, "fail": fail}
+                 "pr_fanout": pr_fanout, "pr_review": pr_review,
+                 "pr_merge": pr_merge, "fail": fail}
         for suffix, fn in chain.items():
             g.node(f"{suffix}_{tid}", fn)
+        # One reviewer per node, with the per-node policy the fan-out makes
+        # possible: a harness that dies on the way in is retried HERE, and the
+        # join only ever sees crashes that survived the retries. The timeout is
+        # a backstop above the driver's own; a reviewer cannot hold the join
+        # open indefinitely.
+        from graph import Retry
+        g.node(f"pr_reviewer_{tid}", pr_reviewer,
+               retry=Retry(attempts=3, backoff=20.0, max_backoff=120.0,
+                           on=(DriverError,)),
+               timeout=config.DRIVER_TIMEOUT + 600)
+        # Declared so validate() sees them; at runtime Spawn and the join do
+        # the routing and these two edges never fire on their own.
+        g.edge(f"pr_fanout_{tid}", f"pr_reviewer_{tid}")
+        g.edge(f"pr_reviewer_{tid}", f"pr_review_{tid}")
+        # A fanout with no PR to review goes straight to the join's rejection.
+        g.edge(f"pr_fanout_{tid}", f"pr_review_{tid}",
+               when=lambda r, c: bool(r.get("no_pr")), on_drain=True)
         g.edge(f"alloc_{tid}", f"implement_{tid}")
         g.edge(f"implement_{tid}", f"gate_{tid}")
         g.edge(f"gate_{tid}", f"review_{tid}", when=lambda r, c: r["passed"])
@@ -1291,19 +1419,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # edges still fire so the PR gets reviewed and merged instead of being
         # orphaned on GitHub. The rework edge below is deliberately not marked —
         # draining must not start a fresh implementer.
-        g.edge(f"publish_{tid}", f"pr_review_{tid}",
+        g.edge(f"publish_{tid}", f"pr_fanout_{tid}",
                when=lambda r, c: bool(r.get("published")), on_drain=True)
         g.edge(f"pr_review_{tid}", f"pr_merge_{tid}",
                when=lambda r, c: bool(r.get("approved")), on_drain=True)
         # A resync rewrote the branch, so the approval the PR already has no
         # longer covers what is on it. Back to review, not straight to merge.
-        g.edge(f"pr_merge_{tid}", f"pr_review_{tid}",
+        g.edge(f"pr_merge_{tid}", f"pr_fanout_{tid}",
                when=lambda r, c: bool(r.get("resynced")), on_drain=True)
         # An inconclusive round reached no verdict: every reviewer crashed and
         # nobody read the diff. Retry the REVIEW — sending the implementer back
         # to fix issues that do not exist wastes a model and burns a real round.
         # on_drain, because the PR is already open and this is still landing it.
-        g.edge(f"pr_review_{tid}", f"pr_review_{tid}",
+        g.edge(f"pr_review_{tid}", f"pr_fanout_{tid}",
                when=lambda r, c: r.get("inconclusive")
                and r.get("inconclusive_n", 0) < config.PR_MAX_INCONCLUSIVE,
                on_drain=True)
@@ -1355,10 +1483,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # pushed branch and an open pull request.
         first = "publish" if prior_status in ("conflict", "in_review") else "alloc"
         if t["deps"]:
-            # Wait for the dep's PR to MERGE into the base branch, not just to
-            # open — otherwise a dependent branches from a base that lacks the
-            # code it depends on.
-            g.edge(f"pr_merge_{t['deps'][-1]}", f"{first}_{tid}")
+            # Wait for EVERY dep's PR to MERGE into the base branch, not just
+            # to open — otherwise a dependent branches from a base that lacks
+            # the code it depends on.
+            wire_deps(t, f"{first}_{tid}")
         else:
             heads.append(f"{first}_{tid}")
 
@@ -1391,14 +1519,50 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     return g
 
 
-PLAN_SCHEMA_HINT = """\
-{"project": {"repo": "<abs path>", "title": "<short>",
- "pattern": "<name from the graph-pattern library, e.g. fan-out-fan-in>",
- "tasks": [{"id": "<kebab-id>", "title": "...", "prompt": "<detailed spec>",
-            "model": "gpt-oss-120b" | "DeepSeek-V4-Flash" | "GLM-5.3" | "Kimi-K3",
-            "reviewer": "kimi" | "glm",
-            "verify_cmd": "<shell cmd run in the worktree, empty ok>",
-            "files_hint": ["path/..."], "deps": ["<id>", ...]}]}}"""
+def _routing_tiers_prose():
+    """The planner's routing instructions, written from today's roster."""
+    tiers = config.IMPLEMENT_TIERS
+    lines = ["ROUTING TIERS (enforced — a task file that violates these is rejected):\n"]
+    if tiers.get("medium"):
+        lines.append(f"- {' or '.join(tiers['medium'])}: medium tasks (a self-contained "
+                     "feature, a new endpoint, moderate refactor of one file) AND the "
+                     "mechanical ones (rename, small HTML/CSS, wiring, config) — there is "
+                     "no lower tier.\n")
+    if tiers.get("hard"):
+        lines.append(f"- {' or '.join(tiers['hard'])}: hard tasks that need deep "
+                     "understanding, multi-file reasoning, delicate architecture, or "
+                     "subtle debugging.\n")
+    fams = list(config.REVIEW_FAMILIES)
+    pairs = []
+    for m in config.ESCALATION_PATH:
+        r = config.cross_family_reviewer(m)
+        if r:
+            pairs.append(f"work by {m} is reviewed by {r}")
+    lines.append(f"- reviewer is one of {' or '.join(fams)}. Cross-review rule: "
+                 + "; ".join(pairs) + ". Spread reviews across the review-capable "
+                 "families so none idles or saturates.\n\n")
+    return "".join(lines)
+
+
+def plan_schema_hint():
+    """The taskfile schema the planner is shown, with TODAY'S models in it.
+
+    A string literal here named gpt-oss and Kimi long after either should have
+    appeared in a plan. Generated from the roster so the planner is never told
+    to route work to a model that left."""
+    models = " | ".join(f'"{m}"' for m in config.ESCALATION_PATH)
+    reviewers = " | ".join(f'"{f}"' for f in config.REVIEW_FAMILIES)
+    return (
+        '{"project": {"repo": "<abs path>", "title": "<short>",\n'
+        ' "pattern": "<name from the graph-pattern library, e.g. fan-out-fan-in>",\n'
+        ' "tasks": [{"id": "<kebab-id>", "title": "...", "prompt": "<detailed spec>",\n'
+        f'            "model": {models},\n'
+        f'            "reviewer": {reviewers},\n'
+        '            "verify_cmd": "<shell cmd run in the worktree, empty ok>",\n'
+        '            "files_hint": ["path/..."], "deps": ["<id>", ...]}]}}')
+
+
+PLAN_SCHEMA_HINT = plan_schema_hint()
 
 
 def _balanced_span(text, start):
@@ -1527,17 +1691,7 @@ async def plan_tasks(goal, repo, out_path=None):
         "the model routing (who implements), the reviewer, and the verify "
         "gate for every task. Design it well; there is no later triage.\n\n"
         f"GOAL: {goal}\nTARGET REPO: {repo}\n\n"
-        "ROUTING TIERS (enforced — a task file that violates these is rejected):\n"
-        "- gpt-oss-120b: very basic, mechanical tasks (rename, small HTML/CSS, "
-        "append a function, wiring, config).\n"
-        "- DeepSeek-V4-Flash: medium tasks (a self-contained feature, a new "
-        "endpoint, moderate refactor of one file).\n"
-        "- GLM-5.3 or Kimi-K3: hard tasks that need deep understanding, "
-        "multi-file reasoning, delicate architecture, or subtle debugging.\n"
-        "- reviewer is kimi or glm. Cross-review rule: work by Kimi-K3 is "
-        "reviewed by glm; work by GLM-5.3 is reviewed by kimi; gpt-oss/"
-        "DeepSeek work may be reviewed by either. Split reviews between "
-        "kimi and glm so neither idles nor saturates.\n\n"
+        + _routing_tiers_prose() +
         "GRAPH DESIGN (maximize safe parallelism):\n"
         "- First choose ONE graph pattern for the plan from the pattern "
         "library in docs/graph-patterns.md of the orchestrator repo: chain, "
@@ -1597,7 +1751,9 @@ async def plan_tasks(goal, repo, out_path=None):
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )
-    res = await KimiDriver("planner").run(prompt, Path(repo), task_id="plan")
+    # The strongest live model that may plan — Kimi-K3 until 09-19, GLM after.
+    res = await _driver(config.PLANNER_MODEL, "planner", None).run(
+        prompt, Path(repo), task_id="plan")
     raw = _plan_json_from_run(res)
     if raw is None:
         raise RuntimeError(f"planner produced no usable JSON; transcript: {res.transcript_path}")
