@@ -581,8 +581,11 @@ class Driver:
     # retrying 2s later just re-enters the same cap and deepens the pile-up
     # (observed live: four taskfiles resumed at once put 9 Kimi requests
     # against a cap of 3, and every retry came straight back as a 400).
+    # "rate_limit"/"quota" cover dsh's `dsh: RATE_LIMIT:` / `dsh: QUOTA:`
+    # error codes on stderr (the others are opencode/kimi/HTTP phrasings).
     _CAPACITY_MARKERS = ("provider.api_error: 400", "status code (no body)",
-                         "session limit", "concurrent", "rate limit", "429")
+                         "session limit", "concurrent", "rate limit", "429",
+                         "rate_limit", "quota")
 
     @classmethod
     def is_capacity_error(cls, text):
@@ -976,3 +979,213 @@ class OpencodeDriver(Driver):
         if session_id:
             a.append("-c")
         return a + [prompt]
+
+
+class DeepseekDriver(Driver):
+    """DeepSeek's own harness (dsh, github.com/deepseek-ai/deepseek-harness).
+
+    Operator decision 2026-09-12: DeepSeek-V4.1-Flash-thinking-max runs here
+    instead of opencode. dsh changes the stream contract, which is why a
+    subclass could not fix this with argv alone:
+
+    - stdout carries ONLY the final assistant message, printed at the very
+      end; tool calls and their output never appear.
+    - stderr carries the live `dsh: reasoning:` deltas through the whole
+      thinking phase, and errors as `dsh: <CODE>: <msg>` (RATE_LIMIT, QUOTA,
+      AUTH, TRANSPORT, TIMEOUT...).
+
+    Driver._pump drives the stall clock off stdout bytes. Under dsh stdout is
+    silent for minutes of healthy thinking, so a stock-pumped dsh run would be
+    stall-killed at DRIVER_IDLE_TIMEOUT every time — this driver therefore
+    runs _pump_dual below, where a chunk on EITHER pipe counts as activity.
+    Both pipes land in the transcript file (what the dashboard tails); stdout
+    is additionally kept verbatim as the result text, because that is where
+    the answer is.
+
+    No session resume: `dsh --profile headless` accepts nothing but the task
+    text, so an interrupted attempt simply retries the original prompt (the
+    worktree keeps files already written). dsh prints no token usage either,
+    so DriverResult carries (0, 0, 0) — cost attribution for dsh runs is
+    lost until the harness reports usage.
+
+    Role rules come from the roster, same as the other drivers: dsh serves
+    whichever model its ROSTER row names, and a model without "planner" in
+    its roles cannot be constructed as one — the planner role is intrinsically
+    refused here rather than banned by a side list.
+    """
+
+    harness = "dsh"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        if not bench:
+            # Same roster-check idiom as OpencodeDriver; gh-ops roles are
+            # harness capabilities that need a planner-grade model.
+            _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
+            if model not in config.MODEL_ROLES:
+                raise ValueError(f"{model!r} is not on today's roster "
+                                 f"({sorted(config.MODEL_ROLES)})")
+            need = "planner" if role in _GH_OPS else role
+            if not config.model_may(model, need):
+                raise ValueError(
+                    f"{model} may hold {sorted(config.MODEL_ROLES[model])}, "
+                    f"not {role!r}")
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    def argv(self, prompt, session_id):
+        # session_id unused: the headless profile cannot resume (verified
+        # against `dsh --profile headless --help` on 0.1.5-rc.1).
+        return [config.dsh_bin(), "--profile", "headless", prompt]
+
+    async def _once(self, prompt, worktree, session_id, task_id, attempt):
+        argv = self.argv(prompt, session_id)
+        t0 = time.monotonic()
+        env = dict(
+            os.environ, PWD=str(worktree),
+            # dsh talks to the deepseek-official provider under these names
+            # (see ~/.dsh/cordis.patch.yml); values mirror the ARC endpoint
+            # every other harness uses.
+            DEEPSEEK_API_KEY=config.API_KEY,
+            DEEPSEEK_BASE_URL=config.BASE_URL,
+            DSH_TELEMETRY_MODE="DISABLED",
+            # Headless runs cannot answer an approval prompt — this flips the
+            # approval policy to `never`; without it the default
+            # workspace-write preset stalls forever on the first tool call.
+            DSH_PERMISSION_MODE="danger-full-access",
+        )
+        TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
+        proc = await spawn(argv, cwd=worktree, env=env)
+        try:
+            return await self._pump_dual(proc, argv, tpath, t0, task_id, attempt)
+        finally:
+            await _terminate(proc)
+
+    async def _pump_dual(self, proc, argv, tpath, t0, task_id, attempt):
+        """Driver._pump, multiplexed over both of dsh's pipes.
+
+        Identical stall/deadline/heartbeat/forensics semantics to the stock
+        pump — kept as a copy rather than shared because interleaving a
+        generic stream set into _pump risks the harness (opencode) the whole
+        fleet already runs on. A chunk on EITHER pipe resets the idle clock:
+        dsh is silent on stdout while thinking and silent on stderr while
+        printing the final answer.
+        """
+        out_chunks, err_chunks = [], []
+        q = asyncio.Queue()
+
+        async def feed(stream, tag):
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    break
+                q.put_nowait((tag, chunk))
+            q.put_nowait((tag, None))
+
+        readers = [asyncio.create_task(feed(proc.stdout, "out")),
+                   asyncio.create_task(feed(proc.stderr, "err"))]
+        open_streams = 2
+        last_chunk_t = time.monotonic()
+        last_progress_t = time.monotonic()
+        last_hb_t = time.monotonic()
+        last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
+        last_cpu = None
+        deadline = t0 + config.DRIVER_TIMEOUT
+        interval = config.DRIVER_PROGRESS_INTERVAL
+        idle_budget = config.idle_timeout_for(self.role)
+
+        def written():
+            return sum(len(c) for c in out_chunks) + sum(len(c) for c in err_chunks)
+
+        try:
+            with open(tpath, "wb") as fh:
+                while open_streams:
+                    now = time.monotonic()
+                    idle_for = now - last_chunk_t
+                    if idle_for >= idle_budget or now >= deadline:
+                        raise asyncio.TimeoutError
+                    if (now - last_hb_t >= HEARTBEAT_INTERVAL
+                            and last_hb != (written(), round(idle_for, 1))):
+                        events.emit("driver.heartbeat", harness=self.harness,
+                                    model=self.model, role=self.role,
+                                    task=task_id, attempt=attempt,
+                                    bytes=written(), idle_s=round(idle_for, 1),
+                                    seconds=round(now - t0, 1))
+                        last_hb_t = now
+                        last_hb = (written(), round(idle_for, 1))
+                    wait = max(0.05, min(deadline - now,
+                                         idle_budget - idle_for,
+                                         interval - (now - last_progress_t),
+                                         HEARTBEAT_INTERVAL - (now - last_hb_t)))
+                    try:
+                        tag, chunk = await asyncio.wait_for(q.get(), wait)
+                    except asyncio.TimeoutError:
+                        if time.monotonic() - last_progress_t >= interval:
+                            snap = proc_snapshot(proc.pid)
+                            cpu = snap.get("cpu_s")
+                            events.emit(
+                                "driver.progress", harness=self.harness,
+                                model=self.model, role=self.role, task=task_id,
+                                attempt=attempt, bytes=written(),
+                                idle_s=round(time.monotonic() - last_chunk_t, 1),
+                                elapsed_s=round(time.monotonic() - t0, 1),
+                                cpu_delta_s=(round(cpu - last_cpu, 2)
+                                             if cpu is not None and last_cpu is not None
+                                             else None),
+                                **snap)
+                            last_cpu = cpu
+                            last_progress_t = time.monotonic()
+                        continue
+                    if chunk is None:
+                        open_streams -= 1
+                        continue
+                    (out_chunks if tag == "out" else err_chunks).append(chunk)
+                    last_chunk_t = time.monotonic()
+                    fh.write(chunk)
+                    fh.flush()
+        except asyncio.TimeoutError:
+            # Evidence BEFORE the kill, same as the stock pump; there is no
+            # kimi-style wire log to check for an unanswered request.
+            snap = proc_snapshot(proc.pid)
+            partial = (b"".join(err_chunks) + b"\n" + b"".join(out_chunks)
+                       ).decode(errors="replace")[-6000:]
+            await _terminate(proc)
+            for r in readers:
+                r.cancel()
+            idle = round(time.monotonic() - last_chunk_t, 1)
+            total = round(time.monotonic() - t0, 1)
+            stalled = idle >= idle_budget - 1
+            kind = "stalled" if stalled else "timed out"
+            limit = (f"{idle_budget}s idle" if stalled
+                     else f"{config.DRIVER_TIMEOUT}s total")
+            cpu_delta = (round(snap["cpu_s"] - last_cpu, 2)
+                         if last_cpu is not None and "cpu_s" in snap else None)
+            blocked = (snap.get("state") in ("S", "D") and (cpu_delta or 0) < 0.5)
+            events.emit("driver.stalled" if stalled else "driver.timeout",
+                        harness=self.harness, model=self.model, role=self.role,
+                        task=task_id, attempt=attempt, bytes=written(),
+                        idle_s=idle, elapsed_s=total,
+                        cpu_delta_s=cpu_delta, blocked=blocked,
+                        last_activity=activity_tail(partial),
+                        records=partial.count("\n"), **snap)
+            detail = "; process blocked with no CPU burn" if blocked else ""
+            raise DriverError(
+                f"{argv[0]} {kind} after {limit} "
+                f"(total {total}s, idle {idle}s, {written()} bytes{detail})")
+        for r in readers:
+            await r
+        await proc.wait()
+        out = b"".join(out_chunks).decode(errors="replace")
+        err = b"".join(err_chunks).decode(errors="replace")
+        if proc.returncode != 0:
+            # dsh names its failures on stderr (`dsh: RATE_LIMIT: ...`); fall
+            # back to the stdout tail the way the stock pump falls back to
+            # stderr's, so an exit can never report "exited 1: " with nothing.
+            detail = err.strip()
+            if not detail:
+                detail = out.strip()[-300:] or "no output on stdout or stderr"
+            raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}")
+        return DriverResult(self.harness, self.model, self.role, proc.returncode,
+                            None, str(tpath), out.strip()[-3000:],
+                            round(time.monotonic() - t0, 1), 0, 0, 0)

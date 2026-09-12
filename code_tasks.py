@@ -19,7 +19,7 @@ import errors
 import events
 import gitstore
 import drivers
-from drivers import DriverError, KimiDriver, OpencodeDriver, transcript_tokens
+from drivers import DeepseekDriver, DriverError, KimiDriver, OpencodeDriver, transcript_tokens
 from graph import Graph, GraphError
 
 log = logging.getLogger("code-tasks")
@@ -47,13 +47,16 @@ def load_taskfile(path, policy=None):
     repo = Path(data["project"]["repo"]).resolve()
     pol = policy or {}
     models = set(config.IMPLEMENTER_MODELS) | set(pol.get("implementers", []))
-    # Review-capable families, from the roster: all three today (deepseek,
-    # kimi, glm) since DeepSeek-V4.1-Flash-thinking-max took the hard tier on
-    # 2026-09-12. A taskfile written for a family that has since left is
-    # remapped below rather than rejected — the plan is still good.
+    # Review-capable families, from the roster: two today (deepseek, glm),
+    # since DeepSeek-V4.1-Flash-thinking-max gained reviewer on 2026-09-12.
+    # A taskfile written for a family that has since left is remapped below
+    # rather than rejected — the plan is still good.
     reviewers = tuple(pol.get("reviewers", tuple(config.REVIEW_FAMILIES)))
     review_on = pol.get("review", True)
-    allow_self = bool(pol.get("allow_self_review"))
+    # config.ALLOW_SAME_FAMILY_REVIEW is the operator's TEMPORARY all-DeepSeek
+    # routing (2026-09-12, GLM backend unstable); suspends cross-review — see
+    # the flag's comment in config.py.
+    allow_self = bool(pol.get("allow_self_review")) or config.ALLOW_SAME_FAMILY_REVIEW
     tasks = {}
     for t in data["project"]["tasks"]:
         tid = t["id"]
@@ -444,7 +447,8 @@ def _eligible_pr_reviewers(impl_fam, pol):
     """
     out = []
     for m in config.ESCALATION_PATH[::-1]:  # strongest first, from the roster
-        if config.MODEL_FAMILY.get(m) == impl_fam:
+        if (config.MODEL_FAMILY.get(m) == impl_fam
+                and not config.ALLOW_SAME_FAMILY_REVIEW):
             continue
         try:
             _driver(m, "pr_reviewer", pol)
@@ -661,14 +665,16 @@ def _parse_approval(text):
 
 
 def _driver(model, role, policy):
-    """Implementer/reviewer driver. policy['harness'] maps model -> kimi|opencode
-    (bench variants); default keeps the governed routing (Kimi-K3 -> kimi CLI)."""
+    """Implementer/reviewer driver. policy['harness'] maps model -> kimi|opencode|dsh
+    (bench variants); default follows the roster row's harness."""
     pol = policy or {}
     harness = pol.get("harness", {}).get(model)
     if harness is None:
         harness = config.MODEL_HARNESS.get(model, "opencode")
     if harness == "kimi":
         return KimiDriver(role, bench=bool(pol))
+    if harness == "dsh":
+        return DeepseekDriver(model, role, bench=bool(pol))
     return OpencodeDriver(model, role, bench=bool(pol))
 
 

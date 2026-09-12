@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,17 @@ load_dotenv(ROOT / ".env")
 API_KEY = os.getenv("ARC_API_KEY", "")
 BASE_URL = os.getenv("ARC_BASE_URL", "https://llm-api.arc.vt.edu/api/v1")
 DB_PATH = os.getenv("ARC_DB_PATH") or str(ROOT / "orchestrator.db")
+
+
+def dsh_bin():
+    """The dsh CLI binary (DeepSeek's harness, npm-installed 2026-09-12).
+
+    npm's global bin is not on every shell's PATH (the service/shell that
+    spawns harnesses may not be a login shell), so prefer the recorded install
+    location over a bare name that would fail to exec with FileNotFoundError.
+    """
+    found = shutil.which(os.getenv("ARC_DSH_BIN", "dsh"))
+    return found or str(Path.home() / ".local" / "opt" / "node" / "bin" / "dsh")
 
 
 @dataclass(frozen=True)
@@ -358,8 +370,13 @@ ROSTER = [
     # load. The 10 is the provider-published per-account concurrency on the
     # refreshed ARC docs page (docs.arc.vt.edu, 2026-09-12), per the operator —
     # not the carried-over measured 5; the driver semaphore stays the derived
-    # 10 // 2 = 5 while opencode holds ~2 API sessions per process.
-    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "opencode", "medium", 10,
+    # 10 // 2 = 5 while dsh is assumed (unmeasured, 2026-09-12) to hold ~2 API
+    # sessions per process the way opencode does.
+    # Harness: "dsh" — DeepSeek's own harness (github.com/deepseek-ai/
+    # deepseek-harness), swapped in by operator decision 2026-09-12 instead of
+    # opencode for this model. See drivers.DeepseekDriver for the streaming
+    # contract that forced a whole new driver (stdout is final-answer-only).
+    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "dsh",      "medium", 10,
      ("implementer", "reviewer", "pr_reviewer"),           "2026-09-12", None),
 ]
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
@@ -501,6 +518,17 @@ _DEFAULT_PATH = [m for tier in TIER_ORDER for m, _f, _h, t, _c, _r in _LIVE if t
 
 
 PR_REVIEWERS = max(1, min(PR_REVIEWERS_WANTED, len(PR_REVIEW_FAMILIES) - 1))
+
+
+# OPERATOR-AUTHORIZED 2026-09-12, TEMPORARY: while GLM-5.3's provider backend
+# was unstable (90s+ stalls and capacity flapping, measured and logged
+# 2026-09-12), review may be SAME-family — DeepSeek reviewing DeepSeek — so
+# the fleet is not down whenever GLM-5.3 is. This suspends the cross-review
+# halves of AGENTS.md Rule 2 and Rule 5: a review is no longer an independent
+# reading by a different harness, only a second pass by the same model. Remove
+# this (and the two consumption points in code_tasks.py) once GLM-5.3 is
+# stable again.
+ALLOW_SAME_FAMILY_REVIEW = os.getenv("ARC_ALLOW_SAME_FAMILY_REVIEW", "") == "1"
 
 
 def model_may(model, role):
@@ -650,12 +678,19 @@ def kimi_plan_mode_on():
 # GLM was the only model to show it because it is the most-used opencode model
 # and the only one whose account limit (4) is small enough for the doubling to
 # bite before the harness pool (5) binds first. The factor is a property of the
-# HARNESS, not of the model, so it applies to all three opencode models.
-_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1}
+# HARNESS, not of the model, so it applies to every model on that harness.
+# dsh's factor is ASSUMED 2 until measured: its shipped base profile includes
+# subagent-spawning tools, like opencode's — re-measure before trusting a
+# higher cap.
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2}
 
 
 def _harness_of_model(model):
-    return "kimi" if model == "Kimi-K3" else "opencode"
+    # Derive from the roster so a model's harness follows its ROSTER row —
+    # this function predates MODEL_HARNESS and hard-coded "kimi or opencode",
+    # which would have silently kept DeepSeek at the opencode factor after it
+    # moved to dsh on 2026-09-12.
+    return MODEL_HARNESS.get(model, "opencode")
 
 
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
@@ -681,7 +716,10 @@ _MODEL_DRIVER_CAP = {
 # "opencode exited 1: " and retried four times per task — burning the retry
 # ladder on self-inflicted contention and blaming the provider for it. The
 # kimi CLI has no shared store, so its limit is just Kimi-K3's own cap.
-_HARNESS_CAP = {"opencode": 5, "kimi": _MEASURED_CONCURRENCY.get("Kimi-K3", 3)}
+# dsh (added 2026-09-12) keeps its state as per-profile JSON files under
+# $DSH_HOME — no central store like opencode's sqlite — so it gets no measured
+# cliff yet; 5 mirrors opencode until a load test says otherwise.
+_HARNESS_CAP = {"opencode": 5, "dsh": 5}
 
 
 def kimi_wire_model():

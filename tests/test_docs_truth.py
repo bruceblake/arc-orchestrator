@@ -167,9 +167,11 @@ class TestDocsTruthArcEnvVars(unittest.TestCase):
         # config.harness_limit builds its override name the same way
         # driver_limit does — os.getenv(f"ARC_HARNESS_LIMIT_{harness.upper()}")
         # — so the literal never appears in config.py and the scan cannot see
-        # it. Expanded here exactly like the two prefixes above.
-        for harness in ("OPENCODE", "KIMI"):
-            defined.add("ARC_HARNESS_LIMIT_" + harness)
+        # it. Expanded from the configured harness set (was a hardcoded
+        # ("OPENCODE", "KIMI") tuple, which demanded docs for a harness that
+        # had left and none for dsh when it arrived, 2026-09-12).
+        for harness in config._HARNESS_CAP:
+            defined.add("ARC_HARNESS_LIMIT_" + harness.upper())
         cls.defined = defined
         cls.mentioned = set(re.findall(r"ARC_[A-Z0-9_]+", DOC_TEXT))
 

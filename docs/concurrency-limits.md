@@ -74,17 +74,19 @@ Past five it fails fast with an **empty stderr**. The fleet logged that as
 and its retry ladder repeated it four times per task, so self-inflicted
 contention looked like a provider outage. 42 such errors in half an hour.
 
-`config.harness_limit(harness)` caps it (opencode 5, kimi 3), enforced by
+`config.harness_limit(harness)` caps it (opencode 5, dsh 5), enforced by
 `drivers._harness_gate` in-process and by a `harness:<name>` row in the same
 `driver_leases` table across processes.
 
 | Harness | Cap | Override |
 |---|---|---|
-| opencode (GLM, DeepSeek) | 5 | `ARC_HARNESS_LIMIT_OPENCODE` |
-| kimi (Kimi-K3 only) | 3 | `ARC_HARNESS_LIMIT_KIMI` |
+| opencode (GLM-5.3) | 5 | `ARC_HARNESS_LIMIT_OPENCODE` |
+| dsh (DeepSeek-V4.1-Flash-thinking-max) | 5 | `ARC_HARNESS_LIMIT_DSH` |
 
-The kimi CLI keeps no shared store, so its cap is simply Kimi-K3's own and
-raising it buys nothing.
+dsh (DeepSeek's own harness, swapped in 2026-09-12) keeps its state as
+per-profile JSON files under `$DSH_HOME` — no central store like opencode's
+sqlite — so the opencode cliff does not obviously transfer; 5 mirrors it
+until a load test says otherwise.
 
 Acquisition order is **model gate → model lease → harness gate → harness
 lease**, always. One global order means no circular wait, and the scarce
@@ -349,6 +351,22 @@ are overridable from `.env`.
 Note `config.MAX_RETRIES` is also used by `pool.py` for API request retries
 in the research workload; in the code workload the driver retry loop above is
 what governs a single harness firing.
+
+### `ARC_DSH_BIN` — where the dsh CLI lives
+
+`config.dsh_bin()` resolves the DeepSeek harness binary: `$ARC_DSH_BIN` when
+set, otherwise `dsh` found on PATH, otherwise the npm-global install location
+recorded on 2026-09-12 (`~/.local/opt/node/bin/dsh`).
+
+### `ARC_ALLOW_SAME_FAMILY_REVIEW` — TEMPORARY review-policy override
+
+Operator-authorized 2026-09-12 while GLM-5.3's provider backend is unstable:
+setting this to `1` lets a task's pre-merge review and its PR reviewers come
+from the implementer's own family (DeepSeek reviewing DeepSeek). Consumed by
+`code_tasks.load_taskfile` and `code_tasks._eligible_pr_reviewers`. It
+suspends the cross-review requirement — reviews are no longer an independent
+reading by a different harness — so take it back out as soon as GLM-5.3 is
+stable again.
 
 ## 6. Worked example — 12 tasks, first wave
 
