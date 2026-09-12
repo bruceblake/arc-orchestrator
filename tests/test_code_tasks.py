@@ -1302,3 +1302,76 @@ class ACrashedPreMergeReviewerIsNotARejection(unittest.TestCase):
 
     def test_a_passing_review_is_unaffected(self):
         self.assertTrue(self._fires("publish_t1", {"pass": True}))
+
+
+class AJoinWaitsForEveryDependency(unittest.TestCase):
+    """`deps` used to wire only the LAST dependency.
+
+    A task declaring deps ["a", "b"] waited for b and started the moment b
+    merged, whether or not a had. If a was the slower of the two, the dependent
+    branched from a base missing the code it depended on. That is not a join.
+    The engine has had a real one (gather=True) the whole time — the research
+    and build graphs use it; the code graph never did.
+    """
+
+    def _graph(self, deps, merged=()):
+        tasks = [{"id": "a", "title": "a", "prompt": "p", "model": "gpt-oss-120b", "reviewer": "kimi"},
+                 {"id": "b", "title": "b", "prompt": "p", "model": "gpt-oss-120b", "reviewer": "kimi"},
+                 {"id": "c", "title": "c", "prompt": "p", "model": "gpt-oss-120b", "reviewer": "kimi",
+                  "deps": deps}]
+        prior = [{"id": m, "status": "merged", "model": "gpt-oss-120b", "error": None} for m in merged]
+        ts = code_tasks.load_taskfile(taskfile(tasks))
+        with capture_events():
+            return code_tasks.build_code_graph(FakeStore(prior), ts, taskfile="tf.json")
+
+    def test_two_deps_gate_through_a_gather_node(self):
+        g = self._graph(["a", "b"])
+        self.assertIn("join_c", g.nodes)
+        self.assertTrue(g.nodes["join_c"].gather)
+        self.assertEqual(sorted(e.src for e in g.edges if e.dst == "join_c"),
+                         ["pr_merge_a", "pr_merge_b"])
+
+    def test_the_join_feeds_the_dependents_first_node(self):
+        g = self._graph(["a", "b"])
+        self.assertTrue(any(e.src == "join_c" and e.dst == "alloc_c" for e in g.edges))
+
+    def test_neither_dep_alone_can_release_the_dependent(self):
+        # The bug: pr_merge_b -> alloc_c directly. Neither dep may now do that.
+        g = self._graph(["a", "b"])
+        direct = [e.src for e in g.edges if e.dst == "alloc_c" and e.src.startswith("pr_merge_")]
+        self.assertEqual(direct, [])
+
+    def test_a_single_dep_keeps_the_direct_edge(self):
+        g = self._graph(["b"])
+        self.assertNotIn("join_c", g.nodes)
+        self.assertTrue(any(e.src == "pr_merge_b" and e.dst == "alloc_c" for e in g.edges))
+
+    def test_a_merged_dependent_also_joins_on_every_dep(self):
+        # make_skip had the same deps[-1] wiring.
+        g = self._graph(["a", "b"], merged={"c"})
+        self.assertIn("join_c", g.nodes)
+        self.assertTrue(any(e.src == "join_c" and e.dst == "publish_c" for e in g.edges))
+
+    def test_the_join_actually_waits_at_runtime(self):
+        """Engine-level: the gather node must not fire until BOTH sources have."""
+        import asyncio
+        from graph import Graph
+        g = Graph("j"); seen = []
+        slow_done = asyncio.Event()
+
+        async def fast(ctx): return {"n": "fast"}
+        async def slow(ctx):
+            await slow_done.wait(); return {"n": "slow"}
+        async def joined(ctx):
+            seen.append(sorted(ctx["results"])); return {}
+        g.node("fast", fast); g.node("slow", slow); g.node("join", joined, gather=True)
+        g.edge("fast", "join"); g.edge("slow", "join"); g.start("fast"); g.start("slow")
+
+        async def run():
+            task = asyncio.create_task(g.run({}))
+            await asyncio.sleep(0.05)
+            self.assertEqual(seen, [], "join fired before the slow source finished")
+            slow_done.set()
+            await task
+        asyncio.run(run())
+        self.assertEqual(seen, [["fast", "slow"]])

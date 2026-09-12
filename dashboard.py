@@ -2727,16 +2727,48 @@ def _graph_topology(g):
 
 
 def _build_graph_topologies():
-    from pool import ArcPool
-    from work import Roles, build_round_graph
-    from build_work import build_build_graph
+    """The shape of the pipeline the fleet ACTUALLY runs, derived from the code.
 
-    pool = ArcPool(dry_run=True)
-    store = Store(":memory:")
-    round_g = build_round_graph(pool, store, Roles(), {})
-    build_g = build_build_graph(pool, store, build_id=0, iteration=1, mode="create",
-                                out_dir=Path("."), current_files={})
-    return {"round": _graph_topology(round_g), "build": _graph_topology(build_g)}
+    This used to render two other workloads — the research round and the
+    Minecraft build — as static diagrams, on the one page an operator watches.
+    Neither had run in days, and the code-tasks pipeline that had run all day
+    was not depicted at all.
+
+    The topology is built from code_tasks.build_code_graph on a one-task
+    synthetic taskfile and the per-task suffix stripped, so the diagram is
+    generated from the same code that constructs the live graph and cannot
+    drift from it. The loops it shows — fix, escalation, send-back, resync,
+    inconclusive retry — are exactly the ones that are not obvious from the
+    happy path and that a reader most needs to see.
+    """
+    import json as _json
+    import tempfile
+    import code_tasks
+    tf = {"project": {"repo": str(config.ROOT), "title": "shape",
+                      "tasks": [{"id": "t", "title": "t", "prompt": "p",
+                                 "model": "DeepSeek-V4-Flash", "reviewer": "kimi",
+                                 "verify_cmd": "", "files_hint": [], "deps": []}]}}
+    path = Path(tempfile.mkdtemp()) / "shape.json"
+    path.write_text(_json.dumps(tf))
+    try:
+        tasks = code_tasks.load_taskfile(path)
+        g = code_tasks.build_code_graph(None, tasks, taskfile=None)
+    finally:
+        try:
+            path.unlink()
+            path.parent.rmdir()
+        except OSError:
+            pass
+    topo = _graph_topology(g)
+
+    def strip(n):
+        return n[:-2] if n.endswith("_t") else n
+    topo["name"] = "code-tasks pipeline"
+    topo["starts"] = [strip(n) for n in topo["starts"]]
+    topo["nodes"] = [{"name": strip(n["name"]), "gather": n["gather"]} for n in topo["nodes"]]
+    topo["edges"] = [{"src": strip(e["src"]), "dst": strip(e["dst"]),
+                      "conditional": e["conditional"]} for e in topo["edges"]]
+    return {"code": topo}
 
 
 class Handler(BaseHTTPRequestHandler):

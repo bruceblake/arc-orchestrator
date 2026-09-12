@@ -698,6 +698,34 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             events.emit("task.pr_skipped", task=tid,
                         reason=f"pr hook: {exc}"[:200], fingerprint=fp)
 
+    def wire_deps(t, target):
+        """Gate `target` on EVERY dependency merging, not just the last one.
+
+        This used to be `g.edge(f"pr_merge_{t['deps'][-1]}", target)` — the
+        LAST dep only. A task declaring deps ["a", "b"] waited for b and
+        started the moment b merged, whether or not a had; if a was the slower
+        of the two, the dependent branched from a base missing the code it
+        depended on. That is not a join, and the engine has had a real one
+        (gather=True) the whole time — the research and build graphs use it,
+        the code graph never did.
+
+        One dep keeps the direct edge. Two or more get a gather node that
+        waits for all of them.
+        """
+        deps = t["deps"]
+        if len(deps) == 1:
+            g.edge(f"pr_merge_{deps[0]}", target)
+            return
+        join = f"join_{t['id']}"
+
+        async def joined(ctx):
+            return {"joined": list(deps)}
+
+        g.node(join, joined, gather=True)
+        for d in deps:
+            g.edge(f"pr_merge_{d}", join)
+        g.edge(join, target)
+
     def make_skip(t):
         """Merged task: collapse to a stub publish so dependents see it as done."""
         tid = t["id"]
@@ -712,7 +740,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         g.node(f"pr_merge_{tid}", pr_merge)
         g.edge(f"publish_{tid}", f"pr_merge_{tid}")
         if t["deps"]:
-            g.edge(f"pr_merge_{t['deps'][-1]}", f"publish_{tid}")
+            wire_deps(t, f"publish_{tid}")
         else:
             heads.append(f"publish_{tid}")
 
@@ -1355,10 +1383,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # pushed branch and an open pull request.
         first = "publish" if prior_status in ("conflict", "in_review") else "alloc"
         if t["deps"]:
-            # Wait for the dep's PR to MERGE into the base branch, not just to
-            # open — otherwise a dependent branches from a base that lacks the
-            # code it depends on.
-            g.edge(f"pr_merge_{t['deps'][-1]}", f"{first}_{tid}")
+            # Wait for EVERY dep's PR to MERGE into the base branch, not just
+            # to open — otherwise a dependent branches from a base that lacks
+            # the code it depends on.
+            wire_deps(t, f"{first}_{tid}")
         else:
             heads.append(f"{first}_{tid}")
 
