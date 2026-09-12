@@ -13,6 +13,7 @@ import unittest
 from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import config
 import dashboard
@@ -49,7 +50,7 @@ class UsageRangeBase(unittest.TestCase):
         Path(config.EVENTS_LOG).write_text(
             "".join(json.dumps(e) + "\n" for e in events), encoding="utf-8")
 
-    def done(self, ts, model="gpt-oss-120b", tokens=100):
+    def done(self, ts, model=config.ESCALATION_PATH[0], tokens=100):
         return {"ts": ts, "type": "driver.done", "harness": "opencode",
                 "model": model, "role": "implementer", "task": "t1", "attempt": 1,
                 "tokens": tokens, "prompt_tokens": tokens // 2,
@@ -110,7 +111,7 @@ class UsageRangeWindow(UsageRangeBase):
         """A model that has no traffic inside a window must not appear at all,
         not appear with stale totals still attached."""
         now = time.time()
-        self.write_events(self.done(now - 7200, model="gpt-oss-120b"))
+        self.write_events(self.done(now - 7200, model=config.ESCALATION_PATH[0]))
         self.assertEqual(dashboard._usage(None, "1h")["models"], [])
         self.assertEqual(len(dashboard._usage(None, "24h")["models"]), 1)
 
@@ -132,7 +133,7 @@ class UsageRangeInflight(UsageRangeBase):
         window: cutting it from the 1h view would hide a real account-cap
         breach while still showing 24h worth of dead history."""
         now = time.time()
-        base = {"harness": "kimi", "model": "Kimi-K3", "role": "implementer",
+        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 30, "type": "driver.start", **base})
         for r in ("1h", "24h", "7d", "all"):
@@ -158,7 +159,7 @@ class UsageRangeInflight(UsageRangeBase):
                         "test needs a start that is not yet pruned as stale")
         self.write_events({"ts": now - age, "type": "request_start",
                            "req_id": "req-1", "family": "gpt-oss",
-                           "model": "gpt-oss-120b"})
+                           "model": config.ESCALATION_PATH[0]})
         res = dashboard._usage(None, "1h")
         self.assertEqual(len(res["inflight"]), 1)
         self.assertEqual(res["inflight"][0]["source"], "arc-pool")
@@ -178,13 +179,13 @@ class UsageRangeKimi(UsageRangeBase):
     def _install_kimi(self, now):
         old, rec = now - 7200, now - 300
         dashboard._kimi_code_usage = lambda now, fleet_names=frozenset(): {
-            "models": [{"model": "Kimi-K3", "pretty": "Kimi K3", "family": "kimi-code",
+            "models": [{"model": STRONGEST, "pretty": "Kimi K3", "family": "kimi-code",
                         "source": "kimi-code", "requests": 2, "ok": 2, "errors": 0,
                         "failed_attempts": 0, "tokens": 300, "prompt_tokens": 200,
                         "completion_tokens": 100, "avg_latency_ms": None, "last_ts": rec}],
             "inflight": [],
             "points": [(old, 1, 150), (rec, 1, 150)],
-            "turns": [(old, "Kimi-K3", 1, 100, 50, 1), (rec, "Kimi-K3", 1, 100, 50, 1)],
+            "turns": [(old, STRONGEST, 1, 100, 50, 1), (rec, STRONGEST, 1, 100, 50, 1)],
         }
 
     @staticmethod
@@ -201,7 +202,7 @@ class UsageRangeKimi(UsageRangeBase):
         self.assertEqual(res["totals"]["requests"], 1)
         self.assertEqual(res["totals"]["tokens"], 150)
         self.assertEqual(len(res["models"]), 1)
-        self.assertEqual(res["models"][0]["model"], "Kimi-K3")
+        self.assertEqual(res["models"][0]["model"], STRONGEST)
         self.assertEqual(res["models"][0]["requests"], 1)
         fam = self._kimi_family(res)
         self.assertEqual(fam["requests"], 1)

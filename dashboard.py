@@ -36,7 +36,8 @@ _lines_cache = {"key": None, "lines": []}
 MAX_EVENTS_PER_RESPONSE = 3000
 
 PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
-          "DeepSeek-V4-Flash": "DeepSeek V4 Flash"}
+          "DeepSeek-V4-Flash": "DeepSeek V4 Flash",
+          "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash"}
 
 # Rolling windows plus one calendar window. "today" is deliberately not a
 # synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
@@ -974,8 +975,8 @@ def _pid_alive(pid):
 
 
 def _harness_of(model):
-    """Which local harness runs this model. Mirrors code_tasks._driver."""
-    return "kimi" if model == "Kimi-K3" else "opencode"
+    """Which local harness runs this model, from the roster."""
+    return config.MODEL_HARNESS.get(model, "opencode")
 
 
 def _first_event_at_or_after(lines, ts):
@@ -2049,9 +2050,17 @@ def _create_project(body):
         for opt in ("model", "reviewer", "verify_cmd", "base"):
             if isinstance(t.get(opt), str) and t[opt].strip():
                 entry[opt] = t[opt].strip()
-        entry.setdefault("model", "DeepSeek-V4-Flash")
+        # The entry tier of TODAY'S roster, never a literal: this default
+        # would have written DeepSeek-V4-Flash into new taskfiles the morning
+        # after it was withdrawn, and every one of them would then fail
+        # validation with "must be an implementer".
+        entry.setdefault("model", config.ESCALATION_PATH[0])
         if "reviewer" not in entry:
-            entry["reviewer"] = {"Kimi-K3": "glm", "GLM-5.3": "kimi"}.get(entry["model"], "kimi")
+            # Cross-family, from the roster — the literal {Kimi: glm, GLM: kimi}
+            # map this replaces would have defaulted every task to "kimi" the
+            # day after Kimi left.
+            entry["reviewer"] = (config.cross_family_reviewer(entry["model"])
+                                 or next(iter(config.REVIEW_FAMILIES), "glm"))
         deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
         if isinstance(deps_in, list):
             deps = [d for d in deps_in if isinstance(d, str)]
@@ -2683,6 +2692,86 @@ def _retry_task(body):
             "launched_pid": launched, "note": launch_note}, 200
 
 
+def _escalate_task(body):
+    """Move ONE task to a stronger model, by the operator's judgement.
+
+    The fix budget escalates only after repeated failure. The operator can see
+    a task struggling well before that — a planner on gpt-oss producing thin
+    task lists, an implementer looping on a design problem it cannot hold in
+    context — and should not have to burn three rounds to prove it.
+
+    Two writes so the change sticks in both worlds:
+      - a `model_overrides` row, which cur_model() reads at every node boundary,
+        so a RUNNING task moves up at its very next step without a restart;
+      - the taskfile's `model` field, so a fresh run of the project starts on
+        the new model rather than rediscovering the problem from the bottom.
+    The reviewer follows automatically: it is derived from the implementer's
+    family at every call, so a cross-family reviewer stays cross-family.
+    """
+    import code_tasks
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    fname = body.get("file") or ""
+    if not re.fullmatch(r"[\w.-]+\.json", fname):
+        return {"error": "bad file name"}, 400
+    tid = body.get("task") or ""
+    path = Path(config.TASKS_DIR) / fname
+    if not path.is_file():
+        return {"error": "not found"}, 404
+    try:
+        doc = json.loads(path.read_text())
+        tasks = doc["project"]["tasks"]
+    except (ValueError, KeyError, TypeError) as exc:
+        return {"error": f"taskfile unreadable: {exc}"[:200]}, 500
+    t = next((x for x in tasks if x.get("id") == tid), None)
+    if t is None:
+        return {"error": "task id not found"}, 404
+
+    row = next((r for r in Handler.store.code_tasks_all()
+                if r.get("taskfile") and Path(r["taskfile"]).name == fname
+                and r.get("id") == tid), None)
+    current = (Handler.store.get_model_override(row["taskfile"], tid) if row else None) \
+        or (row or {}).get("model") or t.get("model")
+    target = body.get("to_model")
+    if not target:
+        target = code_tasks._next_tier(current)
+        if target is None:
+            return {"error": f"{current} is already the top tier"}, 409
+    if target not in config.IMPLEMENTER_MODELS:
+        return {"error": f"unknown model {target!r}; choose from "
+                         f"{sorted(config.IMPLEMENTER_MODELS)}"}, 400
+    # Escalation is monotonic: refuse to move DOWN a tier.
+    ci, ni = code_tasks._tier_index(current), code_tasks._tier_index(target)
+    ci = -1 if ci is None else ci
+    ni = -1 if ni is None else ni
+    if ni <= ci and target != current:
+        return {"error": f"{target} is not above {current}; escalation only moves up"}, 409
+    if target == current:
+        return {"error": f"already on {current}"}, 409
+
+    reason = (body.get("reason") or "operator escalation")[:200]
+    key = row["taskfile"] if row else str(path)
+    Handler.store.set_model_override(key, tid, target, reason)
+    # the taskfile too, so a fresh run starts here
+    t["model"] = target
+    t["reviewer"] = code_tasks._reviewer_for(t, target)
+    _write_taskfile_atomically(path, doc)
+    if row:
+        Handler.store.upsert_code_task(row["taskfile"], tid, row["title"], target,
+                                       t.get("reviewer") or row.get("reviewer"),
+                                       row.get("status") or "pending")
+    _emit_event("task.escalated", taskfile=str(path), task=tid, from_model=current,
+                to_model=target, manual=True, reason=reason)
+    import reconcile
+    live = any(r.get("taskfile") and Path(r["taskfile"]).name == fname
+               for r in reconcile.live_runs())
+    return {"file": fname, "task": tid, "from": current, "to": target,
+            "reviewer": t.get("reviewer"),
+            "note": ("a run is live — it will use the new model at its next step"
+                     if live else "no run is live — the next run starts on the new model"),
+            "live": live}, 200
+
+
 def _stop_project(body):
     """SIGTERM every `code run` process owning this task file.
 
@@ -2746,7 +2835,8 @@ def _build_graph_topologies():
     import code_tasks
     tf = {"project": {"repo": str(config.ROOT), "title": "shape",
                       "tasks": [{"id": "t", "title": "t", "prompt": "p",
-                                 "model": "DeepSeek-V4-Flash", "reviewer": "kimi",
+                                 "model": config.ESCALATION_PATH[0],
+                                 "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0]),
                                  "verify_cmd": "", "files_hint": [], "deps": []}]}}
     path = Path(tempfile.mkdtemp()) / "shape.json"
     path.write_text(_json.dumps(tf))
@@ -2821,6 +2911,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/queue":
                 return self._json(_queue(Handler.store))
+            if u.path == "/api/audit":
+                import scheduler_audit
+                rep = scheduler_audit.latest()
+                return self._json({"ready": rep is not None, "report": rep,
+                                   "last_run": scheduler_audit.last_run(),
+                                   "due": scheduler_audit.due()})
             if u.path == "/api/errors":
                 q = parse_qs(u.query)
                 return self._json(_errors(q.get("range", ["24h"])[0],
@@ -2992,6 +3088,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/projects/retry-task":
                 obj, code = _retry_task(body)
                 return self._json(obj, code)
+            if u.path == "/api/projects/escalate-task":
+                obj, code = _escalate_task(body)
+                return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
             pass
@@ -3050,6 +3149,16 @@ def serve(port=None, db_path=None):
             raise SystemExit(1)
         raise
     log.info("dashboard on http://0.0.0.0:%d (db=%s, events=%s)", port, db_path, config.EVENTS_LOG)
+    # The daily audit runs from here. WSL has no working cron and sleeps when
+    # idle; this server is the process that is awake when the operator is.
+    try:
+        import scheduler_audit
+        scheduler_audit.start(Handler.store)
+        nxt = scheduler_audit.last_run()
+        log.info("daily audit scheduler armed (last run: %s)",
+                 time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt)) if nxt else "never — will run now")
+    except Exception as exc:
+        log.error("daily audit scheduler did not start: %s", exc)
     print(f"dashboard: http://localhost:{port}", flush=True)
     for ip in _lan_addresses():
         print(f"  from your laptop/phone: http://{ip}:{port}  (small screens: http://{ip}:{port}/phone.html)", flush=True)

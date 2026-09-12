@@ -11,11 +11,62 @@ class GraphError(RuntimeError):
     pass
 
 
+class Retry:
+    """Per-node retry policy — LangGraph's RetryPolicy, Temporal's RetryOptions.
+
+    Retries belonged to the driver layer before this, so a node that failed for
+    a transient reason (a flaky subprocess, a lock held for a moment) drained
+    the whole graph. ``on`` restricts which exceptions are retried; anything
+    else propagates at once, because retrying a programming error is how a bug
+    gets to run three times.
+    """
+
+    def __init__(self, attempts=3, backoff=1.0, max_backoff=30.0, on=(Exception,)):
+        self.attempts = max(1, int(attempts))
+        self.backoff = float(backoff)
+        self.max_backoff = float(max_backoff)
+        self.on = tuple(on)
+
+    def delay(self, attempt):
+        return min(self.max_backoff, self.backoff * (2 ** (attempt - 1)))
+
+
+class Spawn:
+    """Dynamic fan-out — LangGraph's Send(), Prefect's .map().
+
+    A node returns Spawn(target, items, join) and the engine schedules
+    ``target`` once PER ITEM, in parallel, each with ``ctx["spawn"]`` set to
+    that item. When every child has finished, ``join`` fires once with
+    ``ctx["results"][target]`` set to the LIST of child results in item order.
+
+    Width is decided at runtime from data, not drawn in advance. The PR
+    reviewers used to fan out inside a single node via asyncio.gather, which
+    made them invisible to the graph: not in the diagram, not checkpointed,
+    not individually retryable, and a crashed reviewer surfaced only as a
+    field on its parent's result.
+    """
+
+    def __init__(self, target, items, join, result=None):
+        self.target = target
+        self.items = list(items)
+        self.join = join
+        # What the SPAWNING node itself records as its result.
+        self.result = result if result is not None else {"spawned": len(self.items)}
+
+
 class Node:
-    def __init__(self, name, fn, gather=False):
+    def __init__(self, name, fn, gather=False, retry=None, timeout=None,
+                 on_error=None):
         self.name = name
         self.fn = fn
         self.gather = gather
+        self.retry = retry
+        # Seconds; None = unbounded. A node with no timeout can hold the graph
+        # open forever — the fleet's drivers had one, the graph's nodes did not.
+        self.timeout = timeout
+        # Name of a node to run INSTEAD of draining when this one fails after
+        # its retries. It receives ctx["error"] = {node, message, attempts}.
+        self.on_error = on_error
 
 
 class Edge:
@@ -95,14 +146,30 @@ class Graph:
         # existing caller) keeps runs exactly as ephemeral as before.
         self.persist = persist
 
-    def node(self, name, fn=None, *, gather=False):
+    def node(self, name, fn=None, *, gather=False, retry=None, timeout=None,
+             on_error=None):
         def register(f):
             if name in self.nodes:
                 raise GraphError(f"duplicate node: {name}")
-            self.nodes[name] = Node(name, f, gather)
+            self.nodes[name] = Node(name, f, gather, retry, timeout, on_error)
             return f
 
         return register(fn) if fn is not None else register
+
+    def subgraph(self, name, inner, *, retry=None, timeout=None, on_error=None):
+        """A node that is itself a graph.
+
+        Runs ``inner`` with the current ctx and records its final results under
+        this node's name. Errors inside propagate as this node's failure, so
+        the parent's retry/on_error apply to the whole sub-run — which is the
+        point: a task chain becomes one retryable, drainable unit.
+        """
+        async def run_inner(ctx):
+            sub = dict(ctx)
+            sub["results"] = dict(ctx.get("results", {}))
+            out = await inner.run(sub)
+            return {"subgraph": inner.name, "results": out.get("results", {})}
+        return self.node(name, run_inner, retry=retry, timeout=timeout, on_error=on_error)
 
     def edge(self, src, dst, when=None, *, on_drain=False):
         self.edges.append(Edge(src, dst, when, on_drain))
@@ -121,14 +188,19 @@ class Graph:
                 raise GraphError(f"edge from unknown node: {e.src}")
             if e.dst not in self.nodes:
                 raise GraphError(f"edge to unknown node: {e.dst}")
+        for n in self.nodes.values():
+            if n.on_error is not None and n.on_error not in self.nodes:
+                raise GraphError(f"{n.name}.on_error names unknown node: {n.on_error}")
         reachable = set()
-        frontier = list(self.starts)
+        frontier = list(self.starts) + [n.on_error for n in self.nodes.values() if n.on_error]
         while frontier:
             n = frontier.pop()
             if n in reachable:
                 continue
             reachable.add(n)
             frontier.extend(e.dst for e in self.edges if e.src == n)
+        # A Spawn target/join is reached at runtime; declare an edge from the
+        # spawning node so validate() can see them.
         unreachable = set(self.nodes) - reachable
         if unreachable:
             raise GraphError(f"unreachable nodes: {sorted(unreachable)}")
@@ -160,6 +232,8 @@ class _Execution:
         self.error = None
         self.firings = 0
         self.drain_deadline = None
+        # Dynamic fan-out bookkeeping: group id -> {join, expected, target, got}
+        self.spawns = {}
         # Nodes whose results were seeded from the store; run() fires their
         # outgoing edges so a resume continues downstream of finished work.
         self.seeded = []
@@ -326,6 +400,93 @@ class _Execution:
                                  self.g.name, exc)
         return self.last_ctx
 
+    async def _invoke(self, node, ctx):
+        """Run one node with its retry policy and timeout.
+
+        Only exceptions in ``retry.on`` are retried; a programming error
+        propagates on the first attempt, because running a bug three times is
+        not resilience. Each retry emits node_retry so the dashboard can show a
+        node that is struggling rather than a node that is merely slow.
+        """
+        attempts = node.retry.attempts if node.retry else 1
+        for attempt in range(1, attempts + 1):
+            try:
+                if node.timeout:
+                    return await asyncio.wait_for(node.fn(ctx), node.timeout)
+                return await node.fn(ctx)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Convert BEFORE deciding retryability: a policy written as
+                # on=(GraphError,) must catch a timeout, and the raw
+                # asyncio.TimeoutError is not a GraphError.
+                if isinstance(exc, asyncio.TimeoutError):
+                    exc = GraphError(f"node '{node.name}' timed out after {node.timeout}s")
+                retryable = (node.retry is not None
+                             and isinstance(exc, node.retry.on)
+                             and attempt < attempts)
+                if not retryable:
+                    raise exc
+                delay = node.retry.delay(attempt)
+                events.emit("node_retry", graph=self.g.name, node=node.name,
+                            attempt=attempt, of=attempts, error=str(exc)[:200],
+                            retry_in_s=round(delay, 1))
+                self.log.warning("node '%s' attempt %d/%d failed (%s); retrying in %.1fs",
+                                 node.name, attempt, attempts, exc, delay)
+                await asyncio.sleep(delay)
+
+    def _spawn(self, node, sp, ctx):
+        """Schedule one child per item and register the join."""
+        import uuid
+        if sp.target not in self.g.nodes or sp.join not in self.g.nodes:
+            raise GraphError(f"Spawn from '{node.name}' names unknown node(s): "
+                             f"{sp.target!r} -> {sp.join!r}")
+        gid = uuid.uuid4().hex[:12]
+        self.spawns[gid] = {"join": sp.join, "target": sp.target,
+                            "expected": len(sp.items), "got": {}, "of": node.name}
+        events.emit("node_spawn", graph=self.g.name, node=node.name,
+                    target=sp.target, join=sp.join, n=len(sp.items))
+        if not sp.items:
+            # Nothing to fan out to: the join fires at once with an empty list.
+            jctx = dict(ctx)
+            jctx["results"] = dict(ctx.get("results", {}))
+            jctx["results"][sp.target] = []
+            self._put(sp.join, node.name, jctx)
+            return
+        for i, item in enumerate(sp.items):
+            child = dict(ctx)
+            child["results"] = dict(ctx.get("results", {}))
+            child["spawn"] = item
+            child["spawn_index"] = i
+            child["spawn_group"] = gid
+            child["spawn_of"] = node.name
+            self._put(sp.target, node.name, child)
+
+    def _collect_spawn(self, node, ctx, result):
+        """A spawned child finished: record it; fire the join when all are in.
+
+        Returns True if this result was consumed by a spawn group (so the
+        normal edge-firing must NOT also run for it).
+        """
+        gid = ctx.get("spawn_group")
+        grp = self.spawns.get(gid) if gid else None
+        if grp is None or grp["target"] != node.name:
+            return False
+        grp["got"][ctx.get("spawn_index", len(grp["got"]))] = result
+        if len(grp["got"]) < grp["expected"]:
+            return True
+        del self.spawns[gid]
+        ordered = [grp["got"][i] for i in sorted(grp["got"])]
+        jctx = dict(ctx)
+        jctx["results"] = dict(ctx.get("results", {}))
+        jctx["results"][node.name] = ordered  # the fan-in reducer: a LIST
+        for k in ("spawn", "spawn_index", "spawn_group", "spawn_of"):
+            jctx.pop(k, None)
+        events.emit("node_join", graph=self.g.name, node=grp["join"],
+                    target=node.name, n=len(ordered))
+        self._put(grp["join"], node.name, jctx)
+        return True
+
     async def _worker(self, node):
         q = self.queues[node.name]
         while True:
@@ -367,12 +528,12 @@ class _Execution:
                             self._settle()  # dequeued before the drain, dropped on admission
                             continue
                         events.emit("node_start", graph=self.g.name, node=node.name)
-                        result = await node.fn(ctx)
+                        result = await self._invoke(node, ctx)
                     finally:
                         self.admission.release()
                 else:
                     events.emit("node_start", graph=self.g.name, node=node.name)
-                    result = await node.fn(ctx)
+                    result = await self._invoke(node, ctx)
             except Exception as exc:
                 # str(exc)[:300] was ALL that survived a node failure: no file,
                 # no line, no frame. errors.capture keeps the traceback and
@@ -384,6 +545,18 @@ class _Execution:
                 events.emit("node_error", graph=self.g.name, node=node.name,
                             seconds=round(time.monotonic() - t0, 3),
                             error=str(exc)[:300], fingerprint=fp)
+                if node.on_error and self.error is None:
+                    # Route the failure instead of draining the graph. The
+                    # handler sees what failed and why, and decides what next.
+                    hctx = dict(ctx)
+                    hctx["results"] = dict(ctx.get("results", {}))
+                    hctx["error"] = {"node": node.name, "message": str(exc)[:500],
+                                     "kind": type(exc).__name__, "fingerprint": fp}
+                    events.emit("node_handled", graph=self.g.name, node=node.name,
+                                handler=node.on_error)
+                    self._put(node.on_error, node.name, hctx, on_drain)
+                    self._settle()
+                    continue
                 self._fail(exc, node.name)
                 self._settle()
                 continue
@@ -394,6 +567,10 @@ class _Execution:
                     node.name)
                 self._settle()
                 continue
+            # A node may hand back a Spawn instead of a plain result.
+            spawn = result if isinstance(result, Spawn) else None
+            if spawn is not None:
+                result = spawn.result
             runs = ctx.setdefault("runs", {})
             runs[node.name] = runs.get(node.name, 0) + 1
             ctx.setdefault("results", {})[node.name] = result
@@ -402,12 +579,31 @@ class _Execution:
             events.emit("node_end", graph=self.g.name, node=node.name, run=runs[node.name],
                         seconds=round(time.monotonic() - t0, 3))
             self.log.debug("node '%s' fired (run %d, firings=%d, in_flight=%d)", node.name, runs[node.name], self.firings, self.in_flight)
-            draining = self.error is not None
-            for e in self.g.edges:
-                if e.src != node.name:
-                    continue
-                if draining and not e.on_drain:
-                    continue  # draining: only landing edges keep firing
-                if e.when is None or e.when(result, ctx):
-                    self._put(e.dst, node.name, ctx, e.on_drain)
+            # Everything after the node fn — spawn bookkeeping, join collection,
+            # edge predicates — used to run OUTSIDE the try/except. An exception
+            # there (a `when=` lambda hitting a missing key, a Spawn naming an
+            # unknown node) escaped the worker coroutine, killed it silently, and
+            # left in_flight un-settled: the graph hung forever with no error.
+            # That defect predates Spawn; Spawn made it reachable from a test.
+            try:
+                draining = self.error is not None
+                if spawn is not None and not draining:
+                    self._spawn(node, spawn, ctx)
+                elif self._collect_spawn(node, ctx, result):
+                    pass  # a spawned child: its join, not its edges, decides what is next
+                else:
+                    for e in self.g.edges:
+                        if e.src != node.name:
+                            continue
+                        if draining and not e.on_drain:
+                            continue  # draining: only landing edges keep firing
+                        if e.when is None or e.when(result, ctx):
+                            self._put(e.dst, node.name, ctx, e.on_drain)
+            except Exception as exc:
+                fp = errors.capture(exc, node=node.name, graph=self.g.name,
+                                    where=f"graph:{node.name}:routing")
+                events.emit("node_error", graph=self.g.name, node=node.name,
+                            error=f"routing after {node.name}: {exc}"[:300],
+                            fingerprint=fp)
+                self._fail(exc, node.name)
             self._settle()

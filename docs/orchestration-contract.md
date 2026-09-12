@@ -132,7 +132,7 @@ alloc ─► implement ─► gate ─► review ─► publish ──► pr_rev
 `publish` commits, pushes `task/<id>`, and opens a PR against
 `config.BASE_BRANCH` (`development`). **Nothing has merged at this point.**
 
-`pr_review` runs `config.PR_REVIEWERS` (2) reviewers in parallel on the real
+`pr_review` runs `config.PR_REVIEWERS` reviewers in parallel on the real
 `gh pr diff`. They come from families other than the implementer's and from
 each other. Every one must approve. A rejection posts the issues as a PR
 comment and returns the task to `implement`, whose next commit updates the
@@ -175,6 +175,15 @@ the changed code. Documentation-only changes are exempt.
 **Branches.** `task/<id>` → `development` → (manual promotion PR) → `main`.
 The fleet never writes to `main`; `main.py code promote` opens the promotion
 PR for a human to merge.
+
+**How many reviewers.** `PR_REVIEWERS_WANTED` (`ARC_PR_REVIEWERS`, default 2) is
+what the operator asked for. `PR_REVIEWERS` is what today's roster can deliver:
+an implementer's PR can only be read by the *other* review-capable families,
+so the ceiling is `families - 1` — 2 with three families, **1 after Kimi-K3
+leaves on 2026-09-19**. The effective value is the smaller, so the config never
+promises a gate the fleet cannot staff; the daily audit reports delivered
+against wanted, and `task.pr_review_thin` fires on every PR that got fewer
+readers than asked.
 
 **Statuses** gain `in_review`: the PR is open and awaiting approvals.
 

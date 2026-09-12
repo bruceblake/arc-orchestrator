@@ -436,3 +436,78 @@ free.
 CAPTCHA-walled to fetchers — OpenAI's "A practical guide to building agents"
 PDF exceeds fetch size limits; the two OpenAI web sources above cover the
 same pattern vocabulary.)
+
+## Applied audit: the code-tasks pipeline against these principles (2026-09-11)
+
+The patterns above are a menu. This section is the inventory — what the
+pipeline that actually runs does and does not do, measured from the event log
+rather than asserted. Re-run the numbers before trusting them: they are a
+snapshot.
+
+### The Wait Test, edge by edge
+
+*Walk the graph and at every edge ask: does this step need the RESULT of the
+one before it? If yes, serial is correct. If no, the edge is a wait for
+nothing and the steps should run at once.*
+
+| edge | verdict | why, with the number that decides it |
+|---|---|---|
+| `alloc -> implement` | serial | needs the worktree path |
+| `implement -> gate` | serial | needs the written code |
+| `gate -> review` | serial | the gate fails **18%** of the time; running the 7-minute review alongside it would waste a reviewer that often to save ~14 s |
+| `review -> publish` | serial | the pre-merge review rejects **39%** of implementations that passed the gate — publish must wait for that verdict. *This edge looked redundant (pr_review re-reads the diff from scratch) and the data says it is not.* |
+| `publish -> pr_fanout` | serial | reviewers need the PR number and the pushed diff |
+| `pr_fanout -> N × pr_reviewer` | **parallel** | reviewers are independent; each is a `Spawn`'d node (`graph.Spawn`), not a coroutine inside one node |
+| `pr_reviewer -> pr_review` | **join** | the verdict needs every reviewer; the join fires once with the list |
+| `pr_review -> pr_merge` | serial | merge needs unanimous approval |
+| independent tasks | **parallel** | every task without `deps` is a graph head and starts at once |
+| `deps: [a, b] -> c` | **join** | was wired as `deps[-1]` only — a race dressed as a dependency; now a `gather=True` node over every dep |
+
+Nothing in the serial column is a wait for nothing. The cost of the pipeline is
+in the model calls, not in the edges between them.
+
+### Per-node reliability (the "every node must ship on its own" rule)
+
+| node | runs | errors | reliability | median |
+|---|---|---|---|---|
+| alloc | 145 | 4 | 97% | 0 s |
+| implement | 256 | 3 | 99% | 4 min |
+| gate | 255 | 0 | 100% | 14 s |
+| review | 186 | 0 | 100% | 7 min |
+| publish | 159 | 0 | 100% | 0 s |
+| **pr_review** | 59 | **9** | **87%** | 14 min |
+| pr_merge | 52 | 0 | 100% | 4 s |
+
+The one weak node is the one that fanned out inside itself: its nine errors are
+reviewer crashes that took the whole node down. Per-node `Retry` on
+`pr_reviewer` now absorbs those before the join ever sees them.
+
+### Primitives the engine has, and what each one is called elsewhere
+
+| here | LangGraph | Temporal / Prefect | status |
+|---|---|---|---|
+| multiple edges from one node | fan-out | — | ✅ |
+| `gather=True` | list-form edges / `defer` | fan-in | ✅ (now used by `deps`) |
+| `Spawn(target, items, join)` | `Send()` | `.map()` | ✅ (reviewers) |
+| `when=` | conditional edge | branch | ✅ |
+| back-edges, self-edges | loops + recursion limit | — | ✅ (`max_steps`) |
+| `Retry(attempts, backoff, on)` | `RetryPolicy` | `RetryOptions` | ✅ per node |
+| `timeout=` | node `timeout` | activity timeout | ✅ per node |
+| `on_error="handler"` | error handler node | compensation | ✅ |
+| `g.subgraph(name, inner)` | subgraph | child workflow | ✅ |
+| `on_drain=True` | — | graceful cancellation | ✅ (no equivalent in LangGraph) |
+| `Persist` + `_seed_from_store` | checkpointer | durable history | ✅ |
+| human-in-the-loop interrupt | `interrupt()` | signal / update | ❌ — the promotion PR is the only human gate, and it is outside the graph |
+
+### Principles from the graph-engineering material, checked
+
+- **Narrow node** (one job, only the tools it needs) — holds. Reviewers cannot
+  write; implementers do not review; the gate is a shell command.
+- **Separable work** (only graph what genuinely splits) — holds at the task
+  level; the planner is told to decompose by tier and by file ownership.
+- **Deterministic edges for mandatory steps** (hooks, not model choice) — holds.
+  `gate` always runs; `publish` always syncs; no transition is left to a model.
+- **Over-spawn caution** — `PR_REVIEWERS` bounds the fan-out; the pool is the
+  eligible cross-family set, not "every model".
+- **Every node must ship on its own** — measured above; one node was below
+  95% and has been given its own retry.

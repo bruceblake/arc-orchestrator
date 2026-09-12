@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import capture_events  # noqa: F401  (helpers sets the test env)
+from helpers import capture_events, needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: F401  (helpers sets the test env)
 
 import code_tasks
 import config
@@ -19,13 +19,13 @@ import gh_ops
 def _rows():
     return [
         {"number": 7, "title": "Fix crash on empty input", "kind": "bug",
-         "size": "S", "tier": "basic", "model": "gpt-oss-120b",
+         "size": "S", "tier": "basic", "model": config.ESCALATION_PATH[0],
          "actionable": True, "summary": "guard against empty input"},
         {"number": 9, "title": "Add export endpoint", "kind": "feature",
          "size": "M", "tier": "hard", "model": "not-a-model",
          "actionable": True, "summary": "new endpoint"},  # bogus model -> fallback
         {"number": 11, "title": "How do I configure X?", "kind": "question",
-         "size": "S", "tier": "basic", "model": "gpt-oss-120b",
+         "size": "S", "tier": "basic", "model": config.ESCALATION_PATH[0],
          "actionable": False, "summary": "just a question"},
     ]
 
@@ -44,15 +44,17 @@ class RepoTarget(unittest.TestCase):
 
 
 class ReviewerFor(unittest.TestCase):
+    @needs_kimi
     def test_hard_models_cross_review_each_other(self):
         self.assertEqual(gh_ops._reviewer_for("GLM-5.3", 0), "kimi")
-        self.assertEqual(gh_ops._reviewer_for("Kimi-K3", 0), "glm")
+        self.assertEqual(gh_ops._reviewer_for(STRONGEST, 0), "glm")
 
     def test_other_models_alternate_and_never_self(self):
-        for model in ("gpt-oss-120b", "DeepSeek-V4-Flash"):
+        # the models below the "hard" tier, from today's roster
+        for model in config.IMPLEMENT_TIERS.get("medium", []):
             for i in range(4):
                 rev = gh_ops._reviewer_for(model, i)
-                self.assertIn(rev, ("kimi", "glm"))
+                self.assertIn(rev, tuple(config.REVIEW_FAMILIES))
                 self.assertNotEqual(rev, config.MODEL_FAMILY[model])
 
 

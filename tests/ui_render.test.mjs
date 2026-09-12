@@ -31,7 +31,12 @@ globalThis.document = {
 globalThis.window = { addEventListener: () => {}, removeEventListener: () => {},
                       matchMedia: () => ({matches:false, addEventListener(){}}),
                       location: {hash: "", search: ""} };
-globalThis.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+// Backed by a Map so persistence (localStorage prefs) can be asserted; a
+// plain no-op stub could never prove a fold was remembered.
+const lsBacking = new Map();
+globalThis.localStorage = { getItem: k => (lsBacking.has(k) ? lsBacking.get(k) : null),
+                            setItem: (k, v) => lsBacking.set(k, String(v)),
+                            removeItem: k => lsBacking.delete(k) };
 globalThis.location = { hash: "", search: "", href: "http://localhost:8787/" };
 globalThis.history = { replaceState(){}, pushState(){} };
 Object.defineProperty(globalThis, "navigator", {value: {clipboard: {writeText: async () => {}}}, configurable: true});
@@ -49,7 +54,9 @@ const externals = [...src.matchAll(/<script[^>]+src="([^"]+)"/g)]
 // renderGithub() reads module-scope `let GH`; expose a setter from inside.
 const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setGH = v => { GH = v; };"
-  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc};");
+  + "\nglobalThis.__setSlots = v => { SLOTS = v; };"
+  + "\nglobalThis.__setProjects = v => { PROJECTS = v; };"
+  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel};");
 const api = mod();
 
 let n = 0;
@@ -173,6 +180,92 @@ for (const e of events) {
   ok(typeof out === "string" && out.length > 0 && !out.includes("undefined"),
      `friendly(${e.type}): readable line without 'undefined'`);
 }
+
+// ---- renderSummary: the one-glance tier --------------------------------
+const sumEl = document.querySelector("#summary");
+const sumLine = document.querySelector("#summary-line");
+const cnt = (s, sub) => s.split(sub).length - 1;
+
+__setSlots({ totals: { running: 2, waiting: 1, reviewers_waiting: 1, capacity: 8 },
+             harnesses: [ { harness: "opencode", cap: 5, running: 5, waiting: 1, free: 0 },
+                          { harness: "kimi", cap: 3, running: 2, waiting: 0, free: 1 } ] });
+__setGH({ now: 1, ready: true, base: "development", prod: "main", repo_url: "http://x",
+          prs: [ { state: "OPEN", number: 1, title: "a" }, { state: "MERGED", number: 2 } ], stranded: 1 });
+__setProjects([ { file: "a.json", title: "alpha", statuses: { merged: 2, failed: 1, conflict: 1 } },
+                { file: "b.json", title: "beta", statuses: { merged: 3 } } ]);
+api.renderSummary();
+ok(cnt(sumEl.innerHTML, 'class="sumfig') === 5, "summary: five figures, no more");
+ok(sumEl.innerHTML.includes('data-goto="slots-panel"') && sumEl.innerHTML.includes('data-goto="gh-panel"')
+   && sumEl.innerHTML.includes('data-goto="projects-panel"'), "summary: figures point at their panels");
+ok(sumEl.innerHTML.includes("waiting on reviews"), "summary: reviewers called out as the bottleneck");
+ok(sumLine.innerHTML.includes("failed") && sumLine.innerHTML.includes("alpha"), "summary: alarm line names the problem");
+ok(sumLine.className === "err", "summary: alarm line is red");
+ok(!document.querySelector("#projects-panel").className.includes("folded")
+   && document.querySelector("#projects-panel").className.includes("foldable"),
+   "summary: attention panel unfolded");
+ok(document.querySelector("#topo-panel").className.includes("folded"), "summary: quiet panel folded");
+ok(sumEl.innerHTML.includes('class="sumfig err"'), "summary: failed figure is red");
+
+// all-healthy fleet -> the healthy line, nothing red
+__setSlots({ totals: { running: 1, waiting: 0, reviewers_waiting: 0, capacity: 8 },
+             harnesses: [ { harness: "opencode", cap: 5, running: 2, waiting: 0, free: 3 } ] });
+__setGH({ now: 1, ready: true, base: "development", prod: "main", repo_url: "http://x",
+          prs: [ { state: "OPEN", number: 7, title: "z" } ], stranded: 0 });
+__setProjects([ { file: "c.json", title: "gamma", statuses: { merged: 4 } } ]);
+api.renderSummary();
+ok(sumLine.className === "okmsg" && sumLine.innerHTML.includes("healthy"),
+   "summary: healthy fleet shows the healthy line");
+ok(!sumLine.innerHTML.includes("failed") && !sumEl.innerHTML.includes('class="sumfig err"')
+   && !sumEl.innerHTML.includes('class="sumfig warn"'), "summary: nothing red or amber when healthy");
+
+// conflict fixture -> a visible alarm
+__setProjects([ { file: "d.json", title: "delta", statuses: { conflict: 2 } } ]);
+api.renderSummary();
+ok(sumLine.innerHTML.includes("conflict") && sumLine.className === "err",
+   "summary: conflict raises the alarm");
+ok(sumEl.innerHTML.includes('class="sumfig err"'), "summary: conflict figure is red");
+
+// a hostile project title must not reach the DOM as markup
+__setProjects([ { file: "e.json", title: EVIL, statuses: { failed: 1 } } ]);
+api.renderSummary();
+ok(clean(sumLine.innerHTML), "escaping: summary line escapes project titles");
+ok(sumLine.innerHTML.includes("&lt;img"), "escaping: hostile title rendered escaped, not dropped");
+ok(clean(sumEl.innerHTML), "escaping: summary figures escape project titles");
+
+// a hostile HARNESS name reaches the figure detail too — same esc() rule
+__setSlots({ totals: { running: 5, waiting: 1, reviewers_waiting: 0, capacity: 8 },
+             harnesses: [ { harness: EVIL, cap: 5, running: 5, waiting: 1, free: 0 } ] });
+api.renderSummary();
+ok(clean(sumEl.innerHTML), "escaping: summary figures escape harness names");
+ok(sumEl.innerHTML.includes("&lt;img"), "escaping: hostile harness name rendered escaped, not dropped");
+
+// failed/conflict is a TODAY signal: an abandoned failure from an earlier
+// day is yesterday's news, not this morning's alarm
+const daysAgo = n => new Date(Date.now() - n * 864e5).toISOString();
+__setSlots({ totals: { running: 1, waiting: 0, reviewers_waiting: 0, capacity: 8 },
+             harnesses: [ { harness: "opencode", cap: 5, running: 2, waiting: 0, free: 3 } ] });
+__setProjects([ { file: "old.json", title: "stale-project", statuses: { failed: 2 }, last_activity: daysAgo(9) } ]);
+api.renderSummary();
+ok(sumLine.className === "okmsg", "summary: failure from an earlier day is not today's alarm");
+__setProjects([ { file: "new.json", title: "fresh-project", statuses: { failed: 1 }, last_activity: new Date().toISOString() },
+                { file: "old.json", title: "stale-project", statuses: { conflict: 1 }, last_activity: daysAgo(9) } ]);
+api.renderSummary();
+ok(sumLine.className === "err" && sumLine.innerHTML.includes("fresh-project")
+   && !sumLine.innerHTML.includes("stale-project"),
+   "summary: today's failure alarms, an earlier day's does not");
+
+// click-to-expand must persist: renderSummary re-runs applyDisclosure on
+// every 3 s poll, so an unfold that is not remembered is folded back shut
+// within one tick — the drill-down has to survive the next disclosure pass
+lsBacking.clear();
+api.gotoPanel({ getAttribute: () => "slots-panel" });
+ok(!document.querySelector("#slots-panel").className.includes("folded"),
+   "gotoPanel: unfolds the target panel");
+ok(JSON.parse(globalThis.localStorage.getItem("arc-panels") || "{}")["slots-panel"] === "open",
+   "gotoPanel: records the open state, as toggleFold does");
+api.renderSummary();
+ok(!document.querySelector("#slots-panel").className.includes("folded"),
+   "gotoPanel: drill-down survives the disclosure pass that follows a poll");
 
 // ---- usage.html: success rate, waste, direction, alarming sort -------------
 // Same DOM stub; usage.html's fillTotal() reads module-scope `let DAILY` for
