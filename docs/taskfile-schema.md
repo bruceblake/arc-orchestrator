@@ -3,9 +3,10 @@
 A **taskfile** is a JSON document describing a multi-task coding project for
 the code workload in `code_tasks.py`: a set of tasks, each implemented by an
 AI agent in its own git worktree, behind a deterministic verify gate and a
-cross-harness review. Taskfiles live in `config.TASKS_DIR` (default `~/tasks`,
+cross-family review. Taskfiles live in `config.TASKS_DIR` (default `~/tasks`,
 override with `ARC_TASKS_DIR`). They are either written by hand or drafted by
-the planner — `main.py code plan "<goal>" <repo>` (Kimi-K3) — and executed by
+the planner — `main.py code plan "<goal>" <repo>`
+(DeepSeek-V4.1-Flash-thinking-max) — and executed by
 `main.py code run <taskfile>`.
 
 Every task runs through this pipeline (full contract in
@@ -14,7 +15,7 @@ Every task runs through this pipeline (full contract in
 ```
 alloc → implement → gate ──pass──▶ review ──pass──▶ publish → merge to main
            ▲            │                │
-           └──── fail ◀─┴───── fail ◀────┘   (≤ ARC_MAX_FIX_ROUNDS = 3 fix rounds)
+           └──── fail ◀─┴───── fail ◀────┘   (≤ ARC_MAX_FIX_ROUNDS = 8 fix rounds)
 ```
 
 Before any of that, a taskfile declaring `project.after` holds at a
@@ -107,29 +108,38 @@ its first worktree.
 
 ### Model routing (tier table, `config.IMPLEMENT_TIERS`)
 
+The roster is DATED (`config.ROSTER`) and validated against what the API
+actually serves, so this table is a snapshot — `main.py code run <file>
+--dry-run` prints today's. As of 2026-09-12:
+
 | Tier | Model | Use for |
 |---|---|---|
-| basic | `gpt-oss-120b` | Very basic/mechanical tasks only |
-| medium | `DeepSeek-V4-Flash` | Medium tasks only |
-| hard | `GLM-5.3` or `Kimi-K3` | Hard tasks: deep understanding, large refactors |
+| medium | `GLM-5.3` | Documentation, mechanical edits, one self-contained feature |
+| hard | `Kimi-K3` (until 2026-09-19) or `DeepSeek-V4.1-Flash-thinking-max` | Deep understanding, multi-file reasoning, large refactors |
 
-The planner prompt adds: *SPREAD work across all four models so independent
-tasks run in parallel*, and tasks should be small (<30 min for one agent).
-Per-model harness concurrency is capped at Kimi-K3 ≤ 2, GLM-5.3 ≤ 3,
-gpt-oss-120b ≤ 8, DeepSeek-V4-Flash ≤ 8 (see
+There is no basic tier (gpt-oss-120b was retired 2026-09-11). The planner
+prompt adds: *SPREAD work across the models so independent tasks run in
+parallel*, and tasks should be small (<30 min for one agent). Per-model
+driver concurrency follows the measured ARC ceilings minus an interactive
+reserve (`config.driver_limit`; see
 [concurrency-limits.md](concurrency-limits.md)).
 
-### Reviewer and the cross-harness rule
+### Reviewer and the cross-family rule
+
+`reviewer` names a FAMILY from `config.REVIEW_FAMILIES` — today `"deepseek"`,
+`"kimi"` or `"glm"` — and the loader rejects any that shares a family with
+the implementer:
 
 | Implementer | Allowed `reviewer` |
 |---|---|
-| `Kimi-K3` | `"glm"` only |
-| `GLM-5.3` | `"kimi"` only |
-| `gpt-oss-120b`, `DeepSeek-V4-Flash` | either — split reviews between `"kimi"` and `"glm"` so neither idles nor saturates |
+| `GLM-5.3` | `"kimi"` or `"deepseek"` |
+| `Kimi-K3` | `"glm"` or `"deepseek"` |
+| `DeepSeek-V4.1-Flash-thinking-max` | `"kimi"` or `"glm"` |
 
-A reviewer never shares a model family with the implementer it reviews
-(loader-enforced for the two strong models; for gpt-oss/deepseek
-implementations both reviewers are cross-family by construction).
+Split reviews across the allowed families so none idles or saturates; the
+scheduler also load-balances PR reviewers at run time (`_reviewer_pressure`).
+A taskfile that names a reviewer family which has since left the roster is
+remapped (`code_tasks.RETIRED_MODELS`), not rejected.
 
 ### The verify gate (`verify_cmd`)
 
@@ -138,7 +148,7 @@ implementations both reviewers are cross-family by construction).
 - **Exit 0 = pass**; any other exit code fails the gate. On failure the last
   2000 chars of output are fed back to the implementer
   ("verify gate failed, output: ...") and the task loops back to `implement`
-  (up to `ARC_MAX_FIX_ROUNDS` = 3 rounds, then the task fails).
+  (up to `ARC_MAX_FIX_ROUNDS` = 8 rounds, then the task escalates a tier).
 - Killed at `config.GATE_TIMEOUT` (default **180s**, override `ARC_GATE_TIMEOUT`)
   → fails with `gate timed out after 180.0s`. Keep the command fast.
 - Empty string **skips** the gate (auto-pass) — avoid this: the gate is the
@@ -240,9 +250,9 @@ to the implementer with the issue list.
 5. **Unknown/missing model** — the model must be one of the four
    `config.IMPLEMENTER_MODELS` (a missing `model` defaults to `""` and is
    rejected here too):
-   `ValueError: task {tid}: model {model!r} must be an implementer (['DeepSeek-V4-Flash', 'GLM-5.3', 'Kimi-K3', 'gpt-oss-120b'])`
-6. **Reviewer must be kimi/glm** (missing defaults to `""`, rejected):
-   `ValueError: task {tid}: reviewer must be 'kimi' or 'glm', got {reviewer!r}`
+   `ValueError: task {tid}: model {model!r} must be an implementer (['DeepSeek-V4.1-Flash-thinking-max', 'GLM-5.3', 'Kimi-K3'])`
+6. **Reviewer must be a live review family** (missing defaults to `""`, rejected):
+   `ValueError: task {tid}: reviewer must be one of deepseek|kimi|glm, got {reviewer!r}`
 7. **Cross-harness rule** — only when the implementer is `Kimi-K3` or
    `GLM-5.3` (families `kimi`/`glm`); the reviewer must be the other one:
    `ValueError: task {tid}: reviewer {reviewer!r} must not be the harness that implemented ({model}); use the other one`
@@ -297,7 +307,7 @@ with disjoint `files_hint` and Kimi-K3 ↔ GLM-5.3 reviewing each other's work
         "id": "notes-cli",
         "title": "add and list CLI commands",
         "prompt": "src/notes/schema.py already exists (merged by a previous task) and provides Note, load_notes(path), save_notes(path, notes) — read it first. Create src/notes/cli.py with an argparse CLI runnable as python -m notes.cli: subcommand add \"<text>\" appends a Note (id=str(uuid4()), created=now ISO-8601) using save_notes to notes.json in the current directory; subcommand list prints one '<created>  <text>' line per note via load_notes. Acceptance: py_compile passes and both subcommands are registered. Do not modify schema.py or any other file.",
-        "model": "DeepSeek-V4-Flash",
+        "model": "DeepSeek-V4.1-Flash-thinking-max",
         "reviewer": "kimi",
         "verify_cmd": "python -m py_compile src/notes/cli.py && grep -q '\"add\"' src/notes/cli.py && grep -q '\"list\"' src/notes/cli.py",
         "files_hint": ["src/notes/cli.py"],
@@ -317,8 +327,8 @@ with disjoint `files_hint` and Kimi-K3 ↔ GLM-5.3 reviewing each other's work
         "id": "usage-docs",
         "title": "README usage section",
         "prompt": "Add a '## Usage' section to README.md (create the file if missing) documenting two commands, each on its own code-formatted line: python -m notes.cli add \"buy milk\" and python -m notes.cli list. The CLI itself is being built in parallel in src/notes/cli.py — do NOT create, modify, or reference-check any source file; only edit README.md. Acceptance: README.md contains both command lines verbatim.",
-        "model": "gpt-oss-120b",
-        "reviewer": "glm",
+        "model": "GLM-5.3",
+        "reviewer": "kimi",
         "verify_cmd": "grep -q 'notes.cli add' README.md && grep -q 'notes.cli list' README.md",
         "files_hint": ["README.md"],
         "deps": ["notes-schema"]
@@ -333,20 +343,21 @@ with disjoint `files_hint` and Kimi-K3 ↔ GLM-5.3 reviewing each other's work
 ```
 repo: /home/proxyie/repos/notes
   notes-schema: implement=Kimi-K3 review=glm(cross-family) deps=[] base=main verify=python -m py_compile ...
-  notes-cli: implement=DeepSeek-V4-Flash review=kimi(cross-family) deps=['notes-schema'] base=main verify=...
+  notes-cli: implement=DeepSeek-V4.1-Flash-thinking-max review=kimi(cross-family) deps=['notes-schema'] base=main verify=...
   notes-export: implement=GLM-5.3 review=kimi(cross-family) deps=['notes-schema'] base=main verify=...
-  usage-docs: implement=gpt-oss-120b review=glm(cross-family) deps=['notes-schema'] base=main verify=...
+  usage-docs: implement=GLM-5.3 review=kimi(cross-family) deps=['notes-schema'] base=main verify=...
 ```
 
 Why it is shaped this way:
 
 - **Fanout**: `notes-schema` starts at t=0; the other three all depend only on
   it and run concurrently once it merges.
-- **Tier routing**: hard → Kimi-K3 and GLM-5.3, medium → DeepSeek-V4-Flash,
-  basic → gpt-oss-120b; all four implementers used.
-- **Cross-review**: Kimi-K3 implements `notes-schema` → glm reviews it;
-  GLM-5.3 implements `notes-export` → kimi reviews it. The gpt-oss/deepseek
-  tasks take whichever reviewer balances the load.
+- **Tier routing**: hard → Kimi-K3 (the schema everything depends on) and
+  DeepSeek-V4.1-Flash-thinking-max (the CLI); medium → GLM-5.3 for the
+  export module and the README; all three implementers used.
+- **Cross-review**: every reviewer is a different family from its
+  implementer — Kimi-K3's work goes to glm, GLM-5.3's to kimi, DeepSeek's
+  to kimi — and the two GLM tasks split between the families that remain.
 - **Disjoint `files_hint`** across the three parallel tasks (`cli.py`,
   `export.py`, `README.md`) so merges cannot collide.
 - **Single-dep lists**: each dependent lists exactly one dep; with

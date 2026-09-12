@@ -104,11 +104,10 @@ cross-critiques, synthesizes, and verifies. Failed rounds loop back into a
 stronger synthesis (bounded by `ARC_MAX_VERIFY_ROUNDS`, default 3):
 
 ```
-pick_topic ──> gen_questions ──┬─> answer_gpt-oss ────┐
-                               ├─> answer_glm ────────┤
+pick_topic ──> gen_questions ──┬─> answer_glm ────────┐
                                ├─> answer_kimi ───────┤  gather (fan-in)
-                               ├─> answer_deepseek ───┤
-                               └─> research_web ──────┘
+                               ├─> answer_deepseek ───┤  (one per family
+                               └─> research_web ──────┘   in config.FAMILY_ORDER)
                                            │
                                            ▼
                                        critique      each answer scored 0-10 by a family
@@ -128,8 +127,9 @@ consumes next round — the system generates its own work forever.
 
 ### Concurrency
 
-Per-family semaphores match ARC's documented limits exactly (27 requests in
-flight max): gpt-oss 10, deepseek 10, glm 4, kimi 3. Web research uses the
+Per-family semaphores follow the MEASURED ARC ceilings, not the documented
+ones (12 requests in flight max): deepseek 5, glm 4, kimi 3 — see
+[docs/concurrency-limits.md](docs/concurrency-limits.md). Web research uses the
 `-legacy-tool-calling` variants with `tool_ids: ["server:websearch"]`. All
 requests stream (the API caps non-streaming at 8,000 tokens). Roles rotate
 across families every round so every model does every job. Retries use
@@ -222,7 +222,7 @@ coding tasks best. Three suites (31 tasks total; `bench list` details):
 
 Variables swept independently:
 
-- **model x effort**: `--models 'gpt-oss:low;high,glm,kimi,...'` (efforts
+- **model x effort**: `--models 'deepseek:low;max,glm,kimi,...'` (efforts
   after `:` are `;`-separated) or `all`
   (per-family effort names validated against `config.FAMILIES`; deepseek uses
   `max`, not `high`)
@@ -393,21 +393,22 @@ actor — harnesses only write files inside their worktree.
 
 ### Role map (hard rule)
 
-| Model | Harness CLI | Allowed roles |
+| Model | Harness CLI | Tier, allowed roles |
 |---|---|---|
-| `Kimi-K3` | `kimi` | planner, reviewer only |
-| `GLM-5.3` | `opencode` | planner, reviewer only |
-| `gpt-oss-120b` | `opencode` | implementer only |
-| `DeepSeek-V4-Flash` | `opencode` | implementer only |
+| `GLM-5.3` | `opencode` | medium — implement, plan, review, PR-review |
+| `Kimi-K3` | `kimi` | hard — implement, plan, review, PR-review |
+| `DeepSeek-V4.1-Flash-thinking-max` | `opencode` | hard — implement, plan, review, PR-review; the fleet's strongest model and the `code plan` planner |
 
 Every implementation must pass a deterministic verify gate (a shell command
 run inside the worktree) and then a review by the *other* model family — a
 reviewer never shares a family with the implementer it reviews. Rejections
-feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 3).
+feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 8).
 
-Per-model governor caps keep concurrent harness instances under ARC's account
-limits: Kimi-K3 ≤ 2, GLM-5.3 ≤ 3, gpt-oss-120b ≤ 8, DeepSeek-V4-Flash ≤ 8.
-Override with `ARC_DRIVER_LIMIT_<FAMILY>` (e.g. `ARC_DRIVER_LIMIT_KIMI=1`).
+Per-model governor caps keep concurrent harness instances under the measured
+ARC ceilings (deepseek 5, glm 4, kimi 3) minus an interactive reserve, and a
+per-harness cap keeps every opencode model together under 5 — `main.py
+capacity` prints today's effective numbers. Override with
+`ARC_DRIVER_LIMIT_<FAMILY>` (e.g. `ARC_DRIVER_LIMIT_KIMI=1`).
 
 ### Per-task pipeline
 
@@ -432,14 +433,15 @@ already contains each dep's merge.
  "tasks": [
    {"id": "t01-html", "title": "Create src/index.html hello page",
     "prompt": "Create the file src/index.html: <detailed spec>",
-    "model": "gpt-oss-120b", "reviewer": "kimi",
+    "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "kimi",
     "verify_cmd": "test -f src/index.html && grep -q Hello src/index.html",
     "files_hint": ["src/index.html"], "deps": []}
  ]}}
 ```
 
-- `model` must be an implementer (`gpt-oss-120b` or `DeepSeek-V4-Flash`);
-  `reviewer` must be `kimi` or `glm` — choose the cross-family one.
+- `model` must be a live implementer (`GLM-5.3`, `Kimi-K3` or
+  `DeepSeek-V4.1-Flash-thinking-max` today); `reviewer` names a review
+  family (`deepseek`, `kimi`, `glm`) that differs from the implementer's.
 - `verify_cmd` runs with the worktree as cwd; empty string skips the gate.
 - `deps` list task ids that must merge first; ids are unique, cycles rejected.
 

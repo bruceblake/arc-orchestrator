@@ -68,8 +68,8 @@ cd /home/proxyie/arc-orchestrator
 ## 2. Plan -> run workflow
 
 The code workload is a DAG of coding-agent tasks described in a JSON task
-file. Two entry points build one: Kimi-K3 as the planner (CLI) or the
-dashboard's "Plan with Kimi-K3" tab.
+file. Two entry points build one: DeepSeek-V4.1-Flash-thinking-max as the
+planner (CLI) or the dashboard's plan tab.
 
 ### 2.1 Plan
 
@@ -306,7 +306,7 @@ new one:
   - A **capability failure** — the row's `error` says the model exhausted its
     fix rounds or escalation path — retries **one tier higher** in
     `config.ESCALATION_PATH` (default
-    `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`) with a fresh fix
+    `GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max`) with a fresh fix
     budget, because the old run proved that model insufficient.
   - An **infrastructure failure** — the run process was killed, the graph was
     cancelled, the harness crashed — retries at the **same tier**. Being

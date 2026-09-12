@@ -1,12 +1,13 @@
-# Orchestration Contract (Kimi-K3 is the orchestrator)
+# Orchestration Contract (DeepSeek-V4.1-Flash-thinking-max is the orchestrator)
 
-Kimi-K3 is the **brain** of the code fleet. When a goal arrives — via
-`main.py code plan "<goal>" <repo>` or the dashboard's *Plan with Kimi-K3*
-tab — Kimi-K3 designs the entire execution plan. The graph runner
-(`code_tasks.build_code_graph` + `graph.py`) executes it **verbatim**.
-There is no runtime triage: every routing decision below is made by the
-Kimi-K3 plan (or by whoever writes a task file by hand, under the same
-rules, enforced by `code_tasks.load_taskfile`).
+DeepSeek-V4.1-Flash-thinking-max is the **brain** of the code fleet. When a
+goal arrives — via `main.py code plan "<goal>" <repo>` or the dashboard's
+plan tab — DeepSeek-V4.1-Flash-thinking-max designs the entire execution
+plan. The graph runner (`code_tasks.build_code_graph` + `graph.py`) executes
+it **verbatim**. There is no runtime triage: every routing decision below is
+made by the DeepSeek-V4.1-Flash-thinking-max plan (or by whoever writes a
+task file by hand, under the same rules, enforced by
+`code_tasks.load_taskfile`).
 
 ## What the orchestrator decides
 
@@ -29,9 +30,9 @@ rules, enforced by `code_tasks.load_taskfile`).
 6. **Verify gate** — a deterministic `verify_cmd` per task (tests, build,
    `node --check`, a `grep` contract). It runs in the task's worktree
    *before* review; failure loops the task back to the implementer
-   (max `config.MAX_FIX_ROUNDS` = 3 rounds per tier, then the task
+   (max `config.MAX_FIX_ROUNDS` = 8 rounds per tier, then the task
    **escalates** to the next model in `config.ESCALATION_PATH` — default
-   `gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3`, env
+   `GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max`, env
    `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS` — with a fresh fix budget,
    instead of failing).
 7. **Collision avoidance** — `files_hint` must be disjoint across
@@ -93,10 +94,10 @@ alloc → implement → gate ──pass──▶ review ──pass──▶ publ
          │   fix rounds exhausted
          ▼
       escalate_<tid>  ── next model in config.ESCALATION_PATH
-         │                 (gpt-oss-120b → DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3),
+         │                 (GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max),
          │                 fresh fix budget, latest failure carried as feedback;
-         │                 reviewer flips when the new implementer is kimi/glm
-         │                 family (glm→kimi, kimi→glm), basic/medium keep theirs
+         │                 the reviewer is re-chosen so it never shares the new
+         │                 implementer's family (config.cross_family_reviewer)
          │
          └──▶ implement (again)      ... until the last tier exhausts:
                                          task failed, message names the last
