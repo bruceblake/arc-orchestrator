@@ -233,3 +233,74 @@ class HttpReadEndpoints(unittest.TestCase):
                 self.assertIn("error", body)
         status, body = self._get("/api/run-log?file=run-nope-1.log")
         self.assertEqual(status, 404)
+
+    # ---- project chains (project.after) --------------------------------
+    # The runner has gated on `after` since Rule 9 landed; the page never
+    # read it. /api/projects and /api/project must carry the chain in both
+    # directions plus the gate node drawn into the DAG.
+    def _seed_chain(self):
+        tdir = Path(config.TASKS_DIR)
+        tdir.mkdir(exist_ok=True)
+        up = tdir / "up.json"
+        up.write_text(json.dumps({"project": {"title": "Upstream", "tasks": [
+            {"id": "u1", "title": "one"}, {"id": "u2", "title": "two"}]}}),
+            encoding="utf-8")
+        down = tdir / "down.json"
+        down.write_text(json.dumps({"project": {"title": "Downstream",
+            "after": [str(up)], "tasks": [
+                {"id": "d1", "title": "head"},
+                {"id": "d2", "title": "tail", "deps": ["d1"]}]}}), encoding="utf-8")
+        st = dashboard.Handler.store
+        st.upsert_code_task(str(up), "u1", "one", "GLM-5.3", "kimi", "merged")
+        return up, down
+
+    def test_projects_carry_the_chain_in_both_directions(self):
+        self._seed_chain()
+        status, body = self._get("/api/projects")
+        self.assertEqual(status, 200)
+        by = {p["file"]: p for p in body["projects"]}
+        down, up = by["down.json"], by["up.json"]
+        self.assertEqual(down["chain"]["after"], ["up.json"])
+        self.assertFalse(down["chain"]["ready"])
+        dep = down["chain"]["deps"][0]
+        self.assertEqual((dep["file"], dep["title"], dep["merged"], dep["n_tasks"], dep["state"]),
+                         ("up.json", "Upstream", 1, 2, "waiting"))
+        # a project that cannot start is not "never run"
+        self.assertEqual(down["phase"], "chained")
+        self.assertEqual([b["file"] for b in up["chain"]["blocks"]], ["down.json"])
+        self.assertTrue(up["chain"]["ready"])
+        # the gate node feeds the head task only, and does not count as a task
+        gate = [n for n in down["dag"]["nodes"] if n.get("kind") == "chain"]
+        self.assertEqual(len(gate), 1)
+        self.assertEqual(gate[0]["file"], "up.json")
+        self.assertEqual([(e["src"], e["dst"]) for e in down["dag"]["edges"] if e.get("kind") == "chain"],
+                         [("after:up.json", "d1")])
+        self.assertEqual(down["progress"], {"done": 0, "total": 2})
+        self.assertEqual(down["n_tasks"], 2)
+
+    def test_chain_becomes_ready_when_every_upstream_task_is_merged(self):
+        up, down = self._seed_chain()
+        dashboard.Handler.store.upsert_code_task(str(up), "u2", "two", "GLM-5.3", "kimi", "merged")
+        status, body = self._get("/api/projects")
+        d = next(p for p in body["projects"] if p["file"] == "down.json")
+        self.assertTrue(d["chain"]["ready"])
+        self.assertEqual(d["chain"]["deps"][0]["state"], "ready")
+        self.assertEqual(d["phase"], "new")
+
+    def test_project_detail_carries_chain_and_gate_state(self):
+        self._seed_chain()
+        self._write_events({"type": "chain.wait", "ts": 5.0,
+                            "taskfile": str(Path(config.TASKS_DIR) / "down.json"),
+                            "deps": ["x"]})
+        status, body = self._get("/api/project?file=down.json")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["chain"]["after"], ["up.json"])
+        self.assertEqual(body["chain"]["gate"]["state"], "waiting")
+        status, body = self._get("/api/project?file=up.json")
+        self.assertEqual([b["file"] for b in body["chain"]["blocks"]], ["down.json"])
+        self.assertIsNone(body["chain"]["gate"])
+
+    def test_unchained_project_has_no_chain(self):
+        self._seed_project()
+        status, body = self._get("/api/projects")
+        self.assertIsNone(body["projects"][0]["chain"])

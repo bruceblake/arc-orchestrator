@@ -1343,6 +1343,10 @@ def _task_progress(ids):
 def _project_phase(statuses, ids, run_pid):
     """One word for where a project stands: running | done | attention | new.
 
+    (_projects turns `new` into `chained` when the taskfile declares `after`
+    and its chain is not yet merged — it cannot start, so "never run" is
+    the wrong shelf for it.)
+
     The operator's question is "what needs me?", and a status dict of five
     counters does not answer it. `attention` means finished executing with
     something unresolved — a failure or conflict that will not fix itself.
@@ -1411,6 +1415,93 @@ def _task_loop_stats(store, task_ids):
         elif e.get("type") == "task.conflict":
             stats[base]["conflicts"] += 1
     return stats
+
+
+def _chain_gate_state(fname, lines=None):
+    """What the chain_wait gate of this taskfile last reported, from the event
+    log: {'state': 'waiting'|'ready'|'blocked', 'ts', 'waited_s', 'reason'}
+    or None when no run of it has reached the gate."""
+    latest = None
+    for line in reversed(lines if lines is not None else _load_event_lines()):
+        if '"chain.' not in line or fname not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if Path(str(e.get("taskfile") or "")).name != fname:
+            continue
+        latest = e
+        break
+    if not latest:
+        return None
+    kind = latest.get("type", "")
+    return {"state": {"chain.wait": "waiting", "chain.ready": "ready",
+                      "chain.blocked": "blocked"}.get(kind, "waiting"),
+            "ts": latest.get("ts"), "waited_s": latest.get("waited_s"),
+            "reason": latest.get("reason") or
+            (", ".join(f"{Path(k).name}: {', '.join(v)}"
+                       for k, v in (latest.get("failed_tasks") or {}).items()) or None)}
+
+
+def _project_chain(store, path, titles, dependents, ev_lines=None):
+    """A project's place in the taskfile chain (Rule 9), for the page.
+
+    `project.after` has been enforced by the runner since the chain gate
+    landed, but the dashboard never read it: a chained project looked like
+    any other "never run" project, and a run sitting in chain_wait looked
+    like a run doing nothing. This is the same readiness the gate computes
+    (`code_tasks.chain_status`), plus the reverse edges — which projects are
+    waiting on THIS one — and what the gate last said in the event log.
+    Returns None for a project with no chain in either direction.
+    """
+    import code_tasks
+    after = code_tasks._read_after(path)
+    blocks = sorted(dependents.get(str(path.resolve()), set()))
+    if not after and not blocks:
+        return None
+    if after:
+        try:
+            st = code_tasks.chain_status(store, after)
+        except Exception:
+            st = {"ok": False, "waiting": list(after), "failed": {}, "deps": []}
+    else:
+        st = {"ok": True, "waiting": [], "failed": {}, "deps": []}
+    deps = []
+    for d in st.get("deps") or []:
+        name = Path(d["taskfile"]).name
+        deps.append({"file": name, "title": titles.get(d["taskfile"]) or name,
+                     "exists": bool(d.get("readable")),
+                     "n_tasks": d.get("n_tasks"), "merged": d.get("merged", 0),
+                     "failed": d.get("failed") or [],
+                     "state": ("failed" if d.get("failed") else
+                               "waiting" if d["taskfile"] in st["waiting"] else "ready")})
+    gate = _chain_gate_state(path.name, ev_lines)
+    return {"after": [d["file"] for d in deps], "deps": deps, "ready": bool(st["ok"]),
+            "blocks": [{"file": Path(k).name, "title": titles.get(k) or Path(k).name}
+                       for k in blocks],
+            "gate": gate}
+
+
+def _chain_dag_nodes(chain, heads):
+    """The chain gate drawn into a project's DAG: one dashed node per
+    upstream taskfile, feeding every head task (a task with no in-file
+    deps), exactly where `chain_wait` sits in the real graph."""
+    if not chain or not chain.get("deps"):
+        return [], []
+    gate = chain.get("gate") or {}
+    nodes, edges = [], []
+    for d in chain["deps"]:
+        status = {"failed": "failed", "waiting": "running" if gate.get("state") == "waiting" else "pending",
+                  "ready": "merged"}[d["state"]]
+        if gate.get("state") == "blocked" and d["state"] != "ready":
+            status = "failed"
+        nid = f"after:{d['file']}"
+        nodes.append({"id": nid, "kind": "chain", "file": d["file"],
+                      "title": f"after {d['title']}", "status": status,
+                      "merged": d["merged"], "n_tasks": d["n_tasks"], "live": status == "running"})
+        edges.extend({"src": nid, "dst": h, "kind": "chain"} for h in heads)
+    return nodes, edges
 
 
 def _projects(store):
@@ -1516,6 +1607,15 @@ def _projects(store):
         parsed.append((f, proj, tdefs, ids))
         all_ids.extend(ids)
     all_loop_stats = _task_loop_stats(store, sorted(set(all_ids)))
+    # Chains: who each taskfile waits on (`after`) and, reversed, who waits
+    # on it — both are needed to draw a project's place in the chain.
+    import code_tasks
+    titles = {str(f.resolve()): (proj.get("title") or f.stem) for f, proj, _t, _i in parsed}
+    dependents = {}
+    for f, proj, _t, _i in parsed:
+        for key in code_tasks._read_after(f):
+            dependents.setdefault(key, set()).add(str(f.resolve()))
+    ev_lines = _load_event_lines()
     kimi_tok = _kimi_tokens_by_task()
     for f, proj, tdefs, ids in parsed:
         idset = set(ids)
@@ -1599,13 +1699,21 @@ def _projects(store):
             mtime_iso = datetime.utcfromtimestamp(f.stat().st_mtime).isoformat() + "+00:00"
         except OSError:
             mtime_iso = None
+        chain = _project_chain(store, f, titles, dependents, ev_lines)
+        heads = [t["id"] for t in tdefs if t.get("id")
+                 and not [d for d in (t.get("deps") or t.get("depends") or []) if d in ids]]
+        cnodes, cedges = _chain_dag_nodes(chain, heads)
+        phase = _project_phase(statuses, ids, run_by_file.get(f.name))
+        if phase == "new" and chain and not chain["ready"]:
+            phase = "chained"
         out.append({"file": f.name, "title": proj.get("title") or f.stem,
+                    "chain": chain,
                     "repo": proj.get("repo"), "n_tasks": len(tdefs), "task_ids": ids,
                     "models": sorted({t.get("model") for t in tdefs if t.get("model")}),
                     "reviewers": sorted({t.get("reviewer") for t in tdefs if t.get("reviewer")}),
                     "statuses": statuses,
                     "orphan_rows": orphan_rows,
-                    "dag": {"nodes": nodes, "edges": edges},
+                    "dag": {"nodes": cnodes + nodes, "edges": cedges + edges},
                     "progress": {"done": merged_n, "total": len(ids)},
                     "tokens": tok_total + live_tok, "seconds": round(sec_total + live_sec, 1),
                     "done_tokens": tok_total, "done_seconds": sec_total,
@@ -1615,8 +1723,7 @@ def _projects(store):
                     "errors": errors,
                     "archived": str(f) in archived,
                     "archived_at": archived.get(str(f)),
-                    "phase": _project_phase(statuses, ids,
-                                            run_by_file.get(f.name)),
+                    "phase": phase,
                     # NOT "progress": that key already means {done, total}.
                     "task_progress": (_task_progress(ids)
                                       if (statuses.get("running")
@@ -1697,8 +1804,22 @@ def _project_detail(store, fname):
     import reconcile
     run_pid = next((r["pid"] for r in reconcile.live_runs()
                     if r.get("taskfile") and Path(r["taskfile"]).name == fname), None)
+    import code_tasks
+    titles, dependents = {}, {}
+    tdir = Path(config.TASKS_DIR)
+    for g in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
+        try:
+            gp = (json.loads(g.read_text(encoding="utf-8", errors="replace"))
+                  .get("project") or {})
+        except Exception:
+            continue
+        titles[str(g.resolve())] = gp.get("title") or g.stem
+        for key in code_tasks._read_after(g):
+            dependents.setdefault(key, set()).add(str(g.resolve()))
+    chain = _project_chain(store, path, titles, dependents, lines)
     return {"file": fname, "title": proj.get("title") or path.stem,
             "repo": proj.get("repo"), "run_pid": run_pid,
+            "chain": chain,
             "task_progress": _task_progress(ids),
             "tasks": tdefs, "rows": rows, "runs": runs, "events": events,
             "git": _git_block(repo_v, gh)}, 200
