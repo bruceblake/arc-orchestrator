@@ -310,7 +310,7 @@ def cmd_code(args):
         # was then thrown away at publish with "push failed: no git remote
         # configured". Roughly eight minutes of model time to discover a fact
         # `git remote` answers instantly.
-        gh = asyncio.run(gitstore.github_status(taskset["repo"]))
+        gh = await gitstore.github_status(taskset["repo"])
         if not gh.get("ready"):
             log.error(
                 "%s cannot complete a task: %s.\n"
