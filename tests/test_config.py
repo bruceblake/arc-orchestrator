@@ -413,3 +413,36 @@ class HarnessConcurrencyCeiling(unittest.TestCase):
             self.assertEqual(config.harness_limit("opencode"), 5)
         finally:
             del os.environ["ARC_HARNESS_LIMIT_OPENCODE"]
+
+
+class PerRoleIdleBudgets(unittest.TestCase):
+    """A planner is silent for different reasons than an implementer.
+
+    An implementer edits in many small steps; seven minutes of silence means
+    something is wrong. A planner does one long agentic read of the repo and
+    then emits a single JSON plan — it is legitimately quiet while the model
+    generates, and at Kimi's cap of 3 its request waits behind the others with
+    the connection held open. Every planner "stall" on 2026-09-11/12 fired
+    after exactly 59 bytes (the version handshake) with 3-4 other Kimi drivers
+    running: a healthy process killed for being queued.
+    """
+
+    def test_the_planner_gets_a_longer_budget_than_an_implementer(self):
+        self.assertGreater(config.idle_timeout_for("planner"),
+                           config.idle_timeout_for("implementer"))
+
+    def test_an_unlisted_role_gets_the_default(self):
+        for role in ("implementer", "reviewer", "pr_reviewer", "anything-else"):
+            self.assertEqual(config.idle_timeout_for(role), config.DRIVER_IDLE_TIMEOUT)
+
+    def test_every_role_budget_fits_inside_the_outer_deadline(self):
+        # The idle clock must fire BEFORE the hard timeout, or the hard timeout
+        # is the only thing that ever fires and the idle diagnosis is lost.
+        for role, budget in config.ROLE_IDLE_TIMEOUT.items():
+            self.assertLess(budget, config.DRIVER_TIMEOUT,
+                            f"{role}'s idle budget must stay under DRIVER_TIMEOUT")
+
+    def test_the_planner_budget_covers_a_queued_first_token(self):
+        # The measured time-to-first-token tail is ~309 s unloaded; at cap the
+        # request waits behind the others. The budget must clear that with room.
+        self.assertGreaterEqual(config.idle_timeout_for("planner"), 900)

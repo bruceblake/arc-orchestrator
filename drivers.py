@@ -786,12 +786,13 @@ class Driver:
         def written():
             return sum(len(c) for c in chunks)
 
+        idle_budget = config.idle_timeout_for(self.role)
         try:
             with open(tpath, "wb") as fh:
                 while True:
                     now = time.monotonic()
                     idle_for = now - last_chunk_t
-                    if idle_for >= config.DRIVER_IDLE_TIMEOUT or now >= deadline:
+                    if idle_for >= idle_budget or now >= deadline:
                         raise asyncio.TimeoutError
                     # Heartbeat: at most one driver.heartbeat every
                     # HEARTBEAT_INTERVAL seconds, and only when something
@@ -808,7 +809,7 @@ class Driver:
                         last_hb_t = now
                         last_hb = (written(), round(idle_for, 1))
                     wait = max(0.05, min(deadline - now,
-                                         config.DRIVER_IDLE_TIMEOUT - idle_for,
+                                         idle_budget - idle_for,
                                          interval - (now - last_progress_t),
                                          HEARTBEAT_INTERVAL - (now - last_hb_t)))
                     try:
@@ -849,9 +850,9 @@ class Driver:
             psid, _ = parse_transcript(partial)
             idle = round(time.monotonic() - last_chunk_t, 1)
             total = round(time.monotonic() - t0, 1)
-            stalled = idle >= config.DRIVER_IDLE_TIMEOUT - 1
+            stalled = idle >= idle_budget - 1
             kind = "stalled" if stalled else "timed out"
-            limit = (f"{config.DRIVER_IDLE_TIMEOUT}s idle" if stalled
+            limit = (f"{idle_budget}s idle" if stalled
                      else f"{config.DRIVER_TIMEOUT}s total")
             cpu_delta = (round(snap["cpu_s"] - last_cpu, 2)
                          if last_cpu is not None and "cpu_s" in snap else None)

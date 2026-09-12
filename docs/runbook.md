@@ -413,6 +413,16 @@ git -C ~/worktrees/<repo>/<task> status --porcelain | wc -l
 
 ### A harness went quiet (`driver.stalled`)
 
+**The planner has its own budget.** `ARC_PLANNER_IDLE_TIMEOUT` (default 1500 s)
+applies to the `planner` role instead of `ARC_DRIVER_IDLE_TIMEOUT`. An
+implementer edits in many small steps, so seven minutes of silence means
+something is wrong; a planner does one long agentic read of the repo and then
+emits a single JSON plan, and at Kimi's cap of 3 its request waits behind the
+other drivers with the connection held open. Every planner "stall" on
+2026-09-11/12 fired after exactly 59 bytes — the version handshake — with 3 or
+4 other Kimi drivers running. That was a healthy process being killed for being
+queued, and the retry ladder then did it eight more times.
+
 **Read this before shortening `ARC_DRIVER_IDLE_TIMEOUT`.** Silence is not a
 hang. ARC *queues* requests rather than refusing them, and time-to-first-token
 is exactly what stdout silence measures.

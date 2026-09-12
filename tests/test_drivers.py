@@ -806,3 +806,20 @@ class TheVpnIsNotACrash(unittest.TestCase):
             urllib.request.urlopen = real
         self.assertFalse(up)
         self.assertIn("unreachable", detail)
+
+
+class TheIdleClockIsRoleAware(unittest.TestCase):
+    """_pump must use the ROLE's budget, not the global default."""
+
+    def test_pump_reads_the_role_budget(self):
+        import pathlib
+        src = pathlib.Path(drivers.__file__).read_text()
+        pump = src[src.index("    async def _pump("):]
+        pump = pump[:pump.index("\n    async def ", 10)] if "\n    async def " in pump[10:] else pump
+        self.assertIn("idle_budget = config.idle_timeout_for(self.role)", pump)
+        self.assertNotIn("config.DRIVER_IDLE_TIMEOUT", pump,
+                         "the global default must not be read directly inside _pump")
+
+    def test_a_planner_driver_reports_the_longer_budget(self):
+        self.assertEqual(config.idle_timeout_for(drivers.KimiDriver("planner").role),
+                         config.ROLE_IDLE_TIMEOUT["planner"])

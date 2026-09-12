@@ -170,6 +170,21 @@ DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
 # DRIVER_TIMEOUT bounds the total. Shortening this to "fail fast" trades a
 # small latency saving for a large chance of destroying finished work.
 DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "420"))
+# Per-role idle budgets. An implementer edits in many small steps and going
+# quiet for seven minutes means something is wrong. A PLANNER does the opposite:
+# one long agentic read of the repo, then a single 4KB JSON plan — it is
+# legitimately silent while the model generates, and when the fleet is at
+# Kimi's cap of 3 its request waits behind the others with the connection held
+# open. Measured: every planner stall on 09-11/12 fired with 3-4 other Kimi
+# drivers running, after producing exactly the 59-byte version handshake.
+# Killing it there is killing a healthy process for being queued.
+ROLE_IDLE_TIMEOUT = {
+    "planner": float(os.getenv("ARC_PLANNER_IDLE_TIMEOUT", "1500")),
+}
+
+
+def idle_timeout_for(role):
+    return ROLE_IDLE_TIMEOUT.get(role, DRIVER_IDLE_TIMEOUT)
 # While a driver runs, emit driver.progress this often: bytes written, idle
 # time, and a /proc sample. Makes a live agent's progress observable instead of
 # inferred from transcript file size, and gives the stall event a CPU baseline
