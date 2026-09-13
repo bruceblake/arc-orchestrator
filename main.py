@@ -893,7 +893,7 @@ def main():
     chat_p.add_argument("--session", required=True,
                         help="session id, ^[a-z0-9][a-z0-9-]{0,39}$")
     chat_p.add_argument("--repo", required=True,
-                        help="absolute repo path under /home/proxyie")
+                        help="absolute repo path under ARC_REPO_ROOT (default: your home)")
     chat_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     args = ap.parse_args()
