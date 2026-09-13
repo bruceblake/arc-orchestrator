@@ -988,19 +988,25 @@ class DeepseekDriver(Driver):
     instead of opencode. dsh changes the stream contract, which is why a
     subclass could not fix this with argv alone:
 
-    - stdout carries ONLY the final assistant message, printed at the very
-      end; tool calls and their output never appear.
-    - stderr carries the live `dsh: reasoning:` deltas through the whole
-      thinking phase, and errors as `dsh: <CODE>: <msg>` (RATE_LIMIT, QUOTA,
-      AUTH, TRANSPORT, TIMEOUT...).
+    - stdout carries at most the final assistant message, buffered until the
+      run ends. Mid-run BOTH pipes can stay silent for many minutes of
+      perfectly healthy agentic work — measured the hard way on 2026-09-12,
+      when ten implementer attempts were stall-killed at the idle budget
+      while dsh was past step 50 of real work in its session log. No live
+      `dsh: reasoning:` deltas arrive in the headless profile.
+    - Live progress IS visible in dsh's own session log,
+      ~/.dsh/sessions/<cwd-mangled>/session-*/session.v3.jsonl.zstd, which
+      grows on every model round-trip and tool call. _session_probe watches
+      it and the pump counts its growth as activity, exactly like a pipe
+      chunk.
+    - Errors surface as a nonzero exit with `dsh: <CODE>: <msg>` on stderr
+      (RATE_LIMIT, QUOTA, AUTH, TRANSPORT, TIMEOUT...); dsh's own
+      streamIdleTimeoutMs (default 300 s) aborts a held stream from inside,
+      so a dead API connection does not need our idle clock to notice it.
 
-    Driver._pump drives the stall clock off stdout bytes. Under dsh stdout is
-    silent for minutes of healthy thinking, so a stock-pumped dsh run would be
-    stall-killed at DRIVER_IDLE_TIMEOUT every time — this driver therefore
-    runs _pump_dual below, where a chunk on EITHER pipe counts as activity.
-    Both pipes land in the transcript file (what the dashboard tails); stdout
-    is additionally kept verbatim as the result text, because that is where
-    the answer is.
+    Both pipes still land in the transcript file (what the dashboard tails);
+    stdout is additionally kept verbatim as the result text, because that is
+    where the answer is when dsh prints one.
 
     No session resume: `dsh --profile headless` accepts nothing but the task
     text, so an interrupted attempt simply retries the original prompt (the
@@ -1015,6 +1021,34 @@ class DeepseekDriver(Driver):
     """
 
     harness = "dsh"
+
+    @staticmethod
+    def _session_probe(worktree):
+        """Activity probe over dsh's own session log.
+
+        Returns a closure answering "has the log grown since the last call?".
+        The log dir is the run's cwd with slashes turned to dashes, wrapped
+        in dashes (e.g. /tmp -> --tmp--). A run whose file never appears gets
+        no probe resets and keeps the ordinary pipe/deadline behaviour.
+        """
+        root = (Path.home() / ".dsh" / "sessions"
+                / ("--" + str(worktree).strip("/").replace("/", "-") + "--"))
+        best = [None]
+
+        def probe():
+            try:
+                newest = max(
+                    (p.stat().st_mtime
+                     for p in root.glob("session-*/session.v3.jsonl.zstd")),
+                    default=None)
+            except OSError:
+                return False
+            if newest is not None and (best[0] is None or newest > best[0]):
+                best[0] = newest
+                return True
+            return False
+
+        return probe
 
     def __init__(self, model, role, bench=False, interactive=False):
         if not bench:
@@ -1058,19 +1092,22 @@ class DeepseekDriver(Driver):
         tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
         proc = await spawn(argv, cwd=worktree, env=env)
         try:
-            return await self._pump_dual(proc, argv, tpath, t0, task_id, attempt)
+            return await self._pump_dual(proc, argv, tpath, t0, task_id,
+                                         attempt,
+                                         probe=self._session_probe(worktree))
         finally:
             await _terminate(proc)
 
-    async def _pump_dual(self, proc, argv, tpath, t0, task_id, attempt):
+    async def _pump_dual(self, proc, argv, tpath, t0, task_id, attempt,
+                         probe=None):
         """Driver._pump, multiplexed over both of dsh's pipes.
 
         Identical stall/deadline/heartbeat/forensics semantics to the stock
         pump — kept as a copy rather than shared because interleaving a
         generic stream set into _pump risks the harness (opencode) the whole
-        fleet already runs on. A chunk on EITHER pipe resets the idle clock:
-        dsh is silent on stdout while thinking and silent on stderr while
-        printing the final answer.
+        fleet already runs on. A chunk on EITHER pipe resets the idle clock,
+        and so does the session-log probe: dsh's pipes can stay silent for
+        the whole run while it works, the session log cannot.
         """
         out_chunks, err_chunks = [], []
         q = asyncio.Queue()
@@ -1091,6 +1128,7 @@ class DeepseekDriver(Driver):
         last_hb_t = time.monotonic()
         last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
         last_cpu = None
+        last_probe_t = None
         deadline = t0 + config.DRIVER_TIMEOUT
         interval = config.DRIVER_PROGRESS_INTERVAL
         idle_budget = config.idle_timeout_for(self.role)
@@ -1102,6 +1140,9 @@ class DeepseekDriver(Driver):
             with open(tpath, "wb") as fh:
                 while open_streams:
                     now = time.monotonic()
+                    if probe is not None and probe():
+                        last_chunk_t = now
+                        last_probe_t = now
                     idle_for = now - last_chunk_t
                     if idle_for >= idle_budget or now >= deadline:
                         raise asyncio.TimeoutError
@@ -1111,6 +1152,8 @@ class DeepseekDriver(Driver):
                                     model=self.model, role=self.role,
                                     task=task_id, attempt=attempt,
                                     bytes=written(), idle_s=round(idle_for, 1),
+                                    sess_idle_s=(round(now - last_probe_t, 1)
+                                                 if last_probe_t else None),
                                     seconds=round(now - t0, 1))
                         last_hb_t = now
                         last_hb = (written(), round(idle_for, 1))
