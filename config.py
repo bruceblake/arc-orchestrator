@@ -25,6 +25,15 @@ def dsh_bin():
     return found or str(Path.home() / ".local" / "opt" / "node" / "bin" / "dsh")
 
 
+# Code-graph context for harness runs (graft.py, via github.com/trailhq/Graft).
+# Optional: with no `graft` binary the fleet runs exactly as before. ARC_GRAFT=0
+# switches it off with the binary present — for an A/B on the event log's
+# per-task tokens, or when a repo's language has no tree-sitter grammar.
+GRAFT_ENABLED = os.getenv("ARC_GRAFT", "1").lower() not in ("0", "false", "no", "")
+GRAFT_BIN = os.getenv("ARC_GRAFT_BIN", "")           # empty: `graft` on PATH, then the node prefix
+GRAFT_HINTS = int(os.getenv("ARC_GRAFT_HINTS", "3"))  # file:line spans handed to an implementer
+
+
 @dataclass(frozen=True)
 class Family:
     name: str

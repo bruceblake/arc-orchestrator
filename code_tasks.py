@@ -19,6 +19,7 @@ import config
 import errors
 import events
 import gitstore
+import graft
 import drivers
 from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
                      driver_for, transcript_tokens)
@@ -388,13 +389,32 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
-def _impl_prompt(t, feedback):
+def _impl_prompt(t, feedback, hints=""):
+    """The implementer's whole world: the task, where its code is, the rules.
+
+    `hints` is graft.hints_block output — the file:line spans the code graph
+    ranks for this task — or "" when there is no graph. With hints the agent
+    is told to READ those ranges first; without them it is told to search,
+    which is what it would do anyway, just more expensively.
+    """
     p = (
         f"You are implementing one task in this repository.\n\n"
         f"TASK {t['id']}: {t['title']}\n\n{t['prompt']}\n"
     )
     if t["files_hint"]:
         p += f"\nFiles you are expected to touch: {', '.join(t['files_hint'])}\n"
+    if hints:
+        p += "\n" + hints
+    tooling = graft.tooling_prose()
+    if tooling:
+        p += "\n" + tooling
+    if hints:
+        locate = ("- Start from the WHERE TO LOOK spans above; use the graft "
+                  "commands for anything else. ")
+    elif tooling:
+        locate = "- Locate code with the graft commands above FIRST. "
+    else:
+        locate = "- Locate code with grep/search FIRST; "
     p += (
         "\nRules: make only the changes this task requires; do not git-commit "
         "(the orchestrator handles git); keep changes minimal and working.\n"
@@ -408,8 +428,8 @@ def _impl_prompt(t, feedback):
         "change, even when the task description sounds like a rewrite. A "
         "500-line file emitted in one response is the single most likely way "
         "to fail this task.\n"
-        "- Locate code with grep/search FIRST; read only the line ranges you "
-        "need, never a whole large file.\n"
+        + locate +
+        "read only the line ranges you need, never a whole large file.\n"
         "- Do not re-read a file you have already seen; rely on what is "
         "already in the conversation.\n"
         "- Work in several small edits, each one verified, rather than one "
@@ -577,12 +597,13 @@ def _rework_feedback(tid, results):
     return "\n\n".join(parts)
 
 
-def _review_prompt(t, diff):
+def _review_prompt(t, diff, impact=""):
     return (
         f"You are reviewing an implementation produced by another AI agent.\n\n"
         f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
         f"The implementation already passed its automated verify gate "
         f"({t['verify_cmd'] or 'none'}). Here is the full diff:\n\n{diff}\n\n"
+        + graft.impact_block(impact) +
         "Review for: spec compliance, correctness, and scope discipline "
         "(nothing unrelated). Reply with STRICT JSON only, no prose, of the form:\n"
         '{"pass": true}  or  {"pass": false, "issues": ["specific issue 1", ...]}\n'
@@ -612,7 +633,7 @@ def _parse_verdict(text):
     return {"pass": False, "issues": ["reviewer returned no parseable verdict"]}
 
 
-def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues):
+def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact=""):
     """Prompt for a reviewer reading a real pull request.
 
     Deliberately different from the pre-PR review: this reviewer can BLOCK the
@@ -631,7 +652,9 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues):
         p += ("\nIssues raised last round, which the implementer was asked to "
               "fix — verify each is actually resolved:\n"
               + "\n".join(f"- {i}" for i in prior_issues) + "\n")
-    p += f"\nTHE PULL REQUEST DIFF:\n\n{diff}\n\nReview for, in order:\n"
+    p += f"\nTHE PULL REQUEST DIFF:\n\n{diff}\n\n"
+    p += graft.impact_block(impact)
+    p += "Review for, in order:\n"
     p += ("1. CORRECTNESS — does it do what the spec says, without bugs? Trace "
           "the logic; do not assume it works because it looks plausible.\n"
           "2. REGRESSIONS — could this break existing behaviour? Consider what "
@@ -946,9 +969,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
             model = cur_model(ctx)
             driver = _driver(model, "implementer", pol)
+            wt = await worktree(ctx)
+            # Graph hints are recomputed per attempt: a rework's spans should
+            # point at the code as it is NOW, after the previous attempt.
+            hints = await graft.hints(t, wt)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback), await worktree(ctx),
+                    _impl_prompt(t, feedback, hints), wt,
                     task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -1022,11 +1049,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return {"pass": True, "issues": [], "skipped": True}
             wt = await worktree(ctx)
             diff = await gitstore.diff_full(wt, base)
+            impact = await graft.blast(wt, task=tid)   # uncommitted: tree vs HEAD
             rev_tok = reviewer_for(t, cur_model(ctx))
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
             try:
-                res = await driver.run(_review_prompt(t, diff), wt, task_id=f"{tid}-x{attempt}")
+                res = await driver.run(_review_prompt(t, diff, impact), wt,
+                                       task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1247,11 +1276,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             model = it["model"]
             try:
                 drv = _driver(model, "pr_reviewer", pol)
+                wt = await worktree(ctx)
+                impact = await graft.blast(wt, base, task=tid)
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
-                                      it["prior_issues"]),
-                    await worktree(ctx),
-                    task_id=f"{tid}-pr{it['round']}")
+                                      it["prior_issues"], impact),
+                    wt, task_id=f"{tid}-pr{it['round']}")
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather
@@ -1354,7 +1384,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.conflict", task=tid, pr=number, reason=note,
                             files=conflicts[:20])
                 return {"merged": False, "reason": "conflict"}
-            ok, note = await gitstore.merge_pr(repo, number)
+            if state.get("state") == "MERGED":
+                # Someone merged it while the fleet was still reviewing — an
+                # operator from the GitHub UI, or a hand merge of a backlog.
+                # That is the outcome this node exists to reach, not a
+                # failure: `gh pr merge` on a merged PR exits non-zero, and
+                # treating that as a conflict marked the task failed and
+                # stalled every task that depended on it.
+                events.emit("task.merged_externally", task=tid, pr=number)
+                ok, note = True, "already merged"
+            else:
+                ok, note = await gitstore.merge_pr(repo, number)
             if not ok:
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "conflict", error=note, finished=True)
@@ -1779,6 +1819,23 @@ def _existing_projects_prose(repo, store=None):
             "builds on it and it is not merged yet):\n" + "\n".join(rows) + "\n\n")
 
 
+def _orientation_prose(repo_map):
+    """The planner's first look at the repo, from the code graph.
+
+    Directory clusters, hub symbols and hotspots in ~900 tokens — what the
+    planner would otherwise spend its first (slowest-model) minutes deriving
+    with ls and grep. Also tells it the implementers have the same graph, so
+    task prompts can name symbols and trust they will be found.
+    """
+    if not repo_map:
+        return ""
+    return ("REPO ORIENTATION (from the code graph: directory clusters, hub "
+            "symbols with their caller counts, hotspots). Use it to name the "
+            "exact files and symbols each task touches — implementers get "
+            "graph-ranked file:line hints for whatever you name:\n\n"
+            + repo_map + "\n\n")
+
+
 async def plan_tasks(goal, repo, out_path=None, store=None):
     import graph_shapes
     prompt = (
@@ -1789,6 +1846,7 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
         "the model routing (who implements), the reviewer, and the verify "
         "gate for every task. Design it well; there is no later triage.\n\n"
         f"GOAL: {goal}\nTARGET REPO: {repo}\n\n"
+        + _orientation_prose(await graft.repo_map(repo))
         + _routing_tiers_prose()
         + graph_shapes.planner_prose()
         + _existing_projects_prose(repo, store) +

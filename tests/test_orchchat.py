@@ -80,9 +80,11 @@ class TestOrchChat(unittest.TestCase):
             os.environ[key] = value
 
     def _make_repo(self):
-        # under /home/proxyie with a plain .git dir: _repo_problem checks
-        # only prefix + directory + .git existence, so no git init needed
-        repo = Path(tempfile.mkdtemp(prefix="arc-qa-chat-", dir="/home/proxyie"))
+        # under REPO_ROOT with a plain .git dir: _repo_problem checks only
+        # prefix + directory + .git existence, so no git init needed. The
+        # root is config's, not a literal home: CI's home is /home/runner,
+        # and the literal made every one of these tests error there.
+        repo = Path(tempfile.mkdtemp(prefix="arc-qa-chat-", dir=config.REPO_ROOT))
         (repo / ".git").mkdir()
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         return repo
@@ -120,7 +122,7 @@ class TestOrchChat(unittest.TestCase):
         return sorted(p.name for p in self.tasks_dir.iterdir())
 
     @staticmethod
-    def _plan(title="Build A Widget", repo="/home/proxyie/r",
+    def _plan(title="Build A Widget", repo=os.path.join(config.REPO_ROOT, "r"),
               model=ENTRY, reviewer=ENTRY_REVIEWER, tid="make-widget"):
         return {
             "project": {"repo": repo, "title": title,
@@ -154,7 +156,7 @@ class TestOrchChatHappy(TestOrchChat):
 
     def test_cli_argument_repo_overrides_model_repo(self):
         repo = self._make_repo()
-        plan = self._plan(repo="/home/proxyie/not-this-one")
+        plan = self._plan(repo=os.path.join(config.REPO_ROOT, "not-this-one"))
         code, state, spath = self._run(reply=self._reply(plan), repo=repo)
         self.assertEqual(code, 0)
         self.assertEqual(self._taskfiles(), ["build-a-widget.json"])
@@ -264,11 +266,11 @@ class TestOrchChatFailures(TestOrchChat):
         self.assertEqual(code, 0)
         self.assertEqual(state["calls"], 0)
         last = self._read_turns(spath)[-1]
-        self.assertIn("/home/proxyie", last["error"])
+        self.assertIn(config.REPO_ROOT, last["error"])
         self.assertNotIn("taskfile", last)
 
     def test_non_git_repo_rejected(self):
-        repo = Path(tempfile.mkdtemp(prefix="arc-qa-chat-", dir="/home/proxyie"))
+        repo = Path(tempfile.mkdtemp(prefix="arc-qa-chat-", dir=config.REPO_ROOT))
         self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
         code, state, spath = self._run(repo=repo)
         self.assertEqual(code, 0)
@@ -279,7 +281,7 @@ class TestOrchChatFailures(TestOrchChat):
 
 class TestOrchChatSessionIO(unittest.TestCase):
     def test_invalid_session_ids_rejected(self):
-        repo = Path("/home/proxyie/anything")
+        repo = Path(config.REPO_ROOT) / "anything"
         for bad in ("Bad_Session", "../escape", "", "a" * 41):
             with self.subTest(bad=bad):
                 code = asyncio.run(orchchat.run_turn(bad, str(repo)))
@@ -291,8 +293,8 @@ class TestOrchChatSessionIO(unittest.TestCase):
         old = os.environ.get("ARC_CHAT_DIR")
         os.environ["ARC_CHAT_DIR"] = str(blocked)
         try:
-            code = asyncio.run(orchchat.run_turn("sess-1",
-                                                 "/home/proxyie/anything"))
+            code = asyncio.run(orchchat.run_turn(
+                "sess-1", os.path.join(config.REPO_ROOT, "anything")))
             self.assertEqual(code, 1)
         finally:
             if old is None:

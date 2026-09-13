@@ -816,3 +816,30 @@ The full operator runbook, with troubleshooting, is
   slots, uncleaned shutdown) and the reasoning behind each fix
 - [README.md](README.md) — project overview, dashboard quick start, 24/7
   setup
+
+<!-- graft:start -->
+## Graft — repo context graph
+
+When this worktree has a code graph (the orchestrator builds one before every
+implement attempt and exports its location as `GRAFT_DIR` — always pass it:
+`graft --dir "$GRAFT_DIR" <command>`), get context from it before grepping or
+opening source files — each call is one exact answer where a grep ladder is
+several turns:
+
+- `graft --dir "$GRAFT_DIR" ask "<question>" --source` — ranked definitions
+  with the relevant lines inlined; reuse literal identifiers (symbol, error
+  string, file name) as the query. For "every occurrence" tasks use
+  `graft --dir "$GRAFT_DIR" grep "<literal>"` (exhaustive, grouped by
+  enclosing symbol) instead of ranked results.
+- `graft --dir "$GRAFT_DIR" skeleton <file>` — every signature with its line
+  span, far cheaper than reading the file; skim an API surface this way.
+- `graft --dir "$GRAFT_DIR" callers <symbol>` — exact callers; `--direction
+  out` for callees, `-d 2` for the transitive blast radius. Run it before
+  changing a signature.
+- `graft --dir "$GRAFT_DIR" map` — directory clusters, hubs and hotspots.
+
+Open a source file only at the exact `file:line` range a hit names; never
+re-read whole files. The graph refreshes itself before each query, so after
+your own edits the answers are current. Without the binary these commands
+do not exist and the task prompt says so — fall back to grep.
+<!-- graft:end -->

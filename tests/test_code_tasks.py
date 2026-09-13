@@ -372,9 +372,19 @@ class ImplementPromptDiscipline(unittest.TestCase):
         self.assertIn("NEVER rewrite a whole file", p)
 
     def test_prompt_tells_the_agent_to_read_narrowly(self):
-        p = code_tasks._impl_prompt(
-            {"id": "t", "title": "T", "prompt": "x", "files_hint": [],
-             "model": "", "reviewer": ""}, "")
+        # Without a code graph (tests/test_graft.py covers the graph case);
+        # pinned so the assertion does not depend on whether this machine
+        # has the graft binary.
+        import graft
+        saved = dict(graft._bin_cache)
+        graft._bin_cache.update(checked=True, path=None)
+        try:
+            p = code_tasks._impl_prompt(
+                {"id": "t", "title": "T", "prompt": "x", "files_hint": [],
+                 "model": "", "reviewer": ""}, "")
+        finally:
+            graft._bin_cache.clear()
+            graft._bin_cache.update(saved)
         for phrase in ("grep/search FIRST", "line ranges", "Do not re-read"):
             self.assertIn(phrase, p)
 
@@ -1759,3 +1769,55 @@ class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
         same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         with self.assertRaises(ValueError):
             code_tasks.load_taskfile(taskfile([same]))
+
+
+class AnExternallyMergedPullRequestIsNotAConflict(unittest.TestCase):
+    """pr_merge must accept a PR that someone else already merged.
+
+    An operator merging from the GitHub UI, or a hand merge of a backlog,
+    beats the fleet's own reviewers to it. `gh pr merge` on a merged PR exits
+    non-zero, and that used to be recorded as a conflict: the task was marked
+    failed and every task depending on it never started — for a change that
+    had, in fact, landed.
+    """
+
+    def _graph(self):
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        with capture_events():
+            return code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+
+    def _run_merge(self, state, merge_rc):
+        import asyncio as aio
+        g = self._graph()
+        gs = code_tasks.gitstore
+        calls = []
+        saved = (gs.pr_state, gs.merge_pr, gs.fast_forward_base, gs.cleanup)
+        gs.pr_state = lambda repo, n: aio.sleep(0, result=state)
+        gs.merge_pr = lambda repo, n: (calls.append("merge_pr"),
+                                       aio.sleep(0, result=merge_rc))[1]
+        gs.fast_forward_base = lambda repo, base: aio.sleep(0, result=(True, ""))
+        gs.cleanup = lambda repo, tid: aio.sleep(0)
+        try:
+            with capture_events() as ev:
+                out = aio.run(g.nodes["pr_merge_t1"].fn(
+                    {"results": {"pr_review_t1": {"pr": 7, "approved": True,
+                                                  "approvals": 1}}, "runs": {}}))
+        finally:
+            gs.pr_state, gs.merge_pr, gs.fast_forward_base, gs.cleanup = saved
+        return out, calls, ev
+
+    def test_a_merged_pr_counts_as_merged_without_calling_gh(self):
+        out, calls, ev = self._run_merge(
+            {"state": "MERGED", "mergeable": "UNKNOWN"}, (False, "already merged"))
+        self.assertTrue(out["merged"])
+        self.assertEqual(calls, [], "gh pr merge must not run on a merged PR")
+        self.assertIsNotNone(ev.first("task.merged_externally"))
+        self.assertIsNotNone(ev.first("task.merged"))
+        self.assertIsNone(ev.first("task.conflict"))
+
+    def test_an_open_pr_is_still_merged_by_the_fleet(self):
+        out, calls, ev = self._run_merge(
+            {"state": "OPEN", "mergeable": "MERGEABLE"}, (True, "merged"))
+        self.assertTrue(out["merged"])
+        self.assertEqual(calls, ["merge_pr"])
+        self.assertIsNone(ev.first("task.merged_externally"))

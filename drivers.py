@@ -29,6 +29,7 @@ from pathlib import Path
 import config
 import errors
 import events
+import graft
 
 log = logging.getLogger("drivers")
 TRANSCRIPT_DIR = Path(config.ROOT) / "logs" / "harness"
@@ -770,6 +771,10 @@ class Driver:
             cfg = opencode_fleet_config()
             if cfg:
                 env["OPENCODE_CONFIG"] = cfg
+        # GRAFT_DIR: the worktree's code graph lives beside the worktree, not
+        # in it (graft.py explains why); the harness's own `graft ask` calls
+        # must look where the orchestrator built it.
+        env.update(graft.env_for(worktree))
         TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
         tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
         proc = await spawn(argv, cwd=worktree, env=env)
@@ -1195,6 +1200,7 @@ class DeepseekDriver(Driver):
             # approval policy to `never`; without it the default
             # workspace-write preset stalls forever on the first tool call.
             DSH_PERMISSION_MODE="danger-full-access",
+            **graft.env_for(worktree),   # GRAFT_DIR, as in Driver._once
         )
         TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
         tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"

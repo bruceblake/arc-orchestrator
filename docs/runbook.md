@@ -61,7 +61,10 @@ cd /home/proxyie/arc-orchestrator
   literal list) is on `PATH`, the
   worktree and tasks directories are creatable, the timeout invariants hold
   (`DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT`), and there are
-  no stale `running` task rows.
+  no stale `running` task rows. It also prints (never fails on) whether the
+  optional `graft` code-graph binary is found — `PASS graft code-graph
+  hints: on` — since that is the difference between a harness reading three
+  spans and grepping the worktree for ten minutes (see 5, "Search tokens").
 - Exits **non-zero on any failure**, so it works in scripts and as a habit:
   run it after installing, after editing `.env` or `config.py`, and as the
   first step whenever "runs fail for no obvious reason".
@@ -685,6 +688,29 @@ Note the retired kimi harness requested `maxTokens = 131072` (derived from
 separate output cap existed in its config — `max_output_tokens`, `max_tokens`
 and `output_tokens` were all tested and none changed it). So generation length
 is bounded only by the model deciding to stop.
+
+### Search tokens (the code graph, `graft.*` events)
+
+The cheapest request is the one a harness never sends. Before the code graph
+(2026-09-13) an implementer's first several turns were grep → read → grep,
+each re-sending the whole conversation; `graft.py` now hands it the task's
+top `file:line` spans up front and gives reviewers the blast radius of the
+diff. Install with `deploy/install-graft.sh` (the plain
+`npm i -g @nanonets/graft` needs make + gcc for one Kotlin grammar; the script
+falls back to a prebuilt binding). Check it is on with `main.py doctor`.
+
+- `graft.build` — `ok`, `seconds`, `nodes`, `edges` per (re)build. A repo
+  that takes more than the 120 s build timeout, or has no tree-sitter
+  grammar, logs `ok: false` once per attempt and the run continues without
+  hints. Nothing to fix unless you want the hints: `ARC_GRAFT=0` silences it.
+- `graft.hints` — `hits` and `pointers` per implement attempt. `hits: 0` on
+  every task of a project means the prompts do not name anything the graph
+  can rank: ask the planner for file paths and symbol names in task prompts.
+- The graph lives in `~/worktrees/.graft/<repo>/<task>/`, never in the
+  worktree (it would dirty the diff). `code reconcile` does not touch it; it
+  is a regenerable cache, `rm -rf` it any time.
+- A/B on the fleet itself: run one project with `ARC_GRAFT=0`, one with the
+  default, compare `task.budget` `total_tokens` and `total_driver_seconds`.
 
 ### Context budget (per harness — they fail differently)
 

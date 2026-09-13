@@ -180,6 +180,16 @@ User profile → Settings → Account → API keys):
 ARC_API_KEY=sk-...
 ```
 
+Optional but recommended for the code fleet — install
+[Graft](https://github.com/trailhq/Graft), the code-graph CLI that hands each
+harness the exact `file:line` spans its task points at instead of letting it
+grep the worktree on the API's clock (see [Code-graph context](#code-graph-context-graft)):
+
+```bash
+deploy/install-graft.sh        # npm i -g @nanonets/graft, with a no-compiler fallback
+.venv/bin/python main.py doctor   # "PASS  graft code-graph hints: on"
+```
+
 Test everything without spending a single request:
 
 ```bash
@@ -315,6 +325,9 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_PR_REVIEWERS` | 2 | PR reviewers *wanted* before merge; the two-family fleet can field only one cross-family reviewer, and `task.pr_review_thin` records the shortfall |
 | `ARC_PR_MAX_ROUNDS` | 16 | PR review rounds before a task fails |
 | `ARC_REQUIRE_TESTS` | 1 | require changes to ship tests that fail without them |
+| `ARC_GRAFT` | 1 | code-graph hints for harness runs (needs the `graft` binary; `0` = off, for an A/B) |
+| `ARC_GRAFT_BIN` | (unset) | path to the `graft` binary; unset = `graft` on PATH, then `~/.local/opt/node/bin` |
+| `ARC_GRAFT_HINTS` | 3 | `file:line` spans from the code graph handed to an implementer |
 | `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
 | `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
 
@@ -425,9 +438,13 @@ with `ARC_DRIVER_LIMIT_<FAMILY>`
 
 ```
 alloc worktree (~/worktrees/<repo>/<id>, branch task/<id>, from main)
+  → graft build (code graph beside the worktree; ~2 s, no model) + graft ask
+    → the task's top-3 file:line spans go into the implementer prompt
   → implementer writes code IN THE WORKTREE
   → verify gate (verify_cmd, cwd=worktree)
-  → cross-family review (strict-JSON verdict {"pass": ...}), fix loop ≤ 8
+  → cross-family review (strict-JSON verdict {"pass": ...}) with the graph's
+    blast radius — dependents of the changed symbols, tests reaching them —
+    in the prompt; fix loop ≤ 8
     (ARC_MAX_FIX_ROUNDS; then tier escalation with a fresh budget)
   → publish commit (trailers: Harness/Model/Reviewer/Task-Id) + push + open PR
   → one cross-family PR review (`task.pr_review_thin` records the thin gate)
@@ -438,6 +455,40 @@ alloc worktree (~/worktrees/<repo>/<id>, branch task/<id>, from main)
 Tasks claiming dependencies (`deps`) are ordered by graph edges
 (`publish_<dep> → alloc_<task>`); every worktree branches from `main`, which
 already contains each dep's merge.
+
+### Code-graph context (Graft)
+
+Before this, a harness found the code it had to change the way every coding
+agent does by default: grep, read, grep again — and each of those turns
+re-sends the whole conversation to the API. On this fleet that is paid twice:
+in ARC tokens, and in wall-clock against per-model concurrency caps that are
+shared with the rest of campus. `graft.py` removes most of that search:
+
+- **Implementer** — `graft build` parses the worktree with tree-sitter into a
+  symbol graph (deterministic, no model, no key; ~2 s cold / ~0.2 s
+  incremental for this repo), then `graft ask` ranks the task's title, files
+  and prompt against it. The top `ARC_GRAFT_HINTS` (3) `file:line` spans go
+  into the prompt as **WHERE TO LOOK**, and the harness is told the
+  `graft ask / skeleton / callers / grep` commands exist so its remaining
+  searches are one exact call each. Recomputed per attempt, so a rework's
+  spans describe the tree as it is now.
+- **Reviewers** — `graft blast --base <branch>` lists which symbols depend on
+  the changed ones and which tests reach them: the REGRESSIONS and TESTS
+  checks, precomputed from graph edges instead of grepped for.
+- **Planner** — `graft map` (directory clusters, hub symbols, hotspots, ~900
+  tokens) opens the planner prompt, so the slowest model is not spending its
+  first minutes on `ls` and `grep`.
+
+The graph never lives inside the worktree: `graft build` there would edit
+`.gitignore` and drop an `.ignore` file into the task's diff, which the SCOPE
+rule tells reviewers to reject. It lives under `~/worktrees/.graft/<repo>/<id>/`
+and reaches the harness as `GRAFT_DIR`. Every call is optional and
+fail-silent — no binary, a timeout, a parse error, and the run proceeds exactly
+as before; `ARC_GRAFT=0` turns it off for an A/B. `graft.build` / `graft.hints`
+events in the log carry the build time, node/edge counts and hit counts.
+Graft's own 162-run sweep reports 46% fewer tool calls, 42% fewer tokens and
+60% less wall-clock at equal correctness; read that as the ceiling, and take
+the fleet's number from `task.budget` tokens before and after.
 
 ### Task files
 

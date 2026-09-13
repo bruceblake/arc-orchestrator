@@ -702,6 +702,20 @@ def cmd_doctor(args):
         report(f"'{harness}' on PATH", shutil.which(harness) is not None,
                f"the {harness} harness binary was not found on PATH")
 
+    # graft is optional (graft.py: the fleet runs unchanged without it), so
+    # its absence is INFO, not FAIL — but an operator should see whether the
+    # code-graph hints are actually on, since they are the difference
+    # between a harness reading three spans and grepping for ten minutes.
+    import graft
+    if not config.GRAFT_ENABLED:
+        print("INFO  graft code-graph hints: off (ARC_GRAFT=0)")
+    elif graft.available():
+        print(f"PASS  graft code-graph hints: on ({graft.binary()})")
+    else:
+        print("INFO  graft code-graph hints: off — `graft` not found; install "
+              "with deploy/install-graft.sh (npm i -g @nanonets/graft) to cut "
+              "harness search tokens")
+
     for label, path in (("WORKTREE_ROOT", config.WORKTREE_ROOT),
                         ("TASKS_DIR", config.TASKS_DIR)):
         try:
@@ -879,7 +893,7 @@ def main():
     chat_p.add_argument("--session", required=True,
                         help="session id, ^[a-z0-9][a-z0-9-]{0,39}$")
     chat_p.add_argument("--repo", required=True,
-                        help="absolute repo path under /home/proxyie")
+                        help="absolute repo path under ARC_REPO_ROOT (default: your home)")
     chat_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     args = ap.parse_args()

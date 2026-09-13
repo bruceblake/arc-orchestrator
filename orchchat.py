@@ -116,11 +116,17 @@ def _repo_problem(repo):
     Checked BEFORE the planner runs: an invalid repo discovered only at
     finalization would waste the fleet's scarcest model on a taskfile that
     can never execute. Same rule as dashboard._valid_repo — under
-    /home/proxyie (the operator's trees), an existing directory, a git
-    checkout.
+    config.REPO_ROOT (the operator's trees), an existing directory, a git
+    checkout. The root comes from config, not a literal home directory:
+    the literal is what turned CI red on every push (its home is
+    /home/runner), and it silently fenced any deployment whose operator is
+    not this one.
     """
-    if not isinstance(repo, str) or not repo.startswith("/home/proxyie/"):
-        return f"repo must be an absolute path under /home/proxyie, got {repo!r}"
+    root = str(Path(config.REPO_ROOT).resolve())
+    if (not isinstance(repo, str) or not os.path.isabs(repo)
+            or not Path(repo).resolve().is_relative_to(root)
+            or str(Path(repo).resolve()) == root):
+        return f"repo must be an absolute path under {root}, got {repo!r}"
     path = Path(repo)
     if not path.is_dir():
         return f"repo is not a directory: {repo}"
