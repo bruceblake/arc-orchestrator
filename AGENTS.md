@@ -215,7 +215,7 @@ on `dsh`).
   a capacity error, a harness fault — returns `crashed`, and the task retries
   the REVIEW rather than going back to the implementer. Spending a fix round on
   it sends the implementer to repair code nobody criticised. Bounded by
-  `config.MAX_REVIEW_CRASHES` (`ARC_MAX_REVIEW_CRASHES`, default 10), kept
+  `config.MAX_REVIEW_CRASHES` (`ARC_MAX_REVIEW_CRASHES`, default 20), kept
   separate from the fix budget for the same reason `PR_MAX_INCONCLUSIVE` is
   separate from `PR_MAX_ROUNDS`.
 
@@ -261,13 +261,13 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
 ### Rule 4 — Every task MUST define an honest `verify_cmd` gate, run before review
 
 - The gate node (code_tasks.py:190) runs the task's `verify_cmd` as a shell
-  command **in the worktree**, under `config.GATE_TIMEOUT` = **180 s**
+  command **in the worktree**, under `config.GATE_TIMEOUT` = **360 s**
   (override `ARC_GATE_TIMEOUT`); a timeout kills the process and fails the
   gate. Only its stdout/stderr tail (last 2000 chars) is kept.
 - The gate MUST pass before review happens (edge `gate_<tid> ->
   review_<tid>` fires only `when r["passed"]`, code_tasks.py:256).
 - A gate or review failure loops back to `implement` with the failure output
-  as feedback while `runs <= config.MAX_FIX_ROUNDS` (8, override
+  as feedback while `runs <= config.MAX_FIX_ROUNDS` (16, override
   `ARC_MAX_FIX_ROUNDS`). Exhausting the fix rounds does **not** fail the task
   yet: it **escalates one tier up `config.ESCALATION_PATH`** (default
   `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`, overrides
@@ -336,7 +336,7 @@ PR** in the life of the repo.
 - **Unanimous approval is required** among the reviewers who did run. Any
   rejection posts the blocking issues as a PR comment and sends the task back
   to `implement`; the next commit updates the same PR and a new round begins.
-- The loop is bounded by `config.PR_MAX_ROUNDS` (default 8); exhausting it
+- The loop is bounded by `config.PR_MAX_ROUNDS` (default 16); exhausting it
   fails the task rather than looping forever.
 - **Under `ARC_ALLOW_SAME_FAMILY_REVIEW=1`** (the TEMPORARY override in
   Rule 2) the pool may hold the implementer's own family, so a PR review can
@@ -348,7 +348,7 @@ PR** in the life of the repo.
   implementer, and the retry comes from `config.PR_MAX_INCONCLUSIVE` — kept
   separate from `PR_MAX_ROUNDS` so infrastructure failures cannot eat the
   rounds reserved for real disagreement about the code (`ARC_PR_MAX_INCONCLUSIVE`,
-  default 10). A genuine objection still beats a crash. Before this, a crash was posted to a public PR as
+  default 20). A genuine objection still beats a crash. Before this, a crash was posted to a public PR as
   "changes requested: reviewer crashed" and sent the implementer to fix issues
   that did not exist.
 - **A conflicting PR is resynced, not abandoned.** `pr_merge` merges the
@@ -356,7 +356,7 @@ PR** in the life of the repo.
   on failure so a genuine overlap never leaves a half-merged worktree for the
   next publish to commit), pushes, and routes back to `pr_review` — the diff
   changed, so the approval it already has no longer covers it. Bounded by
-  `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 6). A real textual conflict still stops,
+  `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 12). A real textual conflict still stops,
   recording which files disagree.
 - **Resuming a task whose PR is open re-attaches to it.** `in_review` and
   `conflict` tasks restart at `publish`, which finds the existing worktree and
@@ -454,7 +454,8 @@ scores a reviewer on whichever ceiling binds first.
   cap; over cap the task **waits** (poll every 20 s) and emits
   `driver.cap_wait {model, task, in_use, cap}` about once a minute — that event
   is the warning surface for "a new task is about to exceed concurrency".
-  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (3300 s) or when
+  Leases are reaped when older than `config.DRIVER_LEASE_TTL` (derived as
+  `DRIVER_TIMEOUT + DRIVER_CAPACITY_BACKOFF_CAP + 300`, 6300 s at defaults) or when
   the owning pid is dead, so killed runs never deadlock the fleet.
 - For the research workload, `pool.py` additionally enforces per-family
   `asyncio.Semaphore(config.family_limit(f))` client-side.
@@ -519,9 +520,9 @@ processes and move git refs on the same terms.
 - The dashboard Projects DAG view renders the loops: fix-loop attempts as
   dashed amber self-arcs with xN counts, `conflict` nodes in **orange**
   (distinct from `failed` red), and the last review verdict on each node.
-- Harness-level resilience: `config.DRIVER_TIMEOUT` = 2700 s per harness
+- Harness-level resilience: `config.DRIVER_TIMEOUT` = 5400 s per harness
   invocation (override `ARC_DRIVER_TIMEOUT`) as a total-runtime backstop, and
-  `config.DRIVER_IDLE_TIMEOUT` = 420 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
+  `config.DRIVER_IDLE_TIMEOUT` = 840 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
   a **stall detector**: a harness that produces no stdout for that long is
   waiting on a request that is not coming back, so it is killed and retried
   rather than waited out. Every stall records forensics first — process state,
@@ -534,7 +535,7 @@ processes and move git refs on the same terms.
   the capacity backoff exists for; the long silences are a separate,
   still-unexplained failure.)
   Retries use exponential
-  backoff (capped at 30 s) up to `config.MAX_RETRIES` = 12. If every retry
+  backoff (capped at 60 s) up to `config.MAX_RETRIES` = 24. If every retry
   fails, the attempt is recorded as a harness run (exit 1) and treated as a
   failed attempt — the task re-enters the bounded fix loop and, if the
   outage persists through the fix rounds and escalation tiers, ends `failed`
@@ -619,7 +620,7 @@ upstream taskfile paths (bare filenames resolve under `~/tasks`). Never use
   killed run never writes rows for the rest. Waiting costs nothing: no
   worktree, branch, or task row exists until the chain is ready.
 - A `failed`/`conflict` upstream row blocks the chain; the
-  `ARC_CHAIN_TIMEOUT` budget (default **6 h**, poll every 10 s) bounds the
+  `ARC_CHAIN_TIMEOUT` budget (default **12 h**, poll every 10 s) bounds the
   wait. Either ends the run with exit code 1 and a `chain.blocked` event
   (`chain.wait`/`chain.ready` bracket the gate — Rule 7).
 - CLI surface: `main.py code run <taskfile> --no-wait` pre-flights the
@@ -700,7 +701,7 @@ no `planner` role and is refused);
 roster-driven enforcement as Rule 2). Default model `config.GH_MODEL`
 (`ARC_GH_MODEL` env), falling back to `config.PLANNER_MODEL` =
 GLM-5.3; each `gh` subprocess is bounded by
-`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 60 s).
+`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 120 s).
 
 **Preview by default.** `--apply-labels`, `--create`, and `--post` are the
 ONLY paths that write to GitHub; without them every command is read-only.
@@ -727,7 +728,7 @@ Top-level Python modules (one role each):
 | `drivers.py` | Headless CLI harness drivers: `OpencodeDriver` (`opencode`, GLM-5.3) and `DeepseekDriver` (`dsh`, DeepSeek-V4.1-Flash-thinking-max — streams reasoning on stderr, prints only the final message on stdout, pumps both pipes for the stall clock, no session resume, 0 tokens reported); `KimiDriver` still exists for historical transcripts only (no live model runs the kimi harness); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
-| `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout); nothing merges locally |
+| `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (120 s per-git-op timeout); nothing merges locally |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), `chat` (one conversational planner turn over a session jsonl — module `orchchat.py`), and `code {plan,run,status,bench}` |
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |

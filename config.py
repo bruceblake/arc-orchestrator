@@ -77,23 +77,24 @@ FAMILY_ORDER = list(FAMILIES)
 
 QUESTIONS_PER_ROUND = int(os.getenv("ARC_QUESTIONS_PER_ROUND", "10"))
 SEEDS_PER_ROUND = int(os.getenv("ARC_SEEDS_PER_ROUND", "3"))
-PIPELINE_ROUNDS = int(os.getenv("ARC_PIPELINE_ROUNDS", "2"))
-MAX_VERIFY_ROUNDS = int(os.getenv("ARC_MAX_VERIFY_ROUNDS", "3"))
+PIPELINE_ROUNDS = int(os.getenv("ARC_PIPELINE_ROUNDS", "4"))
+MAX_VERIFY_ROUNDS = int(os.getenv("ARC_MAX_VERIFY_ROUNDS", "6"))
 VERIFY_PASS_SCORE = float(os.getenv("ARC_VERIFY_PASS_SCORE", "7.5"))
-REQUEST_TIMEOUT = float(os.getenv("ARC_REQUEST_TIMEOUT", "600"))
+REQUEST_TIMEOUT = float(os.getenv("ARC_REQUEST_TIMEOUT", "1200"))
 # Retry budgets are GENEROUS on purpose. Tokens are not the scarce resource
 # here; a task abandoned one attempt short of working is. Every budget below
 # is still finite, because a task that cannot succeed must eventually stop
 # rather than hold a worktree, a branch and a model slot forever — but the
 # ceilings are set where "gave up" means "genuinely could not", not "ran out
 # of patience". Raised 09-11 from 4/3/3/2/3/3 after graph-admission-control
-# died with a passing gate because its reviewer crashed three times.
-MAX_RETRIES = int(os.getenv("ARC_MAX_RETRIES", "12"))
+# died with a passing gate because its reviewer crashed three times. Every
+# budget in this file doubled 09-13 by operator directive.
+MAX_RETRIES = int(os.getenv("ARC_MAX_RETRIES", "24"))
 ROUND_COOLDOWN = float(os.getenv("ARC_ROUND_COOLDOWN", "5"))
 STATS_INTERVAL = float(os.getenv("ARC_STATS_INTERVAL", "300"))
 MAX_GRAPH_STEPS = int(os.getenv("ARC_MAX_GRAPH_STEPS", "6000"))
-SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "12"))
-SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "30"))
+SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "24"))
+SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "60"))
 
 EVENTS_LOG = os.getenv("ARC_EVENTS_LOG") or str(ROOT / "logs" / "events.jsonl")
 BUILD_OUTPUT_DIR = os.getenv("ARC_BUILD_OUTPUT_DIR") or str(ROOT / "production" / "minecraft")
@@ -114,8 +115,8 @@ DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
 # glanced at from a phone without a login step.
 DASHBOARD_BIND = os.getenv("ARC_DASHBOARD_BIND", "0.0.0.0")
 DASHBOARD_TOKEN = os.getenv("ARC_DASHBOARD_TOKEN", "")
-MAX_MODULE_RETRIES = int(os.getenv("ARC_MAX_MODULE_RETRIES", "3"))
-MAX_INTEGRATION_ROUNDS = int(os.getenv("ARC_MAX_INTEGRATION_ROUNDS", "3"))
+MAX_MODULE_RETRIES = int(os.getenv("ARC_MAX_MODULE_RETRIES", "6"))
+MAX_INTEGRATION_ROUNDS = int(os.getenv("ARC_MAX_INTEGRATION_ROUNDS", "6"))
 REVIEW_PASS_SCORE = float(os.getenv("ARC_REVIEW_PASS_SCORE", "6.5"))
 
 
@@ -157,8 +158,8 @@ REPO_ROOT = os.getenv("ARC_REPO_ROOT") or str(Path.home())
 # It was 900s, which made it the BINDING limit on real work rather than a
 # backstop: an implement was killed at exactly 900s having written 149KB with
 # only 80s of idle — it was demonstrably still working, and each such kill
-# costs a full retry (MAX_RETRIES=4, so an hour per task).
-DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
+# costs a full retry (MAX_RETRIES, so an hour per task).
+DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "5400"))
 # A harness that produces no stdout for this long is killed and retried.
 #
 # This is NOT a hang detector, and treating it as one cost real work. ARC
@@ -177,12 +178,14 @@ DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
 #     300s      0.08%        0.5%        1.8%
 #     420s      0.00%        0.0%        0.0%
 #
-# 420s clears the observed tail. A genuinely dead request costs 7 minutes;
+# 420s clears the observed tail, and the default was doubled to 840s on 09-13
+# by operator directive (patience over speed; tokens are not the scarce
+# resource). A genuinely dead request costs its idle budget in minutes;
 # DRIVER_TIMEOUT bounds the total. Shortening this to "fail fast" trades a
 # small latency saving for a large chance of destroying finished work.
-DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "420"))
+DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "840"))
 # Per-role idle budgets. An implementer edits in many small steps and going
-# quiet for seven minutes means something is wrong. A PLANNER does the opposite:
+# quiet for several minutes means something is wrong. A PLANNER does the opposite:
 # one long agentic read of the repo, then a single 4KB JSON plan — it is
 # legitimately silent while the model generates, and when the fleet is at
 # GLM-5.3's cap of 4 its request waits behind the others with the connection
@@ -190,7 +193,7 @@ DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "420"))
 # of 3 stalled every planner run on 09-11/12). Killing it there is killing a
 # healthy process for being queued.
 ROLE_IDLE_TIMEOUT = {
-    "planner": float(os.getenv("ARC_PLANNER_IDLE_TIMEOUT", "1500")),
+    "planner": float(os.getenv("ARC_PLANNER_IDLE_TIMEOUT", "3000")),
 }
 
 
@@ -204,8 +207,8 @@ DRIVER_PROGRESS_INTERVAL = float(os.getenv("ARC_DRIVER_PROGRESS_INTERVAL", "60")
 # A harness rejected at the ARC account cap never got a slot, so retrying it
 # on the crash schedule (2s, 4s, 8s) walks straight back into the same cap.
 # Capacity rejections back off on this longer, jittered ladder instead.
-DRIVER_CAPACITY_BACKOFF = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF", "45"))
-DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP", "300"))
+DRIVER_CAPACITY_BACKOFF = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF", "90"))
+DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP", "600"))
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
@@ -223,7 +226,7 @@ DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
 # model forever, before its own timeout clock had even started. Exceeding it
 # raises a capacity-classified DriverError, so the retry ladder backs off
 # instead of the run silently stalling.
-DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "5400"))
+DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "10800"))
 # --- branch model + PR review ------------------------------------------------
 # The pull request is the GATE, not a receipt: the branch is pushed, PR_REVIEWERS
 # reviewers read the actual PR diff, and a merger only merges once every one of
@@ -265,35 +268,34 @@ PR_REVIEWERS_WANTED = int(os.getenv("ARC_PR_REVIEWERS", "2"))
 # fleet cannot staff; the audit compares delivered against wanted and says so.
 # PR_REVIEWERS (the effective value) is computed after the roster below.
 # How many times a PR may go back to the implementer before the task fails.
-PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "8"))
+PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "16"))
 # Retries of a review that reached NO verdict (every reviewer crashed).
 # Separate from PR_MAX_ROUNDS on purpose: an infrastructure failure must
 # not consume the rounds reserved for real disagreement about the code.
-PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "10"))
+PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "20"))
 
 # How many times a conflicting PR may be resynced with the base before
-# giving up. Each resync rewrites the branch and costs a fresh review,
-# so this is deliberately small.
-PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "6"))
+# giving up. Each resync rewrites the branch and costs a fresh review.
+PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "12"))
 
 # Retries of a PRE-MERGE review that crashed instead of reaching a
 # verdict. Separate from the fix budget on purpose: a reviewer that
 # could not run has not objected to anything, and spending a fix round
 # on it sends the implementer to repair code nobody criticised.
-MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "10"))
+MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "20"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
 
-GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
-MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "8"))
+GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "360"))
+MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "16"))
 # Project chaining (code workload): a taskfile that declares `after` waits for
 # every task in those upstream taskfiles to reach 'merged' before any of its
 # worktrees allocate. Upstream projects can legitimately take hours (fix
 # loops, PR review rounds, escalation tiers), so the wait budget is hours,
 # not minutes. A chain that never settles must eventually fail loudly rather
 # than sit on the dashboard forever.
-CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
+CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(12 * 3600)))
 
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
@@ -305,7 +307,7 @@ CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
 # (GLM-5.3 since 2026-09-12). A hardcoded default here would name a
 # withdrawn model the morning after it left. GH_MODEL itself is resolved
 # below, once PLANNER_MODEL exists.
-GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "60"))
+GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "120"))
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of

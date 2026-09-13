@@ -103,7 +103,7 @@ buttons for you — but that protects against a web page, not a neighbour.
 
 Every round fans one question out to every live model family in parallel, then
 cross-critiques, synthesizes, and verifies. Failed rounds loop back into a
-stronger synthesis (bounded by `ARC_MAX_VERIFY_ROUNDS`, default 3):
+stronger synthesis (bounded by `ARC_MAX_VERIFY_ROUNDS`, default 6):
 
 ```
 pick_topic ──> gen_questions ──┬─> answer_glm ────────┐
@@ -288,32 +288,32 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | Variable | Default | Meaning |
 |---|---|---|
 | `ARC_QUESTIONS_PER_ROUND` | 10 | questions per round; >= 10 saturates every live family |
-| `ARC_PIPELINE_ROUNDS` | 2 | rounds in flight simultaneously |
-| `ARC_MAX_VERIFY_ROUNDS` | 3 | max synthesis attempts before shipping best effort |
+| `ARC_PIPELINE_ROUNDS` | 4 | rounds in flight simultaneously |
+| `ARC_MAX_VERIFY_ROUNDS` | 6 | max synthesis attempts before shipping best effort |
 | `ARC_VERIFY_PASS_SCORE` | 7.5 | verifier score (0-10) required to pass |
 | `ARC_SEEDS_PER_ROUND` | 3 | new topics generated per round |
 | `ARC_ROUND_COOLDOWN` | 5 | seconds between round launches |
 | `ARC_STATS_INTERVAL` | 300 | seconds between stats log lines |
-| `ARC_REQUEST_TIMEOUT` | 600 | per-request timeout (seconds) |
-| `ARC_MAX_RETRIES` | 12 | retries per request on 429/5xx/network errors |
-| `ARC_SESSION_RETRIES` | 12 | retries on 400 "concurrent session limit" (per-user caps) |
-| `ARC_SESSION_BACKOFF_CAP` | 30 | max backoff per session-limit retry (seconds) |
+| `ARC_REQUEST_TIMEOUT` | 1200 | per-request timeout (seconds) |
+| `ARC_MAX_RETRIES` | 24 | retries per request on 429/5xx/network errors |
+| `ARC_SESSION_RETRIES` | 24 | retries on 400 "concurrent session limit" (per-user caps) |
+| `ARC_SESSION_BACKOFF_CAP` | 60 | max backoff per session-limit retry (seconds) |
 | `ARC_LIMIT_<FAMILY>` | docs limit | override a family's semaphore (e.g. `ARC_LIMIT_DEEPSEEK=6`) |
 | `ARC_EVENTS_LOG` | logs/events.jsonl | event log path (dashboard tail) |
 | `ARC_BUILD_OUTPUT_DIR` | production/minecraft | where the build workload writes |
-| `ARC_MAX_MODULE_RETRIES` | 3 | fix-loop attempts per module in the gauntlet |
-| `ARC_MAX_INTEGRATION_ROUNDS` | 3 | wiring_fix ⇄ integration_review cycles |
+| `ARC_MAX_MODULE_RETRIES` | 6 | fix-loop attempts per module in the gauntlet |
+| `ARC_MAX_INTEGRATION_ROUNDS` | 6 | wiring_fix ⇄ integration_review cycles |
 | `ARC_REVIEW_PASS_SCORE` | 6.5 | cross-model review score required to ship |
 | `ARC_DASHBOARD_PORT` | 8787 | dashboard port |
 | `ARC_REPO_ROOT` | `~` | the only directory tree the dashboard accepts a project repo from (`/api/projects/create`, and every task file it runs) |
-| `ARC_DRIVER_LEASE_WAIT` | 5400 | max seconds a task waits for a driver lease before failing on capacity |
-| `ARC_DRIVER_CAPACITY_BACKOFF_CAP` | 300 | max capacity-backoff sleep on a harness retry (seconds) |
+| `ARC_DRIVER_LEASE_WAIT` | 10800 | max seconds a task waits for a driver lease before failing on capacity |
+| `ARC_DRIVER_CAPACITY_BACKOFF_CAP` | 600 | max capacity-backoff sleep on a harness retry (seconds) |
 | `ARC_BASE_URL` | https://llm-api.arc.vt.edu/api/v1 | ARC API base URL |
 | `ARC_MAX_GRAPH_STEPS` | 6000 | max graph steps before a run is aborted |
 | `ARC_BASE_BRANCH` | main | branch the fleet's pull requests target and merge into; set it to `development` (keeping `ARC_PROD_BRANCH=main`) for a two-branch flow with `code promote` |
 | `ARC_PROD_BRANCH` | main | production branch; promotion (`code promote`, the dashboard button) exists only while it differs from `ARC_BASE_BRANCH` |
 | `ARC_PR_REVIEWERS` | 2 | PR reviewers *wanted* before merge; the two-family fleet can field only one cross-family reviewer, and `task.pr_review_thin` records the shortfall |
-| `ARC_PR_MAX_ROUNDS` | 8 | PR review rounds before a task fails |
+| `ARC_PR_MAX_ROUNDS` | 16 | PR review rounds before a task fails |
 | `ARC_REQUIRE_TESTS` | 1 | require changes to ship tests that fail without them |
 | `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
 | `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
@@ -406,7 +406,7 @@ Every implementation must pass a deterministic verify gate (a shell command
 run inside the worktree) and then a review by the *other* model family — a
 reviewer never shares a family with the implementer it reviews
 (**GLM-5.3 → deepseek, DeepSeek → glm**). Rejections
-feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 8).
+feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 16).
 `ARC_ALLOW_SAME_FAMILY_REVIEW=1` is a TEMPORARY operator-authorized override
 (2026-09-12) that suspends the cross-family requirement while GLM-5.3's
 backend is unstable; it is documented in

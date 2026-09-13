@@ -680,7 +680,7 @@ class Driver:
                                   config.DRIVER_CAPACITY_BACKOFF_CAP)
                     backoff += random.uniform(0, backoff * 0.25)
                 else:
-                    backoff = min(30, 2 ** attempt)
+                    backoff = min(60, 2 ** attempt)
                 log.warning("%s attempt %d failed (%s%s); retry in %.0fs",
                             self.model, attempt, "at capacity: " if capacity else "",
                             exc, backoff)

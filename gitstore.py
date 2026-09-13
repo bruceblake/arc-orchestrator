@@ -15,7 +15,7 @@ import events
 
 log = logging.getLogger("gitstore")
 
-GIT_TIMEOUT = 60
+GIT_TIMEOUT = 120
 
 
 class GitError(RuntimeError):
@@ -277,7 +277,7 @@ async def cleanup(repo, task_id, delete_branch=True):
 # once every reviewer approves. Nothing is merged locally, so "send it back"
 # actually withholds the change instead of commenting on history.
 
-async def _gh(args, cwd, timeout=90):
+async def _gh(args, cwd, timeout=180):
     """Run gh; returns (rc, stdout, stderr). Never raises."""
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -476,7 +476,7 @@ async def merge_pr(repo, number, method="squash"):
     """Merge a PR. Returns (ok, note). Only ever called after approvals."""
     rc, out, err = await _gh(
         ["pr", "merge", str(number), f"--{method}", "--delete-branch"],
-        cwd=Path(repo).resolve(), timeout=120)
+        cwd=Path(repo).resolve(), timeout=240)
     if rc != 0:
         return False, f"gh pr merge failed: {err.strip()[:200]}"
     return True, "merged"

@@ -207,7 +207,8 @@ has fewer live rows than `config.driver_limit(model)`. Over cap, the task
 **waits**, polling every 20 s and emitting `driver.cap_wait {model, task,
 in_use, cap}` about once a minute — that event is the fleet's "concurrency
 limit reached" warning. Rows are reaped when older than
-`config.DRIVER_LEASE_TTL` (default 3300 s, `ARC_DRIVER_LEASE_TTL`) or owned by
+`config.DRIVER_LEASE_TTL` (default derived: `DRIVER_TIMEOUT +
+DRIVER_CAPACITY_BACKOFF_CAP + 300`, 6300 s at defaults, `ARC_DRIVER_LEASE_TTL`) or owned by
 a dead pid, so a killed run frees its slots within seconds and a crashed one
 within the TTL. All of this is in addition to — never instead of — the
 semaphore: the semaphore is the fast in-process path, the lease is the
@@ -365,8 +366,8 @@ are overridable from `.env`.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `DRIVER_TIMEOUT` | 2700 s | Per-harness-subprocess runtime cap. `drivers.Driver._once` sets `deadline = t0 + config.DRIVER_TIMEOUT`; if the child is still producing output past it, it is killed and the run raises `DriverError` (`drivers.py:799`). |
-| `GATE_TIMEOUT` | 180 s | Cap on the deterministic verify gate. `code_tasks.gate` runs `verify_cmd` via `asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)`; on timeout it kills the child and returns `passed=False` (`code_tasks.py:924-947`). |
+| `DRIVER_TIMEOUT` | 5400 s | Per-harness-subprocess runtime cap. `drivers.Driver._once` sets `deadline = t0 + config.DRIVER_TIMEOUT`; if the child is still producing output past it, it is killed and the run raises `DriverError` (`drivers.py:799`). |
+| `GATE_TIMEOUT` | 360 s | Cap on the deterministic verify gate. `code_tasks.gate` runs `verify_cmd` via `asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)`; on timeout it kills the child and returns `passed=False` (`code_tasks.py:924-947`). |
 | `MAX_FIX_ROUNDS` | 8 | Bounded (re)implement↔review fix loop per task. `code_tasks.py` re-fires `implement_<tid>` after a failed gate/review while `runs["implement_<tid>"] <= config.MAX_FIX_ROUNDS`, else it escalates one tier up `config.ESCALATION_PATH` with a fresh fix budget; the task fails only when the last tier exhausts. |
 | `MAX_RETRIES` | 12 | Per-firing retry budget in `drivers.Driver.run`: an attempt that raises `DriverError` retries (exponential backoff `2^attempt`, capped at 30 s; capacity errors use the longer `DRIVER_CAPACITY_BACKOFF` ladder) until `attempt > config.MAX_RETRIES`, then re-raises and fails the attempt (`drivers.py:666`). |
 
