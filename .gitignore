@@ -16,3 +16,8 @@ logs/
 
 # Per-session handoff scratch, not a project artifact
 .kimi-handoff-state.md
+
+# graft's local graph cache when run by hand in this checkout (the fleet keeps
+# its graphs outside the worktrees, under ~/worktrees/.graft/). Regenerable.
+/graft/
+.ignore

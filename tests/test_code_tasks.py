@@ -372,9 +372,19 @@ class ImplementPromptDiscipline(unittest.TestCase):
         self.assertIn("NEVER rewrite a whole file", p)
 
     def test_prompt_tells_the_agent_to_read_narrowly(self):
-        p = code_tasks._impl_prompt(
-            {"id": "t", "title": "T", "prompt": "x", "files_hint": [],
-             "model": "", "reviewer": ""}, "")
+        # Without a code graph (tests/test_graft.py covers the graph case);
+        # pinned so the assertion does not depend on whether this machine
+        # has the graft binary.
+        import graft
+        saved = dict(graft._bin_cache)
+        graft._bin_cache.update(checked=True, path=None)
+        try:
+            p = code_tasks._impl_prompt(
+                {"id": "t", "title": "T", "prompt": "x", "files_hint": [],
+                 "model": "", "reviewer": ""}, "")
+        finally:
+            graft._bin_cache.clear()
+            graft._bin_cache.update(saved)
         for phrase in ("grep/search FIRST", "line ranges", "Do not re-read"):
             self.assertIn(phrase, p)
 
