@@ -410,6 +410,30 @@ class PlanExtraction(unittest.TestCase):
             res = type("R", (), {"transcript_path": str(p), "text": text})()
             return code_tasks._plan_json_from_run(res)
 
+    def test_reads_opencode_event_dialect_transcripts(self):
+        """opencode session logs have NO "role" lines: assistant text lives in
+        {"type":"text","part":{"text":...}} records. Without reading them a
+        completed GLM-via-opencode plan parses as empty and is thrown away
+        (first attempt killed exactly so, 2026-09-13)."""
+        span = self._run([
+            {"type": "step_start", "part": {"type": "step-start"}},
+            {"type": "text", "part": {"type": "text", "text": "investigating the repo...\n"}},
+            {"type": "text", "part": {"type": "text", "synthetic": True,
+                                      "metadata": {"compaction_continue": True},
+                                      "text": "Continue if you have next steps."}},
+            {"type": "text", "part": {"type": "text", "text": "the plan:\n" + json.dumps(self.PLAN)}},
+            {"type": "step_finish", "part": {"type": "step-finish", "reason": "stop"}},
+        ])
+        self.assertIsNotNone(span, "opencode-dialect plan lost")
+        self.assertEqual(json.loads(span)["project"]["tasks"][0]["id"], "a")
+
+    def test_opencode_synthetic_markers_are_not_messages(self):
+        """Compaction 'continue' markers must not count as assistant output."""
+        self.assertIsNone(self._run([
+            {"type": "text", "part": {"type": "text", "synthetic": True,
+                                      "text": "Continue if you have next steps."}},
+        ]))
+
     def test_recovers_a_plan_too_large_for_the_truncated_text(self):
         big = json.dumps(self.PLAN)
         self.assertGreater(len(big), 200)

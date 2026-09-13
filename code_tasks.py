@@ -1684,7 +1684,19 @@ def _extract_plan_json(text):
 
 
 def _transcript_assistant_messages(path):
-    """Assistant message texts from a harness transcript, oldest first."""
+    """Assistant message texts from a harness transcript, oldest first.
+
+    Reads BOTH transcript dialects. kimi stream-json carries
+    {"role": "assistant", "content": ...} lines. opencode session logs carry
+    NO role lines at all — assistant text lives in
+    {"type": "text", "part": {"text": ...}} records, next to step_finish
+    bookkeeping and synthetic compaction markers. Reading only the role
+    dialect means a successful GLM-via-opencode plan is parsed as empty and
+    thrown away with "produced no usable JSON": the res.text fallback is
+    parse_transcript's last 3000 chars and a real plan is 6.5-11.5KB, so the
+    fallback can never hold one. Exactly this killed the first opencode-GLM
+    plan attempt on 2026-09-13.
+    """
     out = []
     try:
         raw = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -1697,6 +1709,13 @@ def _transcript_assistant_messages(path):
         try:
             obj = json.loads(line)
         except ValueError:
+            continue
+        if obj.get("type") == "text":  # opencode event dialect
+            part = obj.get("part")
+            if isinstance(part, dict) and not part.get("synthetic"):
+                t = part.get("text")
+                if isinstance(t, str) and t.strip():
+                    out.append(t)
             continue
         if obj.get("role") != "assistant":
             continue
@@ -1821,9 +1840,26 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
     )
     # The strongest live model that may plan — GLM-5.3 on the two-model
     # roster pinned 2026-09-12 (Kimi-K3 retired that day).
-    res = await _driver(config.PLANNER_MODEL, "planner", None).run(
-        prompt, Path(repo), task_id="plan")
-    raw = _plan_json_from_run(res)
+    #
+    # A planner can exit 0 with NO usable JSON: reasoning models burn the
+    # whole opencode output budget on thinking and finish reason=length with
+    # zero emitted text. That threw away a 40-minute GLM plan on 2026-09-13,
+    # unnoticed until the traceback. One tightened retry costs little against
+    # losing the run; the retry gets its own task_id so the first attempt's
+    # transcript survives instead of being overwritten.
+    raw = None
+    res = None
+    for attempt in (1, 2):
+        res = await _driver(config.PLANNER_MODEL, "planner", None).run(
+            prompt, Path(repo), task_id="plan" if attempt == 1 else "plan-r2")
+        raw = _plan_json_from_run(res)
+        if raw is not None:
+            break
+        prompt += (
+            "\n\nPREVIOUS ATTEMPT LOST: your run exhausted its output budget "
+            "on investigation notes and produced NO taskfile JSON. Keep the "
+            "investigation tight and emit the final taskfile JSON EARLY — "
+            "the JSON is the deliverable.\n")
     if raw is None:
         raise RuntimeError(f"planner produced no usable JSON; transcript: {res.transcript_path}")
     json.loads(raw)  # validate
