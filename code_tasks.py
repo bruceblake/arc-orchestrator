@@ -1,8 +1,9 @@
 """Multi-harness code workload: JSON task files -> task graph -> worktrees.
 
-Per task: alloc worktree -> implement (opencode: gpt-oss-120b / DeepSeek-V4-Flash)
--> deterministic verify gate (verify_cmd) -> cross-family review (Kimi-K3 via
-kimi CLI, or GLM-5.3 via opencode) -> bounded fix loop -> publish commit ->
+Per task: alloc worktree -> implement (the model's roster harness; since the
+2026-09-12 two-model fleet: DeepSeek-V4.1-Flash-thinking-max on dsh, GLM-5.3 on
+opencode) -> deterministic verify gate (verify_cmd) -> cross-family review
+(the other family's reviewer) -> bounded fix loop -> publish commit ->
 merge to main (serialized) -> cleanup. Reviews are mandatory and cross-family
 by default; an explicit bench `policy` (see orchbench.py) may relax
 routing/review rules to measure what the governance defaults buy.
@@ -19,7 +20,8 @@ import errors
 import events
 import gitstore
 import drivers
-from drivers import DriverError, KimiDriver, OpencodeDriver, transcript_tokens
+from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
+                     driver_for, transcript_tokens)
 from graph import Graph, GraphError
 
 log = logging.getLogger("code-tasks")
@@ -36,6 +38,9 @@ RETIRED_MODELS = {
                                        if m.startswith("DeepSeek")),
                                       config.ESCALATION_PATH[0]),
     "Kimi-K3":           lambda: config.ESCALATION_PATH[-1],                # strongest live
+    # RETIRED EARLY by operator decision 2026-09-12 (the provider had scheduled
+    # its withdrawal for 2026-09-19; the operator moved first). Old taskfiles
+    # naming it still run, remapped onto the strongest live tier.
 }
 
 
@@ -47,12 +52,16 @@ def load_taskfile(path, policy=None):
     repo = Path(data["project"]["repo"]).resolve()
     pol = policy or {}
     models = set(config.IMPLEMENTER_MODELS) | set(pol.get("implementers", []))
-    # Review-capable families, from the roster: ("kimi", "glm") until 09-19,
-    # then ("glm", "deepseek"). A taskfile written for a family that has since
-    # left is remapped below rather than rejected — the plan is still good.
+    # Review-capable families, from the roster: two today (deepseek, glm),
+    # since DeepSeek-V4.1-Flash-thinking-max gained reviewer on 2026-09-12.
+    # A taskfile written for a family that has since left is remapped below
+    # rather than rejected — the plan is still good.
     reviewers = tuple(pol.get("reviewers", tuple(config.REVIEW_FAMILIES)))
     review_on = pol.get("review", True)
-    allow_self = bool(pol.get("allow_self_review"))
+    # config.ALLOW_SAME_FAMILY_REVIEW is the operator's TEMPORARY all-DeepSeek
+    # routing (2026-09-12, GLM backend unstable); suspends cross-review — see
+    # the flag's comment in config.py.
+    allow_self = bool(pol.get("allow_self_review")) or config.ALLOW_SAME_FAMILY_REVIEW
     tasks = {}
     for t in data["project"]["tasks"]:
         tid = t["id"]
@@ -67,8 +76,8 @@ def load_taskfile(path, policy=None):
         planned_model = model
         if model not in models and model in RETIRED_MODELS and not pol.get("implementers"):
             # A model that LEFT the roster — gpt-oss retired 09-11, DeepSeek-V4
-            # replaced 09-12, Kimi-K3 withdrawn 09-19. The decomposition is still
-            # good; only the label is stale. Remap to where that tier's work
+            # replaced 09-12, Kimi-K3 retired EARLY 09-12. The decomposition is
+            # still good; only the label is stale. Remap to where that tier's work
             # goes now rather than failing every taskfile written before the
             # transition.
             model = RETIRED_MODELS[model]() or config.ESCALATION_PATH[0]
@@ -79,7 +88,7 @@ def load_taskfile(path, policy=None):
         reviewer = t.get("reviewer", "")
         if review_on and reviewer not in reviewers and not pol.get("reviewers"):
             # The named family is not review-capable TODAY — most likely it left
-            # the roster (kimi after 09-19) or was never one (gpt-oss). Remap to
+            # the roster (kimi on 09-12) or was never one (gpt-oss). Remap to
             # the strongest cross-family reviewer instead of failing a taskfile
             # whose decomposition is still perfectly good.
             remapped = config.cross_family_reviewer(model)
@@ -523,10 +532,10 @@ def _reviewer_pressure(model, usage):
     """How contended this reviewer is, 0.0 (idle) to 1.0+ (at a ceiling).
 
     Whichever ceiling binds FIRST wins: a model comfortably under its own cap
-    is not actually available if the harness it shares with two other models is
-    full. Scoring on the model alone sent every review to GLM and DeepSeek while
-    the single opencode pool they share sat at 5/5 with seven reviewers queued
-    behind it and the kimi harness idle at 1/3.
+    is not actually available if the harness it shares with another model is
+    full. Scoring on the model alone once sent every review to the opencode
+    models while their single local pool sat at 5/5 with seven reviewers
+    queued behind it and another harness idle at 1/3.
     """
     h = _harness_of(model)
     return max(usage.get(model, 0) / max(1, config.driver_limit(model)),
@@ -545,7 +554,8 @@ def _eligible_pr_reviewers(impl_fam, pol):
     """
     out = []
     for m in config.ESCALATION_PATH[::-1]:  # strongest first, from the roster
-        if config.MODEL_FAMILY.get(m) == impl_fam:
+        if (config.MODEL_FAMILY.get(m) == impl_fam
+                and not config.ALLOW_SAME_FAMILY_REVIEW):
             continue
         try:
             _driver(m, "pr_reviewer", pol)
@@ -762,14 +772,19 @@ def _parse_approval(text):
 
 
 def _driver(model, role, policy):
-    """Implementer/reviewer driver. policy['harness'] maps model -> kimi|opencode
-    (bench variants); default keeps the governed routing (Kimi-K3 -> kimi CLI)."""
+    """Implementer/reviewer driver. policy['harness'] maps model -> opencode|dsh
+    (bench variants); default follows the roster row's harness, so a model
+    whose ROSTER row moves harness moves with it."""
     pol = policy or {}
     harness = pol.get("harness", {}).get(model)
     if harness is None:
-        harness = config.MODEL_HARNESS.get(model, "opencode")
+        return driver_for(model, role, bench=bool(pol))
+    # A bench variant may pin a harness the roster does not name (orchbench's
+    # kimi-via-opencode swap); that path is explicit and never implicit.
     if harness == "kimi":
         return KimiDriver(role, bench=bool(pol))
+    if harness == "dsh":
+        return DeepseekDriver(model, role, bench=bool(pol))
     return OpencodeDriver(model, role, bench=bool(pol))
 
 
@@ -777,8 +792,9 @@ def _reviewer_driver(t, policy):
     """The driver for the taskfile's `reviewer:` family token.
 
     Resolved through config.REVIEW_FAMILIES, so "glm" means GLM-5.3 and
-    "deepseek" means whichever DeepSeek is live — and "kimi" stops resolving
-    the day Kimi leaves instead of constructing a driver for a withdrawn model.
+    "deepseek" means whichever DeepSeek is live. A token that has left the
+    roster ("kimi", retired 2026-09-12) is remapped in load_taskfile before it
+    ever reaches this; the .get fallback never builds a withdrawn driver.
     """
     token = t["reviewer"]
     model = config.REVIEW_FAMILIES.get(token, token)
@@ -878,8 +894,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         exhausted its fix rounds is evidence the tier was too weak; a row the
         stale-reset wrote because its run process was killed says nothing about
         the model at all. Escalating the latter used to send every interrupted
-        task straight to Kimi-K3 — the scarcest, most stall-prone tier — so one
-        killed queue turned into four tasks piled on a cap of two.
+        task straight to the scarcest top tier — so one killed queue turned
+        into four tasks piled on one small cap.
         """
         t = tasks[tid]
         r = prior.get(tid)
@@ -1416,8 +1432,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             chosen = pool[:max(1, config.PR_REVIEWERS)]
             if len(chosen) < config.PR_REVIEWERS_WANTED:
                 # The roster cannot field PR_REVIEWERS cross-family readers for
-                # this implementer — after Kimi-K3 leaves on 09-19 there are
-                # two families, so every task gets exactly one. The gate still
+                # this implementer — the two-model fleet of 2026-09-12 has two
+                # families, so every task gets exactly one. The gate still
                 # requires unanimity among those who review; one genuine
                 # cross-family read beats a same-family pair for the property
                 # cross-review protects. But it is a weaker gate than the
@@ -1770,6 +1786,8 @@ def _routing_tiers_prose():
         lines.append(f"- {' or '.join(tiers['hard'])}: hard tasks that need deep "
                      "understanding, multi-file reasoning, delicate architecture, or "
                      "subtle debugging.\n")
+    lines.append(f"- {config.ESCALATION_PATH[-1]} is the fleet's strongest model "
+                 "(the last escalation stage) — prefer it for the hardest tasks.\n")
     fams = list(config.REVIEW_FAMILIES)
     pairs = []
     for m in config.ESCALATION_PATH:
@@ -1785,9 +1803,9 @@ def _routing_tiers_prose():
 def plan_schema_hint():
     """The taskfile schema the planner is shown, with TODAY'S models in it.
 
-    A string literal here named gpt-oss and Kimi long after either should have
-    appeared in a plan. Generated from the roster so the planner is never told
-    to route work to a model that left."""
+    A string literal here named gpt-oss and Kimi-K3 long after both had left.
+    Generated from the roster so the planner is never told to route work to a
+    model that retired (gpt-oss 09-11, Kimi-K3 09-12)."""
     models = " | ".join(f'"{m}"' for m in config.ESCALATION_PATH)
     reviewers = " | ".join(f'"{f}"' for f in config.REVIEW_FAMILIES)
     return (
@@ -1879,7 +1897,19 @@ def _extract_plan_json(text):
 
 
 def _transcript_assistant_messages(path):
-    """Assistant message texts from a harness transcript, oldest first."""
+    """Assistant message texts from a harness transcript, oldest first.
+
+    Reads BOTH transcript dialects. kimi stream-json carries
+    {"role": "assistant", "content": ...} lines. opencode session logs carry
+    NO role lines at all — assistant text lives in
+    {"type": "text", "part": {"text": ...}} records, next to step_finish
+    bookkeeping and synthetic compaction markers. Reading only the role
+    dialect means a successful GLM-via-opencode plan is parsed as empty and
+    thrown away with "produced no usable JSON": the res.text fallback is
+    parse_transcript's last 3000 chars and a real plan is 6.5-11.5KB, so the
+    fallback can never hold one. Exactly this killed the first opencode-GLM
+    plan attempt on 2026-09-13.
+    """
     out = []
     try:
         raw = Path(path).read_text(encoding="utf-8", errors="replace")
@@ -1892,6 +1922,13 @@ def _transcript_assistant_messages(path):
         try:
             obj = json.loads(line)
         except ValueError:
+            continue
+        if obj.get("type") == "text":  # opencode event dialect
+            part = obj.get("part")
+            if isinstance(part, dict) and not part.get("synthetic"):
+                t = part.get("text")
+                if isinstance(t, str) and t.strip():
+                    out.append(t)
             continue
         if obj.get("role") != "assistant":
             continue
@@ -2014,10 +2051,28 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )
-    # The strongest live model that may plan — Kimi-K3 until 09-19, GLM after.
-    res = await _driver(config.PLANNER_MODEL, "planner", None).run(
-        prompt, Path(repo), task_id="plan")
-    raw = _plan_json_from_run(res)
+    # The strongest live model that may plan — GLM-5.3 on the two-model
+    # roster pinned 2026-09-12 (Kimi-K3 retired that day).
+    #
+    # A planner can exit 0 with NO usable JSON: reasoning models burn the
+    # whole opencode output budget on thinking and finish reason=length with
+    # zero emitted text. That threw away a 40-minute GLM plan on 2026-09-13,
+    # unnoticed until the traceback. One tightened retry costs little against
+    # losing the run; the retry gets its own task_id so the first attempt's
+    # transcript survives instead of being overwritten.
+    raw = None
+    res = None
+    for attempt in (1, 2):
+        res = await _driver(config.PLANNER_MODEL, "planner", None).run(
+            prompt, Path(repo), task_id="plan" if attempt == 1 else "plan-r2")
+        raw = _plan_json_from_run(res)
+        if raw is not None:
+            break
+        prompt += (
+            "\n\nPREVIOUS ATTEMPT LOST: your run exhausted its output budget "
+            "on investigation notes and produced NO taskfile JSON. Keep the "
+            "investigation tight and emit the final taskfile JSON EARLY — "
+            "the JSON is the deliverable.\n")
     if raw is None:
         raise RuntimeError(f"planner produced no usable JSON; transcript: {res.transcript_path}")
     json.loads(raw)  # validate

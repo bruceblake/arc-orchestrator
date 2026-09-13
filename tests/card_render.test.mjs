@@ -83,7 +83,7 @@ const FIX = { projects: [
     dag: {nodes: [{id: "t-clean", status: "merged"}, {id: "t-tests", status: "running", live: true}],
           edges: [{src: "t-clean", dst: "t-tests"}]} },
   { file: "flaky.json", repo: "acme/other-repo", title: "flaky tests", phase: "attention", archived: false,
-    models: ["gpt-oss-120b"], statuses: {merged: 1, failed: 2, conflict: 1},
+    models: ["DeepSeek-V4.1-Flash-thinking-max"], statuses: {merged: 1, failed: 2, conflict: 1},
     progress: {done: 1, total: 4}, n_tasks: 4, tokens: 9000, seconds: 0,
     last_activity: NOW, errors: [],
     dag: {nodes: [{id: "f-a", status: "merged"}, {id: "f-b", status: "failed"},
@@ -94,8 +94,8 @@ const FIX = { projects: [
 // the detail meta line must source tokens from PROJECTS (the /api/projects
 // snapshot), not from this response.
 const DET = { file: "ui.json", title: "game UI polish", repo: "acme/arc-orchestrator",
-  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "kimi", deps: [], verify_cmd: "./check.sh"},
-          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "kimi", deps: ["t-clean"], verify_cmd: "node t.js"}],
+  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "deepseek", deps: [], verify_cmd: "./check.sh"},
+          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "deepseek", deps: ["t-clean"], verify_cmd: "node t.js"}],
   rows: [{id: "t-clean", status: "merged", attempts: 1}, {id: "t-tests", status: "running", attempts: 2}],
   runs: [{task_id: "t-tests", model: "GLM-5.3", role: "implementer", harness: "opencode",
           attempt: 2, exit_code: 0, seconds: 12, verdict: "", transcript: "logs/harness/t-tests-x2.jsonl"}],

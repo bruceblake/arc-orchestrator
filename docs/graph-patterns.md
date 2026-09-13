@@ -48,21 +48,25 @@ Two facts from the literature shape everything below:
 
 ### Model tiers and driver caps (fan-out arithmetic)
 
-| Model | Tier | Roles | Account cap | Driver semaphore |
-|---|---|---|---|---|
-| gpt-oss-120b | basic | implement only | 10 | 8 |
-| DeepSeek-V4-Flash | medium | implement only | 10 | 8 |
-| GLM-5.3 | hard | implement/plan/review | 4 | 3 |
-| Kimi-K3 | hard | implement/plan/review | 3 | 2 |
+The roster is dated and API-validated (`config.ROSTER`); this is the
+2026-09-12 snapshot — the live numbers are `config.harness_limit()` /
+`config.driver_limit()` (`config._HARNESS_CAP`, `config._MODEL_DRIVER_CAP`).
 
-- Reviewer is always `kimi` ↔ `glm` cross-family: GLM-5.3 work gets
-  `reviewer: "kimi"`, Kimi-K3 work gets `reviewer: "glm"`, gpt-oss/DeepSeek
-  work may use either. Split reviews so neither reviewer idles.
+| Model | Harness | Tier | Roles | Account cap | Driver slots |
+|---|---|---|---|---|---|
+| DeepSeek-V4.1-Flash-thinking-max | `dsh` | medium | implement/review/PR-review (never plans) | 10 | 5 |
+| GLM-5.3 | `opencode` | hard | implement/plan/review/PR-review; the planner | 4 | 2 |
+
+- Reviewer is always cross-family: `reviewer` names a family in
+  `config.REVIEW_FAMILIES` (`glm`, `deepseek`) other than the
+  implementer's. With two families the pairing is forced: GLM-5.3's work goes
+  to deepseek, DeepSeek's to glm.
 - Fan-out wider than a family's driver slots simply **queues** (leases are
-  cross-process; over-cap tasks wait, they do not fail): at most 3 GLM or
-  2 Kimi tasks ever run at once. Width beyond the cap costs latency, not
-  correctness — but a fan-out of 6 hard tasks all routed to GLM is really a
-  chain of 2 batches, so plan for it or spread tiers.
+  cross-process; over-cap tasks wait, they do not fail), and each harness has
+  its own cap of 5 (opencode for GLM-5.3, dsh for DeepSeek). Width beyond the
+  cap costs latency, not correctness — but a fan-out of 6 tasks all routed
+  to DeepSeek is really a chain of 2 batches (driver cap 5), so plan for it
+  or spread tiers.
 - Keep `files_hint` disjoint across parallel tasks. Two implementers editing
   one file = merge conflict = failed task.
 - `deps` joins are real: a task with two or more deps gets a gather node
@@ -75,8 +79,8 @@ Taskfile task shape (see docs/taskfile-schema.md):
 
 ```json
 {"id": "kebab-id", "title": "...", "prompt": "<self-contained spec>",
- "model": "gpt-oss-120b|DeepSeek-V4-Flash|GLM-5.3|Kimi-K3",
- "reviewer": "kimi|glm", "verify_cmd": "./check.sh && ...",
+ "model": "GLM-5.3|DeepSeek-V4.1-Flash-thinking-max",
+ "reviewer": "glm|deepseek", "verify_cmd": "./check.sh && ...",
  "files_hint": ["..."], "deps": ["other-id"]}
 ```
 
@@ -100,12 +104,12 @@ chaining", generalized: each link is a full implementer + gate + review.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "chain",
  "tasks": [
-  {"id": "intro-api", "model": "GLM-5.3", "reviewer": "kimi",
+  {"id": "intro-api", "model": "GLM-5.3", "reviewer": "deepseek",
    "prompt": "...", "verify_cmd": "./check.sh", "deps": []},
-  {"id": "migrate-callers", "model": "DeepSeek-V4-Flash", "reviewer": "glm",
+  {"id": "migrate-callers", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
    "prompt": "... uses the new API from ...", "verify_cmd": "./check.sh",
    "deps": ["intro-api"]},
-  {"id": "delete-old", "model": "gpt-oss-120b", "reviewer": "kimi",
+  {"id": "delete-old", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
    "prompt": "...", "verify_cmd": "./check.sh", "deps": ["migrate-callers"]}]}}
 ```
 
@@ -135,21 +139,22 @@ same shape with dynamic width.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "fan-out-fan-in",
  "tasks": [
-  {"id": "slice-a", "model": "gpt-oss-120b", "reviewer": "kimi",
+  {"id": "slice-a", "model": "GLM-5.3", "reviewer": "deepseek",
    "files_hint": ["a/"], "deps": [], "...": "..."},
-  {"id": "slice-b", "model": "DeepSeek-V4-Flash", "reviewer": "glm",
+  {"id": "slice-b", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
    "files_hint": ["b/"], "deps": []},
-  {"id": "slice-c", "model": "DeepSeek-V4-Flash", "reviewer": "kimi",
+  {"id": "slice-c", "model": "GLM-5.3", "reviewer": "deepseek",
    "files_hint": ["c/"], "deps": []},
-  {"id": "integrate", "model": "GLM-5.3", "reviewer": "kimi",
+  {"id": "integrate", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
    "prompt": "Verify the slices work TOGETHER on merged base; fix seams.",
    "verify_cmd": "./check.sh && full test suite",
    "deps": ["slice-a", "slice-b", "slice-c"]}]}}
 ```
 
 - **Fan-out width:** 2–4 is the sweet spot (planner rule: 2–8 tasks total).
-  Spread the width across tiers — 3 gpt-oss + 2 DeepSeek truly run at once;
-  5 GLM tasks run 3-then-2.
+  Spread the width across families and tiers — 2 GLM + 4 DeepSeek truly run
+  at once; 5 DeepSeek tasks still fit under its driver cap of 5, while 5 GLM
+  tasks run 2-2-1.
 - **Pitfalls:** the fan-in task owns integration honesty — its `verify_cmd`
   must run the *whole* suite against the merged base, not grep for the slice
   files. Respect the `deps[-1]` wait-edge rule: list the slowest/hardest
@@ -181,13 +186,13 @@ coin-flip into a decision.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "diamond",
  "tasks": [
-  {"id": "contract", "model": "GLM-5.3", "reviewer": "kimi", "deps": [],
+  {"id": "contract", "model": "GLM-5.3", "reviewer": "deepseek", "deps": [],
    "prompt": "Land the shared interface/types both sides will build on."},
-  {"id": "side-a", "model": "GLM-5.3", "reviewer": "kimi",
+  {"id": "side-a", "model": "GLM-5.3", "reviewer": "deepseek",
    "files_hint": ["impl/a*"], "deps": ["contract"]},
-  {"id": "side-b", "model": "Kimi-K3", "reviewer": "glm",
+  {"id": "side-b", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
    "files_hint": ["impl/b*"], "deps": ["contract"]},
-  {"id": "verify-integration", "model": "GLM-5.3", "reviewer": "kimi",
+  {"id": "verify-integration", "model": "GLM-5.3", "reviewer": "deepseek",
    "prompt": "Run the full suite against the merged a+b; repair the seam.",
    "verify_cmd": "./check.sh && pytest tests/integration -x",
    "deps": ["side-a", "side-b"]}]}}
@@ -204,9 +209,8 @@ coin-flip into a decision.
 ## 4. Router
 
 ```
-           +--(basic)----> gpt-oss task
 classify --+--(medium)---> DeepSeek task
-           +--(hard)-----> GLM/Kimi task
+           +--(hard)-----> GLM-5.3 task
 ```
 
 Classify the work, send it down exactly one branch. Two ways to route here:
@@ -229,7 +233,7 @@ decision or a whole plan of its own.
 
 - **When:** bugfix vs. feature vs. docs triage; a bug whose location is
   unknown (phase 1 = probe: locate + write a failing reproduction test with
-  gpt-oss/DeepSeek; phase 2 = fix with the tier the probe justifies);
+  GLM; phase 2 = fix with the tier the probe justifies);
   migrations scoped by an inventory pass.
 - **Express it:** one taskfile per phase — phase 1 explores, phase 2
   executes. Never emit "all branches and let the graph choose": task-level
@@ -263,7 +267,7 @@ Exactly one of `fix-frontend` / `fix-backend` runs; the other is recorded
 ## 5. Orchestrator-workers (supervisor)
 
 ```
-            planner (Kimi-K3, code plan)
+            planner (GLM-5.3, code plan)
                  |  taskfile
         +--------+--------+
         v        v        v
@@ -297,12 +301,12 @@ Magentic-One's "stall → replan" is our resume/escalate, §9).
 ## 6. Evaluator-optimizer (reflection loop)
 
 ```
-   +--------------------- fix loop (≤ MAX_FIX_ROUNDS=3) --------------------+
+   +--------------------- fix loop (≤ MAX_FIX_ROUNDS=8) --------------------+
    v                                                                        |
 implement → gate(verify_cmd) → cross-review(other harness) → publish → PR
-   ^            |fail             |fail                       |2 PR reviewers
+   ^            |fail             |fail                       |1 PR reviewer
    +------------+-----------------+---------------------------+ any reject
-                     exhaust → escalate tier up (§9)          (≤3 rounds)
+                     exhaust → escalate tier up (§9)          (≤8 rounds)
 ```
 
 Generator + evaluator in a bounded loop until quality is met — Anthropic's
@@ -326,15 +330,16 @@ evaluator: an honest `verify_cmd` plus a reviewer from the other harness.
 ## 7. Debate / vote (N implementers + judge)
 
 ```
-      +--> candidate A (GLM-5.3)  --+
-  --> +--> candidate B (Kimi-K3)    + --> judge (hard tier) --> one winner lands
-      +--> candidate C (DeepSeek) --+
+      +--> candidate A (GLM-5.3)      --+
+  --> +--> candidate B (DeepSeek)      + --> judge (GLM-5.3) --> one winner lands
+      +--> candidate C (DeepSeek)     --+
 ```
 
 Run the same (or the same-shaped) task N times for diverse answers and
 aggregate — Anthropic's "voting" parallelization. Note this system already
-votes on **every** task: `PR_REVIEWERS` (default 2) independent reviewers
-must unanimously approve the PR. This pattern adds voting at the
+votes on **every** task: PR reviewers must unanimously approve the PR —
+exactly ONE cross-family reviewer in the two-family fleet, recorded as
+`task.pr_review_thin`. This pattern adds voting at the
 *generation* stage for the few tasks that warrant it.
 
 - **When:** design/approach decisions (API shape, schema, algorithm choice)
@@ -348,18 +353,18 @@ must unanimously approve the PR. This pattern adds voting at the
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "debate-vote",
  "tasks": [
-  {"id": "cand-a", "model": "GLM-5.3", "reviewer": "kimi",
+  {"id": "cand-a", "model": "GLM-5.3", "reviewer": "deepseek",
    "files_hint": ["proposals/a.md"], "deps": [], "...": "..."},
-  {"id": "cand-b", "model": "Kimi-K3", "reviewer": "glm",
+  {"id": "cand-b", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
    "files_hint": ["proposals/b.md"], "deps": []},
-  {"id": "judge", "model": "GLM-5.3", "reviewer": "kimi",
+  {"id": "judge", "model": "GLM-5.3", "reviewer": "deepseek",
    "prompt": "Compare proposals a/b against the criteria in ...; implement "
              "the winner in src/...",
    "verify_cmd": "./check.sh", "deps": ["cand-a", "cand-b"]}]}}
 ```
 
-- **Width:** N=2 candidates is usually enough; N=3 max, and mind that Kimi
-  runs at most 2 concurrent sessions, GLM 3. Cost is N+1 full gauntlets.
+- **Width:** N=2 candidates is usually enough; N=3 max, and mind the driver
+  caps — DeepSeek 5, GLM-5.3 2. Cost is N+1 full gauntlets.
 - **Pitfalls:** two candidate PRs touching the same file cannot both merge —
   either both write proposals and the judge implements, or expect one PR to
   be closed by hand (the orchestrator does not auto-close losers). Juries
@@ -369,7 +374,7 @@ must unanimously approve the PR. This pattern adds voting at the
 ## 8. Hierarchical (planner → sub-planners → workers)
 
 ```
-planner(Kimi-K3)
+planner(GLM-5.3)
   |-- sub-plan A (taskfile A: 2-8 tasks) --> code run A
   |-- sub-plan B (taskfile B: 2-8 tasks) --> code run B
   +-- sub-plan C ...
@@ -398,22 +403,25 @@ separate projects; with a two-branch flow, `ARC_BASE_BRANCH=development`,
 ## 9. Retry + escalate (per-task resilience, built-in)
 
 ```
-implement → gate ─fail→ implement (fix round, ≤3)
-                └─budget out→ escalate tier up (fresh 3-round budget,
-                    ≤ MAX_ESCALATIONS=2 per run)
-                    path (config.ESCALATION_PATH): DeepSeek → GLM → Kimi → fail
-                    gpt-oss is off-path: its first hop lands on DeepSeek
+implement → gate ─fail→ implement (fix round, ≤ MAX_FIX_ROUNDS=8)
+                └─budget out→ escalate tier up (fresh fix budget,
+                    ≤ MAX_ESCALATIONS=1 per run)
+                    path (config.ESCALATION_PATH): DeepSeek-V4.1 → GLM-5.3 → fail
+                    a retired model's task hops in at its remap (RETIRED_MODELS)
 ```
 
 The saga/circuit-breaker analog, already wired by `code_tasks.build_code_graph`
 (Rule 4): bounded local retry, then escalate along `config.ESCALATION_PATH`
-(default DeepSeek-V4-Flash → GLM-5.3 → Kimi-K3) with the failure as feedback,
-cross-review flipping as the implementer's family changes; compensation =
-reallocating the worktree **resets the task branch to base**, so a rejected
-attempt never leaks into a retry. gpt-oss-120b is deliberately **off** the
-path — a gpt-oss-planned task hops into it at DeepSeek-V4-Flash, and with
-`MAX_ESCALATIONS` = 2 (one less than the path length) that tops out at
-GLM-5.3 within a single run; it reaches Kimi-K3 only via the resume path
+(default DeepSeek-V4.1-Flash-thinking-max → GLM-5.3) with the failure as
+feedback, the reviewer re-chosen as the implementer's family changes;
+compensation = reallocating the worktree **resets the task branch to base**,
+so a rejected attempt never leaks into a retry. A taskfile that still names a
+retired model (gpt-oss-120b, DeepSeek-V4-Flash, Kimi-K3) is remapped onto the path by
+`code_tasks.RETIRED_MODELS` rather than rejected. With `MAX_ESCALATIONS` = 1
+(one less than the two-model path's length, `config.py:556-557`) a
+medium-tier DeepSeek task can reach the top tier
+(GLM-5.3) within a single run; a task planned at the top tier tops out sooner, and continues
+only via the resume path
 (re-running a capability-failed row resumes one tier up). Resume escalates
 only on capability failures — an interrupted run restarts at the same
 tier.
@@ -422,7 +430,7 @@ tier.
   estimating latency: worst case per task is fix_rounds × tiers.
 - **Pitfalls:** escalation is predicated on the failure being *the model's
   fault*. A task whose prompt is unknowable ("make it better") will climb
-  all the way to Kimi and fail there burning the scarcest capacity — write
+  all the way to GLM-5.3 and fail there burning the scarcest capacity — write
   verifiable tasks instead. Gate output is truncated to 2000 chars, so make
   `verify_cmd` print the diagnosis early (or tail-filter it), or every fix
   round starts from a useless feedback blob.
@@ -435,7 +443,7 @@ tier.
 |---|---|---|
 | Greenfield build (multi-module) | orchestrator-workers → fan-out-fan-in (+ diamond seam check) | 4–8 |
 | Small feature / endpoint | single task (evaluator-optimizer is free) | 1–2 |
-| Repo-wide mechanical change | fan-out-fan-in sliced by directory, all gpt-oss/DeepSeek | 3–6 |
+| Repo-wide mechanical change | fan-out-fan-in sliced by directory, all GLM | 3–6 |
 | Delicate refactor / architecture | chain of hard-tier links; diamond if a seam is risky | 2–4 |
 | Docs | chain (write → link/render check) or one task | 1–3 |
 | Bugfix, known location | router→single task; gate = failing repro test now passing | 1–2 |
@@ -588,7 +596,8 @@ reviewer crashes that took the whole node down. Per-node `Retry` on
   level; the planner is told to decompose by tier and by file ownership.
 - **Deterministic edges for mandatory steps** (hooks, not model choice) — holds.
   `gate` always runs; `publish` always syncs; no transition is left to a model.
-- **Over-spawn caution** — `PR_REVIEWERS` bounds the fan-out; the pool is the
+- **Over-spawn caution** — `PR_REVIEWERS` bounds the fan-out (1 in the
+  two-family fleet); the pool is the
   eligible cross-family set, not "every model".
 - **Every node must ship on its own** — measured above; one node was below
   95% and has been given its own retry.

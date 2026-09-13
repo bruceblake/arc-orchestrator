@@ -164,7 +164,7 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   </section>
 
   <section class="panel">
-    <h2>Families <small style="color:var(--dim);font-weight:normal">kimi + kimi-code share one ARC account (combined)</small></h2>
+    <h2>Families <small style="color:var(--dim);font-weight:normal">live cap per model family (retired families show history only)</small></h2>
     <div class="tblwrap">
       <table>
         <thead><tr><th>family</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
@@ -199,7 +199,9 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 const $ = s => document.querySelector(s);
 const RANGES = ["1h", "24h", "7d", "all"];
 const AUTO = 5000;
-const SRC = {"arc-pool":"pool","kimi-code":"kimi-code"};
+// "kimi-code" is HISTORICAL (the retired kimi CLI harness, 2026-09-12): its
+// wire logs still price so old usage rows do not read $0.00.
+const SRC = {"arc-pool":"pool","kimi-code":"kimi-code (historical)"};
 let RANGE = "1h", USAGE = null, FLEET = {caps:{}, totals:null}, nextAt = Date.now() + AUTO;
 
 const ms = n => n == null ? "—" : n >= 1000 ? (n/1000).toFixed(1)+"s" : Math.round(n)+"ms";

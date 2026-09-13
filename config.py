@@ -1,5 +1,6 @@
 import os
 import re
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -12,7 +13,16 @@ API_KEY = os.getenv("ARC_API_KEY", "")
 BASE_URL = os.getenv("ARC_BASE_URL", "https://llm-api.arc.vt.edu/api/v1")
 DB_PATH = os.getenv("ARC_DB_PATH") or str(ROOT / "orchestrator.db")
 
-FAMILY_ORDER = ["gpt-oss", "glm", "kimi", "deepseek"]
+
+def dsh_bin():
+    """The dsh CLI binary (DeepSeek's harness, npm-installed 2026-09-12).
+
+    npm's global bin is not on every shell's PATH (the service/shell that
+    spawns harnesses may not be a login shell), so prefer the recorded install
+    location over a bare name that would fail to exec with FileNotFoundError.
+    """
+    found = shutil.which(os.getenv("ARC_DSH_BIN", "dsh"))
+    return found or str(Path.home() / ".local" / "opt" / "node" / "bin" / "dsh")
 
 
 @dataclass(frozen=True)
@@ -23,17 +33,19 @@ class Family:
     websearch_model: str = ""
 
 
+# gpt-oss was removed here on 2026-09-12, not just retired from ROSTER: while
+# it stayed in this registry `main.py ask --family gpt-oss` still reached it,
+# and it still minted a per-family driver-limit env knob for a model the fleet
+# is not allowed to run. Its historical rate stays in MODEL_PRICING, which is
+# what prices the event log's thousands of past gpt-oss runs.
+#
+# kimi was removed the same way on 2026-09-12 (operator decision: Kimi-K3 is
+# retired from this repo entirely; its ROSTER row was deleted in the pin
+# commit). Leaving the family here would keep `main.py ask --family kimi`
+# reaching a retired model and mint a per-family limit knob nothing may use.
+# Kimi-K3's historical rate stays in MODEL_PRICING for old harness_runs rows.
+# TWO families are live today: glm and deepseek.
 FAMILIES = {
-    "gpt-oss": Family(
-        "gpt-oss",
-        5,
-        {
-            "default": "gpt-oss-120b",
-            "low": "gpt-oss-120b-thinking-low",
-            "high": "gpt-oss-120b-thinking-high",
-        },
-        websearch_model="gpt-oss-120b-thinking-high-legacy-tool-calling",
-    ),
     "glm": Family(
         "glm",
         4,
@@ -43,47 +55,46 @@ FAMILIES = {
         },
         websearch_model="glm-52-thinking-high-legacy-tool-calling",
     ),
-    "kimi": Family(
-        "kimi",
-        3,
-        {
-            "default": "Kimi-K3",
-            "low": "Kimi-K3-thinking-low",
-            "high": "Kimi-K3-thinking-high",
-        },
-        websearch_model="Kimi-K3-thinking-max-legacy-tool-calling",
-    ),
     "deepseek": Family(
         "deepseek",
-        5,
+        10,   # provider-published per-account cap on the refreshed ARC docs
+              # page (2026-09-12); the measurement test asserts agreement with
+              # _MEASURED_CONCURRENCY, which carries the same 10.
         {
-            "default": "DeepSeek-V4-Flash",
-            "low": "DeepSeek-V4-Flash-thinking-low",
-            "max": "DeepSeek-V4-Flash-thinking-max",
+            "default": "DeepSeek-V4.1-Flash",
+            "low": "DeepSeek-V4.1-Flash-thinking-low",
+            "max": "DeepSeek-V4.1-Flash-thinking-max",
         },
-        websearch_model="DeepSeek-V4-Flash-thinking-max-legacy-tool-calling",
+        websearch_model="DeepSeek-V4.1-Flash-thinking-max-legacy-tool-calling",
     ),
 }
 
+# Derived, never hand-written: a literal list here kept naming gpt-oss after it
+# was removed from FAMILIES, and every consumer (pool semaphores, the dashboard
+# capacity row, work.py's round-robin) then asked family_limit() for a family
+# that no longer existed and raised KeyError on import.
+FAMILY_ORDER = list(FAMILIES)
+
 QUESTIONS_PER_ROUND = int(os.getenv("ARC_QUESTIONS_PER_ROUND", "10"))
 SEEDS_PER_ROUND = int(os.getenv("ARC_SEEDS_PER_ROUND", "3"))
-PIPELINE_ROUNDS = int(os.getenv("ARC_PIPELINE_ROUNDS", "2"))
-MAX_VERIFY_ROUNDS = int(os.getenv("ARC_MAX_VERIFY_ROUNDS", "3"))
+PIPELINE_ROUNDS = int(os.getenv("ARC_PIPELINE_ROUNDS", "4"))
+MAX_VERIFY_ROUNDS = int(os.getenv("ARC_MAX_VERIFY_ROUNDS", "6"))
 VERIFY_PASS_SCORE = float(os.getenv("ARC_VERIFY_PASS_SCORE", "7.5"))
-REQUEST_TIMEOUT = float(os.getenv("ARC_REQUEST_TIMEOUT", "600"))
+REQUEST_TIMEOUT = float(os.getenv("ARC_REQUEST_TIMEOUT", "1200"))
 # Retry budgets are GENEROUS on purpose. Tokens are not the scarce resource
 # here; a task abandoned one attempt short of working is. Every budget below
 # is still finite, because a task that cannot succeed must eventually stop
 # rather than hold a worktree, a branch and a model slot forever — but the
 # ceilings are set where "gave up" means "genuinely could not", not "ran out
 # of patience". Raised 09-11 from 4/3/3/2/3/3 after graph-admission-control
-# died with a passing gate because its reviewer crashed three times.
-MAX_RETRIES = int(os.getenv("ARC_MAX_RETRIES", "12"))
+# died with a passing gate because its reviewer crashed three times. Every
+# budget in this file doubled 09-13 by operator directive.
+MAX_RETRIES = int(os.getenv("ARC_MAX_RETRIES", "24"))
 ROUND_COOLDOWN = float(os.getenv("ARC_ROUND_COOLDOWN", "5"))
 STATS_INTERVAL = float(os.getenv("ARC_STATS_INTERVAL", "300"))
 MAX_GRAPH_STEPS = int(os.getenv("ARC_MAX_GRAPH_STEPS", "6000"))
-SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "12"))
-SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "30"))
+SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "24"))
+SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "60"))
 
 EVENTS_LOG = os.getenv("ARC_EVENTS_LOG") or str(ROOT / "logs" / "events.jsonl")
 BUILD_OUTPUT_DIR = os.getenv("ARC_BUILD_OUTPUT_DIR") or str(ROOT / "production" / "minecraft")
@@ -104,8 +115,8 @@ DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
 # glanced at from a phone without a login step.
 DASHBOARD_BIND = os.getenv("ARC_DASHBOARD_BIND", "0.0.0.0")
 DASHBOARD_TOKEN = os.getenv("ARC_DASHBOARD_TOKEN", "")
-MAX_MODULE_RETRIES = int(os.getenv("ARC_MAX_MODULE_RETRIES", "3"))
-MAX_INTEGRATION_ROUNDS = int(os.getenv("ARC_MAX_INTEGRATION_ROUNDS", "3"))
+MAX_MODULE_RETRIES = int(os.getenv("ARC_MAX_MODULE_RETRIES", "6"))
+MAX_INTEGRATION_ROUNDS = int(os.getenv("ARC_MAX_INTEGRATION_ROUNDS", "6"))
 REVIEW_PASS_SCORE = float(os.getenv("ARC_REVIEW_PASS_SCORE", "6.5"))
 
 
@@ -124,10 +135,11 @@ def family_limit(name):
     return FAMILIES[name].limit
 
 # --- multi-harness code workload -------------------------------------------
-# Implementation is tiered by task difficulty: gpt-oss-120b takes very basic
-# tasks, DeepSeek-V4-Flash takes medium ones, and GLM-5.3 / Kimi-K3 take the
-# hard tasks on top of their planning and reviewing duties. Every task is
-# reviewed by kimi or glm, never by the same harness that implemented it.
+# Implementation is tiered by task difficulty (see ROSTER below):
+# DeepSeek-V4.1-Flash-thinking-max takes the medium and mechanical tasks and
+# reviews (the fast workhorse), GLM-5.3 takes the hard tier on top of its
+# planning and reviewing duties (the fleet's strongest model). Review comes
+# from a family other than the implementer's own.
 # ARC rejects over-limit requests per model, so driver caps reserve headroom
 # for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
@@ -144,10 +156,10 @@ REPO_ROOT = os.getenv("ARC_REPO_ROOT") or str(Path.home())
 # dribbles output forever without converging.
 #
 # It was 900s, which made it the BINDING limit on real work rather than a
-# backstop: a Kimi-K3 implement was killed at exactly 900s having written
-# 149KB with only 80s of idle — it was demonstrably still working, and each
-# such kill costs a full retry (MAX_RETRIES=4, so an hour per task).
-DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
+# backstop: an implement was killed at exactly 900s having written 149KB with
+# only 80s of idle — it was demonstrably still working, and each such kill
+# costs a full retry (MAX_RETRIES, so an hour per task).
+DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "5400"))
 # A harness that produces no stdout for this long is killed and retried.
 #
 # This is NOT a hang detector, and treating it as one cost real work. ARC
@@ -166,20 +178,22 @@ DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "2700"))
 #     300s      0.08%        0.5%        1.8%
 #     420s      0.00%        0.0%        0.0%
 #
-# 420s clears the observed tail. A genuinely dead request costs 7 minutes;
+# 420s clears the observed tail, and the default was doubled to 840s on 09-13
+# by operator directive (patience over speed; tokens are not the scarce
+# resource). A genuinely dead request costs its idle budget in minutes;
 # DRIVER_TIMEOUT bounds the total. Shortening this to "fail fast" trades a
 # small latency saving for a large chance of destroying finished work.
-DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "420"))
+DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "840"))
 # Per-role idle budgets. An implementer edits in many small steps and going
-# quiet for seven minutes means something is wrong. A PLANNER does the opposite:
+# quiet for several minutes means something is wrong. A PLANNER does the opposite:
 # one long agentic read of the repo, then a single 4KB JSON plan — it is
 # legitimately silent while the model generates, and when the fleet is at
-# Kimi's cap of 3 its request waits behind the others with the connection held
-# open. Measured: every planner stall on 09-11/12 fired with 3-4 other Kimi
-# drivers running, after producing exactly the 59-byte version handshake.
-# Killing it there is killing a healthy process for being queued.
+# GLM-5.3's cap of 4 its request waits behind the others with the connection
+# held open (the pattern was first measured on the retired Kimi-K3, whose cap
+# of 3 stalled every planner run on 09-11/12). Killing it there is killing a
+# healthy process for being queued.
 ROLE_IDLE_TIMEOUT = {
-    "planner": float(os.getenv("ARC_PLANNER_IDLE_TIMEOUT", "1500")),
+    "planner": float(os.getenv("ARC_PLANNER_IDLE_TIMEOUT", "3000")),
 }
 
 
@@ -193,8 +207,8 @@ DRIVER_PROGRESS_INTERVAL = float(os.getenv("ARC_DRIVER_PROGRESS_INTERVAL", "60")
 # A harness rejected at the ARC account cap never got a slot, so retrying it
 # on the crash schedule (2s, 4s, 8s) walks straight back into the same cap.
 # Capacity rejections back off on this longer, jittered ladder instead.
-DRIVER_CAPACITY_BACKOFF = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF", "45"))
-DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP", "300"))
+DRIVER_CAPACITY_BACKOFF = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF", "90"))
+DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP", "600"))
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
@@ -212,7 +226,7 @@ DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
 # model forever, before its own timeout clock had even started. Exceeding it
 # raises a capacity-classified DriverError, so the retry ladder backs off
 # instead of the run silently stalling.
-DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "5400"))
+DRIVER_LEASE_WAIT = float(os.getenv("ARC_DRIVER_LEASE_WAIT", "10800"))
 # --- branch model + PR review ------------------------------------------------
 # The pull request is the GATE, not a receipt: the branch is pushed, PR_REVIEWERS
 # reviewers read the actual PR diff, and a merger only merges once every one of
@@ -247,85 +261,83 @@ def promotion_configured():
 PR_REVIEWERS_WANTED = int(os.getenv("ARC_PR_REVIEWERS", "2"))
 # What the roster can DELIVER: an implementer's PR can only be read by the
 # other PR-review-capable families (pr_reviewer role — a superset of the
-# pre-merge `reviewer` role), so the ceiling is (families - 1). Three
-# families -> 2; after Kimi-K3 leaves on 09-19, two families -> 1. The
+# pre-merge `reviewer` role), so the ceiling is (families - 1). With the
+# three-family fleet that was 2; the two-model fleet of 2026-09-12 has two
+# families, so it is 1 until a third review-capable family is added. The
 # effective value is the smaller, so the config never promises a gate the
 # fleet cannot staff; the audit compares delivered against wanted and says so.
 # PR_REVIEWERS (the effective value) is computed after the roster below.
 # How many times a PR may go back to the implementer before the task fails.
-PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "8"))
+PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "16"))
 # Retries of a review that reached NO verdict (every reviewer crashed).
 # Separate from PR_MAX_ROUNDS on purpose: an infrastructure failure must
 # not consume the rounds reserved for real disagreement about the code.
-PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "10"))
+PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "20"))
 
 # How many times a conflicting PR may be resynced with the base before
-# giving up. Each resync rewrites the branch and costs a fresh review,
-# so this is deliberately small.
-PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "6"))
+# giving up. Each resync rewrites the branch and costs a fresh review.
+PR_MAX_RESYNCS = int(os.getenv("ARC_PR_MAX_RESYNCS", "12"))
 
 # Retries of a PRE-MERGE review that crashed instead of reaching a
 # verdict. Separate from the fix budget on purpose: a reviewer that
 # could not run has not objected to anything, and spending a fix round
 # on it sends the implementer to repair code nobody criticised.
-MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "10"))
+MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "20"))
 # Every task must add or update tests. Reviewers are told to reject a code
 # change that ships none, and the gate reports it.
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
 
-GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "180"))
-MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "8"))
+GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "360"))
+MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "16"))
 # Project chaining (code workload): a taskfile that declares `after` waits for
 # every task in those upstream taskfiles to reach 'merged' before any of its
 # worktrees allocate. Upstream projects can legitimately take hours (fix
 # loops, PR review rounds, escalation tiers), so the wait budget is hours,
 # not minutes. A chain that never settles must eventually fail loudly rather
 # than sit on the dashboard forever.
-CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(6 * 3600)))
+CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(12 * 3600)))
 
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
-# governed code pipeline: no worktree, no gate, no publish. Only Kimi-K3 and
-# GLM-5.3 may hold the gh roles (driver validation enforces it), every command
-# previews by default, and --apply-labels/--create/--post are the only writes.
+# governed code pipeline: no worktree, no gate, no publish. A model trusted
+# to plan on today's roster may hold the gh roles (GLM-5.3 only today — the
+# only roster model with planner permission; driver validation enforces it), and
+# every command previews by default — --apply-labels/--create/--post are the only writes.
 # Default None: gh_ops falls back to PLANNER_MODEL, which follows the roster
-# (Kimi-K3 until 09-19, GLM-5.3 after). A hardcoded default here would name a
-# withdrawn model the morning after it left.
-GH_MODEL = os.getenv("ARC_GH_MODEL") or None
-GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "60"))
+# (GLM-5.3 since 2026-09-12). A hardcoded default here would name a
+# withdrawn model the morning after it left. GH_MODEL itself is resolved
+# below, once PLANNER_MODEL exists.
+GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "120"))
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of
-# failing; it only fails when the last tier exhausts. gpt-oss-120b may
-# legitimately exhaust immediately on a task planned too optimistically, so the
-# path still reaches a strong model within a couple of escalations.
-# DeepSeek-V4-Flash is the ENTRY tier, not gpt-oss-120b. Measured over 103
-# implement runs across 31 tasks:
+# failing; it only fails when the last tier exhausts.
+# The ENTRY tier is the medium tier; the ESCALATION HISTORY behind that choice:
+# measured over 103 implement runs across 31 tasks (retired three-model fleet):
 #
 #            gate pass   end-to-end   implement runs/task   escalated
 #   gpt-oss     59.1%       25.0%            5.5              36%
 #   DeepSeek    71.0%       51.6%            1.7               0%
 #
-# gpt-oss time is cheap (cap 8) but its REVIEWS are not: gpt-oss-started tasks
-# were 35% of tasks and consumed 54.7% of all reviewer runs, every one of them
-# executed by GLM-5.3 or Kimi-K3 — the two capped models that are the fleet's
-# actual scarce resource. Cheap retries paid for with expensive reviews is a
-# bad trade. gpt-oss stays available for explicitly-routed mechanical work
-# (docs, one-line edits); it is just no longer where every task starts.
+# gpt-oss time was cheap but its REVIEWS were not: gpt-oss-started tasks were
+# 35% of tasks and consumed 54.7% of all reviewer runs, every one of them
+# executed by the fleet's scarce capped models. Cheap retries paid for with
+# expensive reviews is a bad trade.
 # ---------------------------------------------------------------------------
 # THE MODEL ROSTER — the one table every other model constant derives from.
 #
 # Models come and go on dates the provider sets, not on dates we choose:
 #   - gpt-oss-120b is retired from this fleet now (operator decision, 09-11).
 #   - DeepSeek-V4-Flash is replaced by DeepSeek-V4.1-Flash on 2026-09-12.
-#   - Kimi-K3 is withdrawn on 2026-09-19.
+#   - Kimi-K3 was retired EARLY by operator decision 2026-09-12 (the provider
+#     had scheduled 2026-09-19; the operator moved first, and its row was
+#     deleted rather than date-ended — see the note below the table).
 # Each row carries the window it is available in. Everything below — tiers,
 # families, the escalation path, concurrency caps, harness routing — is
 # computed from the rows that are live TODAY, so a transition is a date in
 # this table rather than an edit in six places on the morning it happens.
 #
 # ARC_ROSTER_DATE=YYYY-MM-DD previews any day's roster without waiting for it.
-# That is how the 09-12 and 09-19 states were tested before they arrived.
 # ---------------------------------------------------------------------------
 import datetime as _dt
 
@@ -333,21 +345,37 @@ import datetime as _dt
 # `from` inclusive, `until` exclusive; None = open-ended.
 #
 # roles: which of implementer / reviewer / pr_reviewer / planner the model may
-# hold. DeepSeek-V4-Flash may review an open PR but not gate or plan (judging
-# a bounded diff is a smaller job than authoring; planning is not). Its 4.1
-# successor gets the full set — after Kimi-K3 leaves on 09-19 it is the ONLY
-# cross-family reviewer GLM's work can have, and a fleet with one reviewable
-# family has no cross-review at all.
+# hold. The two-model fleet of 2026-09-12: GLM-5.3 is strongest, hard tier,
+# the planner, and holds every role; DeepSeek-V4.1-Flash-thinking-max is the
+# medium-tier workhorse — it implements and reviews/PR-reviews, NEVER plans.
 ALL_ROLES = ("implementer", "reviewer", "pr_reviewer", "planner")
 ROSTER = [
+    # Kimi-K3's row was DELETED here on 2026-09-12 by operator decision (its
+    # scheduled 2026-09-19 withdrawal was not waited for). A row is the only
+    # thing that keeps a model routable, so deletion is the retirement: no
+    # role, tier, cap or harness lookup can name it any more. Historical
+    # harness_runs rows still price through MODEL_PRICING, and KimiDriver
+    # still constructs-fails loudly for old transcripts.
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
-    ("DeepSeek-V4.1-Flash", "deepseek", "opencode", "medium", 5,
-     ALL_ROLES,                                            "2026-09-12", None),
+    # Operator decision (2026-09-12): GLM-5.3 is the fleet's strongest model —
+    # hard tier, the planner, the last escalation stage.
     ("GLM-5.3",             "glm",      "opencode", "hard",   4,
      ALL_ROLES,                                            None,         None),
-    ("Kimi-K3",             "kimi",     "kimi",     "hard",   3,
-     ALL_ROLES,                                            None,         "2026-09-19"),
+    # Operator decision (2026-09-12): DeepSeek-V4.1-Flash-thinking-max is the
+    # medium-tier workhorse — it implements and reviews/PR-reviews, never
+    # plans. It is far faster than GLM-5.3, so it carries the implementation
+    # load. The 10 is the provider-published per-account concurrency on the
+    # refreshed ARC docs page (docs.arc.vt.edu, 2026-09-12), per the operator —
+    # not the carried-over measured 5; the driver semaphore stays the derived
+    # 10 // 2 = 5 while dsh is assumed (unmeasured, 2026-09-12) to hold ~2 API
+    # sessions per process the way opencode does.
+    # Harness: "dsh" — DeepSeek's own harness (github.com/deepseek-ai/
+    # deepseek-harness), swapped in by operator decision 2026-09-12 instead of
+    # opencode for this model. See drivers.DeepseekDriver for the streaming
+    # contract that forced a whole new driver (stdout is final-answer-only).
+    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "dsh",      "medium", 10,
+     ("implementer", "reviewer", "pr_reviewer"),           "2026-09-12", None),
 ]
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
 
@@ -480,6 +508,8 @@ for _m, _fam, _h, _t, _c, _roles in _STRONGEST_FIRST:
         REVIEW_FAMILIES[_fam] = _m
 PLANNER_MODEL = next((m for m, _f, _h, _t, _c, roles in _STRONGEST_FIRST
                       if "planner" in roles), None)
+# gh_ops default model: the planner model, which never names a retired model.
+GH_MODEL = os.getenv("ARC_GH_MODEL") or PLANNER_MODEL
 # Families that may review an OPEN PR. A superset of REVIEW_FAMILIES: DeepSeek
 # V4 may judge a bounded diff (pr_reviewer) but not gate or plan (reviewer).
 PR_REVIEW_FAMILIES = {fam for _m, fam, _h, _t, _c, roles in _LIVE if "pr_reviewer" in roles}
@@ -488,6 +518,17 @@ _DEFAULT_PATH = [m for tier in TIER_ORDER for m, _f, _h, t, _c, _r in _LIVE if t
 
 
 PR_REVIEWERS = max(1, min(PR_REVIEWERS_WANTED, len(PR_REVIEW_FAMILIES) - 1))
+
+
+# OPERATOR-AUTHORIZED 2026-09-12, TEMPORARY: while GLM-5.3's provider backend
+# was unstable (90s+ stalls and capacity flapping, measured and logged
+# 2026-09-12), review may be SAME-family — DeepSeek reviewing DeepSeek — so
+# the fleet is not down whenever GLM-5.3 is. This suspends the cross-review
+# halves of AGENTS.md Rule 2 and Rule 5: a review is no longer an independent
+# reading by a different harness, only a second pass by the same model. Remove
+# this (and the two consumption points in code_tasks.py) once GLM-5.3 is
+# stable again.
+ALLOW_SAME_FAMILY_REVIEW = os.getenv("ARC_ALLOW_SAME_FAMILY_REVIEW", "") == "1"
 
 
 def model_may(model, role):
@@ -499,9 +540,9 @@ def cross_family_reviewer(impl_model):
     """The family token that reviews `impl_model`'s work, or None.
 
     Cross-review means a DIFFERENT family. Deterministic: the STRONGEST
-    review-capable family that is not the implementer's. Before 09-19 that
-    pairs kimi<->glm as it always did — DeepSeek 4.1 arriving on 09-12 does not
-    demote GLM's reviewer a week early; after 09-19, glm<->deepseek.
+    review-capable family that is not the implementer's. With the 2026-09-12
+    two-model fleet that pairs glm<->deepseek in both directions: GLM-5.3
+    (the fleet's strongest) reviews DeepSeek work, DeepSeek reviews GLM work.
     """
     fam = MODEL_FAMILY.get(impl_model)
     for f in REVIEW_FAMILIES:
@@ -518,22 +559,24 @@ MAX_ESCALATIONS = int(os.getenv("ARC_MAX_ESCALATIONS",
                                 str(max(0, len(ESCALATION_PATH) - 1))))
 
 # --- harness context budget -------------------------------------------------
-# Both harnesses ship configured for a 131072-token context and only compact
-# near that ceiling (kimi: max_context_size - reserved_context_size; opencode:
-# limit.context * compaction.threshold). ARC leaves requests unanswered well
-# before it — measured 2026-09-09, hangs cluster around 55-60k input tokens —
-# so neither harness ever reaches its own compaction point. It simply grows
-# context until the server stops replying, and the task dies with it.
+# The harnesses ship configured for a 131072-token context and only compact
+# near that ceiling (opencode: limit.context * compaction.threshold; the
+# retired kimi CLI used max_context_size - reserved_context_size). ARC leaves
+# requests unanswered well before it — measured 2026-09-09, hangs cluster
+# around 55-60k input tokens — so a harness never reaches its own compaction
+# point. It simply grows context until the server stops replying, and the task
+# dies with it.
 #
 # The fix is config, not code: fleet-only model aliases declaring a context
 # budget the server will actually serve, so the harness compacts in time.
-#   ~/.kimi-code/config.toml        [models."arc/<m>-fleet"] max_context_size
 #   ~/.config/opencode/opencode.json  ARC.models["<m>-fleet"].limit.context
+#   ~/.kimi-code/config.toml        [models."arc/<m>-fleet"] max_context_size
+#     (historical only — no live model runs the kimi harness)
 # Interactive sessions keep the full window: they use the unsuffixed aliases.
 USE_FLEET_ALIASES = os.getenv("ARC_USE_FLEET_ALIASES", "1").lower() not in (
     "0", "false", "no", "")
 # Context budget the fleet declares to its harnesses — PER HARNESS, because
-# the two behave differently when they hit it (measured 2026-09-09):
+# they behave differently when they hit it (measured 2026-09-09):
 #
 #   opencode  compaction works. Observed firing twice inside one GLM-5.3 run,
 #             after which the session carried on to 621KB of output — against
@@ -541,17 +584,20 @@ USE_FLEET_ALIASES = os.getenv("ARC_USE_FLEET_ALIASES", "1").lower() not in (
 #             compacted at all. A smaller budget is a WIN here: it keeps each
 #             request small enough to come back.
 #
-#   kimi      compaction never completes against this provider. Across the
-#             whole session history: 20 `full_compaction.begin`, 0
-#             `full_compaction.end`, interactive sessions included. Lowering
-#             its budget only makes it reach that dead end sooner — tried,
-#             measured, reverted. It stays at the harness default until
-#             compaction is fixed upstream.
+#   kimi      RETIRED 2026-09-12; kept for old logs. Its compaction never
+#             completed against this provider. Across the whole session
+#             history: 20 `full_compaction.begin`, 0 `full_compaction.end`,
+#             interactive sessions included. Lowering its budget only made it
+#             reach that dead end sooner — tried, measured, reverted.
 OPENCODE_CONTEXT = int(os.getenv("ARC_OPENCODE_CONTEXT", "65536"))
 KIMI_CONTEXT = int(os.getenv("ARC_KIMI_CONTEXT", "131072"))
 KIMI_CONFIG = Path.home() / ".kimi-code" / "config.toml"
 OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
 OPENCODE_FLEET_CONFIG = OPENCODE_CONFIG.with_name("opencode-fleet.json")
+# Historical: Kimi-K3 is off the roster (2026-09-12) and KimiDriver refuses to
+# construct, so nothing live reaches this alias. It stays so a re-admitted
+# kimi-harness model with a configured alias would be picked up, and so old
+# configs keep parsing.
 _KIMI_ALIAS = {"Kimi-K3": "arc/kimi-k3-fleet"}
 
 
@@ -561,6 +607,11 @@ def harness_model(model, harness):
     opencode takes its budget from OPENCODE_CONFIG instead (see drivers): it
     sends the model KEY to the API, so a differently-keyed alias is rejected
     with "Model not found" — verified, not assumed.
+
+    Historical: only the retired kimi harness ever needed an alias here, and
+    KimiDriver refuses to construct since Kimi-K3 left the roster (2026-09-12),
+    so this returns None for every live model. Kept because it is the fleet's
+    one alias mechanism and old configs still parse.
     """
     if not USE_FLEET_ALIASES or harness != "kimi":
         return None
@@ -603,15 +654,19 @@ def kimi_plan_mode_on():
 #     gpt-oss-120b       5 concurrent   (was configured 10 account / 8 drivers)
 #     DeepSeek-V4-Flash  5 concurrent   (was configured 10 account / 8 drivers)
 #     GLM-5.3            4 concurrent
-#     Kimi-K3            3 concurrent
+#     Kimi-K3            3 concurrent   (retired 2026-09-12 — history only)
+#
+# DeepSeek-V4.1-Flash-thinking-max arrived 2026-09-12. Its 10 is the
+# provider-published per-account cap on the refreshed ARC docs page
+# (2026-09-12), per the operator — not a measurement of ours; the event log
+# still holds zero runs of it. Re-ramp it once `main.py capacity` has real
+# rejection data, and correct the row then.
 #
 # gpt-oss and DeepSeek were OVER-subscribed: 8 drivers against a real ceiling
 # of 5, so the fleet generated its own 400s under load and blamed the provider.
-# GLM and Kimi were UNDER-subscribed by one slot each.
 #
-# Driver caps now equal the measured ceiling. ARC_DRIVER_HEADROOM reserves
-# slots for interactive use of the same account — set it to 1 if you want to
-# run an interactive `kimi` alongside the fleet without contending.
+# Driver caps are the account cap divided by sessions-per-process (below).
+# ARC_DRIVER_HEADROOM reserves slots for interactive use of the same account.
 
 # ONE HARNESS PROCESS IS NOT ONE ARC SESSION.
 #
@@ -629,12 +684,19 @@ def kimi_plan_mode_on():
 # GLM was the only model to show it because it is the most-used opencode model
 # and the only one whose account limit (4) is small enough for the doubling to
 # bite before the harness pool (5) binds first. The factor is a property of the
-# HARNESS, not of the model, so it applies to all three opencode models.
-_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1}
+# HARNESS, not of the model, so it applies to every model on that harness.
+# dsh's factor is ASSUMED 2 until measured: its shipped base profile includes
+# subagent-spawning tools, like opencode's — re-measure before trusting a
+# higher cap.
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2}
 
 
 def _harness_of_model(model):
-    return "kimi" if model == "Kimi-K3" else "opencode"
+    # Derive from the roster so a model's harness follows its ROSTER row —
+    # this function predates MODEL_HARNESS and hard-coded "kimi or opencode",
+    # which would have silently kept DeepSeek at the opencode factor after it
+    # moved to dsh on 2026-09-12.
+    return MODEL_HARNESS.get(model, "opencode")
 
 
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
@@ -646,9 +708,11 @@ _MODEL_DRIVER_CAP = {
 # The per-MODEL caps above are the ARC API's ceiling. They are not the only
 # ceiling: every opencode-backed model shares ONE local harness, and that
 # harness serialises through a single ~240MB sqlite db in
-# ~/.local/share/opencode. The model caps permit GLM 4 + DeepSeek 5 + gpt-oss 5
-# = 14 concurrent opencode processes against it, and measured on this machine
-# (identical prompt, warm cache):
+# ~/.local/share/opencode. On the two-model fleet (2026-09-12) only GLM-5.3
+# runs opencode — DeepSeek moved to its own `dsh` harness — so the opencode
+# pool sees GLM's 2 against its cap of 5. The retired three-model fleet put
+# GLM 4 + DeepSeek 5 + gpt-oss 5 = 14 concurrent opencode processes against
+# it, and measured on this machine (identical prompt, warm cache):
 #
 #     3 concurrent   3/3 ok
 #     4 concurrent   4/4 ok
@@ -658,9 +722,29 @@ _MODEL_DRIVER_CAP = {
 #
 # Past 5 it fails fast with an empty stderr, which the fleet logged as
 # "opencode exited 1: " and retried four times per task — burning the retry
-# ladder on self-inflicted contention and blaming the provider for it. The
-# kimi CLI has no shared store, so its limit is just Kimi-K3's own cap.
-_HARNESS_CAP = {"opencode": 5, "kimi": _MEASURED_CONCURRENCY.get("Kimi-K3", 3)}
+# ladder on self-inflicted contention and blaming the provider for it.
+# dsh (added 2026-09-12) keeps its state as per-profile JSON files under
+# $DSH_HOME — no central store like opencode's sqlite — so it gets no measured
+# cliff yet; 5 mirrors opencode until a load test says otherwise.
+# ("kimi" stays in _SESSIONS_PER_PROCESS only so a historical transcript's
+# harness still resolves; no live model maps to that harness.)
+_HARNESS_CAP = {"opencode": 5, "dsh": 5}
+
+
+def kimi_wire_model():
+    """The model whose rate prices tokens read from the kimi CLI's wire log.
+
+    The wire log is the ONLY token source for kimi-harness runs (its
+    transcripts carry no usage) and it records no model name, so the reader
+    has to supply one. Derive it from the roster: the literal "Kimi-K3" was
+    correct only while Kimi-K3 was the sole kimi-harness model, and would
+    silently price a successor at $0.00. No live model runs on that harness
+    since Kimi-K3 was retired on 2026-09-12, so today this always falls back
+    to "Kimi-K3" — which is exactly what historical wire tokens need to keep
+    pricing at Kimi's rate instead of $0.00. It stays derived so a future
+    kimi-harness model would be priced correctly without an edit here.
+    """
+    return next((m for m, h in MODEL_HARNESS.items() if h == "kimi"), "Kimi-K3")
 
 
 def harness_limit(harness):
@@ -754,6 +838,9 @@ MODEL_PRICING = {
     # estimate with a note. Override with ARC_PRICE_DEEPSEEK_V4_1_FLASH_PROMPT
     # and ARC_PRICE_DEEPSEEK_V4_1_FLASH_COMPLETION.
     "DeepSeek-V4.1-Flash": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
+    # The fleet actually routes the thinking-max variant (ROSTER). Same price
+    # assumption: thinking tokens are completion tokens.
+    "DeepSeek-V4.1-Flash-thinking-max": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
     "GLM-5.3": {"prompt_per_mtok": 1.00, "completion_per_mtok": 2.00},
     "Kimi-K3": {"prompt_per_mtok": 0.50, "completion_per_mtok": 2.00},
 }

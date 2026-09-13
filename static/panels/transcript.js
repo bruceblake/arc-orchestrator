@@ -44,11 +44,12 @@ async function pollTranscript() {
   pre.textContent = d.lines.map(renderTranscriptLine).join("\n");
   if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
-// The two harnesses log completely different shapes and only one was ever
-// handled: opencode emits {type: "step_finish"|"text"|"tool_use"}, kimi emits
-// OpenAI-style {role: "assistant"|"tool", tool_calls, content}. A kimi
-// transcript therefore rendered `o.type` — undefined — on every single line,
-// so the drawer showed a column of "undefined" and looked broken.
+// The harnesses log completely different shapes and only one was ever handled:
+// opencode emits {type: "step_finish"|"text"|"tool_use"}, and the retired kimi
+// CLI emitted OpenAI-style {role: "assistant"|"tool", tool_calls, content}. A
+// kimi transcript therefore rendered `o.type` — undefined — on every single
+// line, so the drawer showed a column of "undefined" and looked broken. The
+// kimi branch stays: old transcripts are still opened from history.
 function renderTranscriptLine(l) {
   let o;
   try { o = JSON.parse(l); } catch { return l.slice(0, 300); }

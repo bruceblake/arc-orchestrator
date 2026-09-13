@@ -87,6 +87,12 @@ class ArcPool:
         self._verify_attempts = defaultdict(int)
 
     def resolve_model(self, family, effort="default", websearch=False):
+        # chat() rejects an unknown family with ValueError; this raised a bare
+        # KeyError for the same mistake, so `main.py ask --family <gone>` gave
+        # a traceback instead of the message chat() would have printed.
+        if family not in FAMILIES:
+            raise ValueError(f"unknown family: {family}; "
+                             f"choices: {sorted(FAMILIES)}")
         fam = FAMILIES[family]
         if websearch:
             if not fam.websearch_model:

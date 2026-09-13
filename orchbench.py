@@ -234,7 +234,7 @@ else:
 
 DEFAULT_ROUTING = {  # tier -> (implementer model, reviewer token)
     "basic": ("gpt-oss-120b", "glm"),
-    "medium": ("DeepSeek-V4-Flash", "kimi"),
+    "medium": ("DeepSeek-V4.1-Flash-thinking-max", "kimi"),
 }
 DEFAULT_HARD = {"tmpl": ("GLM-5.3", "kimi"), "topo": ("Kimi-K3", "glm")}
 
@@ -268,7 +268,7 @@ def _self_review(tid, tier, model, reviewer):
 def _misroute(tid, tier, model, reviewer):
     swap = {"slug": ("Kimi-K3", "glm"), "hist": ("Kimi-K3", "glm"),
             "jflat": ("gpt-oss-120b", "glm"), "wrap": ("gpt-oss-120b", "glm"),
-            "tmpl": ("gpt-oss-120b", "kimi"), "topo": ("DeepSeek-V4-Flash", "kimi")}
+            "tmpl": ("gpt-oss-120b", "kimi"), "topo": ("DeepSeek-V4.1-Flash-thinking-max", "kimi")}
     return swap[tid]
 
 
@@ -278,7 +278,7 @@ def _extra_reviewers(model, tiers):
     return route
 
 
-ALL_MODELS = ["gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"]
+ALL_MODELS = ["gpt-oss-120b", "DeepSeek-V4.1-Flash-thinking-max", "GLM-5.3", "Kimi-K3"]
 
 VARIANTS = {
     "default": {
@@ -294,10 +294,10 @@ VARIANTS = {
         "policy": {"allow_self_review": True}, "route": _reviews_to("glm"), "code": "kio",
     },
     "deepseek-reviews": {
-        "desc": "DeepSeek-V4-Flash allowed as reviewer; reviews basic+medium tasks",
-        "policy": {"reviewers": ("kimi", "glm", "DeepSeek-V4-Flash"),
+        "desc": "DeepSeek-V4.1-Flash-thinking-max allowed as reviewer; reviews basic+medium tasks",
+        "policy": {"reviewers": ("kimi", "glm", "DeepSeek-V4.1-Flash-thinking-max"),
                    "allow_self_review": True},
-        "route": _extra_reviewers("DeepSeek-V4-Flash", ("basic", "medium")),
+        "route": _extra_reviewers("DeepSeek-V4.1-Flash-thinking-max", ("basic", "medium")),
         "code": "dr",
     },
     "gptoss-reviews": {
@@ -326,8 +326,8 @@ VARIANTS = {
         "policy": {}, "route": _route_all("GLM-5.3", "kimi"), "code": "ag",
     },
     "all-deepseek": {
-        "desc": "flat routing: every task implemented by DeepSeek-V4-Flash",
-        "policy": {}, "route": _route_all("DeepSeek-V4-Flash", "glm"), "code": "ad",
+        "desc": "flat routing: every task implemented by DeepSeek-V4.1-Flash-thinking-max",
+        "policy": {}, "route": _route_all("DeepSeek-V4.1-Flash-thinking-max", "glm"), "code": "ad",
     },
     "all-kimi": {
         "desc": "flat routing: every task implemented by Kimi-K3",

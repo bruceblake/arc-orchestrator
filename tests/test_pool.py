@@ -30,24 +30,46 @@ class PoolResolveModel(unittest.TestCase):
         self.pool = ArcPool(dry_run=True)
 
     def test_returns_the_family_default_model(self):
-        self.assertEqual(self.pool.resolve_model("gpt-oss"), "gpt-oss-120b")
+        # Every live family, not one named literally: this asserted gpt-oss's
+        # default and went uninformative the day gpt-oss left the registry.
+        for fam in config.FAMILY_ORDER:
+            self.assertEqual(self.pool.resolve_model(fam),
+                             config.FAMILIES[fam].models["default"])
+
+    def test_a_removed_family_is_unreachable(self):
+        # Retiring a model from ROSTER is not enough: while it stayed in
+        # FAMILIES, `main.py ask --family gpt-oss` still routed to it.
+        with self.assertRaises(ValueError):
+            self.pool.resolve_model("gpt-oss")
 
     def test_returns_an_explicit_effort_variant(self):
         self.assertEqual(
             self.pool.resolve_model("deepseek", effort="max"),
-            "DeepSeek-V4-Flash-thinking-max",
+            "DeepSeek-V4.1-Flash-thinking-max",
         )
 
     def test_returns_the_websearch_variant(self):
-        self.assertEqual(
-            self.pool.resolve_model("kimi", websearch=True),
-            "Kimi-K3-thinking-max-legacy-tool-calling",
-        )
+        # Derived from the live family that HAS a websearch variant, not a
+        # named retired family: the literal was "kimi" and its model, and went
+        # red the day Kimi-K3 left FAMILIES (2026-09-12).
+        fams = [f for f in config.FAMILY_ORDER if config.FAMILIES[f].websearch_model]
+        self.assertTrue(fams, "no live family declares a websearch variant")
+        for fam in fams:
+            self.assertEqual(self.pool.resolve_model(fam, websearch=True),
+                             config.FAMILIES[fam].websearch_model)
+
+    def test_a_retired_harness_family_is_unreachable(self):
+        # Kimi-K3 was removed from FAMILIES on 2026-09-12 as well as ROSTER:
+        # while a family stays in the registry, `main.py ask --family kimi`
+        # still routes to a retired model.
+        with self.assertRaises(ValueError):
+            self.pool.resolve_model("kimi")
 
     def test_rejects_an_unknown_family(self):
-        # resolve_model indexes FAMILIES directly, so lookup raises KeyError
-        # rather than silently defaulting to an unrelated family's model.
-        with self.assertRaises(KeyError):
+        # Same error type as chat(), and never a silent fall-through to some
+        # other family's model. It used to be a bare KeyError from indexing
+        # FAMILIES, which reached the CLI as a traceback.
+        with self.assertRaises(ValueError):
             self.pool.resolve_model("no-such-family")
 
     def test_rejects_websearch_for_a_family_without_a_websearch_variant(self):

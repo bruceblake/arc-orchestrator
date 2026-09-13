@@ -4,17 +4,20 @@ This is the reference for "how many harness instances run at the same time"
 in the multi-harness code workload. It is checked against `config.py`,
 `drivers.py`, `scheduler.py`, `pool.py`, `graph.py` and `code_tasks.py`.
 
-There are **two independent layers** of limits, and they mean different
+There are **three independent layers** of limits, and they mean different
 things:
 
 | Layer | Where it is enforced | Ceiling | Applies to |
 |---|---|---|---|
-| Per-account API caps | The ARC API itself (server-side, per API key) | 27 across all models | **All** processes sharing the key |
-| Per-process driver semaphores | `drivers.py` in this process | 21 across all models | One orchestrator run |
+| Per-account API caps | The ARC API itself (server-side, per API key) | 14 across both live models (deepseek 10 + glm 4) | **All** processes sharing the key |
+| Per-process driver semaphores | `drivers.py` in this process | 7 across both live models (deepseek 5 + glm 2) | One orchestrator run |
+| Per-harness pool | `drivers._harness_gate` + `harness:<name>` leases | opencode **5** + dsh **5** | Every model on that binary |
 
-The two are not the same number on purpose. The account caps are the hard
+The layers are not the same number on purpose. The account caps are the hard
 ceiling the API will reject you for exceeding. The driver semaphores are what
-this process actually enforces, and they sit **below** the account caps.
+this process actually enforces, and they sit **below** the account caps. The
+harness pools are separate, one per binary, because the two models no longer
+share a harness (section 0).
 
 ## Measured caps (2026-09-10)
 
@@ -37,9 +40,20 @@ it as the provider being busy. Under-subscription silently wasted capacity.
 limit and the driver cap derive from them, so they cannot drift apart again.
 `tests/test_config.py` fails if any model's driver cap exceeds its account cap.
 
+**Since that measurement** (2026-09-12): DeepSeek-V4.1-Flash-thinking-max
+joined the roster with a **provider-published** limit of 10 concurrent (ARC
+docs updated 2026-09-12) — a published figure, not a ramped measurement like
+the ones above, so re-measure it if observed rejections disagree. Every row
+above is now history: gpt-oss-120b left the fleet on 2026-09-11,
+DeepSeek-V4-Flash was retired on 2026-09-12 when the provider removed the
+model from the API, and Kimi-K3 was retired the same day by operator decision.
+Of those numbers only **GLM-5.3's 4** is still a live cap; DeepSeek's live cap
+is the published 10, and its cap of 10 is the one `_MEASURED_CONCURRENCY`
+carries.
+
 **`ARC_DRIVER_HEADROOM`** (default 0) reserves slots per model for interactive
 use of the same ARC account. Set it to `1` if you want to run an interactive
-`kimi` alongside the fleet without contending; at 0 the fleet uses everything
+`dsh`/`opencode` session alongside the fleet without contending; at 0 the fleet uses everything
 and an interactive session competes with it — a rejection there is retried on
 the capacity backoff, not fatal, but it will feel slow.
 
@@ -51,9 +65,11 @@ To re-measure after a plan change, ramp concurrency per model and find where
 
 Before the per-model layers below, there is a limit that is easy to miss and is
 frequently the binding one: **every opencode-backed model shares ONE local
-binary and ONE ~240MB sqlite store** in `~/.local/share/opencode`. The
-per-model caps permit GLM 4 + DeepSeek 5 + gpt-oss 5 = **14** concurrent
-opencode processes against it.
+binary and ONE ~240MB sqlite store** in `~/.local/share/opencode`. On the
+two-model fleet (2026-09-12) only GLM-5.3 runs opencode — DeepSeek moved to
+its own `dsh` harness — so the opencode pool now sees GLM's driver cap of 2
+against its ceiling of 5, and DeepSeek's 5 runs against the separate dsh pool
+of 5.
 
 Measured 2026-09-10, identical prompt, warm cache:
 
@@ -66,17 +82,19 @@ Past five it fails fast with an **empty stderr**. The fleet logged that as
 and its retry ladder repeated it four times per task, so self-inflicted
 contention looked like a provider outage. 42 such errors in half an hour.
 
-`config.harness_limit(harness)` caps it (opencode 5, kimi 3), enforced by
+`config.harness_limit(harness)` caps it (opencode 5, dsh 5), enforced by
 `drivers._harness_gate` in-process and by a `harness:<name>` row in the same
 `driver_leases` table across processes.
 
 | Harness | Cap | Override |
 |---|---|---|
-| opencode (GLM, DeepSeek, gpt-oss) | 5 | `ARC_HARNESS_LIMIT_OPENCODE` |
-| kimi (Kimi-K3 only) | 3 | `ARC_HARNESS_LIMIT_KIMI` |
+| opencode (GLM-5.3) | 5 | `ARC_HARNESS_LIMIT_OPENCODE` |
+| dsh (DeepSeek-V4.1-Flash-thinking-max) | 5 | `ARC_HARNESS_LIMIT_DSH` |
 
-The kimi CLI keeps no shared store, so its cap is simply Kimi-K3's own and
-raising it buys nothing.
+dsh (DeepSeek's own harness, swapped in 2026-09-12) keeps its state as
+per-profile JSON files under `$DSH_HOME` — no central store like opencode's
+sqlite — so the opencode cliff does not obviously transfer; 5 mirrors it
+until a load test says otherwise.
 
 Acquisition order is **model gate → model lease → harness gate → harness
 lease**, always. One global order means no circular wait, and the scarce
@@ -86,8 +104,9 @@ A consequence worth internalising: **a model under its own cap is not
 available if its harness is full.** `code_tasks._reviewer_pressure` therefore
 scores a candidate reviewer on whichever ceiling binds first. Scoring on the
 model alone sent reviews to GLM and DeepSeek while the opencode pool they
-share sat at 5/5 with seven reviewers queued behind it — and the kimi harness
-idle at 1/3.
+shared sat at 5/5 with seven reviewers queued behind it — and the kimi harness
+idle at 1/3. (That was the retired three-model fleet; the scoring rule is what
+survives it, and it now weighs opencode against dsh.)
 
 Graph admission — bounding fanout WITHIN a run
 ----------------------------------------------
@@ -99,7 +118,7 @@ holding a worktree and a DB row while doing nothing. `Graph(max_in_flight=...)`
 bounds how many nodes execute concurrently within one run; the rest wait on
 their per-node queues holding no driver slot. `code_tasks.build_code_graph`
 sets it from `config.max_tasks_in_flight()` — default the total harness
-capacity (opencode 5 + kimi 3 = 8), override **`ARC_MAX_TASKS_IN_FLIGHT`**.
+capacity (opencode 5 + dsh 5 = 10), override **`ARC_MAX_TASKS_IN_FLIGHT`**.
 The default exceeds the root count of every taskfile measured so far, so
 unconfigured runs behave exactly as before.
 
@@ -114,10 +133,12 @@ really server-side):
 
 | Model (family) | Account cap |
 |---|---|
-| gpt-oss-120b (`gpt-oss`) | 10 |
-| DeepSeek-V4-Flash (`deepseek`) | 10 |
+| DeepSeek-V4.1-Flash-thinking-max (`deepseek`) | 10 |
 | GLM-5.3 (`glm`) | 4 |
-| Kimi-K3 (`kimi`) | 3 |
+
+Kimi-K3's `kimi` row is gone: the family was removed from `config.FAMILIES`
+on 2026-09-12 with the model's retirement, so its family knobs are no longer
+minted and `main.py ask --family kimi` no longer resolves.
 
 For the **research workload** `pool.py` enforces these client-side as an
 `asyncio.Semaphore(config.family_limit(f))` per family (`pool.py:79`), so a
@@ -131,25 +152,31 @@ request is rejected with HTTP 400, which `pool._is_session_limit` recognises by
 ### Layer 2 — per-process driver semaphores (`drivers._MODEL_DRIVER_CAP`)
 
 The **code workload** does not call the API through `pool.chat`. It shells out
-to the `kimi` and `opencode` CLIs (`drivers.py`), each of which makes its own
+to the `opencode` (GLM-5.3) and `dsh` (DeepSeek) CLIs (`drivers.py`), each of
+which makes its own
 API calls. Concurrent harness instances are bounded by a **per-model**
 semaphore, not a per-family one:
 
 ```python
 # config.py
-_MEASURED_CONCURRENCY = {"Kimi-K3": 3, "GLM-5.3": 4,
-                         "gpt-oss-120b": 5, "DeepSeek-V4-Flash": 5}
+# Derived from the live ROSTER rows — DeepSeek-V4.1-Flash-thinking-max's 10
+# is the provider-published figure (2026-09-12), the rest are measured.
+_MEASURED_CONCURRENCY = {"GLM-5.3": 4,
+                         "DeepSeek-V4.1-Flash-thinking-max": 10}
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2}
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
-_MODEL_DRIVER_CAP = {m: max(1, n - DRIVER_HEADROOM)
+_MODEL_DRIVER_CAP = {m: max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)]
+                            - DRIVER_HEADROOM)
                      for m, n in _MEASURED_CONCURRENCY.items()}
 ```
 
-| Model | ARC sessions | Sessions per process | Driver cap |
-|---|---|---|---|
-| gpt-oss-120b | 5 | 2 (opencode) | 2 |
-| DeepSeek-V4-Flash | 5 | 2 (opencode) | 2 |
-| GLM-5.3 | 4 | 2 (opencode) | 2 |
-| Kimi-K3 | 3 | 1 (kimi CLI) | 3 |
+| Model | ARC sessions | Harness | Sessions per process | Driver cap |
+|---|---|---|---|---|
+| DeepSeek-V4.1-Flash-thinking-max | 10 | dsh | 2 | 5 |
+| GLM-5.3 | 4 | opencode | 2 | 2 |
+
+(`"kimi": 1` remains in `_SESSIONS_PER_PROCESS` only so a historical
+transcript's harness still resolves; no live model maps to it.)
 
 A harness PROCESS is not an ARC SESSION. An opencode run issues parallel tool
 calls and holds about two sessions at once, so a driver cap equal to the
@@ -157,13 +184,14 @@ session limit asks for twice the budget. Measured over four hours: 23 capacity
 rejections, GLM-5.3 refused with as few as TWO drivers live against a ceiling
 of four.
 
-Remember the harness pool above sits UNDER these: the three opencode models
-share five slots between them, so their per-model caps are reached only when
-the other two are idle.
+Remember the harness pools above sit UNDER these: opencode and dsh are
+separate binaries with their own 5-slot pools, so a model's driver cap binds
+before its harness pool does on today's numbers.
 
 `drivers._gate(model)` lazily creates an `asyncio.Semaphore(config.driver_limit(model))`
-per model (`drivers.py:44-50`). `Driver.run` does `await gate.acquire()` before
-launching the subprocess and `gate.release()` when it finishes (`drivers.py:123,137`).
+per model (`drivers.py:60`). `Driver.run` does `await gate.acquire()` before
+launching the subprocess and releases it on every exit path (`drivers.py:605`,
+`drivers.py:686`).
 These semaphores are process-local (a module-level dict), so **each** `main.py
 code run` process gets its own set.
 
@@ -179,45 +207,55 @@ has fewer live rows than `config.driver_limit(model)`. Over cap, the task
 **waits**, polling every 20 s and emitting `driver.cap_wait {model, task,
 in_use, cap}` about once a minute — that event is the fleet's "concurrency
 limit reached" warning. Rows are reaped when older than
-`config.DRIVER_LEASE_TTL` (default 3300 s, `ARC_DRIVER_LEASE_TTL`) or owned by
+`config.DRIVER_LEASE_TTL` (default derived: `DRIVER_TIMEOUT +
+DRIVER_CAPACITY_BACKOFF_CAP + 300`, 6300 s at defaults, `ARC_DRIVER_LEASE_TTL`) or owned by
 a dead pid, so a killed run frees its slots within seconds and a crashed one
 within the TTL. All of this is in addition to — never instead of — the
 semaphore: the semaphore is the fast in-process path, the lease is the
 cross-process truth.
 
-Summing the driver caps: **8 + 8 + 3 + 2 = 21**. This is the maximum number
-of harness instances one orchestrator run can have in flight at once.
+Summing the driver caps: **5 + 2 = 7**. That is the maximum number
+of harness instances one orchestrator run can have in flight at once, and it
+fits inside the two harness pools: DeepSeek's 5 into the 5-wide dsh pool,
+GLM's 2 into the 5-wide opencode pool.
 
 ```
-gpt-oss-120b  8   ← basic implementers (opencode)
-DeepSeek-V4   8   ← medium implementers (opencode)
-GLM-5.3       3   ← hard implementers + planners/reviewers (opencode)
-Kimi-K3       2   ← hard implementers + planners/reviewers (kimi CLI)
+DeepSeek-V4.1-max  5   ← medium implementers + reviewers/PR-reviewers (dsh)
+GLM-5.3            2   ← hard implementers + planner/reviewers (opencode)
 ────────────────
-             21   per-process ceiling
+                   7   per-process ceiling
 ```
 
 ## 2. Why driver caps sit below account caps
 
-The driver caps are the account cap **minus headroom**. The account key is
-shared with the user's own interactive sessions, so the orchestrator must stay
-polite. `config.driver_limit` is documented as "Max concurrent harness
-instances for a model (ARC cap minus headroom)" (`config.py:128`), and the
-module docstring in `drivers.py` says ARC rejects over-limit requests per
-model, so the per-model semaphores cap concurrent harness instances *below*
-the account limits.
+Two mechanisms keep a driver cap below its account cap.
 
-The headroom matters because:
+The first is the sessions-per-process factor: an opencode run holds about two
+ARC sessions at once (parallel tool calls), and dsh is assumed to behave the
+same way (`config._SESSIONS_PER_PROCESS`, unmeasured for dsh as of
+2026-09-12), so both caps are the account cap
+**divided by two** — DeepSeek 10 → 5, GLM 4 → 2. Setting a
+cap equal to the session limit asks for twice the budget and the
+fleet generates its own 400s. On top of the division, `ARC_DRIVER_HEADROOM`
+(default 0) subtracts a flat reserve per model.
 
-- **Kimi-K3** — you run the `kimi` CLI interactively. Account cap 3, driver
-  cap 2 leaves exactly 1 slot for your own session during a run.
-- **GLM-5.3** — account cap 4, driver cap 3 leaves 1 slot.
-- **gpt-oss-120b / DeepSeek-V4-Flash** — account cap 10, driver cap 8 leaves
-  headroom, and also absorbs some of the burst/retry load.
+The second is politeness. The account key is shared with the user's own
+interactive sessions, so the orchestrator must leave room for them:
 
-So on a machine where `kimi-code` and `opencode` are also used by hand, a run
-does not starve the interactive agents. This headroom is the *reason* driver
-caps are deliberately lower than the account caps.
+- `config.driver_limit(model, interactive=False)` gives batch callers on the
+  planner model (GLM-5.3) one slot **fewer** (`INTERACTIVE_RESERVE`, default 1)
+  — but **only while it still leaves batch at least two slots**
+  (`_apply_reserve`, config.py:767-779; `MIN_BATCH_SLOTS` = 2). GLM-5.3's
+  driver cap is 2, so the reserve is **not** applied and its batch cap stays
+  **2**: an interactive chat queues behind the fleet rather than cutting the
+  planner to a single slot. It is reserved only on the planner model —
+  applying it to every model halved GLM and DeepSeek to protect a path neither
+  of them serves.
+- With `ARC_DRIVER_HEADROOM=1` every model's cap drops by one, leaving a
+  measured slot for your own `opencode` or `dsh` session during a run.
+
+So on a machine where `opencode` and `dsh` are also used by hand, a run
+does not starve the interactive agents.
 
 ## 3. Semaphore queueing — what actually happens
 
@@ -257,20 +295,23 @@ the DAG in `graph.py` plus the per-model driver semaphores in `drivers.py`.
    no "queue the leftover tasks in a list and run the most important first".
 
 Net effect: with a big task batch, **all** runnable no-dep tasks are dispatched
-and the extra ones park on the GLM/Kimi semaphore (the tightest caps). That is
+and the extra ones park on the DeepSeek semaphore (the tightest cap, 5, on the
+harness that carries the implementation load). That is
 why the effective parallelism of a run is governed by the driver caps — in
-practice the **GLM-5.3 + Kimi-K3** pair (3 + 2 = 5) is the bottleneck, since
-every review (and every hard implementation) needs one of them.
+practice **DeepSeek-V4.1-Flash-thinking-max (5)** and then **GLM-5.3 (2)**
+bound a batch, and every review of DeepSeek work lands on GLM-5.3 and competes
+with the planner for the two opencode slots.
 
 ## 4. Environment overrides
 
-Both layers can be overridden per family with env vars. The suffixes match the
-**family** name from `config.FAMILIES`, not the model name.
+Every layer can be overridden with env vars. The suffixes match the
+**family** name from `config.FAMILIES`, not the model name (harness pools use
+the harness name instead).
 
 ### `ARC_LIMIT_<FAMILY>` — override the account cap layer
 
 `config.family_limit` builds the name by uppercasing the family key and
-replacing `-` with `_` (`config.py:88-100`):
+replacing `-` with `_` (`config.py:112-124`):
 
 ```python
 override = os.getenv(f"ARC_LIMIT_{name.upper().replace('-', '_')}")
@@ -278,43 +319,42 @@ override = os.getenv(f"ARC_LIMIT_{name.upper().replace('-', '_')}")
 
 | Family | Env var |
 |---|---|
-| gpt-oss | `ARC_LIMIT_GPT_OSS` |
 | deepseek | `ARC_LIMIT_DEEPSEEK` |
 | glm | `ARC_LIMIT_GLM` |
-| kimi | `ARC_LIMIT_KIMI` |
 
-Example: `ARC_LIMIT_KIMI=1`. This raises/lowers the **account-cap** layer
+Example: `ARC_LIMIT_DEEPSEEK=6`. This raises/lowers the **account-cap** layer
 (used by `pool.py`'s families and reported as `capacity`). It does **not**
-change the driver semaphores.
+change the driver semaphores. The kimi family's limit knob retired with the
+family itself on 2026-09-12; config no longer reads it.
 
 ### `ARC_DRIVER_LIMIT_<FAMILY>` — override the driver semaphore layer
 
 `config.driver_limit` maps the model to its family first, then builds the same
-suffix (`config.py:127-135`):
+suffix (`config.py:708-721`):
 
 ```python
 override = os.getenv(f"ARC_DRIVER_LIMIT_{MODEL_FAMILY[model].upper().replace('-', '_')}")
 ```
 
-`MODEL_FAMILY` (`config.py:118-123`) maps `gpt-oss-120b → gpt-oss`,
-`DeepSeek-V4-Flash → deepseek`, `GLM-5.3 → glm`, `Kimi-K3 → kimi`, so:
+`MODEL_FAMILY` is derived from the live roster (`config.ROSTER`) and maps
+`DeepSeek-V4.1-Flash-thinking-max → deepseek` and `GLM-5.3 → glm` on the
+two-model fleet (2026-09-12), so:
 
 | Model (family) | Env var |
 |---|---|
-| gpt-oss-120b (`gpt-oss`) | `ARC_DRIVER_LIMIT_GPT_OSS` |
-| DeepSeek-V4-Flash (`deepseek`) | `ARC_DRIVER_LIMIT_DEEPSEEK` |
+| DeepSeek-V4.1-Flash-thinking-max (`deepseek`) | `ARC_DRIVER_LIMIT_DEEPSEEK` |
 | GLM-5.3 (`glm`) | `ARC_DRIVER_LIMIT_GLM` |
-| Kimi-K3 (`kimi`) | `ARC_DRIVER_LIMIT_KIMI` |
 
-Example: `ARC_DRIVER_LIMIT_KIMI=1` (the README's example).
+Example: `ARC_DRIVER_LIMIT_DEEPSEEK=3`. (The kimi family's driver-limit knob
+retired with the family on 2026-09-12 and is no longer minted or read.)
 
 ### When to raise them
 
 | Situation | What to do |
 |---|---|
-| **Dedicated box** — no interactive `kimi`/`opencode` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=4`, `ARC_DRIVER_LIMIT_KIMI=3`) to run the fleet flat-out. |
+| **Dedicated box** — no interactive `opencode`/`dsh` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=4`; DeepSeek is already at 5 = 10 ÷ 2) to run the fleet flat-out. Raise `ARC_HARNESS_LIMIT_OPENCODE` too if GLM's cap rises above 5. |
 | You have a **higher account tier** | Raise `ARC_LIMIT_<FAMILY>` *and* the matching `ARC_DRIVER_LIMIT_<FAMILY>`. The account cap is server-side, so raising only the driver cap can hit the API's 400 "session limit" rejection. |
-| **Shared box** (you also use `kimi-code` / `opencode` by hand) | Keep defaults. The whole point of the driver caps is to leave headroom for your own sessions. |
+| **Shared box** (you also use `opencode` / `dsh` by hand) | Keep defaults. The whole point of the driver caps is to leave headroom for your own sessions. |
 
 Never set a driver cap above the account cap for a family — you would only
 trade "polite headroom" for hard API rejections and retry churn.
@@ -326,56 +366,63 @@ are overridable from `.env`.
 
 | Knob | Default | What it does |
 |---|---|---|
-| `DRIVER_TIMEOUT` | 2700 s | Per-harness-subprocess runtime cap. `drivers.Driver._once` sets `deadline = t0 + config.DRIVER_TIMEOUT`; if the child is still producing output past it, it is killed and the run raises `DriverError` (`drivers.py:166-180`). |
-| `GATE_TIMEOUT` | 180 s | Cap on the deterministic verify gate. `code_tasks.gate` runs `verify_cmd` via `asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)`; on timeout it kills the child and returns `passed=False` (`code_tasks.py:199-203`). |
-| `MAX_FIX_ROUNDS` | 3 | Bounded (re)implement↔review fix loop per task. `code_tasks.py` re-fires `implement_<tid>` after a failed gate/review while `runs["implement_<tid>"] <= config.MAX_FIX_ROUNDS`, else it fires `fail_<tid>` (`code_tasks.py:253-265`). |
-| `MAX_RETRIES` | 4 | Per-firing retry budget in `drivers.Driver.run`: an attempt that raises `DriverError` retries (exponential backoff `2^attempt`, capped at 30 s) until `attempt > config.MAX_RETRIES`, then re-raises and fails the task (`drivers.py:126-136`). |
+| `DRIVER_TIMEOUT` | 5400 s | Per-harness-subprocess runtime cap. `drivers.Driver._once` sets `deadline = t0 + config.DRIVER_TIMEOUT`; if the child is still producing output past it, it is killed and the run raises `DriverError` (`drivers.py:799`). |
+| `GATE_TIMEOUT` | 360 s | Cap on the deterministic verify gate. `code_tasks.gate` runs `verify_cmd` via `asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)`; on timeout it kills the child and returns `passed=False` (`code_tasks.py:924-947`). |
+| `MAX_FIX_ROUNDS` | 8 | Bounded (re)implement↔review fix loop per task. `code_tasks.py` re-fires `implement_<tid>` after a failed gate/review while `runs["implement_<tid>"] <= config.MAX_FIX_ROUNDS`, else it escalates one tier up `config.ESCALATION_PATH` with a fresh fix budget; the task fails only when the last tier exhausts. |
+| `MAX_RETRIES` | 12 | Per-firing retry budget in `drivers.Driver.run`: an attempt that raises `DriverError` retries (exponential backoff `2^attempt`, capped at 30 s; capacity errors use the longer `DRIVER_CAPACITY_BACKOFF` ladder) until `attempt > config.MAX_RETRIES`, then re-raises and fails the attempt (`drivers.py:666`). |
 
 Note `config.MAX_RETRIES` is also used by `pool.py` for API request retries
 in the research workload; in the code workload the driver retry loop above is
 what governs a single harness firing.
 
+### `ARC_DSH_BIN` — where the dsh CLI lives
+
+`config.dsh_bin()` resolves the DeepSeek harness binary: `$ARC_DSH_BIN` when
+set, otherwise `dsh` found on PATH, otherwise the npm-global install location
+recorded on 2026-09-12 (`~/.local/opt/node/bin/dsh`).
+
+### `ARC_ALLOW_SAME_FAMILY_REVIEW` — TEMPORARY review-policy override
+
+Operator-authorized 2026-09-12 while GLM-5.3's provider backend is unstable:
+setting this to `1` lets a task's pre-merge review and its PR reviewers come
+from the implementer's own family (DeepSeek reviewing DeepSeek). Consumed by
+`code_tasks.load_taskfile` and `code_tasks._eligible_pr_reviewers`. It
+suspends the cross-review requirement — reviews are no longer an independent
+reading by a different harness — so take it back out as soon as GLM-5.3 is
+stable again.
+
 ## 6. Worked example — 12 tasks, first wave
 
-A task file has 12 tasks: 2 hard (GLM-5.3 / Kimi-K3 implementers), 4 medium
-(DeepSeek-V4-Flash), 6 basic (gpt-oss-120b), all with no `deps` (so all are
-graph start nodes and become runnable at once). Driver caps: GLM-5.3 = 3,
-Kimi-K3 = 3, DeepSeek-V4-Flash = 5, gpt-oss-120b = 5 — and the opencode
-harness pool = 5 across all three of the opencode models.
+A task file has 12 tasks: 8 medium (DeepSeek-V4.1-Flash-thinking-max) and 4
+hard (GLM-5.3), all with no `deps` (so all
+are graph start nodes and become runnable at once). Driver caps: GLM-5.3 = 2,
+DeepSeek-V4.1-Flash-thinking-max = 5 — and the two harness pools are separate
+and 5 wide (opencode for GLM, dsh for DeepSeek).
 
-**First wave — the implementers (12 of them) all start.** The caps are far
-from binding on implementers:
+**First wave — the implementers (12 of them) all start.** A
+per-model cap bites first:
 
 | Implementer | Need | Cap | Runs? |
 |---|---|---|---|
-| gpt-oss-120b | 6 | 5 | 5 run, 1 queues |
-| DeepSeek-V4-Flash | 4 | 5 | queues behind the harness |
-| GLM-5.3 | 1 (one hard task) | 4 | queues behind the harness |
-| Kimi-K3 | 1 (the other hard task) | 3 | ✓ (own harness) |
+| GLM-5.3 | 4 | 2 | 2 run, 2 queue on the model semaphore |
+| DeepSeek-V4.1-Flash-thinking-max | 8 | 5 | 5 run, 3 queue on the model semaphore |
 
-The per-model caps are NOT what binds here. gpt-oss, DeepSeek and GLM want
-6 + 4 + 1 = 11 opencode processes against a harness pool of 5, so only five of
-them run at a time regardless of model headroom. Kimi runs immediately because
-the `kimi` CLI is a separate harness. **All 12 implementations do not run
-concurrently** in the first wave. The per-model guards only bite when a model
-needs *more* than its cap.
+**All 12 implementations do not run concurrently** in the first wave: 7 run
+(2 opencode + 5 dsh) against the two pools' 5 + 5, and the rest park in FIFO
+order on `drivers._gate(model)`.
 
-**What queues — the reviews.** Every task must then be reviewed by GLM-5.3 or
-Kimi-K3 (a reviewer never shares a family with its implementer). That is 12
-review firings, plus the hard-tasks' own implementations already counted. The
-GLM + Kimi caps together allow only **3 + 2 = 5** concurrent harness
-instances, and GLM/Kimi are also still busy with the hard implementations.
-So once the implementations start finishing, the review firings pile up on the
-`GLM-5.3` and `Kimi-K3` semaphores (`drivers._gate`): the first five reach
-`gate.acquire()` and run, the rest block in FIFO order until a reviewer frees
-its slot.
+**What queues next — the reviews.** Cross-review is family-based: the 8
+DeepSeek tasks are all reviewed by `glm` (GLM-5.3), and the 4 GLM tasks are
+reviewed by `deepseek`. That is eight review firings on GLM-5.3 against a
+driver cap of 2, behind the 2 hard implementations already holding those
+slots; the four DeepSeek reviews share DeepSeek's cap of 5 with the medium
+implementations still draining.
 
-**Why this is the bottleneck.** DeepSeek (cap 8) and gpt-oss (cap 8) never
-saturate with 4 and 6 tasks; the run is limited by the hard-model pair
-(GLM 3 + Kimi 2 = 5). Even though the *implementers* all ran, throughput is
-capped by review slots, so the total in-flight never reaches the 21 ceiling
-with only 12 tasks — the theoretical 21 only takes over when a batch has
-many more hard/review work items than 5.
+**Why this is the bottleneck.** GLM-5.3 (cap 2) paces everything routed to it
+— the hard implementations AND every review of DeepSeek work, including the
+planner's own slot — while DeepSeek's 5-wide dsh pool drains the medium work.
+The per-process ceiling of 7 is approached only when a batch is heavy on
+medium work and GLM-side reviews at the same time.
 
 ## Cross-references
 

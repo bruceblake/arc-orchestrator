@@ -598,7 +598,7 @@ def audit_roster():
     provider's schedule. Two things an operator needs to hear before the day,
     not after: WHAT changes in the next two weeks, and whether the fleet left
     behind can still field PR_REVIEWERS cross-family reviewers for every
-    implementer. After Kimi-K3 leaves on 2026-09-19 it cannot — two families
+    implementer. It cannot on the two-model fleet of 2026-09-12 — two families
     means one cross-family reviewer each — and the merge gate quietly gets
     thinner unless someone is told.
     """

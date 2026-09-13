@@ -33,7 +33,7 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 
 | Route | Body | Returns |
 |---|---|---|
-| `/api/projects/create` | `repo` (required, absolute path under `ARC_REPO_ROOT`, default the operator home), plus either `goal` (3..2000 chars, Kimi-K3 plans it) or `title` + `tasks` list; optional `overwrite` | `mode: plan` with pid/log/taskfile, or `mode: tasks` with written file name |
+| `/api/projects/create` | `repo` (required, absolute path under `ARC_REPO_ROOT`, default the operator home), plus either `goal` (3..2000 chars, GLM-5.3 plans it) or `title` + `tasks` list; optional `overwrite` | `mode: plan` with pid/log/taskfile, or `mode: tasks` with written file name |
 | `/api/projects/run` | `file` = taskfile name, optional `dry_run` | Spawns `main.py code run [--dry-run]`; pid, log name, `dry_run` flag; 409 if already running |
 
 ## Metrics endpoint
@@ -84,8 +84,9 @@ slot right now, and who is queued behind them.**
 
 - **Capacity cards** — one per harness *and* one per model, pips for held vs
   free. Harness rows come first because the harness is frequently the binding
-  ceiling: every opencode model can sit under its own cap while the single
-  opencode pool is saturated, which reads as "idle" exactly when it is most
+  ceiling: a model can sit under its own cap while
+  its harness pool (opencode for GLM-5.3, dsh for DeepSeek) is saturated,
+  which reads as "idle" exactly when it is most
   wrong. Amber = at cap, red = a queue behind it.
 - **Attempt rows** — each running and queued attempt with its task, role,
   model, wait time, and *why* it is waiting: `fleet at cap (4/4)`,

@@ -90,8 +90,8 @@ class HttpReadEndpoints(unittest.TestCase):
             {"id": "t1", "title": "one"}, {"id": "t2", "title": "two"}]}}),
             encoding="utf-8")
         st = dashboard.Handler.store
-        st.upsert_code_task(str(f), "t1", "one", "GLM-5.3", "kimi", "merged")
-        st.upsert_code_task(str(f), "t2", "two", "GLM-5.3", "kimi", "running")
+        st.upsert_code_task(str(f), "t1", "one", "GLM-5.3", config.cross_family_reviewer("GLM-5.3"), "merged")
+        st.upsert_code_task(str(f), "t2", "two", "GLM-5.3", config.cross_family_reviewer("GLM-5.3"), "running")
         self._write_events({"type": "node_start", "node": "implement_t2", "ts": 0.0})
 
     def test_health_returns_200_json_object(self):
@@ -251,7 +251,7 @@ class HttpReadEndpoints(unittest.TestCase):
                 {"id": "d1", "title": "head"},
                 {"id": "d2", "title": "tail", "deps": ["d1"]}]}}), encoding="utf-8")
         st = dashboard.Handler.store
-        st.upsert_code_task(str(up), "u1", "one", "GLM-5.3", "kimi", "merged")
+        st.upsert_code_task(str(up), "u1", "one", "GLM-5.3", config.cross_family_reviewer("GLM-5.3"), "merged")
         return up, down
 
     def test_projects_carry_the_chain_in_both_directions(self):
@@ -280,7 +280,7 @@ class HttpReadEndpoints(unittest.TestCase):
 
     def test_chain_becomes_ready_when_every_upstream_task_is_merged(self):
         up, down = self._seed_chain()
-        dashboard.Handler.store.upsert_code_task(str(up), "u2", "two", "GLM-5.3", "kimi", "merged")
+        dashboard.Handler.store.upsert_code_task(str(up), "u2", "two", "GLM-5.3", config.cross_family_reviewer("GLM-5.3"), "merged")
         status, body = self._get("/api/projects")
         d = next(p for p in body["projects"] if p["file"] == "down.json")
         self.assertTrue(d["chain"]["ready"])

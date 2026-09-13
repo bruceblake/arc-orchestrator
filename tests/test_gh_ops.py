@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import capture_events, needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: F401  (helpers sets the test env)
+from helpers import capture_events, ENTRY, STRONGEST  # noqa: F401  (helpers sets the test env)
 
 import code_tasks
 import config
@@ -44,10 +44,21 @@ class RepoTarget(unittest.TestCase):
 
 
 class ReviewerFor(unittest.TestCase):
-    @needs_kimi
     def test_hard_models_cross_review_each_other(self):
-        self.assertEqual(gh_ops._reviewer_for("GLM-5.3", 0), "kimi")
-        self.assertEqual(gh_ops._reviewer_for(STRONGEST, 0), "glm")
+        """A top-tier model draws the strongest review family that is not its own.
+
+        This named the pairs literally ("GLM is reviewed by kimi") until the
+        roster reordered on 2026-09-12 and deepseek became the strongest review
+        family -- the code was right and the test was asserting last month's
+        roster. REVIEW_FAMILIES is ordered strongest-first, so the rule states
+        itself; on the two-model fleet that leaves exactly one family per model.
+        """
+        strongest_first = list(config.REVIEW_FAMILIES)
+        for model in config.IMPLEMENT_TIERS.get("hard", []):
+            fam = config.MODEL_FAMILY[model]
+            expected = next(f for f in strongest_first if f != fam)
+            self.assertEqual(gh_ops._reviewer_for(model, 0), expected,
+                             f"{model} should be reviewed by {expected}")
 
     def test_other_models_alternate_and_never_self(self):
         # the models below the "hard" tier, from today's roster

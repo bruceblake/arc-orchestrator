@@ -25,7 +25,8 @@ def taskfile(tasks, repo="/tmp"):
 
 
 BASIC = {"id": "t1", "title": "T1", "prompt": "do it",
-         "model": config.ESCALATION_PATH[0], "reviewer": "kimi"}
+         "model": config.ESCALATION_PATH[0],
+         "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0])}
 
 
 def rejected(result):

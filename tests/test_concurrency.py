@@ -16,7 +16,8 @@ import unittest
 from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path + event log redirect)
-from helpers import ENTRY, STRONGEST  # noqa: E402,F401
+from helpers import ENTRY, ENTRY_REVIEWER, STRONGEST  # noqa: E402,F401
+import config  # noqa: E402
 
 from graph import Graph
 from store import Store
@@ -145,7 +146,7 @@ class ConcurrencyLeaseVisibility(unittest.TestCase):
         later resume would see a phantom crash (reconcile's dead-process reset
         goes through the same code path)."""
         a, b = self._store(), self._store()
-        a.upsert_code_task("A.json", "a1", "a1", "GLM-5.3", "kimi", "running")
+        a.upsert_code_task("A.json", "a1", "a1", "GLM-5.3", ENTRY_REVIEWER, "running")
         b.upsert_code_task("B.json", "b1", "b1", STRONGEST, "glm", "running")
         stop = threading.Event()
 
@@ -158,7 +159,7 @@ class ConcurrencyLeaseVisibility(unittest.TestCase):
         t.start()
         try:
             for _ in range(10):
-                a.upsert_code_task("A.json", "a1", "a1", "GLM-5.3", "kimi", "running")
+                a.upsert_code_task("A.json", "a1", "a1", "GLM-5.3", ENTRY_REVIEWER, "running")
                 self.assertEqual(
                     a.reset_stale_code_tasks(taskfile="A.json", reason="interrupted"), 1)
         finally:
@@ -181,8 +182,10 @@ class ConcurrencyUpsertSameTask(TempDB):
     stranded tasks on resume at a tier they had already outgrown, and a torn
     pair would report a model with the wrong reviewer."""
 
-    TIERS = [("gpt-oss-120b", "kimi"), (ENTRY, "glm"),
-             ("GLM-5.3", "kimi"), (STRONGEST, "glm")]
+    # Escalation walks the LIVE tier pairs, model and reviewer together: on
+    # the 2026-09-12 two-model roster each model's reviewer is the other
+    # family. Written from the roster so it does not encode a past fleet.
+    TIERS = [(m, config.cross_family_reviewer(m)) for m in config.ESCALATION_PATH]
 
     def test_one_row_survives_and_the_last_write_wins(self):
         self.store.upsert_code_task("f.json", "t1", "t1", *self.TIERS[0], "running")
@@ -206,9 +209,10 @@ class ConcurrencyUpsertSameTask(TempDB):
         self.assertIn((rows[0]["model"], rows[0]["reviewer"]), self.TIERS)
         # Deterministically pin last-write-wins: a final (escalation) upsert
         # must replace the recorded tier, not be dropped on conflict.
-        self.store.upsert_code_task("f.json", "t1", "t1", STRONGEST, "glm", "running")
+        top_pair = (STRONGEST, config.cross_family_reviewer(STRONGEST))
+        self.store.upsert_code_task("f.json", "t1", "t1", *top_pair, "running")
         row = self.store.code_tasks_for("f.json")[0]
-        self.assertEqual((row["model"], row["reviewer"]), (STRONGEST, "glm"))
+        self.assertEqual((row["model"], row["reviewer"]), top_pair)
 
 
 class ConcurrencyGraph(unittest.TestCase):
