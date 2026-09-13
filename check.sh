@@ -18,8 +18,8 @@ cd "$(dirname "$0")" || exit 1
 # gitignored, so `git worktree add` never creates one. The old fallback to
 # bare `python3` picked an interpreter without dotenv/openai, so every module
 # import failed and EVERY gate beginning with ./check.sh failed no matter what
-# the agent wrote. Two documentation tasks escalated all the way to Kimi-K3
-# and died that way, never once reaching review.
+# the agent wrote. Two documentation tasks escalated all the way to the top
+# tier and died that way, never once reaching review.
 #
 # git-common-dir points at the main checkout's .git from any worktree, so its
 # parent is where the real virtualenv lives.

@@ -95,7 +95,8 @@ class WorktreeSweep(RepoFixture):
 class RowAndLeaseSweep(RepoFixture):
     def test_marks_stale_running_rows_failed_with_an_infrastructure_reason(self):
         self.store.upsert_code_task("f.json", "t1", "T1", "gpt-oss-120b",
-                                    "kimi", "running")
+                                    config.cross_family_reviewer("gpt-oss-120b"),
+                                    "running")
         rep = self.run_reconcile()
         self.assertEqual([r["id"] for r in rep["rows"]], ["t1"])
         row = self.store.code_tasks_for("f.json")[0]

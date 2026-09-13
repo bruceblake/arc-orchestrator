@@ -514,7 +514,7 @@ async function doPlan(overwrite) {
   const goal = $("#p-goal").value.trim(), repo = planRepo();
   const msg = $("#p-msg"); msg.className = "";
   if (!goal || !repo) { msg.className = "err"; msg.textContent = "repo and goal are required"; return; }
-  msg.textContent = "asking Kimi-K3 to draft the task file… (this takes a minute)";
+  msg.textContent = `asking ${PLANNER_SHORT} to draft the task file… (this takes a minute)`;
   const body0 = {goal, repo};
   if (overwrite) body0.overwrite = true;
   const {code, body} = await jpost("/api/projects/create", body0);

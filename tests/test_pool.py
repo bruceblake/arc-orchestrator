@@ -49,10 +49,21 @@ class PoolResolveModel(unittest.TestCase):
         )
 
     def test_returns_the_websearch_variant(self):
-        self.assertEqual(
-            self.pool.resolve_model("kimi", websearch=True),
-            "Kimi-K3-thinking-max-legacy-tool-calling",
-        )
+        # Derived from the live family that HAS a websearch variant, not a
+        # named retired family: the literal was "kimi" and its model, and went
+        # red the day Kimi-K3 left FAMILIES (2026-09-12).
+        fams = [f for f in config.FAMILY_ORDER if config.FAMILIES[f].websearch_model]
+        self.assertTrue(fams, "no live family declares a websearch variant")
+        for fam in fams:
+            self.assertEqual(self.pool.resolve_model(fam, websearch=True),
+                             config.FAMILIES[fam].websearch_model)
+
+    def test_a_retired_harness_family_is_unreachable(self):
+        # Kimi-K3 was removed from FAMILIES on 2026-09-12 as well as ROSTER:
+        # while a family stays in the registry, `main.py ask --family kimi`
+        # still routes to a retired model.
+        with self.assertRaises(ValueError):
+            self.pool.resolve_model("kimi")
 
     def test_rejects_an_unknown_family(self):
         # Same error type as chat(), and never a silent fall-through to some

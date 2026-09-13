@@ -1,5 +1,5 @@
 "use strict";
-// ---- plan-with-kimi chat panel ----
+// ---- plan-with-the-fleet-planner chat panel ----
 // A conversational front to `main.py chat` over the orchestration repo.
 // Chat with the planner; a turn that produced a taskfile shows an action card
 // that can open the project or run the generated taskfile directly.
@@ -84,7 +84,7 @@ function chatTurnHTML(turn) {
 }
 
 function chatThinkingHTML() {
-  return `<div class="chat-turn assistant"><div class="chat-bubble dim chat-thinking"><span class="chat-spin"></span> Kimi-K3 is thinking…</div></div>`;
+  return `<div class="chat-turn assistant"><div class="chat-bubble dim chat-thinking"><span class="chat-spin"></span> ${esc(PLANNER_SHORT)} is thinking…</div></div>`;
 }
 
 function chatRender() {
@@ -96,7 +96,7 @@ function chatRender() {
 }
 
 function chatEmptyState() {
-  return `<div class="chat-empty">Describe what you want built. Kimi-K3 will turn it into a governed project — tasks, model routing, verify gates, cross-review — and hand it back ready to run.</div>`;
+  return `<div class="chat-empty">Describe what you want built. ${esc(PLANNER_SHORT)} will turn it into a governed project — tasks, model routing, verify gates, cross-review — and hand it back ready to run.</div>`;
 }
 
 // ---- network ----

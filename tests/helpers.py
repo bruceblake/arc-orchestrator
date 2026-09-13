@@ -29,6 +29,13 @@ config.EVENTS_LOG = str(pathlib.Path(_EVENT_DIR) / "events.jsonl")
 config.DB_PATH = str(pathlib.Path(_EVENT_DIR) / "test.db")
 atexit.register(lambda: shutil.rmtree(_EVENT_DIR, ignore_errors=True))
 
+# The suite tests the DEFAULT governance, so the operator's TEMPORARY
+# same-family-review escape hatch (ARC_ALLOW_SAME_FAMILY_REVIEW, 2026-09-12)
+# must not leak in from the shell a gate runs in: with it set, every
+# cross-review assertion in the suite is vacuous. Cross-review is Rule 2, and
+# its tests pin the rule; the hatch gets its own explicit test.
+config.ALLOW_SAME_FAMILY_REVIEW = False
+
 # Several tests deliberately drive failure paths (node crashes, driver retry
 # ladders, gather deadlocks). Their log output is expected, and printing it
 # buries a real failure in the runner's output — and in check.sh's.
@@ -92,9 +99,10 @@ class FakeStore:
 
 # --- roster-aware fixture names ------------------------------------------
 # The model roster is DATED (config.ROSTER): names change on the provider's
-# schedule. A fixture that hard-codes "Kimi-K3" is a test that breaks on
-# 2026-09-19 for a reason unrelated to what it tests. Use these instead, and
-# run the suite under ARC_ROSTER_DATE=<date> before each transition.
+# schedule — Kimi-K3 was retired on 2026-09-12 by operator decision and a
+# fixture that hard-codes it became a test that fails for a reason unrelated
+# to what it tests. Use these instead, and run the suite under
+# ARC_ROSTER_DATE=<date> before each transition.
 import unittest as _ut
 
 ENTRY = config.ESCALATION_PATH[0]        # weakest live implementer

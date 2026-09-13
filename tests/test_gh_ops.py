@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import capture_events, needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: F401  (helpers sets the test env)
+from helpers import capture_events, ENTRY, STRONGEST  # noqa: F401  (helpers sets the test env)
 
 import code_tasks
 import config
@@ -44,7 +44,6 @@ class RepoTarget(unittest.TestCase):
 
 
 class ReviewerFor(unittest.TestCase):
-    @needs_three_families
     def test_hard_models_cross_review_each_other(self):
         """A top-tier model draws the strongest review family that is not its own.
 
@@ -52,7 +51,7 @@ class ReviewerFor(unittest.TestCase):
         roster reordered on 2026-09-12 and deepseek became the strongest review
         family -- the code was right and the test was asserting last month's
         roster. REVIEW_FAMILIES is ordered strongest-first, so the rule states
-        itself.
+        itself; on the two-model fleet that leaves exactly one family per model.
         """
         strongest_first = list(config.REVIEW_FAMILIES)
         for model in config.IMPLEMENT_TIERS.get("hard", []):

@@ -2,7 +2,7 @@
 
 The dashboard appends the operator's turn to $ARC_CHAT_DIR/<session>.jsonl
 and runs `main.py chat --session <id> --repo <path>`. run_turn loads the
-session, runs the fleet's planner (Kimi-K3) exactly once over the whole
+session, runs the fleet's planner (config.PLANNER_MODEL) exactly once over the whole
 conversation, appends the assistant turn, and — when the reply carries a
 ```taskfile fenced block — validates that block through
 code_tasks.load_taskfile (every governance rule applies: tier routing,
@@ -27,8 +27,8 @@ from pathlib import Path
 
 import code_tasks
 import config
+import drivers
 import errors
-from drivers import KimiDriver, OpencodeDriver
 
 SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
@@ -37,7 +37,8 @@ SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 HISTORY_CHARS = 30000
 
 PLANNER_PERSONA = (
-    "You are the ARC fleet's planning orchestrator, running on Kimi-K3. "
+    f"You are the ARC fleet's planning orchestrator, running on "
+    f"{config.PLANNER_MODEL}. "
     "The operator describes a goal conversationally; you refine it into a "
     "governed code project for this fleet. Ask at most 2-3 sharp questions "
     "when the goal is ambiguous; once the goal is concrete, reply with a "
@@ -45,12 +46,14 @@ PLANNER_PERSONA = (
     "exactly ONE ```taskfile fenced block with the complete taskfile JSON. "
     "Taskfile rules: {\"project\": {\"repo\": <stated path>, \"title\": str, "
     "\"tasks\": [...]}}; 2-6 tasks, each <30 min for one agent; per-task "
-    "model is exactly one of GLM-5.3 (medium/mechanical), "
-    "Kimi-K3 or DeepSeek-V4.1-Flash-thinking-max (hard multi-file work; "
-    "DeepSeek-V4.1-Flash-thinking-max is the fleet's strongest model — "
-    "prefer it for the hardest tasks); "
-    "reviewer is \"kimi\", \"glm\" or \"deepseek\" and MUST NOT share a "
-    "family with the implementer (never self-review); "
+    "model is exactly one of "
+    f"{' or '.join(sorted(config.IMPLEMENTER_MODELS))} — today's two-model "
+    "fleet is GLM-5.3 (hard tier, the fleet's strongest, and the planner) and "
+    "DeepSeek-V4.1-Flash-thinking-max (medium tier, the fast workhorse that "
+    "implements and reviews but NEVER plans); "
+    f"reviewer is exactly one of "
+    f"{', '.join(chr(34) + f + chr(34) for f in sorted(config.REVIEW_FAMILIES))} "
+    "and MUST NOT share a family with the implementer (never self-review); "
     "every task gets an honest verify_cmd — when code changes make "
     "./check.sh the first clause, use ./py NEVER .venv/bin/python (worktrees "
     "have no venv), and the command must FAIL on the untouched tree and pass "
@@ -143,9 +146,10 @@ def _history(turns, limit=HISTORY_CHARS):
 def _planner_driver():
     """The planner for CHAT, which is interactive and therefore different.
 
-    Roster-aware: Kimi-K3 today, GLM-5.3 once Kimi is withdrawn on 2026-09-19.
-    Hardcoding KimiDriver here would have failed outright that morning — the
-    governed pipeline's planner was already fixed, this one was missed.
+    Roster-aware through drivers.driver_for: GLM-5.3 (opencode) on the
+    two-model roster pinned 2026-09-12. Hardcoding a driver class here would
+    fail the morning the roster's harness for the planner moves — this call
+    site was missed once already when the governed pipeline's was fixed.
 
     `interactive=True` is the real point. A batch planner queueing behind three
     implementers is fine; a HUMAN waiting on a chat reply behind them is not.
@@ -154,9 +158,7 @@ def _planner_driver():
     model = config.PLANNER_MODEL
     if model is None:
         raise RuntimeError("no planner-capable model on today's roster")
-    if config.MODEL_HARNESS.get(model) == "kimi":
-        return KimiDriver("planner", interactive=True)
-    return OpencodeDriver(model, "planner", interactive=True)
+    return drivers.driver_for(model, "planner", interactive=True)
 
 
 def build_prompt(repo, turns):
@@ -288,7 +290,7 @@ async def run_turn(session, repo):
         # A crashed planner did not answer. Same containment as the
         # governed pipeline: capture a fingerprint for triage, keep the
         # turn loop alive.
-        fp = errors.capture(exc, task=task_id, model="Kimi-K3", node="chat")
+        fp = errors.capture(exc, task=task_id, model=config.PLANNER_MODEL, node="chat")
         err = _safe_append(path, {
             "role": "assistant", "ts": time.time(),
             "text": "Sorry — the planner failed on that request. "

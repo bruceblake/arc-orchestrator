@@ -1,13 +1,14 @@
 """GitHub operations agents over the gh CLI: issue triage, issue drafting, PR review.
 
 Three dedicated roles — 'issue-triager', 'issue-maker', 'pr-reviewer' — held
-only by Kimi-K3 or GLM-5.3 (drivers.py role validation rejects them for
-gpt-oss-120b / DeepSeek-V4.1-Flash-thinking-max). These are standalone tools, NOT the
-governed code pipeline: no worktree, no gate, no publish. Every command
-previews by default; --apply-labels / --create / --post are the ONLY paths
-that write to GitHub. Every gh-touching command checks `gh auth status` first
-and exits with 'run: gh auth login' when unauthenticated; drafting and
-printing need no gh and always work.
+only by a model the roster trusts to PLAN (GLM-5.3 on the two-model fleet
+pinned 2026-09-12; DeepSeek-V4.1-Flash-thinking-max implements and reviews but
+never plans, so it is refused — drivers.py role validation enforces it). These
+are standalone tools, NOT the governed code pipeline: no worktree, no gate, no
+publish. Every command previews by default; --apply-labels / --create /
+--post are the ONLY paths that write to GitHub. Every gh-touching command
+checks `gh auth status` first and exits with 'run: gh auth login' when
+unauthenticated; drafting and printing need no gh and always work.
 """
 
 import asyncio
@@ -16,8 +17,8 @@ import re
 from pathlib import Path
 
 import config
+import drivers
 from code_tasks import _balanced_span, _parse_verdict
-from drivers import KimiDriver, OpencodeDriver
 
 GH_ROLES = ("issue-triager", "issue-maker", "pr-reviewer")
 MAX_DIFF = 30000  # chars of PR diff sent to the reviewer model
@@ -67,16 +68,20 @@ def _repo_target(repo):
 def _driver(model, role):
     """A gh role needs a model the roster trusts to PLAN; the driver enforces it.
 
-    Resolved through the roster so this stops naming Kimi the day it leaves:
-    with no ARC_GH_MODEL set, the planner-capable strongest model is used.
+    Eligibility is constructed from the ROSTER, never from hardcoded names:
+    whichever live model holds the `planner` role may hold the gh roles (GLM-5.3
+    today; DeepSeek-V4.1-Flash-thinking-max does not, so it is refused), and
+    the harness comes from that model's roster row via drivers.driver_for.
     """
     model = model or config.GH_MODEL or config.PLANNER_MODEL
-    if model not in config.MODEL_HARNESS:
+    if model not in config.MODEL_ROLES:
         raise ValueError(f"gh role {role!r}: {model!r} is not on today's roster "
-                         f"({sorted(config.MODEL_HARNESS)}); set ARC_GH_MODEL")
-    if config.MODEL_HARNESS[model] == "kimi":
-        return KimiDriver(role)
-    return OpencodeDriver(model, role)
+                         f"({sorted(config.MODEL_ROLES)}); set ARC_GH_MODEL")
+    if not config.model_may(model, "planner"):
+        raise ValueError(f"gh role {role!r}: {model} may hold "
+                         f"{sorted(config.MODEL_ROLES[model])}, and gh roles "
+                         f"need planner permission; set ARC_GH_MODEL")
+    return drivers.driver_for(model, role)
 
 
 def _json_from(text, key):
@@ -114,16 +119,24 @@ def _reviewer_for(model, i):
 # --- issue-triager ------------------------------------------------------------
 
 def _triage_prompt(repo, issues_json):
+    # Tiers and models come from the roster, never a literal list: one here
+    # named Kimi-K3 as a hard-tier implementer and had the two tiers' models
+    # the wrong way round after the 2026-09-12 pin.
+    hint = {config.TIER_ORDER[0]: "a self-contained feature, one endpoint, "
+                                  "mechanical fixes",
+            config.TIER_ORDER[-1]: "multi-file reasoning, delicate design"}
+    tiers = "\n".join(f"- {tier} -> {' or '.join(models)}: {hint[tier]}"
+                      for tier, models in sorted(config.IMPLEMENT_TIERS.items()))
+    example = next(iter(config.IMPLEMENT_TIERS.get(config.TIER_ORDER[0], [])), "")
     return (
         "You are triaging GitHub issues for a multi-model coding fleet.\n\n"
         f"REPO: {repo}\nOPEN ISSUES (JSON):\n{issues_json}\n\n"
         "Classify EACH issue: kind (bug|feature|question|docs), size (S|M|L), "
         "and the implementer per these routing tiers (enforced downstream):\n"
-        "- medium -> GLM-5.3: a self-contained feature, one endpoint, mechanical fixes\n"
-        "- hard -> DeepSeek-V4.1-Flash-thinking-max or Kimi-K3: multi-file reasoning, delicate design\n"
+        f"{tiers}\n"
         "Reply with STRICT JSON only, no prose:\n"
         '{"issues": [{"number": 1, "title": "short title", "kind": "bug", '
-        '"size": "S", "tier": "medium", "model": "GLM-5.3", '
+        f'"size": "S", "tier": "{config.TIER_ORDER[0]}", "model": "{example}", '
         '"actionable": true, "summary": "one line: what to do"}]}\n'
         "actionable=false for questions, and for issues too vague to implement."
     )
@@ -147,8 +160,9 @@ def _write_taskfile(repo, rows):
             continue
         model = r.get("model")
         if model not in config.IMPLEMENTER_MODELS:
-            model = config.IMPLEMENT_TIERS.get(r.get("tier", "medium"),
-                                               ["DeepSeek-V4.1-Flash-thinking-max"])[-1]
+            model = config.IMPLEMENT_TIERS.get(
+                r.get("tier", config.TIER_ORDER[0]),
+                [config.ESCALATION_PATH[0]])[-1]
         n = r.get("number", i)
         view = f"gh issue view {n}" if cwd else \
             f"gh issue view {n} --repo {repo}"

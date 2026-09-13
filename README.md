@@ -295,7 +295,7 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_MAX_RETRIES` | 12 | retries per request on 429/5xx/network errors |
 | `ARC_SESSION_RETRIES` | 12 | retries on 400 "concurrent session limit" (per-user caps) |
 | `ARC_SESSION_BACKOFF_CAP` | 30 | max backoff per session-limit retry (seconds) |
-| `ARC_LIMIT_<FAMILY>` | docs limit | override a family's semaphore (e.g. `ARC_LIMIT_KIMI=1`) |
+| `ARC_LIMIT_<FAMILY>` | docs limit | override a family's semaphore (e.g. `ARC_LIMIT_DEEPSEEK=6`) |
 | `ARC_EVENTS_LOG` | logs/events.jsonl | event log path (dashboard tail) |
 | `ARC_BUILD_OUTPUT_DIR` | production/minecraft | where the build workload writes |
 | `ARC_MAX_MODULE_RETRIES` | 3 | fix-loop attempts per module in the gauntlet |
@@ -405,10 +405,11 @@ reviewer never shares a family with the implementer it reviews. Rejections
 feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 8).
 
 Per-model governor caps keep concurrent harness instances under the measured
-ARC ceilings (deepseek 5, glm 4, kimi 3) minus an interactive reserve, and a
-per-harness cap keeps every opencode model together under 5 — `main.py
-capacity` prints today's effective numbers. Override with
-`ARC_DRIVER_LIMIT_<FAMILY>` (e.g. `ARC_DRIVER_LIMIT_KIMI=1`).
+or provider-published ARC ceilings (deepseek 10, glm 4 on the two-model fleet of
+2026-09-12) minus an interactive reserve, and a per-harness cap keeps the
+opencode models together under 5 — `main.py capacity` prints today's effective
+numbers. Override with `ARC_DRIVER_LIMIT_<FAMILY>`
+(e.g. `ARC_DRIVER_LIMIT_DEEPSEEK=3`).
 
 ### Per-task pipeline
 

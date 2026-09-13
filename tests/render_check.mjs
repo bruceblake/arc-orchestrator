@@ -90,9 +90,9 @@ console.log("feed entries:", (document.querySelector("#feed").innerHTML.match(/b
 const feedProbe = [
   {type: "task.gate", task: "t1", passed: false, tail: "3 tests failed"},
   {type: "task.gate", task: "t1", passed: true},
-  {type: "task.reviewed", task: "t1", passed: false, reviewer: "kimi", n_issues: 2},
+  {type: "task.reviewed", task: "t1", passed: false, reviewer: "deepseek", n_issues: 2},
   {type: "task.pr_reviewed", task: "t1", pr: 9, approved: false, n_issues: 4, round: 1},
-  {type: "task.pr_reviewed", task: "t1", pr: 6, approved: true, approvals: ["Kimi-K3", "GLM-5.3"]},
+  {type: "task.pr_reviewed", task: "t1", pr: 6, approved: true, approvals: ["DeepSeek-V4.1-Flash-thinking-max"]},
   {type: "task.resumed", task: "t1", prior_status: "in_review"},
   {type: "task.pr_reattached", task: "t1", pr: 5},
   {type: "task.branch_reset", task: "t1", branch: "task/t1", commits_discarded: 3},
@@ -166,20 +166,20 @@ console.log("defect rows rendered + escaped + hidden when empty");
 // exercise none of the queue rendering this panel exists for.
 const queue = {
   totals: {running: 2, waiting: 3, reviewers_waiting: 2, capacity: 17},
+  // The live two-model fleet (2026-09-12): GLM on opencode, DeepSeek on dsh.
+  // One model is saturated WITH a queue ("queued"); the other sits at cap with
+  // nobody behind it ("full") — the panel must distinguish the two states.
   models: [
-    {model: "Kimi-K3", pretty: "Kimi K3", cap: 3, running: 3, waiting: 2, free: 0, reviewers_waiting: 2},
-    {model: "GLM-5.3", pretty: "GLM 5.3", cap: 4, running: 1, waiting: 1, free: 3, reviewers_waiting: 0},
-    // saturated but nobody blocked behind it — amber, not red
-    {model: "gpt-oss-120b", pretty: "gpt-oss 120B", cap: 5, running: 5, waiting: 0, free: 0, reviewers_waiting: 0},
-    {model: "DeepSeek-V4.1-Flash-thinking-max", pretty: "DeepSeek V4 Flash", cap: 5, running: 0, waiting: 0, free: 5, reviewers_waiting: 0},
+    {model: "DeepSeek-V4.1-Flash-thinking-max", pretty: "DeepSeek V4.1 Flash max", cap: 5, running: 5, waiting: 2, free: 0, reviewers_waiting: 2},
+    {model: "GLM-5.3", pretty: "GLM 5.3", cap: 2, running: 2, waiting: 0, free: 0, reviewers_waiting: 0},
   ],
-  harnesses: [{harness: "opencode", cap: 5, running: 5, waiting: 2, free: 0},
-              {harness: "kimi", cap: 3, running: 1, waiting: 0, free: 2}],
-  running: [{task: "qa-http-core", model: "Kimi-K3", pretty: "Kimi K3", role: "pr_reviewer",
+  harnesses: [{harness: "dsh", cap: 5, running: 5, waiting: 2, free: 0},
+              {harness: "opencode", cap: 5, running: 1, waiting: 0, free: 4}],
+  running: [{task: "qa-http-core", model: "DeepSeek-V4.1-Flash-thinking-max", pretty: "DeepSeek V4.1 Flash max", role: "pr_reviewer",
              role_label: "PR review", pid: 1234, seconds: 91}],
-  waiting: [{task: '<img src=x onerror=alert(1)>', model: "Kimi-K3", pretty: "Kimi K3",
+  waiting: [{task: '<img src=x onerror=alert(1)>', model: "DeepSeek-V4.1-Flash-thinking-max", pretty: "DeepSeek V4.1 Flash max",
              role: "pr_reviewer", role_label: "PR review", scope: "fleet",
-             seconds: 240, in_use: 3, cap: 3}],
+             seconds: 240, in_use: 5, cap: 5}],
 };
 api.renderSlots(queue);
 const slotHtml = document.querySelector("#slots").innerHTML;
@@ -228,7 +228,7 @@ const FIX = { projects: [
     dag: {nodes: [{id: "t-clean", status: "merged"}, {id: "t-tests", status: "running", live: true}],
           edges: [{src: "t-clean", dst: "t-tests"}]}, tokens: 4200,
     last_activity: new Date().toISOString() }),
-  mkProj("bench.json", "orchestration bench", "done", { models: ["gpt-oss-120b"],
+  mkProj("bench.json", "orchestration bench", "done", { models: ["DeepSeek-V4.1-Flash-thinking-max"],
     statuses: {merged: 2}, progress: {done: 2, total: 2},
     dag: {nodes: [{id: "b-one", status: "merged"}, {id: "b-two", status: "merged"}], edges: []} }),
   mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4.1-Flash-thinking-max"],
@@ -236,8 +236,8 @@ const FIX = { projects: [
     dag: {nodes: [{id: "w-a", status: "pending"}, {id: "w-b", status: "pending"}], edges: []} }),
 ]};
 const DET = { file: "ui.json", title: "game UI polish", repo: "acme/arc-orchestrator",
-  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "kimi", deps: [], verify_cmd: "./check.sh"},
-          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "kimi", deps: ["t-clean"], verify_cmd: "node t.js"}],
+  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "deepseek", deps: [], verify_cmd: "./check.sh"},
+          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "deepseek", deps: ["t-clean"], verify_cmd: "node t.js"}],
   rows: [{id: "t-clean", status: "merged", attempts: 1}, {id: "t-tests", status: "running", attempts: 2}],
   runs: [{task_id: "t-tests", model: "GLM-5.3", role: "implementer", harness: "opencode",
           attempt: 2, exit_code: 0, seconds: 12, verdict: "", transcript: "logs/harness/t-tests-x2.jsonl"}],

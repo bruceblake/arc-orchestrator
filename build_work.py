@@ -345,11 +345,12 @@ def build_build_graph(pool, store, *, build_id, iteration, mode, out_dir,
     current_files = current_files or {}
     contracts_holder = {}
 
-    # `% 4` was written when the roster had exactly four families. It is now
-    # three (gpt-oss removed 2026-09-12) and will change again on 2026-09-19,
-    # and a literal modulus indexes past the end of the list. The reviewer
-    # offset is +1 off the producer rather than a fixed +2, because +2 with an
-    # even number of families lands a module's producer on its own review.
+    # `% 4` was written when the roster had exactly four families. It is two
+    # today (gpt-oss removed 2026-09-12; Kimi-K3 retired the same day by
+    # operator decision) and any literal modulus would index past the end of
+    # the list. The reviewer offset is +1 off the producer rather than a fixed
+    # +2, because +2 with an even number of families lands a module's producer
+    # on its own review — with two families +1 is the ONLY cross-family choice.
     nfam = len(FAMILY_ORDER)
 
     def producer_of(name):

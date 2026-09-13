@@ -85,17 +85,17 @@ const FIX = { projects: [
   mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4.1-Flash-thinking-max"],
     statuses: {in_review: 1, pending: 1},
     dag: {nodes: [{id: "w-a", status: "pending"}, {id: "w-b", status: "pending"}], edges: []} }),
-  mkProj("flaky.json", "flaky tests", "attention", { models: ["gpt-oss-120b"], repo: "acme/other-repo",
+  mkProj("flaky.json", "flaky tests", "attention", { models: ["GLM-5.3"], repo: "acme/other-repo",
     statuses: {merged: 1, failed: 1, conflict: 1}, progress: {done: 1, total: 3}, n_tasks: 3,
     dag: {nodes: [{id: "f-a", status: "merged"}, {id: "f-b", status: "failed"}, {id: "f-c", status: "conflict"}],
           edges: []}, tokens: 90000, last_activity: NOW }),
-  mkProj("bench.json", "orchestration bench", "done", { models: ["gpt-oss-120b"],
+  mkProj("bench.json", "orchestration bench", "done", { models: ["GLM-5.3"],
     statuses: {merged: 2}, progress: {done: 2, total: 2},
     dag: {nodes: [{id: "b-one", status: "merged"}, {id: "b-two", status: "merged"}], edges: []} }),
 ]};
 const DET = { file: "ui.json", title: "game UI polish", repo: "acme/arc-orchestrator",
-  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "kimi", deps: [], verify_cmd: "./check.sh"},
-          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "kimi", deps: ["t-clean"], verify_cmd: "node t.js"}],
+  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "deepseek", deps: [], verify_cmd: "./check.sh"},
+          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "deepseek", deps: ["t-clean"], verify_cmd: "node t.js"}],
   rows: [{id: "t-clean", status: "merged", attempts: 1}, {id: "t-tests", status: "running", attempts: 2}],
   runs: [{task_id: "t-tests", model: "GLM-5.3", role: "implementer", harness: "opencode",
           attempt: 2, exit_code: 0, seconds: 12, verdict: "", transcript: "logs/harness/t-tests-x2.jsonl"}],
@@ -195,8 +195,12 @@ ok("repo picker offered when >1 repo",
    document.querySelector("#f-repo").style.display === "" && document.querySelector("#f-repo").innerHTML.includes('value="acme/other-repo"')
    && document.querySelector("#f-repo").innerHTML.includes("All repos"));
 const modelOpts = document.querySelector("#f-model").innerHTML;
-ok("model picker lists the fleet",
-   ["gpt-oss-120b", "DeepSeek-V4.1-Flash-thinking-max", "GLM-5.3", "Kimi-K3"].every(m => modelOpts.includes(`value="${m}"`)));
+// The picker seeds TODAY'S live roster (two models, 2026-09-12) and merges
+// observed historical ones in; it must never present a retired model as a
+// live routing choice.
+ok("model picker lists the live fleet",
+   ["GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"].every(m => modelOpts.includes(`value="${m}"`))
+   && !modelOpts.includes('value="Kimi-K3"') && !modelOpts.includes('value="gpt-oss-120b"'));
 const fstat = src.slice(src.indexOf('id="f-status"'), src.indexOf('id="f-model"'));
 ok("status picker offers running/failed/merged",
    ['value="running"', 'value="failed"', 'value="merged"'].every(v => fstat.includes(v)));

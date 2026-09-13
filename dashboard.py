@@ -7,8 +7,9 @@ Usage layers (why a model can appear under more than one source):
   arc-pool          raw API requests the pool made (request/request_end events, carry tokens)
   driver:<harness>  whole agent task runs in an external CLI harness (driver.* events;
                     driver.done carries tokens since drivers.py learned transcript_tokens)
-  kimi-code         per-API-call usage parsed from kimi-code session wire logs
-                    (covers every kimi-code session, interactive ones included)
+  kimi-code         HISTORICAL: per-API-call usage parsed from the retired
+                    kimi CLI's session wire logs (2026-09-12, Kimi-K3). Kept so
+                    old interactive sessions still price instead of $0.00.
 """
 import asyncio
 import errno
@@ -36,10 +37,16 @@ log = logging.getLogger("dashboard")
 _lines_cache = {"key": None, "lines": []}
 MAX_EVENTS_PER_RESPONSE = 3000
 
-PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
-          "DeepSeek-V4-Flash": "DeepSeek V4 Flash",
+# Live models first; the retired ones (Kimi-K3, gpt-oss-120b,
+# DeepSeek-V4-Flash) stay mapped so their HISTORICAL usage/harness_runs rows
+# still render a name and a price instead of a raw id and $0.00. They are not
+# offered anywhere as a routing choice — see config.MODEL_ROLES.
+PRETTY = {"GLM-5.3": "GLM 5.3",
+          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max",
           "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash",
-          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max"}
+          "Kimi-K3": "Kimi K3 (retired)",
+          "gpt-oss-120b": "gpt-oss 120B (retired)",
+          "DeepSeek-V4-Flash": "DeepSeek V4 Flash (retired)"}
 
 # Rolling windows plus one calendar window. "today" is deliberately not a
 # synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
@@ -771,10 +778,13 @@ def _usage(store=None, range_key=None, include_series=False):
         if fam is not None:
             fam["inflight"] += 1
 
-    # Over-cap detection. Kimi-K3 headless drivers (family "kimi") and kimi CLI
-    # sessions (family "kimi-code") share ONE ARC account, so their combined
-    # in-flight count is checked against kimi's limit.
-    shared = {"kimi": ("kimi", "kimi-code")}
+    # Over-cap detection. A family's headless drivers and any interactive
+    # sessions of the same ARC account share ONE cap, so where two family
+    # keys bill the same account their combined in-flight count is what must
+    # be checked. Empty today (kimi + kimi-code retired 2026-09-12, and the
+    # live families do not share an account); kept as the seam for one that
+    # does.
+    shared = {}
     for fkey, fam in by_family.items():
         parts = shared.get(fkey, (fkey,))
         eff = sum(by_family.get(p, {}).get("inflight", 0) for p in parts)
@@ -897,8 +907,9 @@ def _fleet(store):
     """All-history code-fleet totals for /api/fleet.
 
     Wraps _usage(store, "all") — no separate event walk — and merges its
-    per-source rows into one row per model (driver:<harness>, arc-pool and
-    kimi-code all feed the same fleet). account_cap/driver_cap come from
+    per-source rows into one row per model (driver:<harness>, arc-pool, and
+    the historical kimi-code wire logs all feed the same fleet). account_cap/
+    driver_cap come from
     config and are None for families/models it does not know. The computed
     aggregate is cached ~2s so rapid polling stays cheap.
     """
@@ -1146,7 +1157,16 @@ def _queue(store):
     # process pool is saturated. Without this row that shows up as "everything
     # idle, nothing progressing".
     harnesses = []
-    for h in ("opencode", "kimi"):
+    # From the ROSTER's live models, not a literal pair: the retired kimi
+    # harness would otherwise keep a permanent 0/x card, and a harness added
+    # by a ROSTER row (dsh, 2026-09-12) would be missing from the panel.
+    # Busiest first (running + queued), then by name, so the binding harness is
+    # the one at the top of the panel.
+    _hs = {_harness_of(m) for m in config.MODEL_HARNESS}
+    for h in sorted(_hs, key=lambda h: (
+            -(harness_running.get(h, 0)
+              + sum(1 for w in waiting if w.get("scope") == "harness"
+                    and w.get("harness") == h)), h)):
         cap = config.harness_limit(h)
         run_n = harness_running.get(h, 0)
         wait_n = sum(1 for w in waiting if w.get("scope") == "harness"
@@ -1547,19 +1567,19 @@ def _projects(store):
         s["tokens"] += e.get("tokens") or 0
         s["prompt_tokens"] += e.get("prompt_tokens") or 0
         s["completion_tokens"] += e.get("completion_tokens") or 0
-        # Price each event at ITS own model. Cross-review (Kimi <-> GLM) and
-        # tier escalation both mix models under one task id; pricing the whole
+        # Price each event at ITS own model. Cross-family review and tier
+        # escalation both mix models under one task id; pricing the whole
         # bucket at the taskfile's implementer mis-charges every reviewer run
-        # (a gpt-oss task reviewed by GLM would price GLM's expensive tokens at
-        # gpt-oss rates, so the figure was not even an upper bound).
+        # (a cheap-model task reviewed by GLM would price GLM's expensive
+        # tokens at the cheap rate, so the figure was not even an upper bound).
         s["cost"] += config.cost_of(e.get("model"), e.get("prompt_tokens") or 0,
                                     e.get("completion_tokens") or 0)
         s["seconds"] += e.get("seconds") or 0.0
         s["runs"] += 1
     # Supplement from harness_runs rows whose driver.done fell out of the event
     # log (the log is bounded; the DB keeps every run). Seconds always; tokens
-    # via cached transcript parse (kimi transcripts carry no usage -> 0 there,
-    # but agent-time is complete either way).
+    # via cached transcript parse (the retired kimi transcripts carry no usage
+    # -> 0 there, but agent-time is complete either way).
     try:
         hrows = store.harness_runs_all() if store else []
     except Exception:
@@ -1654,11 +1674,12 @@ def _projects(store):
             # Prompts/completions are already priced per-model above — each
             # driver.done (and each harness_runs row) carries its own model,
             # and cross-review plus tier escalation mix several under one task
-            # id. Only the excess a split cannot account for — the kimi-wire
-            # tokens, which carry no prompt/completion split — is priced here,
-            # at the kimi-harness model's completion rate, since it is that
-            # harness's wire log (NOT the node's declared model: a node can
-            # name any model and still have kimi wire tokens under it).
+            # id. Only the excess a split cannot account for — historical
+            # kimi-wire tokens, which carry no prompt/completion split — is
+            # priced here, at kimi_wire_model()'s completion rate, since it is
+            # the retired kimi harness's wire log (NOT the node's declared
+            # model: a node can name any model and still have kimi wire tokens
+            # under it).
             extra = max(0, tot - (ptok + ctok))
             node_cost = ev.get("cost", 0.0)
             if extra:
@@ -2167,12 +2188,14 @@ def _create_project(body):
             "pid": proc.pid, "log": log_name, "started": time.time(), "dry_run": False,
             "kind": "plan"}
         return {"mode": "plan", "pid": proc.pid, "log": log_name,
-                "taskfile": expect, "note": "Kimi-K3 is drafting the task file"}, 200
+                "taskfile": expect,
+                "note": f"{config.PLANNER_MODEL} is drafting the task file"}, 200
 
     title = (body.get("title") or "").strip() if isinstance(body.get("title"), str) else ""
     tasks = body.get("tasks")
     if not title:
-        return {"error": "title required (or pass goal to plan with Kimi-K3)"}, 400
+        return {"error": f"title required (or pass goal to plan with "
+                         f"{config.PLANNER_MODEL})"}, 400
     if not isinstance(tasks, list) or not tasks or len(tasks) > 50:
         return {"error": "tasks must be a list of 1..50 task objects"}, 400
     clean, seen = [], set()
@@ -2198,8 +2221,8 @@ def _create_project(body):
         entry.setdefault("model", config.ESCALATION_PATH[0])
         if "reviewer" not in entry:
             # Cross-family, from the roster — the literal {Kimi: glm, GLM: kimi}
-            # map this replaces would have defaulted every task to "kimi" the
-            # day after Kimi left.
+            # map this replaces would have defaulted every task to a retired
+            # family the day after Kimi-K3 left (2026-09-12).
             entry["reviewer"] = (config.cross_family_reviewer(entry["model"])
                                  or next(iter(config.REVIEW_FAMILIES), "glm"))
         deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
@@ -2635,10 +2658,11 @@ def _health(store):
     #                 (config.driver_limit), deliberately below the account cap
     #                 so interactive use still has room;
     #   account_cap — ARC's per-account limit (config.family_limit), which the
-    #                 fleet's drivers AND the operator's own interactive
-    #                 kimi-code sessions both consume.
-    # Counting interactive sessions against driver_cap reported "Kimi-K3 4/2
-    # OVER CAP" while the fleet was correctly running a single driver.
+    #                 fleet's drivers AND any interactive session on the same
+    #                 account (historically the operator's kimi-code CLI) both
+    #                 consume.
+    # Counting interactive sessions against driver_cap once reported a model
+    # at "4/2 OVER CAP" while the fleet was correctly running one driver.
     per_model = {}
 
     def ent_for(model, family=None):
@@ -2873,9 +2897,9 @@ def _escalate_task(body):
     """Move ONE task to a stronger model, by the operator's judgement.
 
     The fix budget escalates only after repeated failure. The operator can see
-    a task struggling well before that — a planner on gpt-oss producing thin
-    task lists, an implementer looping on a design problem it cannot hold in
-    context — and should not have to burn three rounds to prove it.
+    a task struggling well before that — an implementer looping on a design
+    problem it cannot hold in context, a task whose tier was planned too
+    optimistically — and should not have to burn three rounds to prove it.
 
     Two writes so the change sticks in both worlds:
       - a `model_overrides` row, which cur_model() reads at every node boundary,

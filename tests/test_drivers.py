@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import capture_events, needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: F401  (sys.path)
+from helpers import capture_events, ENTRY, STRONGEST  # noqa: F401  (sys.path)
 
 import config
 import drivers
@@ -654,72 +654,72 @@ class InflightIsCountedOnlyWhenHoldingASlot(unittest.TestCase):
 
 
 class ReviewingAnOpenPullRequest(unittest.TestCase):
-    """Which models may hold the pr_reviewer role."""
+    """Which models may hold the pr_reviewer role.
 
-    @needs_kimi
+    Asserted from the roster, not from names: whoever the roster grants
+    pr_reviewer to must construct, and the rules are the same for every live
+    model. A retired model (Kimi-K3, gpt-oss-120b) must refuse every role.
+    """
 
-    def test_kimi_and_glm_may_review_a_pr(self):
-        self.assertEqual(drivers.KimiDriver("pr_reviewer").role, "pr_reviewer")
-        self.assertEqual(
-            drivers.OpencodeDriver("GLM-5.3", "pr_reviewer").role, "pr_reviewer")
+    def test_every_roster_pr_reviewer_can_be_constructed(self):
+        for model, roles in config.MODEL_ROLES.items():
+            if "pr_reviewer" not in roles:
+                continue
+            drv = drivers.driver_for(model, "pr_reviewer")
+            self.assertEqual(drv.role, "pr_reviewer")
+            self.assertEqual(drv.model, model)
 
-    @needs_deepseek_v4
-
-    def test_deepseek_may_review_a_pr_but_not_gate_or_plan(self):
-        self.assertEqual(
-            drivers.OpencodeDriver(ENTRY, "pr_reviewer").role,
-            "pr_reviewer")
-        for role in ("reviewer", "planner"):
+    def test_a_model_lacking_pr_reviewer_is_refused(self):
+        for model, roles in config.MODEL_ROLES.items():
+            if "pr_reviewer" in roles:
+                continue
             with self.assertRaises(ValueError):
-                drivers.OpencodeDriver(ENTRY, role)
+                drivers.driver_for(model, "pr_reviewer")
 
-    def test_gpt_oss_stays_implement_only(self):
-        for role in ("pr_reviewer", "reviewer", "planner"):
-            with self.assertRaises(ValueError):
-                drivers.OpencodeDriver("gpt-oss-120b", role)  # not on the roster at all
+    def test_a_retired_model_is_refused_every_role(self):
+        for model in ("Kimi-K3", "gpt-oss-120b", "DeepSeek-V4-Flash"):
+            for role in ("pr_reviewer", "reviewer", "planner", "implementer"):
+                with self.assertRaises(ValueError):
+                    drivers.OpencodeDriver(model, role)
 
 
 class GitHubOpsRoles(unittest.TestCase):
     """Who may hold the gh_ops roles (issue-triager / issue-maker /
-    pr-reviewer): only Kimi-K3 and GLM-5.3 — the same enforcement pattern as
-    review eligibility, so a hand-kept pool can never drift from the drivers'
-    own role rules."""
+    pr-reviewer): the models the roster trusts to PLAN (gh roles are
+    judgement work) — the same enforcement pattern as review eligibility, so
+    a hand-kept pool can never drift from the drivers' own role rules."""
 
     GH_ROLES = ("issue-triager", "issue-maker", "pr-reviewer")
 
-    @needs_kimi
+    def test_every_planner_capable_model_may_hold_the_gh_roles(self):
+        capable = [m for m, roles in config.MODEL_ROLES.items() if "planner" in roles]
+        self.assertTrue(capable, "no planner-capable model on the roster")
+        for model in capable:
+            for role in self.GH_ROLES:
+                self.assertEqual(drivers.driver_for(model, role).role, role)
+        self.assertIn(config.GH_MODEL, capable,
+                      "the gh default model must be one the roster trusts to plan")
 
-    def test_kimi_may_hold_every_gh_role(self):
-        for role in self.GH_ROLES:
-            self.assertEqual(drivers.KimiDriver(role).role, role)
-
-    def test_glm_may_hold_every_gh_role(self):
-        for role in self.GH_ROLES:
-            self.assertEqual(
-                drivers.OpencodeDriver("GLM-5.3", role).role, role)
+    def test_a_model_without_planner_permission_may_hold_no_gh_role(self):
+        for model, roles in config.MODEL_ROLES.items():
+            if "planner" in roles:
+                continue
+            for role in self.GH_ROLES:
+                with self.assertRaises(ValueError):
+                    drivers.driver_for(model, role)
 
     def test_gpt_oss_may_hold_no_gh_role(self):
         for role in self.GH_ROLES:
             with self.assertRaises(ValueError):
                 drivers.OpencodeDriver("gpt-oss-120b", role)  # not on the roster at all
 
-    @needs_deepseek_v4
-
-    def test_deepseek_may_hold_no_gh_role(self):
-        # pr_reviewer (an open-PR merge review) is allowed for DeepSeek; the
-        # hyphenated gh_ops 'pr-reviewer' is a different role and is not.
-        for role in self.GH_ROLES:
-            with self.assertRaises(ValueError):
-                drivers.OpencodeDriver(ENTRY, role)
-
-    @needs_kimi
-
     def test_existing_roles_still_construct(self):
         # The gh roles were added without breaking planner|reviewer|implementer.
-        for role in ("planner", "reviewer", "implementer"):
-            self.assertEqual(drivers.KimiDriver(role).role, role)
-            self.assertEqual(
-                drivers.OpencodeDriver("GLM-5.3", role).role, role)
+        for model in config.MODEL_ROLES:
+            for role in ("planner", "reviewer", "implementer"):
+                if role not in config.MODEL_ROLES[model]:
+                    continue
+                self.assertEqual(drivers.driver_for(model, role).role, role)
 
 
 class TheVpnIsNotACrash(unittest.TestCase):
@@ -821,5 +821,20 @@ class TheIdleClockIsRoleAware(unittest.TestCase):
                          "the global default must not be read directly inside _pump")
 
     def test_a_planner_driver_reports_the_longer_budget(self):
-        self.assertEqual(config.idle_timeout_for(drivers.KimiDriver("planner").role),
+        # Built from config.PLANNER_MODEL, not KimiDriver: Kimi-K3 left the
+        # roster on 2026-09-12 and constructing KimiDriver now raises (that
+        # refusal is asserted in test_a_kimi_driver_never_constructs below).
+        self.assertIsNotNone(config.PLANNER_MODEL,
+                             "no planner-capable model on the roster")
+        drv = drivers.driver_for(config.PLANNER_MODEL, "planner")
+        self.assertEqual(config.idle_timeout_for(drv.role),
                          config.ROLE_IDLE_TIMEOUT["planner"])
+        self.assertGreater(config.ROLE_IDLE_TIMEOUT["planner"],
+                           config.DRIVER_IDLE_TIMEOUT)
+
+    def test_a_kimi_driver_never_constructs(self):
+        """KimiDriver stays IMPORTABLE for historical transcripts, but its
+        model is off the roster — every construction must raise ValueError."""
+        with self.assertRaises(ValueError) as ctx:
+            drivers.KimiDriver("planner")
+        self.assertIn("roster", str(ctx.exception))
