@@ -71,8 +71,12 @@ class DriverLeases(TempStore):
 
 
 class CodeTaskLifecycle(TempStore):
+    # A live cross-family reviewer token, not the retired "kimi" of the
+    # three-model fleet: these rows are handed to the dashboard and loader.
+    REV = config.cross_family_reviewer(config.ESCALATION_PATH[0])
+
     def add(self, tid, taskfile, status="running", model=config.ESCALATION_PATH[0]):
-        self.store.upsert_code_task(taskfile, tid, tid, model, "kimi", status)
+        self.store.upsert_code_task(taskfile, tid, tid, model, self.REV, status)
 
     def test_running_rows_are_listed_and_scoped(self):
         self.add("a", "f1.json")
@@ -99,7 +103,7 @@ class CodeTaskLifecycle(TempStore):
 
     def test_upsert_preserves_identity_across_status_changes(self):
         self.add("a", "f1.json", status="running")
-        self.store.upsert_code_task("f1.json", "a", "a", "GLM-5.3", "kimi",
+        self.store.upsert_code_task("f1.json", "a", "a", "GLM-5.3", self.REV,
                                     "merged", finished=True)
         rows = self.store.code_tasks_for("f1.json")
         self.assertEqual(len(rows), 1)
@@ -110,15 +114,17 @@ class CodeTaskLifecycle(TempStore):
         """The escalate node re-upserts at a stronger tier; if that is dropped,
         the next resume restarts the task at the tier it already outgrew."""
         self.add("a", "f1.json", model=config.ESCALATION_PATH[0])
-        self.store.upsert_code_task("f1.json", "a", "a", "GLM-5.3", "kimi", "running")
+        rev = config.cross_family_reviewer("GLM-5.3")
+        self.store.upsert_code_task("f1.json", "a", "a", "GLM-5.3", rev, "running")
         row = self.store.code_tasks_for("f1.json")[0]
         self.assertEqual(row["model"], "GLM-5.3")
-        self.assertEqual(row["reviewer"], "kimi")
+        self.assertEqual(row["reviewer"], rev)
 
     def test_reupsert_without_a_branch_keeps_the_allocation(self):
-        self.store.upsert_code_task("f1.json", "a", "a", "gpt-oss-120b", "kimi",
+        rev = config.cross_family_reviewer("GLM-5.3")
+        self.store.upsert_code_task("f1.json", "a", "a", "gpt-oss-120b", rev,
                                     "running", branch="task/a", worktree="/wt/a")
-        self.store.upsert_code_task("f1.json", "a", "a", "GLM-5.3", "kimi", "running")
+        self.store.upsert_code_task("f1.json", "a", "a", "GLM-5.3", rev, "running")
         rows = [r for r in self.store.code_tasks_all() if r["id"] == "a"]
         self.assertEqual(rows[0]["branch"], "task/a")
         self.assertEqual(rows[0]["worktree"], "/wt/a")

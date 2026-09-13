@@ -7,8 +7,9 @@ Usage layers (why a model can appear under more than one source):
   arc-pool          raw API requests the pool made (request/request_end events, carry tokens)
   driver:<harness>  whole agent task runs in an external CLI harness (driver.* events;
                     driver.done carries tokens since drivers.py learned transcript_tokens)
-  kimi-code         per-API-call usage parsed from kimi-code session wire logs
-                    (covers every kimi-code session, interactive ones included)
+  kimi-code         HISTORICAL: per-API-call usage parsed from the retired
+                    kimi CLI's session wire logs (2026-09-12, Kimi-K3). Kept so
+                    old interactive sessions still price instead of $0.00.
 """
 import asyncio
 import errno
@@ -36,9 +37,16 @@ log = logging.getLogger("dashboard")
 _lines_cache = {"key": None, "lines": []}
 MAX_EVENTS_PER_RESPONSE = 3000
 
-PRETTY = {"Kimi-K3": "Kimi K3", "GLM-5.3": "GLM 5.3", "gpt-oss-120b": "gpt-oss 120B",
-          "DeepSeek-V4-Flash": "DeepSeek V4 Flash",
-          "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash"}
+# Live models first; the retired ones (Kimi-K3, gpt-oss-120b,
+# DeepSeek-V4-Flash) stay mapped so their HISTORICAL usage/harness_runs rows
+# still render a name and a price instead of a raw id and $0.00. They are not
+# offered anywhere as a routing choice — see config.MODEL_ROLES.
+PRETTY = {"GLM-5.3": "GLM 5.3",
+          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max",
+          "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash",
+          "Kimi-K3": "Kimi K3 (retired)",
+          "gpt-oss-120b": "gpt-oss 120B (retired)",
+          "DeepSeek-V4-Flash": "DeepSeek V4 Flash (retired)"}
 
 # Rolling windows plus one calendar window. "today" is deliberately not a
 # synonym for 24h: at 09:00 a rolling day is mostly yesterday, and "what has
@@ -770,10 +778,13 @@ def _usage(store=None, range_key=None, include_series=False):
         if fam is not None:
             fam["inflight"] += 1
 
-    # Over-cap detection. Kimi-K3 headless drivers (family "kimi") and kimi CLI
-    # sessions (family "kimi-code") share ONE ARC account, so their combined
-    # in-flight count is checked against kimi's limit.
-    shared = {"kimi": ("kimi", "kimi-code")}
+    # Over-cap detection. A family's headless drivers and any interactive
+    # sessions of the same ARC account share ONE cap, so where two family
+    # keys bill the same account their combined in-flight count is what must
+    # be checked. Empty today (kimi + kimi-code retired 2026-09-12, and the
+    # live families do not share an account); kept as the seam for one that
+    # does.
+    shared = {}
     for fkey, fam in by_family.items():
         parts = shared.get(fkey, (fkey,))
         eff = sum(by_family.get(p, {}).get("inflight", 0) for p in parts)
@@ -896,8 +907,9 @@ def _fleet(store):
     """All-history code-fleet totals for /api/fleet.
 
     Wraps _usage(store, "all") — no separate event walk — and merges its
-    per-source rows into one row per model (driver:<harness>, arc-pool and
-    kimi-code all feed the same fleet). account_cap/driver_cap come from
+    per-source rows into one row per model (driver:<harness>, arc-pool, and
+    the historical kimi-code wire logs all feed the same fleet). account_cap/
+    driver_cap come from
     config and are None for families/models it does not know. The computed
     aggregate is cached ~2s so rapid polling stays cheap.
     """
@@ -1145,7 +1157,16 @@ def _queue(store):
     # process pool is saturated. Without this row that shows up as "everything
     # idle, nothing progressing".
     harnesses = []
-    for h in ("opencode", "kimi"):
+    # From the ROSTER's live models, not a literal pair: the retired kimi
+    # harness would otherwise keep a permanent 0/x card, and a harness added
+    # by a ROSTER row (dsh, 2026-09-12) would be missing from the panel.
+    # Busiest first (running + queued), then by name, so the binding harness is
+    # the one at the top of the panel.
+    _hs = {_harness_of(m) for m in config.MODEL_HARNESS}
+    for h in sorted(_hs, key=lambda h: (
+            -(harness_running.get(h, 0)
+              + sum(1 for w in waiting if w.get("scope") == "harness"
+                    and w.get("harness") == h)), h)):
         cap = config.harness_limit(h)
         run_n = harness_running.get(h, 0)
         wait_n = sum(1 for w in waiting if w.get("scope") == "harness"
@@ -1343,6 +1364,10 @@ def _task_progress(ids):
 def _project_phase(statuses, ids, run_pid):
     """One word for where a project stands: running | done | attention | new.
 
+    (_projects turns `new` into `chained` when the taskfile declares `after`
+    and its chain is not yet merged — it cannot start, so "never run" is
+    the wrong shelf for it.)
+
     The operator's question is "what needs me?", and a status dict of five
     counters does not answer it. `attention` means finished executing with
     something unresolved — a failure or conflict that will not fix itself.
@@ -1413,6 +1438,93 @@ def _task_loop_stats(store, task_ids):
     return stats
 
 
+def _chain_gate_state(fname, lines=None):
+    """What the chain_wait gate of this taskfile last reported, from the event
+    log: {'state': 'waiting'|'ready'|'blocked', 'ts', 'waited_s', 'reason'}
+    or None when no run of it has reached the gate."""
+    latest = None
+    for line in reversed(lines if lines is not None else _load_event_lines()):
+        if '"chain.' not in line or fname not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if Path(str(e.get("taskfile") or "")).name != fname:
+            continue
+        latest = e
+        break
+    if not latest:
+        return None
+    kind = latest.get("type", "")
+    return {"state": {"chain.wait": "waiting", "chain.ready": "ready",
+                      "chain.blocked": "blocked"}.get(kind, "waiting"),
+            "ts": latest.get("ts"), "waited_s": latest.get("waited_s"),
+            "reason": latest.get("reason") or
+            (", ".join(f"{Path(k).name}: {', '.join(v)}"
+                       for k, v in (latest.get("failed_tasks") or {}).items()) or None)}
+
+
+def _project_chain(store, path, titles, dependents, ev_lines=None):
+    """A project's place in the taskfile chain (Rule 9), for the page.
+
+    `project.after` has been enforced by the runner since the chain gate
+    landed, but the dashboard never read it: a chained project looked like
+    any other "never run" project, and a run sitting in chain_wait looked
+    like a run doing nothing. This is the same readiness the gate computes
+    (`code_tasks.chain_status`), plus the reverse edges — which projects are
+    waiting on THIS one — and what the gate last said in the event log.
+    Returns None for a project with no chain in either direction.
+    """
+    import code_tasks
+    after = code_tasks._read_after(path)
+    blocks = sorted(dependents.get(str(path.resolve()), set()))
+    if not after and not blocks:
+        return None
+    if after:
+        try:
+            st = code_tasks.chain_status(store, after)
+        except Exception:
+            st = {"ok": False, "waiting": list(after), "failed": {}, "deps": []}
+    else:
+        st = {"ok": True, "waiting": [], "failed": {}, "deps": []}
+    deps = []
+    for d in st.get("deps") or []:
+        name = Path(d["taskfile"]).name
+        deps.append({"file": name, "title": titles.get(d["taskfile"]) or name,
+                     "exists": bool(d.get("readable")),
+                     "n_tasks": d.get("n_tasks"), "merged": d.get("merged", 0),
+                     "failed": d.get("failed") or [],
+                     "state": ("failed" if d.get("failed") else
+                               "waiting" if d["taskfile"] in st["waiting"] else "ready")})
+    gate = _chain_gate_state(path.name, ev_lines)
+    return {"after": [d["file"] for d in deps], "deps": deps, "ready": bool(st["ok"]),
+            "blocks": [{"file": Path(k).name, "title": titles.get(k) or Path(k).name}
+                       for k in blocks],
+            "gate": gate}
+
+
+def _chain_dag_nodes(chain, heads):
+    """The chain gate drawn into a project's DAG: one dashed node per
+    upstream taskfile, feeding every head task (a task with no in-file
+    deps), exactly where `chain_wait` sits in the real graph."""
+    if not chain or not chain.get("deps"):
+        return [], []
+    gate = chain.get("gate") or {}
+    nodes, edges = [], []
+    for d in chain["deps"]:
+        status = {"failed": "failed", "waiting": "running" if gate.get("state") == "waiting" else "pending",
+                  "ready": "merged"}[d["state"]]
+        if gate.get("state") == "blocked" and d["state"] != "ready":
+            status = "failed"
+        nid = f"after:{d['file']}"
+        nodes.append({"id": nid, "kind": "chain", "file": d["file"],
+                      "title": f"after {d['title']}", "status": status,
+                      "merged": d["merged"], "n_tasks": d["n_tasks"], "live": status == "running"})
+        edges.extend({"src": nid, "dst": h, "kind": "chain"} for h in heads)
+    return nodes, edges
+
+
 def _projects(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
@@ -1455,19 +1567,19 @@ def _projects(store):
         s["tokens"] += e.get("tokens") or 0
         s["prompt_tokens"] += e.get("prompt_tokens") or 0
         s["completion_tokens"] += e.get("completion_tokens") or 0
-        # Price each event at ITS own model. Cross-review (Kimi <-> GLM) and
-        # tier escalation both mix models under one task id; pricing the whole
+        # Price each event at ITS own model. Cross-family review and tier
+        # escalation both mix models under one task id; pricing the whole
         # bucket at the taskfile's implementer mis-charges every reviewer run
-        # (a gpt-oss task reviewed by GLM would price GLM's expensive tokens at
-        # gpt-oss rates, so the figure was not even an upper bound).
+        # (a cheap-model task reviewed by GLM would price GLM's expensive
+        # tokens at the cheap rate, so the figure was not even an upper bound).
         s["cost"] += config.cost_of(e.get("model"), e.get("prompt_tokens") or 0,
                                     e.get("completion_tokens") or 0)
         s["seconds"] += e.get("seconds") or 0.0
         s["runs"] += 1
     # Supplement from harness_runs rows whose driver.done fell out of the event
     # log (the log is bounded; the DB keeps every run). Seconds always; tokens
-    # via cached transcript parse (kimi transcripts carry no usage -> 0 there,
-    # but agent-time is complete either way).
+    # via cached transcript parse (the retired kimi transcripts carry no usage
+    # -> 0 there, but agent-time is complete either way).
     try:
         hrows = store.harness_runs_all() if store else []
     except Exception:
@@ -1516,6 +1628,15 @@ def _projects(store):
         parsed.append((f, proj, tdefs, ids))
         all_ids.extend(ids)
     all_loop_stats = _task_loop_stats(store, sorted(set(all_ids)))
+    # Chains: who each taskfile waits on (`after`) and, reversed, who waits
+    # on it — both are needed to draw a project's place in the chain.
+    import code_tasks
+    titles = {str(f.resolve()): (proj.get("title") or f.stem) for f, proj, _t, _i in parsed}
+    dependents = {}
+    for f, proj, _t, _i in parsed:
+        for key in code_tasks._read_after(f):
+            dependents.setdefault(key, set()).add(str(f.resolve()))
+    ev_lines = _load_event_lines()
     kimi_tok = _kimi_tokens_by_task()
     for f, proj, tdefs, ids in parsed:
         idset = set(ids)
@@ -1553,13 +1674,16 @@ def _projects(store):
             # Prompts/completions are already priced per-model above — each
             # driver.done (and each harness_runs row) carries its own model,
             # and cross-review plus tier escalation mix several under one task
-            # id. Only the excess a split cannot account for — the kimi-wire
-            # tokens, which carry no prompt/completion split — is priced here,
-            # at Kimi's completion rate, since it is kimi's wire log.
+            # id. Only the excess a split cannot account for — historical
+            # kimi-wire tokens, which carry no prompt/completion split — is
+            # priced here, at kimi_wire_model()'s completion rate, since it is
+            # the retired kimi harness's wire log (NOT the node's declared
+            # model: a node can name any model and still have kimi wire tokens
+            # under it).
             extra = max(0, tot - (ptok + ctok))
             node_cost = ev.get("cost", 0.0)
             if extra:
-                node_cost += config.cost_of("Kimi-K3", 0, extra)
+                node_cost += config.cost_of(config.kimi_wire_model(), 0, extra)
             node = {"id": tid, "title": t.get("title") or tid,
                     "model": node_model, "reviewer": t.get("reviewer"),
                     "status": per_task.get(tid, "pending"),
@@ -1599,13 +1723,21 @@ def _projects(store):
             mtime_iso = datetime.utcfromtimestamp(f.stat().st_mtime).isoformat() + "+00:00"
         except OSError:
             mtime_iso = None
+        chain = _project_chain(store, f, titles, dependents, ev_lines)
+        heads = [t["id"] for t in tdefs if t.get("id")
+                 and not [d for d in (t.get("deps") or t.get("depends") or []) if d in ids]]
+        cnodes, cedges = _chain_dag_nodes(chain, heads)
+        phase = _project_phase(statuses, ids, run_by_file.get(f.name))
+        if phase == "new" and chain and not chain["ready"]:
+            phase = "chained"
         out.append({"file": f.name, "title": proj.get("title") or f.stem,
+                    "chain": chain,
                     "repo": proj.get("repo"), "n_tasks": len(tdefs), "task_ids": ids,
                     "models": sorted({t.get("model") for t in tdefs if t.get("model")}),
                     "reviewers": sorted({t.get("reviewer") for t in tdefs if t.get("reviewer")}),
                     "statuses": statuses,
                     "orphan_rows": orphan_rows,
-                    "dag": {"nodes": nodes, "edges": edges},
+                    "dag": {"nodes": cnodes + nodes, "edges": cedges + edges},
                     "progress": {"done": merged_n, "total": len(ids)},
                     "tokens": tok_total + live_tok, "seconds": round(sec_total + live_sec, 1),
                     "done_tokens": tok_total, "done_seconds": sec_total,
@@ -1615,8 +1747,7 @@ def _projects(store):
                     "errors": errors,
                     "archived": str(f) in archived,
                     "archived_at": archived.get(str(f)),
-                    "phase": _project_phase(statuses, ids,
-                                            run_by_file.get(f.name)),
+                    "phase": phase,
                     # NOT "progress": that key already means {done, total}.
                     "task_progress": (_task_progress(ids)
                                       if (statuses.get("running")
@@ -1697,8 +1828,22 @@ def _project_detail(store, fname):
     import reconcile
     run_pid = next((r["pid"] for r in reconcile.live_runs()
                     if r.get("taskfile") and Path(r["taskfile"]).name == fname), None)
+    import code_tasks
+    titles, dependents = {}, {}
+    tdir = Path(config.TASKS_DIR)
+    for g in sorted(tdir.glob("*.json")) if tdir.is_dir() else []:
+        try:
+            gp = (json.loads(g.read_text(encoding="utf-8", errors="replace"))
+                  .get("project") or {})
+        except Exception:
+            continue
+        titles[str(g.resolve())] = gp.get("title") or g.stem
+        for key in code_tasks._read_after(g):
+            dependents.setdefault(key, set()).add(str(g.resolve()))
+    chain = _project_chain(store, path, titles, dependents, lines)
     return {"file": fname, "title": proj.get("title") or path.stem,
             "repo": proj.get("repo"), "run_pid": run_pid,
+            "chain": chain,
             "task_progress": _task_progress(ids),
             "tasks": tdefs, "rows": rows, "runs": runs, "events": events,
             "git": _git_block(repo_v, gh)}, 200
@@ -2043,12 +2188,14 @@ def _create_project(body):
             "pid": proc.pid, "log": log_name, "started": time.time(), "dry_run": False,
             "kind": "plan"}
         return {"mode": "plan", "pid": proc.pid, "log": log_name,
-                "taskfile": expect, "note": "Kimi-K3 is drafting the task file"}, 200
+                "taskfile": expect,
+                "note": f"{config.PLANNER_MODEL} is drafting the task file"}, 200
 
     title = (body.get("title") or "").strip() if isinstance(body.get("title"), str) else ""
     tasks = body.get("tasks")
     if not title:
-        return {"error": "title required (or pass goal to plan with Kimi-K3)"}, 400
+        return {"error": f"title required (or pass goal to plan with "
+                         f"{config.PLANNER_MODEL})"}, 400
     if not isinstance(tasks, list) or not tasks or len(tasks) > 50:
         return {"error": "tasks must be a list of 1..50 task objects"}, 400
     clean, seen = [], set()
@@ -2074,8 +2221,8 @@ def _create_project(body):
         entry.setdefault("model", config.ESCALATION_PATH[0])
         if "reviewer" not in entry:
             # Cross-family, from the roster — the literal {Kimi: glm, GLM: kimi}
-            # map this replaces would have defaulted every task to "kimi" the
-            # day after Kimi left.
+            # map this replaces would have defaulted every task to a retired
+            # family the day after Kimi-K3 left (2026-09-12).
             entry["reviewer"] = (config.cross_family_reviewer(entry["model"])
                                  or next(iter(config.REVIEW_FAMILIES), "glm"))
         deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
@@ -2598,10 +2745,11 @@ def _health(store):
     #                 (config.driver_limit), deliberately below the account cap
     #                 so interactive use still has room;
     #   account_cap — ARC's per-account limit (config.family_limit), which the
-    #                 fleet's drivers AND the operator's own interactive
-    #                 kimi-code sessions both consume.
-    # Counting interactive sessions against driver_cap reported "Kimi-K3 4/2
-    # OVER CAP" while the fleet was correctly running a single driver.
+    #                 fleet's drivers AND any interactive session on the same
+    #                 account (historically the operator's kimi-code CLI) both
+    #                 consume.
+    # Counting interactive sessions against driver_cap once reported a model
+    # at "4/2 OVER CAP" while the fleet was correctly running one driver.
     per_model = {}
 
     def ent_for(model, family=None):
@@ -2836,9 +2984,9 @@ def _escalate_task(body):
     """Move ONE task to a stronger model, by the operator's judgement.
 
     The fix budget escalates only after repeated failure. The operator can see
-    a task struggling well before that — a planner on gpt-oss producing thin
-    task lists, an implementer looping on a design problem it cannot hold in
-    context — and should not have to burn three rounds to prove it.
+    a task struggling well before that — an implementer looping on a design
+    problem it cannot hold in context, a task whose tier was planned too
+    optimistically — and should not have to burn three rounds to prove it.
 
     Two writes so the change sticks in both worlds:
       - a `model_overrides` row, which cur_model() reads at every node boundary,
@@ -3177,6 +3325,12 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 return self._json({"events": events, "next": start + len(chunk),
                                    "reset": reset, "total": len(lines)})
+            if u.path == "/api/graph-shapes":
+                # The graph BETWEEN tasks: the pattern catalogue the planner
+                # chooses from, every taskfile classified by the shape its deps
+                # actually form, and what the engine can and cannot express.
+                import graph_shapes
+                return self._json(graph_shapes.describe())
             if u.path == "/api/pipeline":
                 import pipeline_doc
                 return self._json(pipeline_doc.describe(

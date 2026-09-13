@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import capture_events  # noqa: F401  (sys.path + event redirect)
-from helpers import ENTRY, STRONGEST  # noqa: E402,F401
+from helpers import ENTRY, ENTRY_REVIEWER, STRONGEST  # noqa: E402,F401
 
 import config
 import dashboard
@@ -199,7 +199,7 @@ class HttpWriteCreateEndpoint(_PostCase):
 
     create validates at POST time on purpose: a bad repo (not under
     REPO_ROOT, not a git repo, no commits on main) would otherwise be
-    discovered minutes later inside gitstore.alloc — after Kimi-K3 has
+    discovered minutes later inside gitstore.alloc — after the planner has
     already spent a full planning run on it. These tests pin that the
     checks fire HERE with actionable messages, and that both modes hand
     back the fields the UI needs to track the spawn.
@@ -582,7 +582,7 @@ class HttpWriteArchiveEndpoint(_PostCase):
     def test_archive_warns_when_tasks_ended_failed_or_conflict(self):
         path = self._write_taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", ENTRY, "kimi", "failed")
+            str(path), "t1", "one", ENTRY, ENTRY_REVIEWER, "failed")
         status, resp = self._post_json("/api/projects/archive",
                                        {"file": "proj.json"})
         self.assertEqual(status, 200)
@@ -646,9 +646,9 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
         path = self._write_taskfile()
         store = dashboard.Handler.store
         store.upsert_code_task(str(path), "t1", "one", ENTRY,
-                               "kimi", "failed")
+                               ENTRY_REVIEWER, "failed")
         store.upsert_code_task(str(path), "t2", "two", ENTRY,
-                               "kimi", "merged")
+                               ENTRY_REVIEWER, "merged")
         status, resp = self._post_json("/api/projects/retry-task",
                                        {"file": "proj.json", "task": "t1"})
         self.assertEqual(status, 200)
@@ -667,7 +667,7 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
     def test_retry_unknown_task_id_returns_404(self):
         path = self._write_taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", ENTRY, "kimi", "failed")
+            str(path), "t1", "one", ENTRY, ENTRY_REVIEWER, "failed")
         status, resp = self._post_json("/api/projects/retry-task",
                                        {"file": "proj.json", "task": "ghost"})
         self.assertEqual(status, 404)
@@ -677,7 +677,7 @@ class HttpWriteRetryTaskEndpoint(_PostCase):
         path = self._write_taskfile()
         # the row must exist: the 404 lookup runs before the live check
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", ENTRY, "kimi", "failed")
+            str(path), "t1", "one", ENTRY, ENTRY_REVIEWER, "failed")
         self.live_runs.return_value = [{"pid": 7, "taskfile": str(path)}]
         status, resp = self._post_json("/api/projects/retry-task",
                                        {"file": "proj.json", "task": "t1"})

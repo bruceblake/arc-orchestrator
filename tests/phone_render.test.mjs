@@ -101,18 +101,18 @@ const GH_NOW = 1757500000; // seconds, as /api/github reports
 const iso = s => new Date((GH_NOW - s) * 1000).toISOString();
 const REQ1 = "driver/opencode:GLM-5.3:implementer:t1";
 const FIX = {
-  summary: { ts: GH_NOW, limits: { "GLM-5.3": 4, "Kimi-K3": 3 } },
+  summary: { ts: GH_NOW, limits: { "GLM-5.3": 2, "DeepSeek-V4.1-Flash-thinking-max": 5 } },
   agents: {
     now: GH_NOW,
     agents: [
       { req_id: REQ1, family: "glm", model: "GLM-5.3", role: "implementer", task: "t1", harness: "opencode", elapsed_s: 1250, last_event_s: 30, stalled: false, transcript: "t1-implementer-1.jsonl" },
-      { req_id: "driver/kimi:Kimi-K3:reviewer:t2", family: "kimi", model: "Kimi-K3", role: "reviewer", task: "t2", harness: "kimi", elapsed_s: 90, last_event_s: 400, stalled: true, transcript: "t2-reviewer-1.jsonl" },
+      { req_id: "driver/dsh:DeepSeek-V4.1-Flash-thinking-max:reviewer:t2", family: "deepseek", model: "DeepSeek-V4.1-Flash-thinking-max", role: "reviewer", task: "t2", harness: "dsh", elapsed_s: 90, last_event_s: 400, stalled: true, transcript: "t2-reviewer-1.jsonl" },
     ],
     runs: [{ taskfile: "/home/x/tasks/a.json", pid: 4242 }, { taskfile: "/home/x/tasks/b.json", pid: 4243 }],
   },
   projects: [{
     file: "demo.json", title: "Demo project", n_tasks: 2, task_ids: ["t1", "t2"],
-    models: ["GLM-5.3", "gpt-oss-120b"], reviewers: ["kimi"],
+    models: ["GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"], reviewers: ["deepseek"],
     statuses: { merged: 1, running: 1 },
     dag: {
       nodes: [
@@ -153,11 +153,11 @@ const FIX = {
     running: [], waiting: [],
     models: [
       { model: "GLM-5.3", pretty: "GLM 5.3", cap: 4, running: 1, waiting: 0, free: 3, reviewers_waiting: 0 },
-      { model: "Kimi-K3", pretty: "Kimi K3", cap: 3, running: 0, waiting: 1, free: 3, reviewers_waiting: 1 },
+      { model: "DeepSeek-V4.1-Flash-thinking-max", pretty: "DeepSeek V4.1 Flash max", cap: 5, running: 0, waiting: 1, free: 5, reviewers_waiting: 1 },
     ],
     harnesses: [
       { harness: "opencode", cap: 5, running: 1, waiting: 0, free: 4 },
-      { harness: "kimi", cap: 3, running: 0, waiting: 0, free: 3 },
+      { harness: "dsh", cap: 5, running: 0, waiting: 0, free: 5 },
     ],
     totals: { running: 1, waiting: 1, reviewers_waiting: 1, capacity: 22 },
   },
@@ -172,7 +172,8 @@ ok(el("agents").innerHTML.includes("GLM 5.3 · implementer"), "agent card shows 
 ok(el("agents").innerHTML.includes("t2 · STALLED"), "stalled agent is flagged");
 ok(el("nowsub").textContent.includes("2 harness runs today"), "harness-run count in the sub line");
 ok(el("nowsub").textContent.includes("paused while hidden"), "sub line keeps the battery hint after render");
-ok(el("alert").innerHTML.includes("Kimi K3 stalled on t2"), "stall surfaces in the alert line");
+ok(el("alert").innerHTML.includes("DeepSeek V4.1 Flash max stalled on t2"),
+   "stall surfaces in the alert line");
 ok(el("alert").style.display === "block", "alert is visible while red lines exist");
 ok(el("projects").innerHTML.includes("Demo project"), "project card shows title");
 ok(el("projects").innerHTML.includes("demo.json · 1/2 · running"), "project sub shows file, progress, running");

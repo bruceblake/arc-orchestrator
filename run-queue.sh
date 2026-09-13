@@ -4,8 +4,8 @@
 # Serialization is a flock on a lock file, not a pgrep scan. The pgrep version
 # this replaces had two defects that cost a live fleet run: every waiting queue
 # instance saw the same process exit and started simultaneously (on 2026-09-09
-# that put four task files in flight within two seconds, 9 Kimi requests
-# against a cap of 3, and every retry came back as an instant 400), and its
+# that put four task files in flight within two seconds, 9 requests against
+# a per-model cap of 3, and every retry came back as an instant 400), and its
 # `rc=$?` was always 0 because the `$(date)` in the same echo reset $?.
 #
 # Usage:  ./run-queue.sh [taskfile-stem ...]      (default: the list below)
@@ -30,7 +30,7 @@ fi
 
 # How many task files may be in flight at once. Was effectively 1: this queue
 # ran them strictly one after another after a 09-09 incident where four
-# started together and the dashboard reported kimi at 9/3.
+# started together and the dashboard reported one model at 9/3.
 #
 # That reading was wrong. driver.start was emitted BEFORE a driver acquired
 # its semaphore and lease, so queued drivers were counted as running. With

@@ -82,20 +82,20 @@ const FIX = { projects: [
     dag: {nodes: [{id: "t-clean", status: "merged"}, {id: "t-tests", status: "running", live: true}],
           edges: [{src: "t-clean", dst: "t-tests"}]}, tokens: 4200,
     last_activity: NOW }),
-  mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4-Flash"],
+  mkProj("web.json", "webapp build", "in_review", { models: ["DeepSeek-V4.1-Flash-thinking-max"],
     statuses: {in_review: 1, pending: 1},
     dag: {nodes: [{id: "w-a", status: "pending"}, {id: "w-b", status: "pending"}], edges: []} }),
-  mkProj("flaky.json", "flaky tests", "attention", { models: ["gpt-oss-120b"], repo: "acme/other-repo",
+  mkProj("flaky.json", "flaky tests", "attention", { models: ["GLM-5.3"], repo: "acme/other-repo",
     statuses: {merged: 1, failed: 1, conflict: 1}, progress: {done: 1, total: 3}, n_tasks: 3,
     dag: {nodes: [{id: "f-a", status: "merged"}, {id: "f-b", status: "failed"}, {id: "f-c", status: "conflict"}],
           edges: []}, tokens: 90000, last_activity: NOW }),
-  mkProj("bench.json", "orchestration bench", "done", { models: ["gpt-oss-120b"],
+  mkProj("bench.json", "orchestration bench", "done", { models: ["GLM-5.3"],
     statuses: {merged: 2}, progress: {done: 2, total: 2},
     dag: {nodes: [{id: "b-one", status: "merged"}, {id: "b-two", status: "merged"}], edges: []} }),
 ]};
 const DET = { file: "ui.json", title: "game UI polish", repo: "acme/arc-orchestrator",
-  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "kimi", deps: [], verify_cmd: "./check.sh"},
-          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "kimi", deps: ["t-clean"], verify_cmd: "node t.js"}],
+  tasks: [{id: "t-clean", title: "cleanup", model: "GLM-5.3", reviewer: "deepseek", deps: [], verify_cmd: "./check.sh"},
+          {id: "t-tests", title: "tests", model: "GLM-5.3", reviewer: "deepseek", deps: ["t-clean"], verify_cmd: "node t.js"}],
   rows: [{id: "t-clean", status: "merged", attempts: 1}, {id: "t-tests", status: "running", attempts: 2}],
   runs: [{task_id: "t-tests", model: "GLM-5.3", role: "implementer", harness: "opencode",
           attempt: 2, exit_code: 0, seconds: 12, verdict: "", transcript: "logs/harness/t-tests-x2.jsonl"}],
@@ -173,7 +173,7 @@ filter("#q=game");
 ok("text search matches the title", JSON.stringify(files()) === '["ui.json"]' && hint() === "1 of 4 projects");
 filter("#q=flaky");
 ok("text search matches the task file", JSON.stringify(files()) === '["flaky.json"]');
-filter("#m=DeepSeek-V4-Flash");
+filter("#m=DeepSeek-V4.1-Flash-thinking-max");
 ok("model filter", JSON.stringify(files()) === '["web.json"]');
 filter("#r=acme%2Fother-repo");
 ok("repo filter", JSON.stringify(files()) === '["flaky.json"]');
@@ -195,8 +195,12 @@ ok("repo picker offered when >1 repo",
    document.querySelector("#f-repo").style.display === "" && document.querySelector("#f-repo").innerHTML.includes('value="acme/other-repo"')
    && document.querySelector("#f-repo").innerHTML.includes("All repos"));
 const modelOpts = document.querySelector("#f-model").innerHTML;
-ok("model picker lists the fleet",
-   ["gpt-oss-120b", "DeepSeek-V4-Flash", "GLM-5.3", "Kimi-K3"].every(m => modelOpts.includes(`value="${m}"`)));
+// The picker seeds TODAY'S live roster (two models, 2026-09-12) and merges
+// observed historical ones in; it must never present a retired model as a
+// live routing choice.
+ok("model picker lists the live fleet",
+   ["GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"].every(m => modelOpts.includes(`value="${m}"`))
+   && !modelOpts.includes('value="Kimi-K3"') && !modelOpts.includes('value="gpt-oss-120b"'));
 const fstat = src.slice(src.indexOf('id="f-status"'), src.indexOf('id="f-model"'));
 ok("status picker offers running/failed/merged",
    ['value="running"', 'value="failed"', 'value="merged"'].every(v => fstat.includes(v)));
@@ -233,6 +237,41 @@ if (vb) for (const m of cyc.matchAll(/<rect x="(\d+(?:\.\d+)?)"[^>]*width="(\d+)
   inside = inside && (+m[1] + +m[2] <= +vb[1] + 0.5);
 ok("cyclic graph: loop-back drawn, nodes stay in the viewBox",
    inside && cyc.includes('stroke="#d29922"'));
+
+// ---- project chains (project.after) ------------------------------------
+// The runner has honoured `after` for weeks; the page never showed it. A
+// chained project must say what it waits on, the upstream must say who
+// waits on it, and the chain gate must be drawn into the DAG in front of
+// the head tasks — dashed, clickable, opening the upstream project.
+const chained = mkProj("panel.json", "graph shapes panel", "chained", {
+  chain: { after: ["picker.json"], ready: false, gate: null, blocks: [],
+           deps: [{file: "picker.json", title: "repo picker", exists: true, n_tasks: 3, merged: 1, failed: [], state: "waiting"}] },
+  dag: { nodes: [{id: "after:picker.json", kind: "chain", file: "picker.json", title: "after repo picker", status: "pending", merged: 1, n_tasks: 3},
+                 {id: "api", status: "pending"}, {id: "panel", status: "pending"}],
+         edges: [{src: "after:picker.json", dst: "api", kind: "chain"}, {src: "api", dst: "panel"}] } });
+const upstream = mkProj("picker.json", "repo picker", "running", {
+  run_pid: 77, statuses: {running: 1, merged: 1}, n_tasks: 3,
+  chain: { after: [], ready: true, gate: null, deps: [], blocks: [{file: "panel.json", title: "graph shapes panel"}] } });
+const cc = api.card(chained, 0), cu = api.card(upstream, 1);
+ok("chained card names what it waits on, with progress",
+   cc.includes("waits for picker") && cc.includes("1/3") && cc.includes("chip chainwait"));
+ok("upstream card counts who waits on it", cu.includes("1 waiting on this"));
+const cdag = api.taskDag(chained.dag, {size: "full", file: "panel.json"});
+ok("chain gate drawn dashed in front of the head, clickable to the upstream project",
+   cdag.includes('data-kind="chain"') && cdag.includes('data-file="picker.json"')
+   && cdag.includes('stroke-dasharray="5 3"') && cdag.includes("1/3 merged"));
+// gate held by a live run: the node pulses like a running task
+const held = JSON.parse(JSON.stringify(chained)); held.run_pid = 99;
+held.chain.gate = {state: "waiting", ts: Date.now() / 1000};
+held.dag.nodes[0].status = "running";
+ok("a run parked at the chain gate is labelled, not 'live'",
+   api.card(held, 0).includes("waiting at chain gate"));
+// (PROJECTS is the very array pollProjects took from the fixture.)
+FIX.projects.push(chained); api.renderProjects();
+ok("chain phase has its own shelf", document.querySelector("#phase-filter").innerHTML.includes("waiting on another project"));
+FIX.projects.pop(); api.renderProjects();
+ok("…which disappears with the chained project", !document.querySelector("#phase-filter").innerHTML.includes("waiting on another project"));
+ok("a project without a chain shows no chain chip", !api.card(FIX.projects[3], 0).includes("⛓"));
 
 console.log(`projects_ui: ${good} passed, ${bad.length} failed`);
 if (bad.length) {

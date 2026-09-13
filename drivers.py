@@ -1,11 +1,16 @@
-"""Headless CLI drivers for the coding harnesses (kimi, opencode).
+"""Headless CLI drivers for the coding harnesses (opencode, dsh; kimi retired).
 
-Role map (hard rule): gpt-oss-120b handles very basic implementation,
-DeepSeek-V4-Flash medium implementation, and GLM-5.3 / Kimi-K3 (kimi CLI) the
-hard tasks plus all planning and reviewing. A task is always reviewed by the
-*other* of kimi/glm when a strong model implemented it. ARC rejects over-limit
+Role map (hard rule): the fleet is TWO models since 2026-09-12 —
+DeepSeek-V4.1-Flash-thinking-max (the `dsh` harness) implements and
+reviews/PR-reviews the medium tier, and GLM-5.3 (opencode) plans, implements
+the hard tier, and reviews. A task is always reviewed by a *different model
+family* than the one that implemented it (Rule 2). ARC rejects over-limit
 requests per model, so per-model semaphores cap concurrent harness instances
 below the account limits (config.driver_limit).
+
+KimiDriver remains importable so historical transcripts and harness_runs rows
+still resolve, but its model is off the roster: constructing it raises
+ValueError (Kimi-K3 retired by operator decision 2026-09-12).
 """
 import asyncio
 import contextlib
@@ -16,6 +21,7 @@ import pathlib
 import random
 import re
 import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -74,9 +80,10 @@ def _gate(model):
 def _harness_gate(harness):
     """The whole harness's slot, shared by every model it serves.
 
-    Distinct from the per-model gate: opencode runs GLM, DeepSeek and gpt-oss
-    through one local binary backed by one sqlite store, so their model caps
-    sum to far more than the harness can survive.
+    Distinct from the per-model gate: every opencode-backed model (GLM-5.3
+    today; DeepSeek, GLM and gpt-oss historically) runs through one local
+    binary backed by one sqlite store, so their model caps can sum to more
+    than the harness can survive.
     """
     key = f"harness:{harness}"
     if key not in _semaphores:
@@ -581,8 +588,11 @@ class Driver:
     # retrying 2s later just re-enters the same cap and deepens the pile-up
     # (observed live: four taskfiles resumed at once put 9 Kimi requests
     # against a cap of 3, and every retry came straight back as a 400).
+    # "rate_limit"/"quota" cover dsh's `dsh: RATE_LIMIT:` / `dsh: QUOTA:`
+    # error codes on stderr (the others are opencode/kimi/HTTP phrasings).
     _CAPACITY_MARKERS = ("provider.api_error: 400", "status code (no body)",
-                         "session limit", "concurrent", "rate limit", "429")
+                         "session limit", "concurrent", "rate limit", "429",
+                         "rate_limit", "quota")
 
     @classmethod
     def is_capacity_error(cls, text):
@@ -670,7 +680,7 @@ class Driver:
                                   config.DRIVER_CAPACITY_BACKOFF_CAP)
                     backoff += random.uniform(0, backoff * 0.25)
                 else:
-                    backoff = min(30, 2 ** attempt)
+                    backoff = min(60, 2 ** attempt)
                 log.warning("%s attempt %d failed (%s%s); retry in %.0fs",
                             self.model, attempt, "at capacity: " if capacity else "",
                             exc, backoff)
@@ -916,19 +926,27 @@ class Driver:
 
 
 class KimiDriver(Driver):
+    """HISTORICAL — Kimi-K3 is retired (operator decision 2026-09-12).
+
+    Importable so old transcripts, harness_runs rows and the usage page keep
+    resolving, but it can never run: `Kimi-K3` is not in config.MODEL_ROLES,
+    so __init__ raises ValueError pointing the caller at a live model. The
+    kimi CLI harness is likewise absent from config.MODEL_HARNESS.
+    """
     harness = "kimi"
     model = "Kimi-K3"
 
     def __init__(self, role, bench=False, interactive=False):
         _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
         if not bench:
-            # Kimi-K3 is withdrawn on 2026-09-19. After that this driver has
-            # no model to drive; constructing it must fail loudly rather than
-            # send a request to a model that no longer exists.
+            # Kimi-K3 is off the roster as of 2026-09-12 (retired early by
+            # operator decision; its ROSTER row was deleted). Constructing
+            # this driver must fail loudly rather than send a request to a
+            # model the fleet may no longer route to.
             if self.model not in config.MODEL_ROLES:
                 raise ValueError("Kimi-K3 is not on today's roster — it was "
-                                 "withdrawn; route this role to config.PLANNER_MODEL "
-                                 "or another live model")
+                                 "retired 2026-09-12; route this role to "
+                                 "config.PLANNER_MODEL or another live model")
             need = "planner" if role in _GH_OPS else role
             if not config.model_may(self.model, need):
                 raise ValueError(f"KimiDriver may hold "
@@ -976,3 +994,377 @@ class OpencodeDriver(Driver):
         if session_id:
             a.append("-c")
         return a + [prompt]
+
+
+def _dsh_log_line(e):
+    """Render one dsh session-log event as one transcript line (None: skip).
+
+    Only the event kinds that show what the agent is doing render; the
+    bookkeeping kinds (turn/meta, usage, ...) return None.
+    """
+    t, d = e.get("type"), e.get("data") or {}
+    ts = time.strftime("%H:%M:%S", time.localtime((e.get("time") or 0) / 1000))
+    step = d.get("step")
+    if t == "tool/call":
+        return (f"[dsh-log {ts} step {step}] TOOL {d.get('name')}: "
+                f"{str(d.get('arguments'))[:260]}")
+    if t == "tool/result":
+        parts = (d.get("message") or {}).get("content") or []
+        texts, err = [], ""
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if p.get("isError"):
+                err = " ERROR"
+            for sub in p.get("content") or []:
+                if isinstance(sub, dict) and sub.get("text"):
+                    texts.append(str(sub["text"]))
+            if p.get("text"):
+                texts.append(str(p["text"]))
+        return f"[dsh-log {ts} step {step}] RESULT{err}: {' '.join(texts).strip()[:400]}"
+    if t == "assistant/message":
+        parts = ((d.get("message") or {}).get("content")) or []
+        texts = [p.get("text", "") for p in parts
+                 if isinstance(p, dict) and p.get("type") == "text"]
+        text = " ".join(x for x in texts if x.strip())[:500]
+        if text:
+            tok = (d.get("usage") or {}).get("outputTokens", "?")
+            return f"[dsh-log {ts} step {step}] ASSISTANT: {text} (+{tok}tok)"
+    return None
+
+
+class DeepseekDriver(Driver):
+    """DeepSeek's own harness (dsh, github.com/deepseek-ai/deepseek-harness).
+
+    Operator decision 2026-09-12: DeepSeek-V4.1-Flash-thinking-max runs here
+    instead of opencode. dsh changes the stream contract, which is why a
+    subclass could not fix this with argv alone:
+
+    - stdout carries at most the final assistant message, buffered until the
+      run ends. Mid-run BOTH pipes can stay silent for many minutes of
+      perfectly healthy agentic work — measured the hard way on 2026-09-12,
+      when ten implementer attempts were stall-killed at the idle budget
+      while dsh was past step 50 of real work in its session log. No live
+      `dsh: reasoning:` deltas arrive in the headless profile.
+    - Live progress IS visible in dsh's own session log,
+      ~/.dsh/sessions/<cwd-mangled>/session-*/session.v3.jsonl.zstd, which
+      grows on every model round-trip and tool call. _session_probe watches
+      it and the pump counts its growth as activity, exactly like a pipe
+      chunk.
+    - Errors surface as a nonzero exit with `dsh: <CODE>: <msg>` on stderr
+      (RATE_LIMIT, QUOTA, AUTH, TRANSPORT, TIMEOUT...); dsh's own
+      streamIdleTimeoutMs (default 300 s) aborts a held stream from inside,
+      so a dead API connection does not need our idle clock to notice it.
+
+    Both pipes still land in the transcript file (what the dashboard tails);
+    stdout is additionally kept verbatim as the result text, because that is
+    where the answer is when dsh prints one. Since the pipes are silent
+    mid-run by design, the transcript ALSO gets the session log rendered
+    live: whenever the probe sees it grow, new events are appended as
+    `[dsh-log <ts> step <n>] TOOL/RESULT/ASSISTANT ...` lines, so a
+    dashboard tail shows the chain of action instead of bare heartbeats.
+
+    No session resume: `dsh --profile headless` accepts nothing but the task
+    text, so an interrupted attempt simply retries the original prompt (the
+    worktree keeps files already written). dsh prints no token usage either,
+    so DriverResult carries (0, 0, 0) — cost attribution for dsh runs is
+    lost until the harness reports usage.
+
+    Role rules come from the roster, same as the other drivers: dsh serves
+    whichever model its ROSTER row names, and a model without "planner" in
+    its roles cannot be constructed as one — the planner role is intrinsically
+    refused here rather than banned by a side list.
+    """
+
+    harness = "dsh"
+
+    @staticmethod
+    def _session_probe(worktree):
+        """Activity probe over dsh's own session log.
+
+        Returns a closure answering "has the log grown since the last call?".
+        The log dir is the run's cwd with slashes turned to dashes, wrapped
+        in dashes (e.g. /tmp -> --tmp--). A run whose file never appears gets
+        no probe resets and keeps the ordinary pipe/deadline behaviour.
+        """
+        root = (Path.home() / ".dsh" / "sessions"
+                / ("--" + str(worktree).strip("/").replace("/", "-") + "--"))
+        best = [None]
+
+        def probe():
+            try:
+                newest = max(
+                    (p.stat().st_mtime
+                     for p in root.glob("session-*/session.v3.jsonl.zstd")),
+                    default=None)
+            except OSError:
+                return False
+            if newest is not None and (best[0] is None or newest > best[0]):
+                best[0] = newest
+                return True
+            return False
+
+        return probe
+
+    @staticmethod
+    def _session_tail(worktree):
+        """Render NEW session-log events as transcript lines (closure).
+
+        Same mangled root as _session_probe. Each call re-reads the newest
+        session file and returns the rendered lines for events with a seq
+        past the last one seen. The full decode on every call is the simple
+        option: it only runs when the probe reports growth, and the sidecar
+        dsh_tail.py already proves a 20 s poll of it is cheap. A run whose
+        newest file CHANGES (a fresh attempt's session) restarts from seq 0
+        of that file — the backlog is that attempt's opening steps, not all
+        of history. Anything that breaks (no file yet, zstd missing, a
+        partial write) yields no lines, never an exception into the pump.
+        """
+        root = (Path.home() / ".dsh" / "sessions"
+                / ("--" + str(worktree).strip("/").replace("/", "-") + "--"))
+        current = [None]
+        last_seq = [-1]
+
+        def tail():
+            try:
+                files = sorted(
+                    root.glob("session-*/session.v3.jsonl.zstd"),
+                    key=lambda p: p.stat().st_mtime)
+            except OSError:
+                return []
+            if not files:
+                return []
+            if files[-1] != current[0]:
+                current[0] = files[-1]
+                last_seq[0] = -1
+            try:
+                out = subprocess.run(["zstd", "-dc", str(files[-1])],
+                                     capture_output=True, timeout=60).stdout
+            except (OSError, subprocess.SubprocessError):
+                return []
+            lines = []
+            for raw in out.decode(errors="replace").splitlines():
+                try:
+                    e = json.loads(raw)
+                except ValueError:
+                    continue
+                if (e.get("seq") or -1) <= last_seq[0]:
+                    continue
+                last_seq[0] = e.get("seq") or last_seq[0]
+                line = _dsh_log_line(e)
+                if line:
+                    lines.append(line)
+            return lines
+
+        return tail
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        if not bench:
+            # Same roster-check idiom as OpencodeDriver; gh-ops roles are
+            # harness capabilities that need a planner-grade model.
+            _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
+            if model not in config.MODEL_ROLES:
+                raise ValueError(f"{model!r} is not on today's roster "
+                                 f"({sorted(config.MODEL_ROLES)})")
+            need = "planner" if role in _GH_OPS else role
+            if not config.model_may(model, need):
+                raise ValueError(
+                    f"{model} may hold {sorted(config.MODEL_ROLES[model])}, "
+                    f"not {role!r}")
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    def argv(self, prompt, session_id):
+        # session_id unused: the headless profile cannot resume (verified
+        # against `dsh --profile headless --help` on 0.1.5-rc.1).
+        return [config.dsh_bin(), "--profile", "headless", prompt]
+
+    async def _once(self, prompt, worktree, session_id, task_id, attempt):
+        argv = self.argv(prompt, session_id)
+        t0 = time.monotonic()
+        env = dict(
+            os.environ, PWD=str(worktree),
+            # dsh talks to the deepseek-official provider under these names
+            # (see ~/.dsh/cordis.patch.yml); values mirror the ARC endpoint
+            # every other harness uses.
+            DEEPSEEK_API_KEY=config.API_KEY,
+            DEEPSEEK_BASE_URL=config.BASE_URL,
+            DSH_TELEMETRY_MODE="DISABLED",
+            # Headless runs cannot answer an approval prompt — this flips the
+            # approval policy to `never`; without it the default
+            # workspace-write preset stalls forever on the first tool call.
+            DSH_PERMISSION_MODE="danger-full-access",
+        )
+        TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
+        proc = await spawn(argv, cwd=worktree, env=env)
+        try:
+            return await self._pump_dual(proc, argv, tpath, t0, task_id,
+                                         attempt,
+                                         probe=self._session_probe(worktree),
+                                         tail=self._session_tail(worktree))
+        finally:
+            await _terminate(proc)
+
+    async def _pump_dual(self, proc, argv, tpath, t0, task_id, attempt,
+                         probe=None, tail=None):
+        """Driver._pump, multiplexed over both of dsh's pipes.
+
+        Identical stall/deadline/heartbeat/forensics semantics to the stock
+        pump — kept as a copy rather than shared because interleaving a
+        generic stream set into _pump risks the harness (opencode) the whole
+        fleet already runs on. A chunk on EITHER pipe resets the idle clock,
+        and so does the session-log probe: dsh's pipes can stay silent for
+        the whole run while it works, the session log cannot. When the probe
+        fires, `tail` renders the new session-log events into the transcript
+        (`_session_tail`), which is the only live chain of action a dsh run
+        ever shows.
+        """
+        out_chunks, err_chunks = [], []
+        q = asyncio.Queue()
+
+        async def feed(stream, tag):
+            while True:
+                chunk = await stream.read(65536)
+                if not chunk:
+                    break
+                q.put_nowait((tag, chunk))
+            q.put_nowait((tag, None))
+
+        readers = [asyncio.create_task(feed(proc.stdout, "out")),
+                   asyncio.create_task(feed(proc.stderr, "err"))]
+        open_streams = 2
+        last_chunk_t = time.monotonic()
+        last_progress_t = time.monotonic()
+        last_hb_t = time.monotonic()
+        last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
+        last_cpu = None
+        last_probe_t = None
+        deadline = t0 + config.DRIVER_TIMEOUT
+        interval = config.DRIVER_PROGRESS_INTERVAL
+        idle_budget = config.idle_timeout_for(self.role)
+
+        def written():
+            return sum(len(c) for c in out_chunks) + sum(len(c) for c in err_chunks)
+
+        try:
+            with open(tpath, "wb") as fh:
+                while open_streams:
+                    now = time.monotonic()
+                    if probe is not None and probe():
+                        last_chunk_t = now
+                        last_probe_t = now
+                        if tail is not None:
+                            for line in tail():
+                                fh.write(line.encode(errors="replace") + b"\n")
+                            fh.flush()
+                    idle_for = now - last_chunk_t
+                    if idle_for >= idle_budget or now >= deadline:
+                        raise asyncio.TimeoutError
+                    if (now - last_hb_t >= HEARTBEAT_INTERVAL
+                            and last_hb != (written(), round(idle_for, 1))):
+                        events.emit("driver.heartbeat", harness=self.harness,
+                                    model=self.model, role=self.role,
+                                    task=task_id, attempt=attempt,
+                                    bytes=written(), idle_s=round(idle_for, 1),
+                                    sess_idle_s=(round(now - last_probe_t, 1)
+                                                 if last_probe_t else None),
+                                    seconds=round(now - t0, 1))
+                        last_hb_t = now
+                        last_hb = (written(), round(idle_for, 1))
+                    wait = max(0.05, min(deadline - now,
+                                         idle_budget - idle_for,
+                                         interval - (now - last_progress_t),
+                                         HEARTBEAT_INTERVAL - (now - last_hb_t)))
+                    try:
+                        tag, chunk = await asyncio.wait_for(q.get(), wait)
+                    except asyncio.TimeoutError:
+                        if time.monotonic() - last_progress_t >= interval:
+                            snap = proc_snapshot(proc.pid)
+                            cpu = snap.get("cpu_s")
+                            events.emit(
+                                "driver.progress", harness=self.harness,
+                                model=self.model, role=self.role, task=task_id,
+                                attempt=attempt, bytes=written(),
+                                idle_s=round(time.monotonic() - last_chunk_t, 1),
+                                elapsed_s=round(time.monotonic() - t0, 1),
+                                cpu_delta_s=(round(cpu - last_cpu, 2)
+                                             if cpu is not None and last_cpu is not None
+                                             else None),
+                                **snap)
+                            last_cpu = cpu
+                            last_progress_t = time.monotonic()
+                        continue
+                    if chunk is None:
+                        open_streams -= 1
+                        continue
+                    (out_chunks if tag == "out" else err_chunks).append(chunk)
+                    last_chunk_t = time.monotonic()
+                    fh.write(chunk)
+                    fh.flush()
+        except asyncio.TimeoutError:
+            # Evidence BEFORE the kill, same as the stock pump; there is no
+            # kimi-style wire log to check for an unanswered request.
+            snap = proc_snapshot(proc.pid)
+            partial = (b"".join(err_chunks) + b"\n" + b"".join(out_chunks)
+                       ).decode(errors="replace")[-6000:]
+            await _terminate(proc)
+            for r in readers:
+                r.cancel()
+            idle = round(time.monotonic() - last_chunk_t, 1)
+            total = round(time.monotonic() - t0, 1)
+            stalled = idle >= idle_budget - 1
+            kind = "stalled" if stalled else "timed out"
+            limit = (f"{idle_budget}s idle" if stalled
+                     else f"{config.DRIVER_TIMEOUT}s total")
+            cpu_delta = (round(snap["cpu_s"] - last_cpu, 2)
+                         if last_cpu is not None and "cpu_s" in snap else None)
+            blocked = (snap.get("state") in ("S", "D") and (cpu_delta or 0) < 0.5)
+            events.emit("driver.stalled" if stalled else "driver.timeout",
+                        harness=self.harness, model=self.model, role=self.role,
+                        task=task_id, attempt=attempt, bytes=written(),
+                        idle_s=idle, elapsed_s=total,
+                        cpu_delta_s=cpu_delta, blocked=blocked,
+                        last_activity=activity_tail(partial),
+                        records=partial.count("\n"), **snap)
+            detail = "; process blocked with no CPU burn" if blocked else ""
+            raise DriverError(
+                f"{argv[0]} {kind} after {limit} "
+                f"(total {total}s, idle {idle}s, {written()} bytes{detail})")
+        for r in readers:
+            await r
+        await proc.wait()
+        out = b"".join(out_chunks).decode(errors="replace")
+        err = b"".join(err_chunks).decode(errors="replace")
+        if proc.returncode != 0:
+            # dsh names its failures on stderr (`dsh: RATE_LIMIT: ...`); fall
+            # back to the stdout tail the way the stock pump falls back to
+            # stderr's, so an exit can never report "exited 1: " with nothing.
+            detail = err.strip()
+            if not detail:
+                detail = out.strip()[-300:] or "no output on stdout or stderr"
+            raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}")
+        return DriverResult(self.harness, self.model, self.role, proc.returncode,
+                            None, str(tpath), out.strip()[-3000:],
+                            round(time.monotonic() - t0, 1), 0, 0, 0)
+
+
+def driver_for(model, role, bench=False, interactive=False):
+    """The driver for `model` on the harness its ROSTER row names.
+
+    ONE mapping from model -> harness, shared by code_tasks, gh_ops and
+    orchchat, so a hand-kept harness choice here cannot drift from the roster
+    the way a per-model if-chain did. A model with no roster row (retired:
+    Kimi-K3, gpt-oss-120b, DeepSeek-V4-Flash) raises ValueError instead of
+    silently falling back to opencode.
+    """
+    harness = config.MODEL_HARNESS.get(model)
+    if harness is None:
+        raise ValueError(f"{model!r} is not on today's roster "
+                         f"({sorted(config.MODEL_HARNESS)})")
+    if harness == "kimi":
+        return KimiDriver(role, bench=bench, interactive=interactive)
+    if harness == "dsh":
+        return DeepseekDriver(model, role, bench=bench, interactive=interactive)
+    return OpencodeDriver(model, role, bench=bench, interactive=interactive)

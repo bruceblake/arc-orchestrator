@@ -152,7 +152,7 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "partial" }, isFinal: false }] }), "handleSpeechResult() interim");
   ok(input.value === "hello world more", "interim text stays out of the committed value");
   ok(p.el("plan-interim").textContent.includes("partial"), "interim text goes to the dedicated interim element");
-  ok(input.placeholder === "Ask Kimi‑K3", "interim speech never pollutes the input placeholder");
+  ok(input.placeholder === "Ask the planner", "interim speech never pollutes the input placeholder");
   input.value = "  x";
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "y" }, isFinal: true }] }), "handleSpeechResult() final after manual edit");
   ok(input.value === "  x y", "a final appends to, not overwrites, manually typed text");
@@ -171,7 +171,7 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   ok(mic.textContent === "🎤", "mic idle returns to the mic glyph");
   ok(!mic.classList.contains("mic-live"), "mic idle drops the .mic-live class");
   ok(input.value === "keep me", "returning to idle does not discard typed text");
-  ok(p.el("plan-input").placeholder === "Ask Kimi‑K3", "mic idle leaves the placeholder alone");
+  ok(p.el("plan-input").placeholder === "Ask the planner", "mic idle leaves the placeholder alone");
   run(() => { p.el("plan-interim").textContent = "partial"; p.api.setMicLive(false); }, "setMicLive(false) clears the interim element");
   ok(p.el("plan-interim").textContent === "", "mic idle clears the interim element");
 }

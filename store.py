@@ -447,8 +447,8 @@ class Store:
         """{model: live lease count} — how contended each model is right now.
 
         Reviewer selection uses this to pick the LEAST busy eligible model.
-        Choosing a fixed order instead meant Kimi and GLM took every review
-        while DeepSeek sat idle, and tasks queued 30 minutes for a slot that
+        Choosing a fixed order instead meant the two scarcest models took every
+        review while a third sat idle, and tasks queued 30 minutes for a slot
         another model could have served immediately.
         """
         now = time.time()
@@ -527,10 +527,10 @@ class Store:
             return None
 
     # ---- manual model escalation ----------------------------------------
-    # The operator can see a task struggling before the fix budget does — a
-    # planner on gpt-oss producing thin task lists, an implementer looping on a
-    # design problem — and should not have to wait for three failed rounds to
-    # move it up a tier. An override is read by cur_model() at every node
+    # The operator can see a task struggling before the fix budget does — an
+    # implementer looping on a design problem, a task whose tier was planned
+    # too optimistically — and should not have to wait for three failed rounds
+    # to move it up a tier. An override is read by cur_model() at every node
     # boundary, so a RUNNING task picks it up at its next step.
 
     def set_model_override(self, taskfile, task_id, model, reason=None):

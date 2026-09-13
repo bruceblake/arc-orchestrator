@@ -11,8 +11,9 @@ import unittest
 from pathlib import Path
 
 from helpers import FakeStore, capture_events
-from helpers import needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: E402,F401
+from helpers import ENTRY, STRONGEST, DISTINCT_MODELS, MODEL_OF  # noqa: E402,F401
 from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
+
 
 import code_tasks
 import config
@@ -58,14 +59,33 @@ def _reap(pid):
         pass
 
 
+# The canonical valid task: entry-tier implementer, reviewed by the family the
+# roster says reviews it. Derived, not pinned, so a transition does not leave a
+# fixture whose reviewer is a family that has left (kimi left on 2026-09-12).
 BASIC = {"id": "t1", "title": "T1", "prompt": "do it",
-         "model": config.ESCALATION_PATH[0], "reviewer": "kimi"}
+         "model": config.ESCALATION_PATH[0],
+         "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0])}
 
 
 class LoadTaskfile(unittest.TestCase):
     def test_accepts_a_valid_cross_family_task(self):
         ts = code_tasks.load_taskfile(taskfile([BASIC]))
         self.assertEqual(list(ts["tasks"]), ["t1"])
+
+    def test_every_implementer_has_a_cross_family_default_reviewer(self):
+        """The RULE, over the whole roster: name any live implementer and the
+        default reviewer's family differs from its own. Stated this way, a
+        roster move cannot leave a model whose only reviewer is itself."""
+        for model in config.IMPLEMENTER_MODELS:
+            fam = config.MODEL_FAMILY[model]
+            rev = config.cross_family_reviewer(model)
+            self.assertIsNotNone(rev, f"{model} has no cross-family reviewer")
+            self.assertNotEqual(rev, fam, f"{model} would self-review")
+            self.assertIn(rev, config.REVIEW_FAMILIES)
+            # And the loader accepts the pairing it implies.
+            t = {**BASIC, "model": model, "reviewer": rev}
+            loaded = code_tasks.load_taskfile(taskfile([t]))
+            self.assertEqual(loaded["tasks"]["t1"]["reviewer"], rev)
 
     def test_rejects_a_non_implementer_model(self):
         bad = {**BASIC, "model": "gpt-4"}
@@ -78,6 +98,21 @@ class LoadTaskfile(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             code_tasks.load_taskfile(taskfile([bad]))
         self.assertIn("must not be the harness", str(cm.exception))
+
+    def test_the_same_family_escape_hatch_is_off_by_default(self):
+        """ARC_ALLOW_SAME_FAMILY_REVIEW is the operator's TEMPORARY override
+        (2026-09-12, GLM backend unstable). The default must stay
+        cross-family; the hatch is a separate, explicit opt-in."""
+        self.assertFalse(config.ALLOW_SAME_FAMILY_REVIEW,
+                         "the suite must exercise the default governance")
+        orig = config.ALLOW_SAME_FAMILY_REVIEW
+        config.ALLOW_SAME_FAMILY_REVIEW = True
+        try:
+            same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
+            ts = code_tasks.load_taskfile(taskfile([same]))
+            self.assertEqual(ts["tasks"]["t1"]["reviewer"], STRONGEST_FAMILY)
+        finally:
+            config.ALLOW_SAME_FAMILY_REVIEW = orig
 
     def test_rejects_duplicate_ids(self):
         with self.assertRaises(ValueError):
@@ -106,17 +141,32 @@ class LoadTaskfile(unittest.TestCase):
         ts = code_tasks.load_taskfile(taskfile([BASIC], pattern="chain"))
         self.assertEqual(ts["pattern"], "chain")
 
+    def test_pattern_aliases_normalize_to_the_catalogue_id(self):
+        # Planners wrote "fan-out-fan-in" and "orchestrator-workers" for the
+        # same shape; the dashboard and describe() compare labels to detected
+        # shapes, so the label must be canonical. Unknown names pass through.
+        for raw, want in (("fan-out-fan-in", "fanout"), ("Orchestrator Workers", "fanout"),
+                          ("evaluator-optimizer", "evaluator"), ("debate-vote", "debate"),
+                          ("something-new", "something-new")):
+            with self.subTest(raw=raw):
+                ts = code_tasks.load_taskfile(taskfile([BASIC], pattern=raw))
+                self.assertEqual(ts["pattern"], want)
+
     def test_pattern_defaults_to_empty_when_absent(self):
         ts = code_tasks.load_taskfile(taskfile([BASIC]))
         self.assertEqual(ts["pattern"], "")
 
 
 class PlannerPatternLibrary(unittest.TestCase):
-    """The planner is told to pick a named pattern from the library doc."""
+    """The planner designs the graph BETWEEN tasks: it is handed the catalogue
+    (graph_shapes.PATTERNS), the decision table, today's fan-out caps, and
+    the other projects for the repo it may chain `after`."""
 
-    def test_schema_hint_carries_the_pattern_field(self):
+    def test_schema_hint_carries_the_pattern_and_after_fields(self):
         self.assertIn('"pattern"', code_tasks.PLAN_SCHEMA_HINT)
-        self.assertIn("graph-pattern library", code_tasks.PLAN_SCHEMA_HINT)
+        self.assertIn('"after"', code_tasks.PLAN_SCHEMA_HINT)
+        for pid in ("chain", "fanout", "diamond", "router"):
+            self.assertIn(pid, code_tasks.PLAN_SCHEMA_HINT)
 
     def test_planner_prompt_points_at_the_pattern_library(self):
         seen = {}
@@ -126,9 +176,10 @@ class PlannerPatternLibrary(unittest.TestCase):
                 seen["prompt"] = prompt
                 return object()
 
-        # The planner is whichever model the roster says may plan today — Kimi
-        # until 09-19, GLM after — resolved through _driver. Stub THAT, not a
-        # specific driver class, or the test breaks the day the roster moves.
+        # The planner is whichever model the roster says may plan today —
+        # GLM-5.3 on the 2026-09-12 two-model roster — resolved through
+        # _driver. Stub THAT, not a specific driver class, or the test breaks
+        # the day the roster moves.
         orig_driver = code_tasks._driver
         orig_extract = code_tasks._plan_json_from_run
         code_tasks._driver = lambda model, role, pol: FakeDriver()
@@ -141,8 +192,39 @@ class PlannerPatternLibrary(unittest.TestCase):
         finally:
             code_tasks._driver = orig_driver
             code_tasks._plan_json_from_run = orig_extract
-        self.assertIn("docs/graph-patterns.md", seen["prompt"])
-        self.assertIn('"pattern"', seen["prompt"])
+        import graph_shapes
+        p = seen["prompt"]
+        # The catalogue itself is in the prompt — a planner working on another
+        # repo cannot read this repo's docs/graph-patterns.md.
+        for pat in graph_shapes.PATTERNS:
+            if pat["id"] not in ("evaluator", "escalate"):
+                self.assertIn(f"{pat['id']}: {pat['gist']}", p)
+        self.assertIn("Decision table", p)
+        self.assertIn("Joins are real", p)
+        self.assertIn('"after"', p)
+        # The per-task pipeline is stated as fixed, so the planner designs
+        # only the graph above it.
+        self.assertIn("fixed per-task pipeline", p)
+        self.assertIn('"pattern"', p)
+        # Fan-out arithmetic quotes today's slots, not a typed number.
+        for m in config.ESCALATION_PATH:
+            self.assertIn(f"{m} {config.driver_limit(m)}", p)
+
+    def test_planner_sees_existing_projects_for_the_repo_only(self):
+        with tempfile.TemporaryDirectory() as d:
+            orig = config.TASKS_DIR
+            config.TASKS_DIR = d
+            try:
+                (Path(d) / "mine.json").write_text(json.dumps({"project": {
+                    "repo": "/tmp/repo-a", "title": "Mine", "tasks": [BASIC]}}))
+                (Path(d) / "other.json").write_text(json.dumps({"project": {
+                    "repo": "/tmp/repo-b", "title": "Other", "tasks": [BASIC]}}))
+                prose = code_tasks._existing_projects_prose("/tmp/repo-a")
+            finally:
+                config.TASKS_DIR = orig
+        self.assertIn("mine.json: Mine (1 tasks", prose)
+        self.assertNotIn("other.json", prose)
+        self.assertIn('"after"', prose)
 
 
 class ParseVerdict(unittest.TestCase):
@@ -171,7 +253,7 @@ class CapabilityFailureClassification(unittest.TestCase):
     def test_exhausted_rounds_is_a_capability_failure(self):
         self.assertTrue(code_tasks._is_capability_failure("exhausted fix rounds"))
         self.assertTrue(code_tasks._is_capability_failure(
-            "exhausted escalation up to Kimi-K3"))
+            f"exhausted escalation up to {config.PLANNER_MODEL}"))
 
     def test_killed_run_process_is_not(self):
         self.assertFalse(code_tasks._is_capability_failure(
@@ -181,7 +263,7 @@ class CapabilityFailureClassification(unittest.TestCase):
 
     def test_harness_crash_is_not(self):
         self.assertFalse(code_tasks._is_capability_failure(
-            "run crashed: kimi driver 400"))
+            "run crashed: driver 400"))
 
 
 class ResumePlanning(unittest.TestCase):
@@ -207,7 +289,7 @@ class ResumePlanning(unittest.TestCase):
                          "a capability failure at the entry tier moves up one")
 
     def test_killed_run_resumes_at_the_same_tier(self):
-        """The regression that put four tasks on Kimi-K3 at once."""
+        """The regression that put four tasks on one scarce tier at once."""
         p = self.plan([{"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
                         "error": "reset-stale: owning run process died"}])
         self.assertEqual(p["escalated_on_resume"], {},
@@ -316,10 +398,10 @@ class PlanExtraction(unittest.TestCase):
 
     PLAN = {"project": {"repo": "/tmp", "title": "T", "tasks": [
         {"id": "a", "title": "A", "prompt": "x" * 200, "model": config.ESCALATION_PATH[0],
-         "reviewer": "kimi"}]}}
+         "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0])}]}}
     DECOY = {"project": {"repo": "/tmp", "title": "T", "tasks": [
         {"id": "a", "title": "A", "prompt": "...", "model": config.ESCALATION_PATH[0],
-         "reviewer": "kimi"}]}}
+         "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0])}]}}
 
     def _run(self, transcript_lines, text=""):
         with tempfile.TemporaryDirectory() as d:
@@ -327,6 +409,30 @@ class PlanExtraction(unittest.TestCase):
             p.write_text("\n".join(json.dumps(l) for l in transcript_lines))
             res = type("R", (), {"transcript_path": str(p), "text": text})()
             return code_tasks._plan_json_from_run(res)
+
+    def test_reads_opencode_event_dialect_transcripts(self):
+        """opencode session logs have NO "role" lines: assistant text lives in
+        {"type":"text","part":{"text":...}} records. Without reading them a
+        completed GLM-via-opencode plan parses as empty and is thrown away
+        (first attempt killed exactly so, 2026-09-13)."""
+        span = self._run([
+            {"type": "step_start", "part": {"type": "step-start"}},
+            {"type": "text", "part": {"type": "text", "text": "investigating the repo...\n"}},
+            {"type": "text", "part": {"type": "text", "synthetic": True,
+                                      "metadata": {"compaction_continue": True},
+                                      "text": "Continue if you have next steps."}},
+            {"type": "text", "part": {"type": "text", "text": "the plan:\n" + json.dumps(self.PLAN)}},
+            {"type": "step_finish", "part": {"type": "step-finish", "reason": "stop"}},
+        ])
+        self.assertIsNotNone(span, "opencode-dialect plan lost")
+        self.assertEqual(json.loads(span)["project"]["tasks"][0]["id"], "a")
+
+    def test_opencode_synthetic_markers_are_not_messages(self):
+        """Compaction 'continue' markers must not count as assistant output."""
+        self.assertIsNone(self._run([
+            {"type": "text", "part": {"type": "text", "synthetic": True,
+                                      "text": "Continue if you have next steps."}},
+        ]))
 
     def test_recovers_a_plan_too_large_for_the_truncated_text(self):
         big = json.dumps(self.PLAN)
@@ -494,7 +600,9 @@ class ProjectChaining(unittest.TestCase):
         p.write_text(json.dumps({"project": {
             "repo": "/tmp", "title": name, "tasks": [
                 {"id": i, "title": i, "prompt": "x",
-                 "model": config.ESCALATION_PATH[0], "reviewer": "kimi"} for i in ids]}}))
+                 "model": config.ESCALATION_PATH[0],
+                 "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0])}
+                for i in ids]}}))
         return str(p.resolve())
 
     def _row(self, tid, status):
@@ -714,7 +822,11 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
     """
 
     def _pick(self, usage, impl_family=None, n=2):
-        pool = [m for m in (STRONGEST, "GLM-5.3", ENTRY)
+        # One model per FAMILY. The old pool was (STRONGEST, "GLM-5.3", ENTRY),
+        # positional aliases that both resolved into the glm family once the
+        # roster reordered — so "three families" quietly became two and the
+        # reviewer pool could not be filled.
+        pool = [m for m in DISTINCT_MODELS
                 if config.MODEL_FAMILY.get(m) != impl_family]
         pool.sort(key=lambda m: (usage.get(m, 0) / max(1, config.driver_limit(m)),
                                  usage.get(m, 0)))
@@ -745,27 +857,39 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         self.assertEqual(caps[picked[0]], roomiest)
 
     def test_a_model_at_its_cap_is_never_preferred_to_an_idle_one(self):
-        caps = {m: config.driver_limit(m)
-                for m in ("GLM-5.3", ENTRY, STRONGEST)}
-        full, idle = "GLM-5.3", STRONGEST
+        """THE RULE: an idle model beats one already at its cap, whatever the
+        caps are and whichever model holds them. Numbers come from today's
+        roster (DeepSeek driver cap 5, GLM 2 with two models); the assertion
+        is on the ordering, not on which model won."""
+        caps = {m: config.driver_limit(m) for m in DISTINCT_MODELS}
+        if len(caps) < 2:
+            self.skipTest("needs two live models to compare contention")
+        full, idle = sorted(caps, key=lambda m: -caps[m])[:2]
+        if caps[full] == 0:
+            self.skipTest("no live model has a positive driver cap")
         picked = self._pick({full: caps[full], idle: 0})
-        self.assertEqual(picked[0], idle)
+        self.assertEqual(picked[0], idle,
+                         f"{full} sits at its cap of {caps[full]} and must not "
+                         f"outrank the idle {idle}")
 
     def test_the_implementers_family_is_never_chosen(self):
-        for fam in ("kimi", "glm", "deepseek"):
+        # The RULE, over the whole roster: whichever family implements, no
+        # reviewer offered shares it. The family list is derived, not the
+        # hard-coded kimi/glm/deepseek of the three-model fleet.
+        for fam in sorted(config.REVIEW_FAMILIES):
             picked = self._pick({}, impl_family=fam, n=2)
+            self.assertTrue(picked, f"no reviewer at all for a {fam} implementer")
             for m in picked:
                 self.assertNotEqual(config.MODEL_FAMILY[m], fam)
 
-    @needs_three_families
-
-    def test_enough_reviewers_remain_after_excluding_the_implementer(self):
-        """PR_REVIEWERS must be satisfiable from the remaining families."""
-        for fam in ("kimi", "glm", "deepseek"):
-            picked = self._pick({}, impl_family=fam, n=config.PR_REVIEWERS)
-            self.assertEqual(len(picked), config.PR_REVIEWERS,
-                             f"cannot fill {config.PR_REVIEWERS} reviewers when "
-                             f"the implementer is {fam}")
+    def test_every_implementer_family_can_be_reviewed_when_it_must(self):
+        """An implementer's family is excluded; when the roster still has
+        another family, at least one reviewer must remain (the cross-review
+        gate is thinner on a two-model fleet, never absent)."""
+        for fam in sorted(config.REVIEW_FAMILIES):
+            self.assertGreaterEqual(
+                len(self._pick({}, impl_family=fam, n=len(config.REVIEW_FAMILIES))),
+                1, f"no cross-family reviewer remains when {fam} implements")
 
 
 class ResumingAnOpenPullRequest(unittest.TestCase):
@@ -859,30 +983,34 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
     nobody coming back. Eligibility is now decided by building the driver.
     """
 
-    @needs_three_families
-
-    def test_every_implementer_family_has_enough_reviewers(self):
-        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+    def test_every_implementer_family_has_a_reviewer_it_can_use(self):
+        """The RULE: every live implementer family must have at least one
+        eligible PR reviewer. PR_REVIEWERS itself is capped at
+        families-1 (two families -> one reviewer on the 2026-09-12 roster),
+        so the count that must be satisfiable is min(wanted, families-1)."""
+        wanted = min(config.PR_REVIEWERS, len(config.REVIEW_FAMILIES) - 1)
+        for fam in sorted(config.REVIEW_FAMILIES):
             with self.subTest(family=fam):
                 self.assertGreaterEqual(
                     len(code_tasks._eligible_pr_reviewers(fam, None)),
-                    config.PR_REVIEWERS,
-                    f"{fam} cannot field {config.PR_REVIEWERS} PR reviewers")
+                    max(1, wanted),
+                    f"{fam} cannot field a cross-family PR reviewer")
 
     def test_it_never_picks_the_implementer_s_own_family(self):
-        for fam in ("kimi", "glm", "deepseek"):
+        for fam in sorted(config.REVIEW_FAMILIES):
             for m in code_tasks._eligible_pr_reviewers(fam, None):
                 self.assertNotEqual(config.MODEL_FAMILY.get(m), fam)
 
     def test_every_model_it_offers_can_actually_be_built(self):
-        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
+        for fam in sorted(config.REVIEW_FAMILIES):
             for m in code_tasks._eligible_pr_reviewers(fam, None):
                 code_tasks._driver(m, "pr_reviewer", None)  # must not raise
 
-    def test_gpt_oss_is_never_offered_as_a_reviewer(self):
-        for fam in ("kimi", "glm", "deepseek", "gpt-oss"):
-            self.assertNotIn("gpt-oss-120b",
-                             code_tasks._eligible_pr_reviewers(fam, None))
+    def test_a_retired_model_is_never_offered_as_a_reviewer(self):
+        for fam in sorted(config.REVIEW_FAMILIES):
+            offered = code_tasks._eligible_pr_reviewers(fam, None)
+            for retired in ("gpt-oss-120b", "Kimi-K3", "DeepSeek-V4-Flash"):
+                self.assertNotIn(retired, offered)
 
 
 class ReviewerContention(unittest.TestCase):
@@ -901,27 +1029,38 @@ class ReviewerContention(unittest.TestCase):
         usage = {"GLM-5.3": config.driver_limit("GLM-5.3"), "harness:opencode": 0}
         self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
 
-    @needs_kimi
-
-    def test_kimi_is_preferred_when_the_opencode_pool_is_full(self):
-        usage = {STRONGEST: 1, "GLM-5.3": 1, ENTRY: 1,
-                 "harness:opencode": config.harness_limit("opencode"),
-                 "harness:kimi": 1}
-        order = sorted(["GLM-5.3", ENTRY, STRONGEST],
+    def test_a_model_on_a_free_harness_is_preferred_when_one_pool_is_full(self):
+        # The point is HARNESS contention, not model strength: every model on
+        # a saturated harness inherits that pool's pressure, so a model on a
+        # different, free harness must sort first however the roster is
+        # ordered. Harnesses are read from the roster — with one harness in
+        # use there is nothing to compare, and the rule is vacuous.
+        by_harness = {}
+        for m in DISTINCT_MODELS:
+            by_harness.setdefault(config.MODEL_HARNESS.get(m), []).append(m)
+        if len(by_harness) < 2:
+            self.skipTest("every live model shares one harness today")
+        (busy_h, busy), (free_h, free) = sorted(
+            by_harness.items(), key=lambda kv: -len(kv[1]))[:2]
+        usage = {m: 1 for m in DISTINCT_MODELS}
+        usage[f"harness:{busy_h}"] = config.harness_limit(busy_h)
+        usage[f"harness:{free_h}"] = 0
+        order = sorted(DISTINCT_MODELS,
                        key=lambda m: code_tasks._reviewer_pressure(m, usage))
-        self.assertEqual(order[0], STRONGEST)
+        self.assertIn(order[0], free,
+                      f"a model on the saturated {busy_h} pool outranked one on "
+                      f"the free {free_h} pool")
 
     def test_an_idle_fleet_scores_everything_zero(self):
-        for m in (STRONGEST, "GLM-5.3", ENTRY):
+        for m in DISTINCT_MODELS:
             self.assertEqual(code_tasks._reviewer_pressure(m, {}), 0.0)
 
-    @needs_kimi
-
-    def test_kimi_routes_to_the_kimi_harness_and_the_rest_to_opencode(self):
-        self.assertEqual(code_tasks._harness_of(STRONGEST), "kimi")
+    def test_driver_routing_follows_the_roster(self):
+        # Routing follows the roster row, whatever is on it today — no
+        # hard-coded model->harness if-chain that goes stale on a transition.
         for m, h in config.MODEL_HARNESS.items():
             self.assertEqual(code_tasks._harness_of(m), h)
-        self.assertEqual(code_tasks._harness_of("GLM-5.3"), "opencode")
+            self.assertEqual(code_tasks._driver(m, "implementer", None).harness, h)
 
 
 class EveryTaskEventNamesItsTask(unittest.TestCase):
@@ -1400,10 +1539,10 @@ class AJoinWaitsForEveryDependency(unittest.TestCase):
     """
 
     def _graph(self, deps, merged=()):
-        tasks = [{"id": "a", "title": "a", "prompt": "p", "model": config.ESCALATION_PATH[0], "reviewer": "kimi"},
-                 {"id": "b", "title": "b", "prompt": "p", "model": config.ESCALATION_PATH[0], "reviewer": "kimi"},
-                 {"id": "c", "title": "c", "prompt": "p", "model": config.ESCALATION_PATH[0], "reviewer": "kimi",
-                  "deps": deps}]
+        mk = {"model": config.ESCALATION_PATH[0], "reviewer": config.cross_family_reviewer(config.ESCALATION_PATH[0])}
+        tasks = [{"id": "a", "title": "a", "prompt": "p", **mk},
+                 {"id": "b", "title": "b", "prompt": "p", **mk},
+                 {"id": "c", "title": "c", "prompt": "p", **mk, "deps": deps}]
         prior = [{"id": m, "status": "merged", "model": config.ESCALATION_PATH[0], "error": None} for m in merged]
         ts = code_tasks.load_taskfile(taskfile(tasks))
         with capture_events():
@@ -1488,8 +1627,6 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
         self.assertEqual(n.retry.on, (code_tasks.DriverError,))
         self.assertGreater(n.timeout, config.DRIVER_TIMEOUT)
 
-    @needs_three_families
-
     def test_the_fanout_returns_a_spawn_with_one_item_per_reviewer(self):
         """Run the real pr_fanout node against stubbed git/store."""
         import asyncio as aio
@@ -1572,7 +1709,8 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
 class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
     """A taskfile written before a roster transition is still a good plan.
 
-    gpt-oss retired 09-11, DeepSeek-V4 replaced 09-12, Kimi-K3 withdrawn 09-19.
+    gpt-oss retired 09-11; DeepSeek-V4 replaced 09-12; Kimi-K3 retired
+    09-12 by operator decision.
     Fourteen taskfiles on disk named gpt-oss the morning after it left; failing
     every one of them with "must be an implementer" would have thrown away
     fourteen decompositions over a stale label.
@@ -1593,3 +1731,31 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
                 continue  # not retired yet on this roster date
             self.assertIn(dest, config.IMPLEMENTER_MODELS,
                           f"{name} remaps to {dest!r}, which is not live")
+
+
+class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
+    """A retired model's task lands on a live tier; if that tier's family is
+    the task's reviewer, the reviewer flips. On 2026-09-12 the provider
+    stopped serving DeepSeek: every old DeepSeek task with reviewer "glm"
+    remapped to GLM-5.3 and then failed as a self-review, and check.sh's
+    taskfile-validity step was red for the whole tasks directory."""
+
+    def test_remapped_task_flips_a_now_same_family_reviewer(self):
+        import config as cfg
+        retired = next((m for m in code_tasks.RETIRED_MODELS
+                        if m not in cfg.IMPLEMENTER_MODELS), None)
+        if retired is None:
+            self.skipTest("every model in RETIRED_MODELS is live today")
+        target = code_tasks.RETIRED_MODELS[retired]() or cfg.ESCALATION_PATH[0]
+        same = cfg.MODEL_FAMILY[target]
+        if same not in cfg.REVIEW_FAMILIES:
+            self.skipTest(f"{target}'s family cannot review, nothing to collide with")
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
+        t = ts["tasks"]["t1"]
+        self.assertEqual(t["model"], target)
+        self.assertNotEqual(cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"]), same)
+
+    def test_a_live_model_with_its_own_family_as_reviewer_is_still_rejected(self):
+        same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
+        with self.assertRaises(ValueError):
+            code_tasks.load_taskfile(taskfile([same]))

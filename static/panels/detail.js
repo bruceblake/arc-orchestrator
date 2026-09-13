@@ -54,7 +54,33 @@ async function refreshDetail() {
     ${(g.worktrees || []).length > 1 ? `<div class="hint" style="margin-top:3px">${g.worktrees.map(esc).join("<br>")}</div>` : ""}`;
   const pm = $("#d-progress");
   if (pm) pm.innerHTML = progressLines(d.task_progress);
-  renderDag(d); renderFeed(d); renderTasks(d);
+  renderChain(d); renderDag(d); renderFeed(d); renderTasks(d);
+}
+
+function renderChain(d) {
+  const box = $("#d-chain"); if (!box) return;
+  const c = d.chain;
+  if (!c) { box.innerHTML = ""; box.style.display = "none"; return; }
+  box.style.display = "";
+  const dep = x => {
+    const prog = x.n_tasks != null ? `${x.merged}/${x.n_tasks} merged` : "not planned yet";
+    const cls = x.state === "failed" ? "bad" : x.state === "ready" ? "good" : "warn";
+    return `<li><a href="#" data-open="${attr(x.file)}"><b>${esc(x.title)}</b></a> <span class="${cls}">${esc(x.state)}</span> <span class="hint">${esc(prog)}${x.failed && x.failed.length ? ` · failed: ${esc(x.failed.join(", "))}` : ""}</span></li>`;
+  };
+  const g = c.gate;
+  const gateLine = !g ? "" :
+    g.state === "waiting" ? `<div class="hint">⛓ a run is holding at the chain gate since ${esc(fmtT(new Date(g.ts * 1000).toISOString()))} — it allocates no worktree until every upstream task is merged</div>` :
+    g.state === "ready" ? `<div class="hint good">⛓ chain gate opened after ${esc(tick(g.waited_s || 0))}</div>` :
+    `<div class="hint bad">⛓ chain blocked: ${esc(g.reason || "an upstream task failed")}</div>`;
+  box.innerHTML = `<div class="kv"><span>chain</span></div>
+    ${(c.deps || []).length ? `<div class="hint">runs only after ${c.deps.length === 1 ? "this project is" : "these projects are"} fully merged:</div><ul class="chainlist">${c.deps.map(dep).join("")}</ul>` : ""}
+    ${(c.blocks || []).length ? `<div class="hint">waiting on this one:</div><ul class="chainlist">${c.blocks.map(b => `<li><a href="#" data-open="${attr(b.file)}">${esc(b.title)}</a></li>`).join("")}</ul>` : ""}
+    ${gateLine}`;
+  box.onclick = ev => {
+    const a = ev.target.closest && ev.target.closest("[data-open]");
+    if (!a) return;
+    ev.preventDefault(); openDetail(a.dataset.open);
+  };
 }
 
 function renderDag(d) {
@@ -71,7 +97,21 @@ function renderDag(d) {
   const edges = [];
   for (const t of tasks) for (const dep of (t.deps || t.depends || []))
     if (rowsById[dep] !== undefined || tasks.some(x => x.id === dep)) edges.push({src: dep, dst: t.id});
-  $("#d-dagmeta").textContent = "(left → right = dependency order; colored border = status; hover = title + verify; click = transcript)";
+  // The chain gate, drawn where it really sits: in front of every head.
+  const c = d.chain;
+  if (c && (c.deps || []).length) {
+    const ids = new Set(tasks.map(t => t.id));
+    const heads = tasks.filter(t => !(t.deps || t.depends || []).some(x => ids.has(x))).map(t => t.id);
+    const g = c.gate || {};
+    for (const x of c.deps) {
+      let status = x.state === "failed" ? "failed" : x.state === "ready" ? "merged" : g.state === "waiting" ? "running" : "pending";
+      if (g.state === "blocked" && x.state !== "ready") status = "failed";
+      const id = "after:" + x.file;
+      nodes.unshift({id, kind: "chain", file: x.file, title: "after " + x.title, status, merged: x.merged, n_tasks: x.n_tasks});
+      for (const h of heads) edges.push({src: id, dst: h, kind: "chain"});
+    }
+  }
+  $("#d-dagmeta").textContent = `(left → right = dependency order; colored border = status; hover = title + verify; click = transcript${c && (c.deps || []).length ? "; dashed ⛓ = chain gate, click = that project" : ""})`;
   $("#dag").innerHTML = taskDag({nodes, edges}, {size: "full", file: CUR});
   bindDagClicks("#dag", d.runs || []);
 }

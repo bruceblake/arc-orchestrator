@@ -89,9 +89,12 @@ ok(typeof c.chatEmptyState === "function", "chatEmptyState defined");
 
 // ---- empty-state text (exact spec string) -----------------------------------
 const empty = c.chatEmptyState();
-ok(empty.includes("Kimi-K3 will turn it into a governed project")
-   && empty.includes("and hand it back ready to run"),
-   "empty state uses the exact spec wording");
+// The planner is named by the page constant, not a retired model: assert the
+// RULE (the live planner is named, plus the spec wording), not a model id.
+ok(/\S+ will turn it into a governed project/.test(empty)
+   && empty.includes("and hand it back ready to run")
+   && !empty.includes("Kimi"),
+   "empty state names a live planner and keeps the spec wording");
 
 // ---- mic renders iff SpeechRecognition exists ------------------------------
 window.SpeechRecognition = function(){};
@@ -170,11 +173,13 @@ ok(card.includes("data-ct-open=") && card.includes("data-ct-run="), "taskcard: b
 // ---- thinking spinner renders while a turn runs ----------------------------
 __setChat({ TURNS: [], RUNNING: true });
 c.chatRender();
-ok(document.querySelector("#c-log").innerHTML.includes("Kimi-K3 is thinking…"),
+const thinking = document.querySelector("#c-log").innerHTML;
+ok(/\S+ is thinking…/.test(thinking) && !thinking.includes("Kimi"),
    "render: thinking line shown while running");
 __setChat({ TURNS: [], RUNNING: false });
 c.chatRender();
-ok(!document.querySelector("#c-log").innerHTML.includes("Kimi-K3 is thinking…"),
+const idle = document.querySelector("#c-log").innerHTML;
+ok(!idle.includes("is thinking…"),
    "render: thinking line hidden when idle");
 
 // ---- repo picker gains a 'new repo…' option --------------------------------

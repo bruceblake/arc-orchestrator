@@ -158,15 +158,20 @@ class TestDocsTruthArcEnvVars(unittest.TestCase):
             with open(os.path.join(ROOT, rel), encoding="utf-8") as fh:
                 src += fh.read() + "\n"
         defined = set(re.findall(r"ARC_[A-Z0-9_]+", src))
+        # Derived from the registry, not listed here: a literal list kept
+        # minting a gpt-oss driver-limit knob after it was removed from
+        # FAMILIES, so the suite demanded docs for a knob nothing reads.
         for prefix in ("ARC_LIMIT_", "ARC_DRIVER_LIMIT_"):
-            for family in ("GPT_OSS", "GLM", "KIMI", "DEEPSEEK"):
-                defined.add(prefix + family)
+            for family in config.FAMILIES:
+                defined.add(prefix + family.upper().replace("-", "_"))
         # config.harness_limit builds its override name the same way
         # driver_limit does — os.getenv(f"ARC_HARNESS_LIMIT_{harness.upper()}")
         # — so the literal never appears in config.py and the scan cannot see
-        # it. Expanded here exactly like the two prefixes above.
-        for harness in ("OPENCODE", "KIMI"):
-            defined.add("ARC_HARNESS_LIMIT_" + harness)
+        # it. Expanded from the configured harness set (was a hardcoded
+        # ("OPENCODE", "KIMI") tuple, which demanded docs for a harness that
+        # had left and none for dsh when it arrived, 2026-09-12).
+        for harness in config._HARNESS_CAP:
+            defined.add("ARC_HARNESS_LIMIT_" + harness.upper())
         cls.defined = defined
         cls.mentioned = set(re.findall(r"ARC_[A-Z0-9_]+", DOC_TEXT))
 
@@ -315,6 +320,67 @@ class TestDocsTruthReferencedPaths(unittest.TestCase):
             missing, [],
             "docs name paths that do not exist: %s" % missing,
         )
+
+
+class TestDocsTruthTaskfileExamples(unittest.TestCase):
+    """A taskfile example in the docs must be one a run would actually accept.
+
+    The docs are what an agent copies from. README.md listed `gpt-oss-120b` as
+    a valid `model` value for eleven days after the model left the roster, and
+    the whole docs-truth suite passed the entire time: it checked env vars,
+    config attributes and file paths, and never once looked at the model names
+    the examples tell the reader to write. A taskfile built from those examples
+    is rejected by load_taskfile before a single model is called.
+
+    Scope is deliberately narrow — fenced blocks only. Prose that discusses a
+    retired model ("gpt-oss-120b was retired on 2026-09-11") is history and
+    must stay readable; an EXAMPLE is an instruction.
+    """
+
+    @staticmethod
+    def _pairs(key):
+        for block in _fenced_blocks():
+            for m in re.finditer(r'"%s"\s*:\s*"([^"]+)"' % key, block):
+                yield m.group(1)
+
+    def test_example_models_are_live_implementers(self):
+        live = set(config.IMPLEMENTER_MODELS)
+        # A schema line naming the alternatives ("gpt-oss|DeepSeek|GLM") is a
+        # placeholder, not a value; the loader would reject it either way, and
+        # the per-alternative check below covers its parts.
+        bad = sorted({m for m in self._pairs("model")
+                      if "|" not in m and m not in live and not m.startswith("<")})
+        self.assertEqual(
+            bad, [],
+            "docs show taskfile examples whose `model` is not a live "
+            "implementer %s: %s" % (sorted(live), bad))
+
+    def test_example_model_alternatives_are_live(self):
+        live = set(config.IMPLEMENTER_MODELS)
+        bad = []
+        for value in self._pairs("model"):
+            if "|" not in value:
+                continue
+            for alt in value.split("|"):
+                alt = alt.strip()
+                if alt and not alt.startswith("<") and alt not in live:
+                    bad.append(alt)
+        self.assertEqual(
+            sorted(set(bad)), [],
+            "a docs schema line offers models that are not live: %s" % sorted(set(bad)))
+
+    def test_example_reviewers_are_live_review_families(self):
+        live = set(config.REVIEW_FAMILIES)
+        bad = []
+        for value in self._pairs("reviewer"):
+            for alt in str(value).split("|"):
+                alt = alt.strip()
+                if alt and not alt.startswith("<") and alt not in live:
+                    bad.append(alt)
+        self.assertEqual(
+            sorted(set(bad)), [],
+            "docs show taskfile examples whose `reviewer` is not a live review "
+            "family %s: %s" % (sorted(live), sorted(set(bad))))
 
 
 if __name__ == "__main__":
