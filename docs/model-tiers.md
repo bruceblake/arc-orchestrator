@@ -2,7 +2,7 @@
 
 The multi-model code fleet is tiered by task difficulty and role. Every
 routing decision below is made at plan time — by
-DeepSeek-V4.1-Flash-thinking-max in `main.py code plan`
+GLM-5.3 in `main.py code plan`
 (`config.PLANNER_MODEL`), or by whoever writes a task file by hand — and is
 enforced again by `code_tasks.load_taskfile`, which remaps retired model
 names and rejects anything else that violates it. There is no runtime
@@ -10,30 +10,46 @@ triage.
 
 ## Model fleet
 
+Two models, two harnesses (operator decision 2026-09-12):
+
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement, Plan, Review, PR-review | 4 | 2 |
-| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review, PR-review | 3 | 3 |
-| DeepSeek-V4.1-Flash-thinking-max | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 5 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
+| DeepSeek-V4.1-Flash-thinking-max | `dsh` (`DeepseekDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
+
+**GLM-5.3 is the fleet's strongest model** — hard tier, the planner, the last
+escalation stage. **DeepSeek-V4.1-Flash-thinking-max (DS-max) is the
+medium-tier workhorse**: much faster, carries the implementation load,
+reviews, and **never plans**.
 
 - **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 4,
-  `kimi` 3, `deepseek` 10). The deepseek 10 is **provider-published**
+  `deepseek` 10). GLM's 4 is the measured session ceiling on this fleet; the
+  deepseek 10 is **provider-published**
   (ARC docs, 2026-09-12), not a ramped measurement like the retired
   fleet's figures — re-measure it if observed rejections disagree.
   These are per-account ARC limits, not per-process; overridable per
   family via `ARC_LIMIT_<FAMILY>`.
 - **Driver semaphore cap** — `config._MODEL_DRIVER_CAP`, the max concurrent
   harness instances per model via `drivers._gate` → `config.driver_limit`.
-  It is the account cap divided by sessions-per-process (an opencode run
-  holds about two ARC sessions at once; the kimi CLI holds one), so 10 ÷ 2 = 5
-  and 4 ÷ 2 = 2. `ARC_DRIVER_HEADROOM` subtracts further, and batch callers
-  on the planner model see one slot fewer (`INTERACTIVE_RESERVE`) so an
-  interactive chat always has somewhere to land.
-- Kimi-K3 runs in the `kimi` CLI; GLM-5.3 and
-  DeepSeek-V4.1-Flash-thinking-max run in `opencode` via `OpencodeDriver`.
-  The driver caps apply per model.
-- Kimi-K3 is scheduled for withdrawal on **2026-09-19** (see the roster
-  section below for what changes that morning).
+  It is the account cap divided by sessions-per-process (both harnesses hold
+  about two ARC sessions at once: `config._SESSIONS_PER_PROCESS` is
+  `{"opencode": 2, "dsh": 2}`), so 10 ÷ 2 = 5
+  and 4 ÷ 2 = 2. `ARC_DRIVER_HEADROOM` subtracts further; batch callers on the
+  planner model would see one slot fewer (`INTERACTIVE_RESERVE`), but
+  `_apply_reserve` skips the reserve while it would leave batch under
+  `MIN_BATCH_SLOTS` = 2 — and GLM-5.3's cap **is** 2, so no reserve is applied
+  there (an interactive chat queues instead of cutting the planner to one).
+- GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
+  **`dsh`**, DeepSeek's own harness (`drivers.DeepseekDriver`, binary via
+  `config.dsh_bin()`), set up in
+  [runbook.md](runbook.md) § "DeepSeek's `dsh` harness". The driver caps
+  apply per model; the **harness** pools are separate and 5 each
+  (`config._HARNESS_CAP`), so neither model can starve the other's binary.
+- **Kimi-K3 was retired from this repo on 2026-09-12** by operator decision:
+  its ROSTER row was deleted, it is gone from `config.FAMILIES` and from every
+  live role, and no table above can name it as current. `drivers.KimiDriver`
+  still exists so historical transcripts can be re-read; it refuses to
+  construct for a model off today's roster.
 
 ## Tier definitions (loader-enforced)
 
@@ -47,13 +63,14 @@ rather than rejecting a decomposition that is still good.
 
 | Tier | Work | Model |
 |---|---|---|
-| medium | moderate AND very basic/mechanical implementation | GLM-5.3 |
-| hard | complex / multi-file / architectural | Kimi-K3 or DeepSeek-V4.1-Flash-thinking-max |
+| medium | moderate AND very basic/mechanical implementation | DeepSeek-V4.1-Flash-thinking-max |
+| hard | complex / multi-file / architectural | GLM-5.3 |
 
 There is no basic tier: with gpt-oss-120b retired (2026-09-11) the medium
-tier is the floor and GLM-5.3 absorbs the mechanical work. Within hard,
-DeepSeek-V4.1-Flash-thinking-max takes the hardest tasks — it is the fleet's
-strongest model (operator decision, 2026-09-12).
+tier is the floor. Within the fleet,
+GLM-5.3 takes the hardest tasks — it is the fleet's
+strongest model (operator decision, 2026-09-12), and there is no tier above
+it to escalate to.
 
 Examples of medium: boilerplate, renames, simple utilities, config edits,
 single-file features, straightforward wiring, docs (markdown reference files
@@ -62,21 +79,26 @@ design, or architectural judgment.
 
 ## Planning and review
 
-- **All three live models may plan and review.** In the task file schema the
-  reviewer field names a review *family* — `kimi`, `glm`, or `deepseek`
+- **Both live models may review; only GLM-5.3 may plan.** In the task file
+  schema the
+  reviewer field names a review *family* — `glm`, or `deepseek`
   (`config.REVIEW_FAMILIES`, which maps each token to the live model that
   reviews for it); `code_tasks.load_taskfile` rejects any other value. A
-  family token that has left the roster (as `kimi` will on 2026-09-19) is
+  family token that has left the roster (e.g. `kimi`, retired 2026-09-12) is
   remapped to the strongest cross-family reviewer at load time, not rejected.
 - **Role eligibility is roster-driven.** `config.MODEL_ROLES` (derived from
   `config.ROSTER`) says which of implementer / planner / reviewer /
   pr_reviewer each model may hold; `config.model_may` answers the question,
-  and the driver constructors enforce it — `KimiDriver` and `OpencodeDriver`
+  and the driver constructors enforce it — `OpencodeDriver` and
+  `DeepseekDriver`
   raise `ValueError` when constructed with a role the model's roster row does
-  not allow. There is no per-model if-chain.
-- DeepSeek-V4.1-Flash-thinking-max is the main orchestrator/planner:
+  not allow. There is no per-model if-chain; DeepSeek's row simply has no
+  `planner`.
+- GLM-5.3 is the main orchestrator/planner:
   `main.py code plan` invokes `plan_tasks`, which runs
-  `OpencodeDriver(config.PLANNER_MODEL, "planner")`.
+  `OpencodeDriver(config.PLANNER_MODEL, "planner")`. GLM-5.3 planning is slow
+  on big goals — see [runbook.md](runbook.md) § "Planning a large goal" for
+  the `ARC_DRIVER_TIMEOUT=5400` workaround.
 
 ## Cross-review matrix
 
@@ -88,15 +110,27 @@ that qualifies). With today's roster that resolves to:
 | Implementer | Required reviewer (family → model) |
 |---|---|
 | GLM-5.3 | `deepseek` → DeepSeek-V4.1-Flash-thinking-max |
-| Kimi-K3 | `deepseek` → DeepSeek-V4.1-Flash-thinking-max |
-| DeepSeek-V4.1-Flash-thinking-max | `kimi` → Kimi-K3 |
+| DeepSeek-V4.1-Flash-thinking-max | `glm` → GLM-5.3 |
 
 `code_tasks.load_taskfile` raises `ValueError` if a task's reviewer family is
-the implementer's own family. PR review (`pr_reviewer`) works the same way
-but chooses `config.PR_REVIEWERS` (default 2) reviewers from families other
-than the implementer's, differing from each other, and requires unanimous
-approval — with three review families the fleet can always staff two
-independent readings.
+the implementer's own family. With two families the pairing is exact and
+there is no choice to make.
+
+PR review (`pr_reviewer`) works the same way, but the fleet has only ONE
+family other than the implementer's, so exactly one cross-family reviewer
+reads each PR. `config.PR_REVIEWERS_WANTED` is still 2 and
+`config.PR_REVIEWERS` resolves to `max(1, min(wanted, families - 1))` = 1;
+the miss is not silent — `pr_review` emits
+`task.pr_review_thin {task, pr, wanted, got, reviewers, implementer}`. The
+pre-merge review above is the compensating control: the PR review is the
+second read of a change that already passed a cross-family gate.
+
+**TEMPORARY (operator-authorized 2026-09-12):** with
+`ARC_ALLOW_SAME_FAMILY_REVIEW=1` (`config.ALLOW_SAME_FAMILY_REVIEW`) the
+cross-family half of both rules is suspended — DeepSeek may review DeepSeek —
+while GLM-5.3's provider backend is unstable. It is a second pass by the same
+model, not an independent reading; see
+[concurrency-limits.md](concurrency-limits.md).
 
 ## How to pick a tier
 
@@ -105,9 +139,9 @@ independent readings.
 - Escalate one tier when the task **touches many files**, needs **design
   judgment** (an API shape, a schema, a cross-cutting refactor), or has
   **failed review once**.
-- Do not assign a hard task to a medium model; it will fail review and
-  burn fix rounds. Do not over-assign a trivial task to a hard model — it
-  wastes the fleet and the accounts.
+- Do not assign a hard task to the medium model; it will fail review and
+  burn fix rounds. Do not over-assign a trivial task to GLM-5.3 — it
+  wastes the scarcest model and the planner's own capacity.
 - A planner re-plans (or a hand-authored task file is edited) whenever a task
   crosses a tier boundary; routing is fixed at load time.
 
@@ -123,7 +157,10 @@ upper bound, not an exact charge.
 
 Rates are overridable per model via `ARC_PRICE_<MODEL>_PROMPT` and
 `ARC_PRICE_<MODEL>_COMPLETION`, where `<MODEL>` is the model name uppercased
-with non-alphanumerics turned to `_` — e.g. `ARC_PRICE_KIMI_K3_PROMPT`. A
+with non-alphanumerics turned to `_` — e.g. `ARC_PRICE_DEEPSEEK_V4_1_FLASH_PROMPT`. The
+same knob still prices retired models in history (`ARC_PRICE_KIMI_K3_PROMPT`
+for old Kimi-K3 rows), because the event log prices the past, not just today's
+roster. A
 partial override replaces only the half it names, falling back to the table
 for the other; a junk override value is ignored rather than crashing.
 
@@ -144,12 +181,12 @@ default `ESCALATION_PATH`, the measured concurrency caps — is derived from the
 rows of `ROSTER` that are live **today**, so a transition is a date in one
 table, not an edit in six places on the morning it happens.
 
-| model | tier | roles | live |
-|---|---|---|---|
-| DeepSeek-V4-Flash | medium | implement, PR-review | until 2026-09-12 |
-| GLM-5.3 | medium | all | — |
-| Kimi-K3 | hard | all | until 2026-09-19 |
-| DeepSeek-V4.1-Flash-thinking-max | hard | all | from 2026-09-12 |
+| model | harness | tier | roles | live |
+|---|---|---|---|---|
+| DeepSeek-V4-Flash | opencode | medium | implement, PR-review | until 2026-09-12 |
+| Kimi-K3 | kimi | hard | all | retired 2026-09-12 (row deleted) |
+| DeepSeek-V4.1-Flash-thinking-max | dsh | medium | implement, review, PR-review | from 2026-09-12 |
+| GLM-5.3 | opencode | hard | all | — |
 
 gpt-oss-120b was retired on 2026-09-11 (operator decision). There is no
 "basic" tier: mechanical work routes to the medium tier.
@@ -157,12 +194,21 @@ gpt-oss-120b was retired on 2026-09-11 (operator decision). There is no
 DeepSeek-V4-Flash was retired on 2026-09-12 because the provider removed it
 from the API — a request today returns "Model not found". The replacement
 line is DeepSeek-V4.1-Flash; the code fleet runs its thinking-max variant,
-which the roster row above names (operator decision 2026-09-12: it is the
-fleet's strongest model, the planner, and the last escalation stage). The
+which the roster row above names (operator decision 2026-09-12). The
 research/build workloads address the family through
 `config.FAMILIES["deepseek"]`: DeepSeek-V4.1-Flash (base),
 DeepSeek-V4.1-Flash-thinking-low, DeepSeek-V4.1-Flash-thinking-max, and the
 websearch name DeepSeek-V4.1-Flash-thinking-max-legacy-tool-calling.
+
+**Kimi-K3's retirement (2026-09-12, operator decision).** Its ROSTER row was
+deleted outright — the scheduled 2026-09-19 provider withdrawal was not waited
+for — so it is gone from `config.FAMILIES`, from `MODEL_ROLES`, from
+`REVIEW_FAMILIES`, and from every live table in these docs. Historical
+`harness_runs` rows still price through `MODEL_PRICING`, and `KimiDriver`
+still refuses to construct loudly for old transcripts. A taskfile that still
+names it loads: `code_tasks.RETIRED_MODELS` remaps `Kimi-K3` onto the
+strongest live tier (GLM-5.3), and a taskfile naming a retired reviewer family
+is remapped by `config.cross_family_reviewer`.
 
 **Preview any date** with `ARC_ROSTER_DATE=YYYY-MM-DD` — the whole test suite
 is run under both transition dates before they arrive:
@@ -171,21 +217,10 @@ is run under both transition dates before they arrive:
 ARC_ROSTER_DATE=2026-09-19 ./py -m unittest discover -s tests -t tests
 ```
 
-What changes on **2026-09-19** when Kimi-K3 leaves: the fleet is GLM-5.3 +
-DeepSeek-V4.1-Flash-thinking-max, the escalation path shrinks to two tiers
-(`MAX_ESCALATIONS` becomes 1), the planner stays
-DeepSeek-V4.1-Flash-thinking-max, DS-max's own work is now reviewed by glm
-(GLM's reviewer stays deepseek — the glm ↔ deepseek pairing is the only
-cross-family review left, which is why the 4.1 row carries the full role
-set: a fleet with one reviewable family has no cross-review at all), the PR
-gate drops to one reviewer (`PR_REVIEWERS` is capped at families − 1), and
-`KimiDriver` refuses to construct. Taskfiles that still say
-`"reviewer": "kimi"` are remapped to the strongest cross-family reviewer at
-load time rather than rejected; their decomposition is still good.
-
 Prices live in `config.MODEL_PRICING` and can be overridden per model with
 `ARC_PRICE_<MODEL>_PROMPT` / `ARC_PRICE_<MODEL>_COMPLETION` (USD per million
 tokens; the key is the model name upper-cased with non-alphanumerics as `_`,
 e.g. `ARC_PRICE_DEEPSEEK_V4_1_FLASH_PROMPT` and `ARC_PRICE_DEEPSEEK_V4_1_FLASH_COMPLETION`). DeepSeek-V4.1-Flash is priced the
-same as V4 until the provider publishes a rate; gpt-oss-120b stays in the table
+same as V4 until the provider publishes a rate; gpt-oss-120b and Kimi-K3 stay
+in the table
 because the event log prices history, not just today's roster.

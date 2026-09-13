@@ -37,10 +37,11 @@ Every rule below came from a failure on 2026-09-09. See
 - **Every `verify_cmd` starts with `./check.sh`**, so a task cannot merge a
   change that breaks the engine running it. The clause after it is specific to
   the task and *fails today* — a gate that already passes proves nothing.
-- **Routing follows real difficulty.** `GLM-5.3` for documentation,
-  mechanical edits, and one self-contained feature, `Kimi-K3`/
-  `DeepSeek-V4.1-Flash-thinking-max` only where multi-file reasoning is
-  genuinely needed. DeepSeek-V4.1-Flash-thinking-max is the fleet's
+- **Routing follows real difficulty.** `DeepSeek-V4.1-Flash-thinking-max` for
+  documentation,
+  mechanical edits, and one self-contained feature; `GLM-5.3` where
+  multi-file reasoning is
+  genuinely needed. GLM-5.3 is the fleet's
   strongest model and its planner — do not spend it on prose.
 - **Prompts are self-contained.** The implementer sees only its own prompt and
   the repo, never the project goal, so each one names paths, functions and
@@ -48,7 +49,7 @@ Every rule below came from a failure on 2026-09-09. See
 
 ## Writing your own
 
-`main.py code plan "<goal>" <repo>` drafts one with Kimi, or use the
+`main.py code plan "<goal>" <repo>` drafts one with GLM-5.3, or use the
 dashboard's **+ New project** (JSON tab) to write tasks directly. Either way,
 `--dry-run` it and check the resolved routing before spending tokens.
 
