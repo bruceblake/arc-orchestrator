@@ -19,6 +19,7 @@ import config
 import errors
 import events
 import gitstore
+import graft
 import drivers
 from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
                      driver_for, transcript_tokens)
@@ -125,11 +126,25 @@ def load_taskfile(path, policy=None):
             "verify_cmd": t.get("verify_cmd", ""),
             "deps": list(t.get("deps", [])),
             "files_hint": list(t.get("files_hint", [])),
+            "probe_cmd": t.get("probe_cmd", "") or "",
+            "when": _load_when(tid, t.get("when")),
         }
+        if not isinstance(tasks[tid]["probe_cmd"], str):
+            raise ValueError(f"task {tid}: probe_cmd must be a string")
     for tid, t in tasks.items():
         for d in t["deps"]:
             if d not in tasks:
                 raise ValueError(f"task {tid}: unknown dep {d!r}")
+        w = t["when"]
+        if w:
+            if w["dep"] not in t["deps"]:
+                raise ValueError(
+                    f"task {tid}: when.dep {w['dep']!r} must also be listed in deps "
+                    "(a condition is read from a dependency's verdict)")
+            if not tasks[w["dep"]]["probe_cmd"]:
+                raise ValueError(
+                    f"task {tid}: when reads {w['dep']}'s verdict, but {w['dep']} has no "
+                    "probe_cmd — nothing would ever write one")
     _topo(tasks)  # raises on cycles
     # Project chaining: `after` names whole taskfiles whose EVERY task must be
     # merged before this project allocates its first worktree. Existence of
@@ -166,6 +181,80 @@ def load_taskfile(path, policy=None):
             "policy": pol, "after": after}
 
 
+# --- conditional deps: task.when ---------------------------------------------
+#
+# The graph between tasks used to be unconditional: every task written runs.
+# `when` lets a task run only if a dependency's VERDICT says so. The verdict is
+# the JSON a task's `probe_cmd` prints in its worktree after its gate passes
+# (stored on the row, emitted as task.verdict); the predicate is evaluated on
+# the edge that would release the dependent, exactly like the gate/review
+# branches inside a task (graph.Edge when=). A dependent whose condition does
+# not hold is SKIPPED — a terminal status, recorded like merged or failed — and
+# so is everything downstream of it. This is what makes a one-taskfile router
+# possible: probe → {fix-frontend if area == frontend, fix-backend otherwise}.
+
+_WHEN_OPS = ("equals", "not_equals", "in", "truthy", "exists")
+
+
+def _load_when(tid, raw):
+    """Validate a task's `when` block; None when absent."""
+    if raw in (None, "", {}):
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError(f"task {tid}: when must be an object")
+    dep, key = raw.get("dep"), raw.get("key")
+    if not isinstance(dep, str) or not dep:
+        raise ValueError(f"task {tid}: when.dep must name a dependency")
+    if not isinstance(key, str) or not key:
+        raise ValueError(f"task {tid}: when.key must name a verdict field")
+    ops = [o for o in _WHEN_OPS if o in raw]
+    if len(ops) != 1:
+        raise ValueError(
+            f"task {tid}: when needs exactly one of {_WHEN_OPS}, got {ops or 'none'}")
+    op = ops[0]
+    val = raw[op]
+    if op == "in" and not isinstance(val, list):
+        raise ValueError(f"task {tid}: when.in must be a list")
+    if op in ("truthy", "exists") and not isinstance(val, bool):
+        raise ValueError(f"task {tid}: when.{op} must be true or false")
+    return {"dep": dep, "key": key, "op": op, "value": val}
+
+
+def _verdict_get(verdict, key):
+    """`key` may be dotted (a.b.c) into a nested verdict; missing → None."""
+    cur = verdict
+    for part in key.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return None, False
+        cur = cur[part]
+    return cur, True
+
+
+def when_holds(when, verdict):
+    """Does `verdict` (the dep's probe JSON, or None) satisfy `when`?"""
+    got, present = _verdict_get(verdict if isinstance(verdict, dict) else {}, when["key"])
+    op, val = when["op"], when["value"]
+    if op == "exists":
+        return present == val
+    if op == "truthy":
+        return bool(got) == val
+    if op == "equals":
+        return present and got == val
+    if op == "not_equals":
+        return not present or got != val
+    if op == "in":
+        return present and got in val
+    return False
+
+
+def when_text(when):
+    op, v = when["op"], when["value"]
+    sym = {"equals": "==", "not_equals": "!=", "in": "in"}.get(op)
+    if sym:
+        return f"{when['dep']}.{when['key']} {sym} {json.dumps(v)}"
+    return f"{when['dep']}.{when['key']} {'is' if v else 'is not'} {op}"
+
+
 def _topo(tasks):
     order, seen = [], set()
 
@@ -182,6 +271,18 @@ def _topo(tasks):
     for tid in tasks:
         visit(tid, set())
     return order
+
+
+def _downstream(tasks, tid):
+    """Every task that (transitively) depends on `tid`, in topological order."""
+    out, frontier = [], [tid]
+    while frontier:
+        cur = frontier.pop(0)
+        for other, t in tasks.items():
+            if cur in t["deps"] and other not in out and other != tid:
+                out.append(other)
+                frontier.append(other)
+    return out
 
 
 def describe(taskset):
@@ -205,10 +306,12 @@ def describe(taskset):
         impl_fam = config.MODEL_FAMILY[t["model"]]
         rev_fam = config.MODEL_FAMILY.get(t["reviewer"], t["reviewer"])
         cross = "cross-family" if impl_fam != rev_fam else "SAME-FAMILY(!)"
+        cond = f" when={when_text(t['when'])}" if t.get("when") else ""
+        probe = f" probe={t['probe_cmd']}" if t.get("probe_cmd") else ""
         lines.append(
             f"  {tid}: implement={t['model']} review={rev_fam}({cross}) "
-            f"deps={t['deps'] or '[]'} base={config.BASE_BRANCH} "
-            f"verify={t['verify_cmd'] or '(none)'}"
+            f"deps={t['deps'] or '[]'}{cond} base={config.BASE_BRANCH} "
+            f"verify={t['verify_cmd'] or '(none)'}{probe}"
         )
     return "\n".join(lines)
 
@@ -388,13 +491,32 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
-def _impl_prompt(t, feedback):
+def _impl_prompt(t, feedback, hints=""):
+    """The implementer's whole world: the task, where its code is, the rules.
+
+    `hints` is graft.hints_block output — the file:line spans the code graph
+    ranks for this task — or "" when there is no graph. With hints the agent
+    is told to READ those ranges first; without them it is told to search,
+    which is what it would do anyway, just more expensively.
+    """
     p = (
         f"You are implementing one task in this repository.\n\n"
         f"TASK {t['id']}: {t['title']}\n\n{t['prompt']}\n"
     )
     if t["files_hint"]:
         p += f"\nFiles you are expected to touch: {', '.join(t['files_hint'])}\n"
+    if hints:
+        p += "\n" + hints
+    tooling = graft.tooling_prose()
+    if tooling:
+        p += "\n" + tooling
+    if hints:
+        locate = ("- Start from the WHERE TO LOOK spans above; use the graft "
+                  "commands for anything else. ")
+    elif tooling:
+        locate = "- Locate code with the graft commands above FIRST. "
+    else:
+        locate = "- Locate code with grep/search FIRST; "
     p += (
         "\nRules: make only the changes this task requires; do not git-commit "
         "(the orchestrator handles git); keep changes minimal and working.\n"
@@ -408,8 +530,8 @@ def _impl_prompt(t, feedback):
         "change, even when the task description sounds like a rewrite. A "
         "500-line file emitted in one response is the single most likely way "
         "to fail this task.\n"
-        "- Locate code with grep/search FIRST; read only the line ranges you "
-        "need, never a whole large file.\n"
+        + locate +
+        "read only the line ranges you need, never a whole large file.\n"
         "- Do not re-read a file you have already seen; rely on what is "
         "already in the conversation.\n"
         "- Work in several small edits, each one verified, rather than one "
@@ -577,12 +699,13 @@ def _rework_feedback(tid, results):
     return "\n\n".join(parts)
 
 
-def _review_prompt(t, diff):
+def _review_prompt(t, diff, impact=""):
     return (
         f"You are reviewing an implementation produced by another AI agent.\n\n"
         f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
         f"The implementation already passed its automated verify gate "
         f"({t['verify_cmd'] or 'none'}). Here is the full diff:\n\n{diff}\n\n"
+        + graft.impact_block(impact) +
         "Review for: spec compliance, correctness, and scope discipline "
         "(nothing unrelated). Reply with STRICT JSON only, no prose, of the form:\n"
         '{"pass": true}  or  {"pass": false, "issues": ["specific issue 1", ...]}\n'
@@ -612,7 +735,7 @@ def _parse_verdict(text):
     return {"pass": False, "issues": ["reviewer returned no parseable verdict"]}
 
 
-def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues):
+def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact=""):
     """Prompt for a reviewer reading a real pull request.
 
     Deliberately different from the pre-PR review: this reviewer can BLOCK the
@@ -631,7 +754,9 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues):
         p += ("\nIssues raised last round, which the implementer was asked to "
               "fix — verify each is actually resolved:\n"
               + "\n".join(f"- {i}" for i in prior_issues) + "\n")
-    p += f"\nTHE PULL REQUEST DIFF:\n\n{diff}\n\nReview for, in order:\n"
+    p += f"\nTHE PULL REQUEST DIFF:\n\n{diff}\n\n"
+    p += graft.impact_block(impact)
+    p += "Review for, in order:\n"
     p += ("1. CORRECTNESS — does it do what the spec says, without bugs? Trace "
           "the logic; do not assume it works because it looks plausible.\n"
           "2. REGRESSIONS — could this break existing behaviour? Consider what "
@@ -714,6 +839,48 @@ def _is_capability_failure(error):
         # unexplained failure as a capability signal, matching the old behaviour.
         return True
     return any(m in low for m in _CAPABILITY_FAILURES)
+
+
+async def _run_probe(cmd, wt):
+    """Run a task's probe_cmd in its worktree; (verdict, None) on success —
+    the LAST JSON object in stdout — or (None, reason) on any failure."""
+    try:
+        proc = await drivers.spawn(
+            ["/bin/sh", "-c", cmd], cwd=str(wt),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        try:
+            out, _ = await asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)
+        except asyncio.TimeoutError:
+            await drivers._terminate(proc)
+            return None, f"probe_cmd timed out after {config.GATE_TIMEOUT}s"
+    except OSError as exc:
+        return None, f"probe_cmd could not start: {exc}"
+    text = out.decode(errors="replace")
+    if proc.returncode != 0:
+        return None, f"probe_cmd exited {proc.returncode}: {text.strip()[-400:]}"
+    # The last TOP-LEVEL object: scan forward, and after a balanced span
+    # parses, continue past it — so `{"n": {"k": 2}}` yields the outer object,
+    # not the nested one a reverse search would find first.
+    found, i = None, 0
+    while True:
+        i = text.find("{", i)
+        if i == -1:
+            break
+        span = _balanced_span(text, i)
+        if not span:
+            i += 1
+            continue
+        try:
+            obj = json.loads(span)
+        except ValueError:
+            i += 1
+            continue
+        if isinstance(obj, dict):
+            found = obj
+        i += len(span)
+    if found is not None:
+        return found, None
+    return None, f"probe_cmd printed no JSON object: {text.strip()[-400:]}"
 
 
 def build_code_graph(store, taskset, taskfile="", policy=None):
@@ -799,28 +966,76 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         waits for all of them.
         """
         deps = t["deps"]
+        when = t.get("when")
         if len(deps) == 1:
-            g.edge(f"pr_merge_{deps[0]}", target)
+            src = f"pr_merge_{deps[0]}"
+        else:
+            src = f"join_{t['id']}"
+
+            async def joined(ctx):
+                # The dependents' `when` reads verdicts off this result, so
+                # carry every dep's along (pr_merge returns its own).
+                res = ctx.get("results", {})
+                return {"joined": list(deps),
+                        "verdicts": {d: (res.get(f"pr_merge_{d}") or {}).get("verdict")
+                                     for d in deps}}
+
+            g.node(src, joined, gather=True)
+            for d in deps:
+                g.edge(f"pr_merge_{d}", src)
+        if not when:
+            g.edge(src, target)
             return
-        join = f"join_{t['id']}"
 
-        async def joined(ctx):
-            return {"joined": list(deps)}
+        def verdict_of(r):
+            if len(deps) == 1:
+                return r.get("verdict")
+            return (r.get("verdicts") or {}).get(when["dep"])
 
-        g.node(join, joined, gather=True)
-        for d in deps:
-            g.edge(f"pr_merge_{d}", join)
-        g.edge(join, target)
+        g.edge(src, target, when=lambda r, c: when_holds(when, verdict_of(r)))
+        g.edge(src, f"skip_{t['id']}",
+               when=lambda r, c: not when_holds(when, verdict_of(r)))
+
+    def make_skip_node(t):
+        """Terminal node for a task whose `when` did not hold: it and every
+        task downstream of it are recorded as `skipped`, so the project can
+        finish (skipped counts as complete, like merged) and the page says
+        why the branch was not taken."""
+        tid = t["id"]
+        downstream = _downstream(tasks, tid)
+
+        async def skip(ctx):
+            reason = f"when {when_text(t['when'])} did not hold"
+            for sid in [tid] + downstream:
+                st = tasks[sid]
+                store.upsert_code_task(taskfile, sid, st["title"], st["model"],
+                                       st["reviewer"], "skipped",
+                                       error=reason if sid == tid else f"depends on skipped {tid}",
+                                       finished=True)
+                events.emit("task.skipped", task=sid, reason=reason,
+                            because=None if sid == tid else tid)
+            return {"skipped": True, "merged": False, "reason": reason,
+                    "downstream": downstream}
+
+        g.node(f"skip_{tid}", skip)
 
     def make_skip(t):
         """Merged task: collapse to a stub publish so dependents see it as done."""
         tid = t["id"]
 
+        row = prior.get(tid) or {}
+        try:
+            prior_verdict = json.loads(row["verdict"]) if row.get("verdict") else None
+        except (ValueError, TypeError):
+            prior_verdict = None
+
         async def publish(ctx):
             return {"merged": True, "skipped": True, "head": None}
 
         async def pr_merge(ctx):
-            return {"merged": True, "skipped": True}
+            # The verdict this task recorded when it really ran, so a
+            # dependent's `when` reads the same answer on a resume.
+            return {"merged": True, "skipped": True, "verdict": prior_verdict}
 
         g.node(f"publish_{tid}", publish)
         g.node(f"pr_merge_{tid}", pr_merge)
@@ -946,9 +1161,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
             model = cur_model(ctx)
             driver = _driver(model, "implementer", pol)
+            wt = await worktree(ctx)
+            # Graph hints are recomputed per attempt: a rework's spans should
+            # point at the code as it is NOW, after the previous attempt.
+            hints = await graft.hints(t, wt)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback), await worktree(ctx),
+                    _impl_prompt(t, feedback, hints), wt,
                     task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -1013,7 +1232,23 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             events.emit("task.gate", task=tid, attempt=attempt, passed=passed,
                         log=log_path, cmd=cmd[:120],
                         tail=None if passed else output.strip()[-400:])
-            return {"passed": passed, "output": output, "log_path": log_path}
+            verdict = None
+            if passed and t.get("probe_cmd"):
+                verdict, perr = await _run_probe(t["probe_cmd"], wt)
+                if perr:
+                    # A probe that yields no verdict is a gate failure: the
+                    # dependents' conditions would be evaluated on nothing,
+                    # and "the branch was skipped because the probe crashed"
+                    # is a bug hidden as a decision.
+                    passed = False
+                    output = (output + "\n" + perr)[-2000:]
+                    events.emit("task.gate", task=tid, attempt=attempt, passed=False,
+                                log=log_path, cmd=t["probe_cmd"][:120], tail=perr[-400:])
+                else:
+                    store.set_code_task_verdict(taskfile, tid, verdict)
+                    events.emit("task.verdict", task=tid, attempt=attempt, verdict=verdict)
+            return {"passed": passed, "output": output, "log_path": log_path,
+                    "verdict": verdict}
 
         async def review(ctx):
             if not review_on:
@@ -1022,11 +1257,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return {"pass": True, "issues": [], "skipped": True}
             wt = await worktree(ctx)
             diff = await gitstore.diff_full(wt, base)
+            impact = await graft.blast(wt, task=tid)   # uncommitted: tree vs HEAD
             rev_tok = reviewer_for(t, cur_model(ctx))
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
             try:
-                res = await driver.run(_review_prompt(t, diff), wt, task_id=f"{tid}-x{attempt}")
+                res = await driver.run(_review_prompt(t, diff, impact), wt,
+                                       task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1247,11 +1484,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             model = it["model"]
             try:
                 drv = _driver(model, "pr_reviewer", pol)
+                wt = await worktree(ctx)
+                impact = await graft.blast(wt, base, task=tid)
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
-                                      it["prior_issues"]),
-                    await worktree(ctx),
-                    task_id=f"{tid}-pr{it['round']}")
+                                      it["prior_issues"], impact),
+                    wt, task_id=f"{tid}-pr{it['round']}")
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather
@@ -1354,7 +1592,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.conflict", task=tid, pr=number, reason=note,
                             files=conflicts[:20])
                 return {"merged": False, "reason": "conflict"}
-            ok, note = await gitstore.merge_pr(repo, number)
+            if state.get("state") == "MERGED":
+                # Someone merged it while the fleet was still reviewing — an
+                # operator from the GitHub UI, or a hand merge of a backlog.
+                # That is the outcome this node exists to reach, not a
+                # failure: `gh pr merge` on a merged PR exits non-zero, and
+                # treating that as a conflict marked the task failed and
+                # stalled every task that depended on it.
+                events.emit("task.merged_externally", task=tid, pr=number)
+                ok, note = True, "already merged"
+            else:
+                ok, note = await gitstore.merge_pr(repo, number)
             if not ok:
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "conflict", error=note, finished=True)
@@ -1370,7 +1618,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    "merged", finished=True)
             events.emit("task.merged", task=tid, pr=number,
                         approvals=rv.get("approvals"))
-            return {"merged": True, "pr": number}
+            gate_res = ctx.get("results", {}).get(f"gate_{tid}") or {}
+            return {"merged": True, "pr": number, "verdict": gate_res.get("verdict")}
 
         async def fail(ctx):
             """Terminal failure. Must say WHY, because several paths land here.
@@ -1538,6 +1787,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             make_skip(tasks[tid])
         else:
             make_chain(tasks[tid])
+        if tasks[tid].get("when"):
+            make_skip_node(tasks[tid])
 
     # --- the chain gate -------------------------------------------------
     # With `after`, every head (including conflict-repair publishes) runs
@@ -1605,6 +1856,8 @@ def plan_schema_hint():
         f'            "model": {models},\n'
         f'            "reviewer": {reviewers},\n'
         '            "verify_cmd": "<shell cmd run in the worktree, empty ok>",\n'
+        '            "probe_cmd": "<optional: prints a JSON verdict after the gate passes>",\n'
+        '            "when": {"dep": "<a dep id>", "key": "<verdict field>", "equals": "<value>"},\n'
         '            "files_hint": ["path/..."], "deps": ["<id>", ...]}]}}')
 
 
@@ -1779,6 +2032,23 @@ def _existing_projects_prose(repo, store=None):
             "builds on it and it is not merged yet):\n" + "\n".join(rows) + "\n\n")
 
 
+def _orientation_prose(repo_map):
+    """The planner's first look at the repo, from the code graph.
+
+    Directory clusters, hub symbols and hotspots in ~900 tokens — what the
+    planner would otherwise spend its first (slowest-model) minutes deriving
+    with ls and grep. Also tells it the implementers have the same graph, so
+    task prompts can name symbols and trust they will be found.
+    """
+    if not repo_map:
+        return ""
+    return ("REPO ORIENTATION (from the code graph: directory clusters, hub "
+            "symbols with their caller counts, hotspots). Use it to name the "
+            "exact files and symbols each task touches — implementers get "
+            "graph-ranked file:line hints for whatever you name:\n\n"
+            + repo_map + "\n\n")
+
+
 async def plan_tasks(goal, repo, out_path=None, store=None):
     import graph_shapes
     prompt = (
@@ -1789,6 +2059,7 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
         "the model routing (who implements), the reviewer, and the verify "
         "gate for every task. Design it well; there is no later triage.\n\n"
         f"GOAL: {goal}\nTARGET REPO: {repo}\n\n"
+        + _orientation_prose(await graft.repo_map(repo))
         + _routing_tiers_prose()
         + graph_shapes.planner_prose()
         + _existing_projects_prose(repo, store) +
