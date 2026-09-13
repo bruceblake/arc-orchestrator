@@ -11,19 +11,21 @@ that enforces it. Everything here is true of the code as it exists today.
 
 ## 1. Mission
 
-This repo is a **multi-model coding orchestrator**. A fleet of three models
+This repo is a **multi-model coding orchestrator**. A fleet of **two models**
 builds software — and this repo itself — as a directed graph of small tasks:
 
-- **DeepSeek-V4.1-Flash-thinking-max** — the fleet's strongest model, running
-  in **`opencode`** (`drivers.OpencodeDriver`) — is the main
-  orchestrator/planner (`config.PLANNER_MODEL`): it breaks a project goal into
-  2–6 small tasks, decides the graph fanout (which tasks run in parallel), the
-  dependency order, the model routing (who implements what tier), and the
-  reviewer pairing, via `main.py code plan` (`code_tasks.plan_tasks`).
-- All three models implement: **GLM-5.3** (also in `opencode`) takes the
-  medium/mechanical tasks; **Kimi-K3** (in the **`kimi` CLI harness**,
-  `drivers.KimiDriver`) and **DeepSeek-V4.1-Flash-thinking-max** take the
-  hard ones, with DS-max preferred for the hardest.
+- **GLM-5.3** — the fleet's strongest model, running in **`opencode`**
+  (`drivers.OpencodeDriver`) — is the main orchestrator/planner
+  (`config.PLANNER_MODEL`): it breaks a project goal into 2–6 small tasks,
+  decides the graph fanout (which tasks run in parallel), the dependency
+  order, the model routing (who implements what tier), and the reviewer
+  pairing, via `main.py code plan` (`code_tasks.plan_tasks`).
+- All models implement. **GLM-5.3** takes the hard tier (multi-file reasoning,
+  delicate design, architectural judgment) on top of planning and reviewing;
+  **DeepSeek-V4.1-Flash-thinking-max** (in **`dsh`**, DeepSeek's own harness —
+  `drivers.DeepseekDriver`) takes the medium/mechanical tier. DeepSeek is much
+  faster and carries the implementation load; GLM-5.3 is the planner and the
+  last escalation stage.
 - **Every implementation is gated and cross-reviewed before merge**: a
   deterministic `verify_cmd` gate runs first, then a reviewer model from a
   *different model family* reviews the full diff, and only then does the
@@ -36,7 +38,8 @@ Every project is two graphs, and they are owned by different parties:
 
 1. **The per-task pipeline — static, in code.** Every task runs
    `alloc → implement → gate(verify_cmd) → cross-family review → publish →
-   PR → unanimous PR review → merge`, with the bounded fix loop (Rule 4)
+   PR → PR review (ONE cross-family reviewer today, Rule 5) → merge`, with
+   the bounded fix loop (Rule 4)
    and tier escalation (`config.ESCALATION_PATH`) as conditional edges. It
    is built by `code_tasks.build_code_graph`, documented per node by
    `pipeline_doc.py` (dashboard: "How a task moves through the pipeline"),
@@ -70,7 +73,7 @@ event log and the dashboard.
 
 ## 2. Model fleet and roles
 
-Routing is decided at plan time (by DeepSeek-V4.1-Flash-thinking-max in
+Routing is decided at plan time (by GLM-5.3 in
 `main.py code plan`, or by whoever writes a taskfile by hand) and is
 **enforced again by the loader**,
 `code_tasks.load_taskfile`. There is no runtime triage. Full reference:
@@ -78,34 +81,42 @@ Routing is decided at plan time (by DeepSeek-V4.1-Flash-thinking-max in
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement, Plan, Review, PR-review | 4 | 2 |
-| Kimi-K3 | `kimi` CLI (`KimiDriver`) | hard | Implement, Plan, Review, PR-review | 3 | 3 |
-| DeepSeek-V4.1-Flash-thinking-max | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 5 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
+| DeepSeek-V4.1-Flash-thinking-max | `dsh` (`DeepseekDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
 
-**DeepSeek-V4.1-Flash-thinking-max (DS-max below) is the fleet's strongest
-model** — operator decision 2026-09-12, benchmarks ahead of GLM and Kimi per
-operator research. Its cap of 10 is the provider-published figure for V4.1
-(provider docs updated 2026-09-12), not a measurement of ours.
+**GLM-5.3 is the fleet's strongest model** — operator decision 2026-09-12:
+hard tier, the planner, and the last escalation stage. Its cap of 4 is the
+measured session ceiling on this fleet. **DeepSeek-V4.1-Flash-thinking-max
+(DS-max below) is the medium-tier workhorse**: much faster than GLM-5.3, it
+carries the implementation load and reviews, and it **NEVER plans**. Its cap
+of 10 is the provider-published figure for V4.1 (provider docs updated
+2026-09-12), not a measurement of ours.
 
-- **Tiers** (`config.IMPLEMENT_TIERS`): `medium` → GLM-5.3 (moderate /
-  mechanical work), `hard` → Kimi-K3 or DeepSeek-V4.1-Flash-thinking-max
-  (multi-file reasoning, delicate design, architectural judgment — on top of
-  their planning/reviewing duties, with DS-max preferred for the hardest).
+- **Tiers** (`config.IMPLEMENT_TIERS`): `medium` → DeepSeek-V4.1-Flash-thinking-max
+  (moderate / mechanical work), `hard` → GLM-5.3 (multi-file reasoning,
+  delicate design, architectural judgment — on top of its planning/reviewing
+  duties). There is no `basic` tier: gpt-oss-120b was retired with it.
 - **Role enforcement is roster-driven** (`config.MODEL_ROLES` / `model_may`),
-  not a per-model if-chain: all three live models may implement, plan, review,
-  and PR-review, and the driver constructors raise `ValueError` for a model
-  off today's roster or a role outside `MODEL_ROLES` (gh_ops roles require
-  planner permission).
+  not a per-model if-chain: both live models may implement, review, and
+  PR-review; only GLM-5.3 may plan, and the driver constructors raise
+  `ValueError` for a model off today's roster or a role outside `MODEL_ROLES`
+  (`DeepseekDriver` refuses the planner role intrinsically; gh_ops roles
+  require planner permission).
 - **Retired models still load.** gpt-oss-120b left the fleet before this
   change; DeepSeek-V4-Flash was retired 2026-09-12 (the provider removed it
-  from the API; the DeepSeek-V4.1 line replaced it). A taskfile naming a
-  retired model is remapped onto the escalation path by
-  `code_tasks.RETIRED_MODELS`, so old taskfiles still run.
-- `main.py code plan` uses DeepSeek-V4.1-Flash-thinking-max as the planner.
-  The planner prompt (`code_tasks.plan_tasks`) instructs it to spread work
-  across all three models so independent tasks run in parallel, keep tasks
-  small (<30 min for one agent), add `deps` only when one task truly needs
-  another's output, and give every task a meaningful `verify_cmd`.
+  from the API; the DeepSeek-V4.1 line replaced it); **Kimi-K3 was retired
+  into history the same day by operator decision** — its ROSTER row was
+  deleted, so no role, tier, or cap lookup can name it, and it is gone from
+  `config.FAMILIES` and every live role. A taskfile naming a retired model is
+  remapped onto the escalation path by `code_tasks.RETIRED_MODELS`
+  (Kimi-K3 → the strongest live tier), so old taskfiles still run.
+- `main.py code plan` uses **GLM-5.3** as the planner
+  (`config.PLANNER_MODEL`). The planner prompt (`code_tasks.plan_tasks`)
+  instructs it to spread work across both models so independent tasks run in
+  parallel, keep tasks small (<30 min for one agent), add `deps` only when
+  one task truly needs another's output, and give every task a meaningful
+  `verify_cmd`. GLM-5.3 planning is slow on big goals — see
+  [docs/runbook.md](docs/runbook.md) § "Planning a large goal".
 - Thinking variants (`*-thinking-low/high/max`) and the
   `*-legacy-tool-calling` websearch models registered in `config.FAMILIES`
   belong to the research/build workloads; the code workload routes only the
@@ -121,20 +132,22 @@ are where to look when a rule surprises you.
 ### Rule 1 — Tier routing is mandatory and loader-enforced
 
 A task's `model` MUST be one of `config.IMPLEMENTER_MODELS`
-(`GLM-5.3`, `Kimi-K3`, `DeepSeek-V4.1-Flash-thinking-max`) and MUST match the
+(`GLM-5.3`, `DeepSeek-V4.1-Flash-thinking-max`) and MUST match the
 difficulty tier it was planned for (`config.IMPLEMENT_TIERS`).
 
-- `code_tasks.load_taskfile` (code_tasks.py:35) raises `ValueError` if a
+- `code_tasks.load_taskfile` (code_tasks.py:85) raises `ValueError` if a
   task's model is not in `config.IMPLEMENTER_MODELS` and is not a retired
   model remappable by `code_tasks.RETIRED_MODELS` (Rule §2: retired names are
   remapped onto the escalation path).
-- `drivers.OpencodeDriver.__init__` (drivers.py:215) raises `ValueError` if a
-  model is off the roster or is given a role outside its `config.MODEL_ROLES`
-  entry (`model_may`) — role enforcement is roster-driven, not a per-model
-  if-chain.
+- `drivers.OpencodeDriver.__init__` (drivers.py:967) and
+  `drivers.DeepseekDriver.__init__` raise `ValueError` if a model is off the
+  roster or is given a role outside its `config.MODEL_ROLES` entry
+  (`model_may`) — role enforcement is roster-driven, not a per-model
+  if-chain. DeepSeek is refused the planner role by its roster row, which has
+  no `planner`.
 - The planner prompt (code_tasks.py:333) assigns implementers by tier:
-  GLM-5.3 for medium/mechanical tasks, Kimi-K3 or
-  DeepSeek-V4.1-Flash-thinking-max for hard.
+  DeepSeek-V4.1-Flash-thinking-max for medium/mechanical tasks, GLM-5.3 for
+  hard.
 
 Never route a medium-tier task up to the hard tier or a hard task down to the
 medium tier. Tier reference: [docs/model-tiers.md](docs/model-tiers.md).
@@ -142,30 +155,44 @@ medium tier. Tier reference: [docs/model-tiers.md](docs/model-tiers.md).
 ### Rule 2 — Cross-review is mandatory and loader-enforced; never same-family self-review
 
 Every task MUST be reviewed, and the reviewer MUST NOT be from the same model
-family as the implementer it reviews — family-based, not harness-based
-(DS-max and GLM-5.3 share the opencode harness, and that is fine).
+family as the implementer it reviews — family-based, not harness-based (the
+two families run different harnesses today anyway: GLM on `opencode`, DeepSeek
+on `dsh`).
 
-- `code_tasks.load_taskfile` (code_tasks.py:41) raises `ValueError` unless
-  `reviewer` is exactly one of `"kimi"`, `"glm"`, or `"deepseek"` — the
-  families of `config.REVIEW_FAMILIES` — and again (code_tasks.py:44) if the
-  reviewer family is the implementer's own. The cross-review pairing:
-  **GLM-5.3 work is reviewed by deepseek; Kimi-K3 work is reviewed by
-  deepseek; DeepSeek-V4.1-Flash-thinking-max work is reviewed by kimi.**
+- `code_tasks.load_taskfile` (validation condition at code_tasks.py:89;
+  raises at code_tasks.py:96 and :101) raises `ValueError` unless
+  `reviewer` is one of `"glm"` or `"deepseek"` — the families of
+  `config.REVIEW_FAMILIES` — and again (code_tasks.py:114-115) if the reviewer
+  family is the implementer's own (the reviewer-remap at :94 and the
+  cross-family flip at :104-105 apply only to a taskfile remapped off a
+  retired model). With two families the cross-review pairing
+  is exact: **GLM-5.3 work is reviewed by deepseek; DeepSeek-V4.1-Flash-thinking-max
+  work is reviewed by glm** (`config.cross_family_reviewer`: the strongest
+  review-capable family that is not the implementer's).
 - The review node resolves the token through `config.REVIEW_FAMILIES`
-  (deepseek → DeepSeek-V4.1-Flash-thinking-max, kimi → Kimi-K3, glm →
-  GLM-5.3) and instantiates `KimiDriver("reviewer")` or
-  `OpencodeDriver(<model>, "reviewer")` accordingly, sending the full
+  (glm → GLM-5.3, deepseek → DeepSeek-V4.1-Flash-thinking-max) and
+  instantiates `OpencodeDriver(<model>, "reviewer")` or
+  `DeepseekDriver(<model>, "reviewer")` accordingly, sending the full
   diff (`gitstore.diff_full`) with the original spec; the verdict must be
   JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
+- **TEMPORARY (operator-authorized 2026-09-12): `ARC_ALLOW_SAME_FAMILY_REVIEW=1`
+  suspends the cross-family half of this rule.** While GLM-5.3's provider
+  backend was unstable (90s+ stalls and capacity flapping, measured and logged
+  2026-09-12), review may be SAME-family — DeepSeek reviewing DeepSeek — so
+  the fleet is not down whenever GLM-5.3 is. It is read once into
+  `config.ALLOW_SAME_FAMILY_REVIEW` and consumed at `code_tasks.py:64`
+  (loader) and `code_tasks.py:456` (reviewer pool). A same-family review is a
+  second pass by the same model, NOT an independent reading; unset it as soon
+  as GLM-5.3 is stable again. It is the ONLY sanctioned exception — a
+  taskfile must never hard-code a same-family `reviewer` in place of it.
 - **`reviewer` and `pr_reviewer` are different roles.** `reviewer` is this
   pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5):
   judging a bounded diff against a spec is a much smaller job than authoring
-  the change. On today's roster all three live models may hold either role;
-  the constraint is the cross-family pairing, and the `config.PR_REVIEWERS`
-  (default 2) merge gate still needs two reviewers from families other than
-  the implementer's. (This bullet once documented a narrower roster where
-  DeepSeek-V4-Flash could PR-review but never gate-review; that exception
-  retired with the model.)
+  the change. On today's roster both live models may hold either role; the
+  constraint is the cross-family pairing, so with two families exactly ONE
+  reviewer per PR is possible (Rule 5). (This bullet once documented a
+  narrower roster where DeepSeek-V4-Flash could PR-review but never
+  gate-review; that exception retired with the model.)
 - **Never keep a second list of who may review.** Eligibility is decided by
   CONSTRUCTING the driver (`code_tasks._eligible_pr_reviewers`). A hand-kept
   pool and the drivers' own role rules drifted apart once and it cost seven
@@ -233,13 +260,14 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   as feedback while `runs <= config.MAX_FIX_ROUNDS` (3, override
   `ARC_MAX_FIX_ROUNDS`). Exhausting the fix rounds does **not** fail the task
   yet: it **escalates one tier up `config.ESCALATION_PATH`** (default
-  `GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max`, overrides
+  `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`, overrides
   `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS`) — an `escalate_<tid>` graph
   node routes back to `implement_<tid>` with a **fresh fix budget**, carrying
-  the latest gate/review failure as feedback. Cross-review holds on
+  the latest gate/review failure as feedback. There is no `basic` tier, so a
+  medium task's first escalation is the hard tier, GLM-5.3. Cross-review holds on
   escalation (`code_tasks.build_code_graph`): the reviewer token flips to the
-  family-paired reviewer of the new implementer (glm implementer → deepseek,
-  kimi → deepseek, deepseek → kimi). Each escalation emits `task.escalated`
+  family-paired reviewer of the new implementer (deepseek implementer → glm,
+  glm → deepseek). Each escalation emits `task.escalated`
   `{from_model, to_model, n}`; the `code_tasks` row is updated with the
   current model/reviewer and `harness_runs` rows record the model actually
   used. On **resume**, escalation is conditional: only a row whose recorded
@@ -250,7 +278,7 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   interrupted task to the scarcest tier simultaneously.
   Only when the last tier exhausts is the task marked `failed`, and
   the failure message names the last model tried (`exhausted escalation up
-  to DeepSeek-V4.1-Flash-thinking-max`, code_tasks.py:243). Concurrency footnote: worst-case harness
+  to GLM-5.3`, code_tasks.py:243). Concurrency footnote: worst-case harness
   runs per task multiply by tier count (fix rounds × tiers); all caps of
   Rule 6 still apply.
 - The loader permits an empty `verify_cmd` (it then passes trivially,
@@ -276,16 +304,31 @@ PR** in the life of the repo.
 
 **The review loop** (`pr_review` -> `pr_merge` | `implement`):
 
-- `config.PR_REVIEWERS` (default 2) reviewers read the **real PR diff** via
-  `gh pr diff`, in parallel, each with its own prompt and no knowledge of the
-  others' verdicts.
-- Reviewers are chosen from families **other than the implementer's**, and
-  differ from each other, so two approvals mean two independent readings.
-- **Unanimous approval is required.** Any rejection posts the blocking issues
-  as a PR comment and sends the task back to `implement`; the next commit
-  updates the same PR and a new round begins.
+- `config.PR_REVIEWERS_WANTED` (default 2) is the *wanted* number of
+  reviewers reading the **real PR diff** via `gh pr diff`, each with its own
+  prompt and no knowledge of the others' verdicts. **In the two-family fleet
+  of 2026-09-12 the effective `config.PR_REVIEWERS` is 1**: reviewers must
+  come from families other than the implementer's, and there is exactly one
+  such family per task, so `PR_REVIEWERS = max(1, min(wanted, families - 1))`
+  resolves to 1 and **exactly ONE cross-family reviewer reads each PR**.
+- **This WEAKENS the gate, and the code says so out loud.** When the
+  roster cannot field the wanted number, `pr_review` emits
+  `task.pr_review_thin {task, pr, wanted, got, reviewers, implementer}`
+  (code_tasks.py:1233) so a thin review is visible in the event log and the
+  dashboard, not silent. The **compensating control is the pre-merge review
+  of Rule 2**: a bounded diff is judged there by the opposite family first,
+  and the PR review is the second read of a change that already passed a
+  cross-family gate. Do not describe the PR gate as "two independent
+  readings" any more — with two families it is one.
+- **Unanimous approval is required** among the reviewers who did run. Any
+  rejection posts the blocking issues as a PR comment and sends the task back
+  to `implement`; the next commit updates the same PR and a new round begins.
 - The loop is bounded by `config.PR_MAX_ROUNDS` (default 3); exhausting it
   fails the task rather than looping forever.
+- **Under `ARC_ALLOW_SAME_FAMILY_REVIEW=1`** (the TEMPORARY override in
+  Rule 2) the pool may hold the implementer's own family, so a PR review can
+  be a same-family second pass. Nothing else changes: unanimity, the round
+  budget, and `task.pr_review_thin` all still apply.
 - **A reviewer that crashed did not review.** If no reviewer objects but one
   never ran, the round is *inconclusive*, not a rejection: nothing is posted
   as `--request-changes`, the task goes back to `pr_review` rather than to the
@@ -340,32 +383,38 @@ merged work.
 
 ### Rule 6 — Concurrency caps are THREE-layer; know all three before launching anything
 
-| Layer | Where | deepseek | glm | kimi | Override |
-|---|---|---|---|---|---|
-| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | 3 | `ARC_LIMIT_<FAMILY>` |
-| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 2 | 3 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode: **5** total | ← shared | kimi: 3 | `ARC_HARNESS_LIMIT_<HARNESS>` |
+| Layer | Where | deepseek | glm | Override |
+|---|---|---|---|---|
+| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | `ARC_LIMIT_<FAMILY>` |
+| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | dsh (deepseek): **5** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
 on this fleet were gpt-oss 5, DeepSeek(V4-Flash) 5, GLM 4, Kimi 3 — that was
-the retired fleet: gpt-oss-120b has since left the fleet, and DeepSeek's
-current 10 is the provider-published figure for V4.1 (provider docs updated
-2026-09-12), not a measurement of ours. An opencode run
+the retired fleet: gpt-oss-120b and Kimi-K3 have since left it, and
+DeepSeek's current 10 is the provider-published figure for V4.1 (provider
+docs updated 2026-09-12), not a measurement of ours. A harness run
+(opencode, and dsh by the same assumption)
 issues parallel tool calls and holds about TWO sessions at once, so a driver
 cap set equal to the session limit over-subscribes by that factor. Measured
 from the event log: 23 capacity rejections in four hours, GLM-5.3 refused with
 as few as TWO of our drivers live against a ceiling of four. Driver caps are
-therefore sessions // sessions-per-process; the kimi CLI holds one, opencode
-two. gpt-oss and DeepSeek were previously configured at 8 against a real
+therefore sessions // sessions-per-process; opencode and dsh hold two each
+(`config._SESSIONS_PER_PROCESS`), so GLM 4 // 2 = 2 and DeepSeek 10 // 2 = 5.
+gpt-oss and DeepSeek were previously configured at 8 against a real
 ceiling of 5, so the fleet generated its own 400s under load and blamed the
 provider.
 
 **The harness layer is the one people forget, and it is often the binding
-one.** Every opencode-backed model runs through ONE local binary backed by ONE
-~240MB sqlite store in `~/.local/share/opencode`. The per-model caps permit
-GLM 2 + DeepSeek 5 = **7** concurrent opencode processes against it (gpt-oss
-is gone) — still above the opencode harness pool of 5. Measured with an
-identical prompt and a warm cache:
+one.** Each harness now has its OWN pool, because the two models no longer
+share a binary: **opencode (GLM-5.3) is capped at 5 and dsh (DeepSeek) at 5**
+(`config._HARNESS_CAP`). Every opencode-backed model runs through ONE local
+binary backed by ONE ~240MB sqlite store in `~/.local/share/opencode`, so
+GLM's driver cap of 2 sits well under the opencode pool — the retired
+three-model fleet's GLM 2 + DeepSeek 5 = 7 opencode processes is history.
+dsh keeps its state as per-profile JSON under `$DSH_HOME`, with no central
+store, so its 5 mirrors opencode until a load test says otherwise. Measured
+on the shared opencode pool, with an identical prompt and a warm cache:
 
 | concurrent | 3 | 4 | 5 | 6 | 10 |
 |---|---|---|---|---|---|
@@ -580,12 +629,16 @@ no policy.
 
 `orchbench.py` (`main.py code bench`) declares the benchmark matrix: each
 entry in `orchbench.VARIANTS` is an explicit, named policy — e.g.
-`glm-implement-only` (GLM implements, never reviews), `kimi-implement-only`,
-`deepseek-reviews` / `gptoss-reviews` (implement-only models reviewing),
+`glm-implement-only` (GLM implements, never reviews),
+`deepseek-reviews` (an implement-only model reviewing),
 `self-review`, `no-review`, `kimi-via-opencode` (harness swap),
-`all-glm` / `all-deepseek` / `all-kimi` (flat routing), `misroute`
+`all-glm` / `all-deepseek` (flat routing), `misroute`
 (tier-inverted routing), `no-fixloop` / `fixloop-1` (`max_fix_rounds` 0/1) —
-so we can measure which governance options actually matter. Two policy keys
+so we can measure which governance options actually matter. Some variant
+names still carry models the fleet has retired (`kimi-implement-only`,
+`gptoss-reviews`, `all-kimi`): `orchbench.VARIANTS` is a dated benchmark
+config of historical comparisons, not a live roster, and no normal run can
+reach those models through it. Two policy keys
 also affect runtime behavior:
 
 - `tolerate_driver_error` — **default on since 2026-09-09, in every path.**
@@ -626,12 +679,14 @@ code pipeline (no worktree, no gate, no publish; Rules 1–8 do not apply):
   `code_tasks._parse_verdict`; see docs/orchestration-contract.md).
 
 Any model **trusted to plan on today's roster** may hold these three roles —
-gh roles require planner permission, which today all three live models have;
-`drivers.KimiDriver.__init__` / `drivers.OpencodeDriver.__init__` raise
+gh roles require planner permission, and today only **GLM-5.3** has it, so
+`config.GH_MODEL` resolves to GLM-5.3 (DeepSeek-V4.1-Flash-thinking-max has
+no `planner` role and is refused);
+`drivers.OpencodeDriver.__init__` / `drivers.DeepseekDriver.__init__` raise
 `ValueError` for a model off the roster or one lacking the permission (same
 roster-driven enforcement as Rule 2). Default model `config.GH_MODEL`
 (`ARC_GH_MODEL` env), falling back to `config.PLANNER_MODEL` =
-DeepSeek-V4.1-Flash-thinking-max; each `gh` subprocess is bounded by
+GLM-5.3; each `gh` subprocess is bounded by
 `config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 60 s).
 
 **Preview by default.** `--apply-labels`, `--create`, and `--post` are the
@@ -652,11 +707,11 @@ Top-level Python modules (one role each):
 |---|---|
 | `build_work.py` | Minecraft-style browser-game build workload: planner → 6 parallel module producers (each an implement → syntax gate → contract check → cross-model review → fix gauntlet) → assemble → bounded integration-review cycle |
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
-| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the DeepSeek-V4.1-Flash-thinking-max planner prompt (`plan_tasks`, model `config.PLANNER_MODEL`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
+| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the GLM-5.3 planner prompt (`plan_tasks`, model `config.PLANNER_MODEL`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
 | `graph_shapes.py` | The graph BETWEEN tasks (§1 "Two graphs"): the pattern catalogue as data (`PATTERNS`, with a drawable sketch each), `normalize_pattern` (label aliases → catalogue id, used by the loader), `classify` (the shape a taskfile's `deps` actually form: single/chain/fanout/fanin/diamond/hierarchical/mixed, width, depth, declared-vs-detected mismatch), `planner_prose` (the GRAPH DESIGN block of the planner prompt, from the catalogue and today's caps), `describe` (→ `GET /api/graph-shapes`: patterns, every taskfile classified, what the engine can and cannot express) |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local-only `git init` + one commit), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
-| `drivers.py` | Headless CLI harness drivers: `KimiDriver` (`kimi` CLI) and `OpencodeDriver` (`opencode`); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
+| `drivers.py` | Headless CLI harness drivers: `OpencodeDriver` (`opencode`, GLM-5.3) and `DeepseekDriver` (`dsh`, DeepSeek-V4.1-Flash-thinking-max — streams reasoning on stderr, prints only the final message on stdout, pumps both pipes for the stall clock, no session resume, 0 tokens reported); `KimiDriver` still exists for historical transcripts only (no live model runs the kimi harness); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
 | `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (60 s per-git-op timeout); nothing merges locally |
@@ -699,9 +754,11 @@ The full operator runbook, with troubleshooting, is
 [docs/runbook.md](docs/runbook.md). The loop:
 
 1. **Plan** — `.venv/bin/python main.py code plan "<goal>" /path/to/repo`
-   (DeepSeek-V4.1-Flash-thinking-max drafts a taskfile into
+   (GLM-5.3 drafts a taskfile into
    `~/tasks/<slug>.json` and prints the
-   resolved DAG).
+   resolved DAG). For a large goal, raise the driver timeout first —
+   `ARC_DRIVER_TIMEOUT=5400 .venv/bin/python main.py code plan ...`
+   ([docs/runbook.md](docs/runbook.md) § "Planning a large goal").
 2. **Review the taskfile** — read and hand-edit `~/tasks/<slug>.json`:
    check tier routing, reviewer pairing, deps, and that every `verify_cmd` is
    honest. Schema reference: [docs/taskfile-schema.md](docs/taskfile-schema.md).
@@ -728,8 +785,8 @@ The full operator runbook, with troubleshooting, is
   semantics)
 - [docs/model-tiers.md](docs/model-tiers.md) — model fleet, tiers, and
   allowed roles in full
-- [docs/concurrency-limits.md](docs/concurrency-limits.md) — the two layers
-  of concurrency caps and their env overrides
+- [docs/concurrency-limits.md](docs/concurrency-limits.md) — the three layers
+  of concurrency caps (account, driver, harness) and their env overrides
 - [docs/taskfile-schema.md](docs/taskfile-schema.md) — taskfile JSON reference
   and validation rules
 - [docs/graph-patterns.md](docs/graph-patterns.md) — the graph-pattern library

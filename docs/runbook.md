@@ -55,9 +55,10 @@ cd /home/proxyie/arc-orchestrator
 ```
 
 - Runs the passive checks that catch misconfiguration *before* a run burns
-  model calls on it: kimi plan mode is off (plan mode silently leaves agents
-  researching instead of editing), `ARC_API_KEY` is set and not the
-  placeholder, the `kimi` and `opencode` harness binaries are on `PATH`, the
+  model calls on it: `ARC_API_KEY` is set and not the
+  placeholder, every harness a live model runs (`opencode` for GLM-5.3, `dsh`
+  for DeepSeek-V4.1-Flash-thinking-max — derived from the roster, not a
+  literal list) is on `PATH`, the
   worktree and tasks directories are creatable, the timeout invariants hold
   (`DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT`), and there are
   no stale `running` task rows.
@@ -68,7 +69,7 @@ cd /home/proxyie/arc-orchestrator
 ## 2. Plan -> run workflow
 
 The code workload is a DAG of coding-agent tasks described in a JSON task
-file. Two entry points build one: DeepSeek-V4.1-Flash-thinking-max as the
+file. Two entry points build one: GLM-5.3 as the
 planner (CLI) or the dashboard's plan tab.
 
 ### 2.1 Plan
@@ -78,12 +79,100 @@ cd /home/proxyie/arc-orchestrator
 .venv/bin/python main.py code plan "<goal>" /path/to/repo
 ```
 
-- `code plan` asks Kimi-K3 (the planner) to break the goal into 2–8 small
+- `code plan` asks GLM-5.3 (the planner) to break the goal into 2–8 small
   tasks and writes the task file to `~/tasks/<goal-slug>.json`, then prints its
   path plus a `describe(...)` summary of the resolved DAG
   (implement/review pairing, deps, verify gates).
 - Review the generated file in `~/tasks/` and edit it by hand if needed
   (schema rules are in `docs/taskfile-schema.md`).
+
+#### Planning a large goal — raise `ARC_DRIVER_TIMEOUT` first
+
+GLM-5.3 planning is **slow on big goals**, and the default 2700 s
+`config.DRIVER_TIMEOUT` is a total-runtime backstop that will kill it.
+
+Measured 2026-09-12: a large goal hit the 2700 s driver timeout
+mid-generation — the planner was still writing the plan. The retry then went
+wrong in a second way: instead of emitting plan JSON the model looped,
+producing essay after essay of prose about the repo, and the run never
+recovered a taskfile from it. Both halves are expensive and both are avoided
+by giving the planner room:
+
+```bash
+ARC_DRIVER_TIMEOUT=5400 .venv/bin/python main.py code plan "<goal>" /path/to/repo
+```
+
+5400 s (90 min) is the working figure for a large goal. `main.py code plan`
+runs a single harness invocation, so the timeout applies to the whole planner
+turn; `ARC_PLANNER_IDLE_TIMEOUT` still applies independently if the planner
+goes silent (see "A harness went quiet").
+
+### 2.1b DeepSeek's `dsh` harness (setup)
+
+DeepSeek-V4.1-Flash-thinking-max does **not** run on opencode. It runs on
+**`dsh`**, DeepSeek's own harness
+([github.com/deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)),
+swapped in by operator decision 2026-09-12. `drivers.DeepseekDriver` wraps it.
+Three things must be right or the model is simply unavailable.
+
+**1. Install the binary** (npm-global; installed on this box 2026-09-12 at
+`~/.local/opt/node/bin/dsh`):
+
+```bash
+npm install -g --allow-scripts=@deepseek-ai/dsh-subprocess-local,koffi,node-pty,@google/genai,protobufjs @deepseek-ai/dsh
+```
+
+`config.dsh_bin()` resolves the binary as **`$ARC_DSH_BIN`, else `dsh` on
+`PATH`, else `~/.local/opt/node/bin/dsh`** — npm's global bin is not on every
+shell's `PATH`, and the service that spawns harnesses may not be a login
+shell, so the recorded install location is the fallback rather than a bare
+name that would fail to exec.
+
+**2. Wire the account and permissions.** The driver passes these through to
+every `dsh` invocation:
+
+| Env var | Value | Why |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | `ARC_API_KEY` | the harness's own key variable, fed from ours |
+| `DEEPSEEK_BASE_URL` | `ARC_BASE_URL` | the ARC endpoint, not DeepSeek's public API |
+| `DSH_TELEMETRY_MODE` | `DISABLED` | no telemetry from this box |
+| `DSH_PERMISSION_MODE` | `danger-full-access` | **required** — headless `dsh` cannot answer approval prompts, so without it the run stalls forever on its first tool call |
+
+**3. Patch dsh's own config — it lives OUTSIDE this repo.** At
+`~/.dsh/cordis.patch.yml`. Nothing in the repo can install or verify this
+file, so it is reproduced here verbatim; **this REQUIRED content is the only
+durable record of it**:
+
+```yaml
+- id: agent-default-model
+  config: {provider: deepseek-official, model: DeepSeek-V4.1-Flash-thinking-max}
+- id: llm-deepseek
+  config: {apiKeyEnv: DEEPSEEK_API_KEY, baseURL: https://llm-api.arc.vt.edu/api/v1, reasoningEffort: max, streamIdleTimeoutMs: 300000}
+```
+
+Grammar: the file is a top-level **list of patch entries**; `id` selects a
+config row and `config` **replaces** it; `disabled: true` disables a row.
+Without the first entry dsh runs its own default model; without the second it
+talks to the public DeepSeek endpoint with the wrong key variable.
+
+**Smoke test** (expect `ok` on stdout in ~2 s):
+
+```bash
+DEEPSEEK_API_KEY=$ARC_API_KEY DEEPSEEK_BASE_URL=https://llm-api.arc.vt.edu/api/v1 DSH_TELEMETRY_MODE=DISABLED DSH_PERMISSION_MODE=danger-full-access dsh --profile headless "Reply with exactly: ok"
+```
+
+**What to expect from the stream contract** (this is why a whole driver
+exists): `dsh` streams `dsh: reasoning:` deltas on **stderr** and prints
+**only the final assistant message on stdout, at the very end**. The driver
+pumps both pipes, and either counts as activity for the stall clock. Two more
+consequences:
+
+- **No session resume.** The headless profile accepts nothing but the task
+  text, so an interrupted attempt retries the **original prompt** (files
+  already written in the worktree survive — `alloc` is what resets them).
+- **No token usage.** dsh reports none, so dsh runs price at **0 tokens**
+  until the harness starts reporting usage — cost attribution for DeepSeek
+  work is lost, not merely rounded.
 
 ### 2.2 Always dry-run first
 
@@ -171,8 +260,10 @@ downstream taskfile's project block:
 ### 2.6 GitHub ops (gh CLI agents)
 
 Three standalone agents in `gh_ops.py` — outside the governed pipeline (no
-worktree, gate, or publish). Only Kimi-K3 or GLM-5.3 may hold them;
-`--model Kimi-K3|GLM-5.3` overrides `ARC_GH_MODEL` (default Kimi-K3).
+worktree, gate, or publish). gh roles require **planner** permission, which
+today only GLM-5.3 has, so `--model GLM-5.3` is the effective override of
+`ARC_GH_MODEL` (default `config.GH_MODEL` = `config.PLANNER_MODEL` =
+GLM-5.3).
 Everything **previews by default**: `--apply-labels`, `--create`, and
 `--post` are the only flags that write to GitHub.
 
@@ -207,7 +298,7 @@ Open `http://localhost:8787/` (or the LAN/Tailscale URL `start.sh` prints).
 | `/usage.html` | Usage page with ranges `1h` / `24h` / `7d` / `all`. |
 | `/api/projects` | List of project task files with statuses, per-task DAG + progress. |
 | `/api/project?file=<name>.json` | Single project detail: tasks, `code_tasks` rows, harness runs, event tail, git info. |
-| `/api/agents` | Live agents across all layers (pool requests, `driver:*` harness runs, kimi-code sessions) plus the launched-run registry. |
+| `/api/agents` | Live agents across all layers (pool requests, `driver:*` harness runs, live harness sessions) plus the launched-run registry. |
 | `/api/transcript?file=<name>.jsonl&tail=N` | Tail of one harness transcript streamed live from `logs/harness/*.jsonl`. |
 | `/api/usage?range=...` | Usage aggregates (models, families, totals, series, inflight). |
 | `/api/graphs` | Static round/build graph topologies. |
@@ -269,7 +360,7 @@ Verify‑gate output is written to `logs/gates/<task>-x<attempt>.log`. These log
 
 If `code run --dry-run` fails to print `dry-run ok`, the task file is invalid.
 Fix the task file per `docs/taskfile-schema.md` (valid `model`, reviewer
-`kimi`/`glm`, cross-family reviewer, known deps, no cycles), re-run the
+`glm`/`deepseek`, cross-family reviewer, known deps, no cycles), re-run the
 dry-run, then re-run.
 
 ### Chain blocked or timed out (`chain.blocked`)
@@ -306,19 +397,19 @@ new one:
   - A **capability failure** — the row's `error` says the model exhausted its
     fix rounds or escalation path — retries **one tier higher** in
     `config.ESCALATION_PATH` (default
-    `GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max`) with a fresh fix
+    `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`) with a fresh fix
     budget, because the old run proved that model insufficient.
   - An **infrastructure failure** — the run process was killed, the graph was
     cancelled, the harness crashed — retries at the **same tier**. Being
     interrupted says nothing about the model. Escalating on it used to send
-    every interrupted task to Kimi-K3, the scarcest tier (driver cap 2): one
+    every interrupted task to GLM-5.3, the scarcest tier (driver cap 2): one
     killed queue put four tasks there at once, exceeded the account cap, and
     every request came back as an instant `provider.api_error: 400`.
 
   Within a run the same tier-escalation happens live: a task that exhausts
   `MAX_FIX_ROUNDS` at one model escalates instead of failing, and the final
   failure message names the last model tried (`exhausted escalation up to
-  Kimi-K3`).
+  GLM-5.3`).
 - `conflict` tasks are **retried at the same model** (a merge conflict is not
   a capability signal) and resume at `publish`, re-attached to the existing
   worktree and PR: the branch is synced with the current base
@@ -378,7 +469,12 @@ curl -s -X POST localhost:8787/api/projects/retry-task \
 
 ### Agents produce output but change no files (plan mode)
 
-The single most damaging misconfiguration found so far, and it looks exactly
+*Historical: this was the single most damaging misconfiguration of the
+kimi-harness era, and it is kept because it is the shape of failure to
+recognise. No live model runs the `kimi` CLI since Kimi-K3 was retired on
+2026-09-12, so this specific cause cannot fire today.*
+
+The failure looks exactly
 like a stall from the outside: the agent runs for minutes, writes 100KB+ of
 transcript, and leaves the worktree completely clean.
 
@@ -399,13 +495,14 @@ enables it; there is no `--no-plan`) and no config-path env var — kimi ships a
 a compiled binary — so this is a global setting. Interactive plan mode is
 still available on demand with `kimi --plan`.
 
-`main.py code run` now refuses to start when it detects plan mode is on,
-naming the config file (`--force` overrides), and `tests/test_config.py` fails
-if this box is ever reconfigured back.
+`main.py code run` used to refuse to start when it detected plan mode was on,
+naming the config file (`--force` overrides), and `tests/test_config.py` failed
+if this box was ever reconfigured back; that guard is gone now that the kimi
+harness is gone.
 
-**How to spot it** without reading config: the implementer transcript shows
-`ExitPlanMode` among the tool calls, or the worktree has zero dirty files
-after a long run:
+**How to spot the general shape** (a harness that researches but never edits):
+the implementer transcript shows plan/approval tool calls, or the worktree has
+zero dirty files after a long run:
 
 ```bash
 git -C ~/worktrees/<repo>/<task> status --porcelain | wc -l
@@ -417,11 +514,13 @@ git -C ~/worktrees/<repo>/<task> status --porcelain | wc -l
 applies to the `planner` role instead of `ARC_DRIVER_IDLE_TIMEOUT`. An
 implementer edits in many small steps, so seven minutes of silence means
 something is wrong; a planner does one long agentic read of the repo and then
-emits a single JSON plan, and at Kimi's cap of 3 its request waits behind the
-other drivers with the connection held open. Every planner "stall" on
-2026-09-11/12 fired after exactly 59 bytes — the version handshake — with 3 or
-4 other Kimi drivers running. That was a healthy process being killed for being
-queued, and the retry ladder then did it eight more times.
+emits a single JSON plan, and a queued request can hold the connection open
+well past that. (The measurements that set this budget were taken on the
+retired three-model fleet: every planner "stall" on 2026-09-11/12 fired after
+exactly 59 bytes — the version handshake — with other drivers live, i.e. a
+healthy process killed for being queued, and the retry ladder then repeated it
+eight more times. GLM-5.3, today's planner, is slower still; on very large
+goals raise `ARC_DRIVER_TIMEOUT` as in §2.1 rather than the idle budget.)
 
 **Chat does not queue behind the fleet.** `ARC_INTERACTIVE_RESERVE` (default 1)
 holds one slot on the planner model back from batch work, so a chat reply
@@ -480,8 +579,9 @@ a harness we SIGKILL also ends on an unanswered request. `waiting_s` against
 the table above is the only real discriminator.
 
 What ARC does at its concurrency cap is **reject instantly**: 5 concurrent
-Kimi-K3 requests against a cap of 3 gave 3 successes and 2
-`400 {"detail": "concurrent session limit reached"}` in 0.2s. Earlier notes in
+requests against a model cap of 3 gave 3 successes and 2
+`400 {"detail": "concurrent session limit reached"}` in 0.2s (measured
+2026-09-09 on the then-live Kimi-K3). Earlier notes in
 this repo claiming ARC "holds rejected requests open indefinitely" are wrong.
 Those 400s are real and are what the capacity backoff is for; the long
 silences are queueing, which is a different thing.
@@ -499,7 +599,7 @@ The vocabulary, in the order an attempt produces it:
 | --- | --- | --- |
 | `driver.cap_wait` | waiting for a cross-process driver lease | `model`, `task`, `in_use`, `cap` |
 | `driver.start` | harness process spawned | `harness`, `model`, `role`, `task`, `attempt` |
-| `driver.resume` | a retry reattaches to a live kimi session instead of restarting from scratch (drivers.py) | `session_id` |
+| `driver.resume` | a retry reattaches to a live harness session instead of restarting from scratch (drivers.py; never fires for dsh, which cannot resume) | `session_id` |
 | `driver.heartbeat` | every ≤15s while the pump loop runs (`HEARTBEAT_INTERVAL`, drivers.py) | `bytes`, `idle_s`, `seconds` |
 | `driver.progress` | every `ARC_DRIVER_PROGRESS_INTERVAL` (60s) with a `/proc` sample | `state`, `cpu_delta_s`, `blocked`, `last_activity` |
 | `driver.stalled` | idle > `ARC_DRIVER_IDLE_TIMEOUT`, killed after forensics | see table above |
@@ -543,8 +643,10 @@ the harness was waiting on.
 
 ### Terminated requests (the real failure mode)
 
-ARC terminates long-running requests. kimi-code's session log records them —
-the wire log does not, which is why this went unexplained for so long:
+ARC terminates long-running requests. kimi-code's session log recorded them —
+the wire log did not, which is why this went unexplained for so long (kimi is
+retired, 2026-09-12; the shape of the failure is what matters here, and a dsh
+run that goes quiet is diagnosed the same way, see "A harness went quiet"):
 
 ```
 ~/.kimi-code/sessions/<session>/logs/kimi-code.log
@@ -576,37 +678,40 @@ Mitigations, in order of effect:
 3. `ARC_DRIVER_TIMEOUT` (2700s) bounds a task that is retrying productively;
    it is a backstop, not a cure — raising it buys time at ~5 min per retry.
 
-Note kimi requests `maxTokens = 131072` (derived from `max_context_size`; no
-separate output cap exists in its config — `max_output_tokens`, `max_tokens`
-and `output_tokens` were all tested and none change it). So generation length
+Note the retired kimi harness requested `maxTokens = 131072` (derived from
+`max_context_size`; no
+separate output cap existed in its config — `max_output_tokens`, `max_tokens`
+and `output_tokens` were all tested and none changed it). So generation length
 is bounded only by the model deciding to stop.
 
 ### Context budget (per harness — they fail differently)
 
 Both harnesses ship configured for a **131072-token** context and compact near
-that ceiling — kimi at `max_context_size - reserved_context_size`, opencode at
-`limit.context * compaction.threshold`. Neither reached it before requests grew
+that ceiling — opencode at `limit.context * compaction.threshold`. Neither
+reached it before requests grew
 too large to come back. But the right response differs, because their
 compaction differs (measured 2026-09-09):
 
 | harness | compaction | budget | why |
 | --- | --- | --- | --- |
-| opencode | **works** — fired twice inside one GLM-5.3 run, which then carried on to 621KB (vs ~350KB at the default, where it never compacted) | `ARC_OPENCODE_CONTEXT`, default **65536** | a smaller budget keeps each request small enough to come back |
-| kimi | **never completes** — 20 `full_compaction.begin` across the whole session history, 0 `full_compaction.end`, interactive sessions included | `ARC_KIMI_CONTEXT`, default **131072** | lowering it only reaches that dead end sooner (tried, measured, reverted) |
+| opencode (GLM-5.3) | **works** — fired twice inside one GLM-5.3 run, which then carried on to 621KB (vs ~350KB at the default, where it never compacted) | `ARC_OPENCODE_CONTEXT`, default **65536** | a smaller budget keeps each request small enough to come back |
+| kimi (retired 2026-09-12) | **never completed** — 20 `full_compaction.begin` across the whole session history, 0 `full_compaction.end`, interactive sessions included | `ARC_KIMI_CONTEXT`, default **131072** (kept for old logs) | lowering it only reaches that dead end sooner (tried, measured, reverted) |
 
 How each budget is applied — interactive sessions keep the harness defaults:
 
 | harness | mechanism |
 | --- | --- |
-| kimi | alias `arc/kimi-k3-fleet` in `~/.kimi-code/config.toml` (same `model = "Kimi-K3"`, its own `max_context_size`), passed as `-m` |
 | opencode | generated `~/.config/opencode/opencode-fleet.json`, selected per-process via `$OPENCODE_CONFIG` |
+| dsh (DeepSeek) | no alias mechanism: the model and `reasoningEffort` come from `~/.dsh/cordis.patch.yml` (§2.1b), and dsh has no `ARC_*_CONTEXT` budget |
 
 opencode needs the whole-file approach because it sends the model **key** to
 the API — a differently-keyed alias comes back `{"detail":"Model not found"}`.
 Its fleet config is regenerated from your own `opencode.json` whenever that
-changes, so provider settings and API keys stay in one place. If the kimi alias
-is missing, the driver falls back to the default model rather than failing.
-`ARC_USE_FLEET_ALIASES=0` disables both.
+changes, so provider settings and API keys stay in one place.
+`ARC_USE_FLEET_ALIASES=0` disables it. (The retired kimi harness used an
+`arc/kimi-k3-fleet` alias in `~/.kimi-code/config.toml`; the driver fell back
+to the default model when the alias was missing. `_KIMI_ALIAS` remains in
+config only so a historical config still parses.)
 
 **None of this is a cure.** Compaction lets an opencode task run roughly twice
 as far; it still stalled eventually. The lever that actually reduces risk is
@@ -679,7 +784,7 @@ resume the task file to land them.
 The implementer failed the verify gate or review `MAX_FIX_ROUNDS` (default 3)
 times **at every tier of `config.ESCALATION_PATH`**, so the task is marked
 `failed` — the failure message names the last model tried (`exhausted
-escalation up to Kimi-K3`). To debug:
+escalation up to GLM-5.3`). To debug:
 
 ```bash
 ls -t /home/proxyie/arc-orchestrator/logs/harness/<task>-x*-implementer-*.jsonl
@@ -736,13 +841,13 @@ editor, which does the same thing.
 Check for orphaned harness processes:
 
 ```bash
-ps aux | grep -E 'kimi|opencode'
+ps aux | grep -E 'dsh|opencode'
 ```
 
 The orchestrator reaps a hung driver itself: `drivers.py` kills the child
 after `DRIVER_TIMEOUT` (default **2700s**) and reports a `driver.error`. A
 `driver.error` counts against `MAX_RETRIES` (default 4) before the task fails.
-If a `kimi`/`opencode` process is still alive past that, it is either running
+If a `dsh`/`opencode` process is still alive past that, it is either running
 a fresh attempt, retrying with backoff, or genuinely orphaned — kill it with
 `kill <pid>` only after confirming it is not the current active attempt on the
 dashboard.
@@ -771,7 +876,7 @@ dashboard.
 ## Cross-references
 
 - [`../AGENTS.md`](../AGENTS.md) — the agent tasking/behaviour contract.
-- [`orchestration-contract.md`](orchestration-contract.md) — how Kimi-K3 plans and the graph runner executes it.
+- [`orchestration-contract.md`](orchestration-contract.md) — how GLM-5.3 plans and the graph runner executes it.
 - [`model-tiers.md`](model-tiers.md) — model routing tiers and the cross-review matrix.
 - [`concurrency-limits.md`](concurrency-limits.md) — per-model caps and the driver semaphores.
 - [`taskfile-schema.md`](taskfile-schema.md) — exact task-file schema and validation rules.

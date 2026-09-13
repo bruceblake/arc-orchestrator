@@ -1,10 +1,12 @@
 # ARC LLM Orchestrator
 
-Runs research questions past four AI model families at once (via Virginia Tech's
-ARC LLM API), has them critique each other, verifies the results, and stores
-everything in SQLite. A second workload has the models build a browser game
-piece by piece. A web dashboard shows it all live — and you can open that
-dashboard from your laptop or phone.
+Runs research questions past every live AI model family at once (via Virginia
+Tech's ARC LLM API), has them critique each other, verifies the results, and
+stores everything in SQLite. A second workload has the models build a browser
+game piece by piece, and a third drives the two-model coding fleet
+(GLM-5.3 on `opencode`, DeepSeek-V4.1-Flash-thinking-max on `dsh`) through a
+governed per-task pipeline. A web dashboard shows it all live — and you can
+open that dashboard from your laptop or phone.
 
 ## Quick start — see the dashboard from your laptop and phone
 
@@ -99,15 +101,15 @@ buttons for you — but that protects against a web page, not a neighbour.
 
 ## The research graph
 
-Every round fans one question out to all four model families in parallel, then
+Every round fans one question out to every live model family in parallel, then
 cross-critiques, synthesizes, and verifies. Failed rounds loop back into a
 stronger synthesis (bounded by `ARC_MAX_VERIFY_ROUNDS`, default 3):
 
 ```
 pick_topic ──> gen_questions ──┬─> answer_glm ────────┐
-                               ├─> answer_kimi ───────┤  gather (fan-in)
-                               ├─> answer_deepseek ───┤  (one per family
-                               └─> research_web ──────┘   in config.FAMILY_ORDER)
+                               ├─> answer_deepseek ───┤  gather (fan-in)
+                               └─> research_web ──────┘   (one per family
+                                            │             in config.FAMILY_ORDER)
                                            │
                                            ▼
                                        critique      each answer scored 0-10 by a family
@@ -127,8 +129,8 @@ consumes next round — the system generates its own work forever.
 
 ### Concurrency
 
-Per-family semaphores follow the MEASURED ARC ceilings, not the documented
-ones (12 requests in flight max): deepseek 5, glm 4, kimi 3 — see
+Per-family semaphores follow the ARC ceilings on the two-model fleet of
+2026-09-12 (14 requests in flight max): deepseek 10, glm 4 — see
 [docs/concurrency-limits.md](docs/concurrency-limits.md). Web research uses the
 `-legacy-tool-calling` variants with `tool_ids: ["server:websearch"]`. All
 requests stream (the API caps non-streaming at 8,000 tokens). Roles rotate
@@ -222,7 +224,7 @@ coding tasks best. Three suites (31 tasks total; `bench list` details):
 
 Variables swept independently:
 
-- **model x effort**: `--models 'deepseek:low;max,glm,kimi,...'` (efforts
+- **model x effort**: `--models 'deepseek:low;max,glm,...'` (efforts
   after `:` are `;`-separated) or `all`
   (per-family effort names validated against `config.FAMILIES`; deepseek uses
   `max`, not `high`)
@@ -230,8 +232,9 @@ Variables swept independently:
   `fanout` (best-of-N parallel samples, test-based selection),
   `fixloop` (aider-style test feedback, <= `--max-rounds`),
   `review` (cross-family reviewer over test results),
-  `opencode` / `kimi` (full CLI agents with shell access in a scratch dir;
-  the kimi harness only runs for the kimi family)
+  `opencode` (full CLI agent with shell access in a scratch dir; live for
+  GLM-5.3) — the retired `kimi` harness solver remains only for historical
+  comparisons and refuses any family but the retired kimi one
 - **sampling**: `--n` direct samples per cell (pass@1 = mean over samples),
   `--fanout-n` inner samples for fanout (default 4), `--temperature`
 
@@ -284,7 +287,7 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `ARC_QUESTIONS_PER_ROUND` | 10 | questions per round; >= 10 saturates all four families |
+| `ARC_QUESTIONS_PER_ROUND` | 10 | questions per round; >= 10 saturates every live family |
 | `ARC_PIPELINE_ROUNDS` | 2 | rounds in flight simultaneously |
 | `ARC_MAX_VERIFY_ROUNDS` | 3 | max synthesis attempts before shipping best effort |
 | `ARC_VERIFY_PASS_SCORE` | 7.5 | verifier score (0-10) required to pass |
@@ -309,7 +312,7 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_MAX_GRAPH_STEPS` | 6000 | max graph steps before a run is aborted |
 | `ARC_BASE_BRANCH` | main | branch the fleet's pull requests target and merge into; set it to `development` (keeping `ARC_PROD_BRANCH=main`) for a two-branch flow with `code promote` |
 | `ARC_PROD_BRANCH` | main | production branch; promotion (`code promote`, the dashboard button) exists only while it differs from `ARC_BASE_BRANCH` |
-| `ARC_PR_REVIEWERS` | 2 | independent PR reviewers required to approve before merge |
+| `ARC_PR_REVIEWERS` | 2 | PR reviewers *wanted* before merge; the two-family fleet can field only one cross-family reviewer, and `task.pr_review_thin` records the shortfall |
 | `ARC_PR_MAX_ROUNDS` | 8 | PR review rounds before a task fails |
 | `ARC_REQUIRE_TESTS` | 1 | require changes to ship tests that fail without them |
 | `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
@@ -387,29 +390,34 @@ the service evolves. Only `config.py`, `work.py`, and `.env` ever need touching.
 
 A third workload (`code_tasks.py`) drives coding agents as first-class
 harnesses: instead of talking to the ARC API directly, it shells out to the
-`opencode` and `kimi` CLIs, which do their own tool use (file edits, shell
-commands) inside per-task git worktrees. The orchestrator is the only git
-actor — harnesses only write files inside their worktree.
+`opencode` (GLM-5.3) and `dsh` (DeepSeek's own harness) CLIs, which do their
+own tool use (file edits, shell commands) inside per-task git worktrees. The
+orchestrator is the only git actor — harnesses only write files inside their
+worktree.
 
 ### Role map (hard rule)
 
 | Model | Harness CLI | Tier, allowed roles |
 |---|---|---|
-| `GLM-5.3` | `opencode` | medium — implement, plan, review, PR-review |
-| `Kimi-K3` | `kimi` | hard — implement, plan, review, PR-review |
-| `DeepSeek-V4.1-Flash-thinking-max` | `opencode` | hard — implement, plan, review, PR-review; the fleet's strongest model and the `code plan` planner |
+| `DeepSeek-V4.1-Flash-thinking-max` | `dsh` | medium — implement, review, PR-review; never plans. Much faster than GLM-5.3, so it carries the implementation load |
+| `GLM-5.3` | `opencode` | hard — implement, plan, review, PR-review; the fleet's strongest model, the `code plan` planner, and the last escalation stage |
 
 Every implementation must pass a deterministic verify gate (a shell command
 run inside the worktree) and then a review by the *other* model family — a
-reviewer never shares a family with the implementer it reviews. Rejections
+reviewer never shares a family with the implementer it reviews
+(**GLM-5.3 → deepseek, DeepSeek → glm**). Rejections
 feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 8).
+`ARC_ALLOW_SAME_FAMILY_REVIEW=1` is a TEMPORARY operator-authorized override
+(2026-09-12) that suspends the cross-family requirement while GLM-5.3's
+backend is unstable; it is documented in
+[docs/concurrency-limits.md](docs/concurrency-limits.md).
 
 Per-model governor caps keep concurrent harness instances under the measured
 or provider-published ARC ceilings (deepseek 10, glm 4 on the two-model fleet of
-2026-09-12) minus an interactive reserve, and a per-harness cap keeps the
-opencode models together under 5 — `main.py capacity` prints today's effective
-numbers. Override with `ARC_DRIVER_LIMIT_<FAMILY>`
-(e.g. `ARC_DRIVER_LIMIT_DEEPSEEK=3`).
+2026-09-12) minus an interactive reserve, and a **per-harness cap of 5 each**
+keeps opencode and dsh under their own pools — `main.py capacity` prints
+today's effective numbers. Override with `ARC_DRIVER_LIMIT_<FAMILY>`
+(e.g. `ARC_DRIVER_LIMIT_DEEPSEEK=3`) or `ARC_HARNESS_LIMIT_<HARNESS>`.
 
 ### Per-task pipeline
 
@@ -418,8 +426,9 @@ alloc worktree (~/worktrees/<repo>/<id>, branch task/<id>, from main)
   → implementer writes code IN THE WORKTREE
   → verify gate (verify_cmd, cwd=worktree)
   → cross-family review (strict-JSON verdict {"pass": ...}), fix loop ≤ 3
-  → publish commit (trailers: Harness/Model/Reviewer/Task-Id)
-  → merge --no-ff into main (serialized)
+  → publish commit (trailers: Harness/Model/Reviewer/Task-Id) + push + open PR
+  → one cross-family PR review (`task.pr_review_thin` records the thin gate)
+  → gh pr merge --squash --delete-branch (serialized)
   → worktree + branch cleanup
 ```
 
@@ -434,15 +443,15 @@ already contains each dep's merge.
  "tasks": [
    {"id": "t01-html", "title": "Create src/index.html hello page",
     "prompt": "Create the file src/index.html: <detailed spec>",
-    "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "kimi",
+    "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
     "verify_cmd": "test -f src/index.html && grep -q Hello src/index.html",
     "files_hint": ["src/index.html"], "deps": []}
  ]}}
 ```
 
-- `model` must be a live implementer (`GLM-5.3`, `Kimi-K3` or
-  `DeepSeek-V4.1-Flash-thinking-max` today); `reviewer` names a review
-  family (`deepseek`, `kimi`, `glm`) that differs from the implementer's.
+- `model` must be a live implementer (`DeepSeek-V4.1-Flash-thinking-max` or
+  `GLM-5.3` today); `reviewer` names a review
+  family (`glm`, `deepseek`) that differs from the implementer's.
 - `verify_cmd` runs with the worktree as cwd; empty string skips the gate.
 - `deps` list task ids that must merge first; ids are unique, cycles rejected.
 
@@ -461,14 +470,17 @@ already contains each dep's merge.
 
 - `code run --dry-run` prints the resolved DAG (implement/review pairing,
   deps, verify gates) with no model calls and no git mutations.
-- `code plan` asks Kimi-K3 (the planner) to break a goal into 2–6 task JSON
-  entries and writes the file to `~/tasks/`, ready for `code run`.
+- `code plan` asks GLM-5.3 (the planner) to break a goal into 2–6 task JSON
+  entries and writes the file to `~/tasks/`, ready for `code run`. Big goals
+  need a longer driver timeout:
+  `ARC_DRIVER_TIMEOUT=5400 .venv/bin/python main.py code plan ...` — see
+  [docs/runbook.md](docs/runbook.md) § "Planning a large goal".
 - `code status` dumps the `code_tasks` and `harness_runs` tables: per-task
   status, and per-firing harness/model/role/attempt/seconds/verdict rows.
 - `code list` shows one row per task file in `~/tasks/` with per-project
   merge progress (declared vs. `merged` tasks, status counts, last activity);
   `--json` emits the same data for scripts. `main.py doctor` runs the
-  pre-flight checks (kimi plan mode off, API key, harness binaries,
+  pre-flight checks (planner harness reachable, API key, harness binaries,
   worktree/tasks dirs, timeout invariants, stale `running` rows) and exits
   non-zero on any failure.
   `code reconcile` reaps everything a killed run left behind — stale
@@ -505,8 +517,8 @@ the parent's `$PWD`, so passing `cwd=worktree` alone is not enough — edits
 silently land wherever the orchestrator itself was launched from.
 `drivers.py` therefore spawns every harness with
 `env=dict(os.environ, PWD=str(worktree))`. Any new subprocess driver for
-JS-based tooling must do the same. Similarly, the kimi CLI's stream-json
-puts assistant text in `"content"` fields (opencode uses `"text"`), and
+JS-based tooling must do the same. Similarly, the retired kimi CLI's
+stream-json put assistant text in `"content"` fields (opencode uses `"text"`), and
 `drivers.parse_transcript` accepts both.
 
 ## Worktrees and project chains
@@ -516,9 +528,11 @@ Every fleet task runs in its own git worktree at
 `main`. The orchestrator (`gitstore.py`) is the only git actor: harnesses
 only write files inside their worktree and never commit.
 
-Merges back to `main` are serialized by a lock, so concurrent task
-completions cannot interleave. A task that will not merge cleanly ends in
-status `conflict` and `main` stays untouched.
+Merges back to `main` go through a pull request: `publish` pushes `task/<id>`
+and opens the PR, one cross-family reviewer reads the real PR diff, and only
+`pr_merge` merges (`gh pr merge --squash --delete-branch`). A task whose PR
+will not merge cleanly is resynced and re-reviewed; a real textual conflict
+ends in status `conflict` and `main` stays untouched.
 
 Projects can be chained into sequences: put `"after": ["other-taskfile.json"]`
 in a taskfile's project object and `code run` waits until that whole
@@ -531,7 +545,7 @@ project failed); `--no-wait` checks once instead of waiting. Details:
 Multi-model orchestration is governed by [AGENTS.md](AGENTS.md).
 
 - [AGENTS.md](AGENTS.md) (governance + model roles)
-- [docs/orchestration-contract.md](docs/orchestration-contract.md) (Kimi-K3 orchestrator contract)
+- [docs/orchestration-contract.md](docs/orchestration-contract.md) (per-task orchestrator contract)
 - [docs/model-tiers.md](docs/model-tiers.md) (tier routing + cross-review matrix)
 - [docs/concurrency-limits.md](docs/concurrency-limits.md) (concurrency limits and overrides)
 - [docs/taskfile-schema.md](docs/taskfile-schema.md) (taskfile reference)

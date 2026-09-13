@@ -23,18 +23,20 @@ task file by hand, under the same rules, enforced by
 4. **Model routing** — the tier table in
    [model-tiers.md](model-tiers.md). Hard rule, loader-enforced:
    `config.IMPLEMENTER_MODELS` × tier suitability.
-5. **Reviewer** — `kimi` or `glm` per task, **cross-harness** when a strong
-   model implements (see the cross-review matrix in
-   [model-tiers.md](model-tiers.md#cross-review-matrix)). Split reviews
-   between the two so neither idles nor saturates.
+5. **Reviewer** — `glm` or `deepseek` per task, **cross-family**, and with
+   two live families the pairing is forced: a GLM-5.3 task is reviewed by
+   `deepseek`, a DeepSeek-V4.1-Flash-thinking-max task by `glm` (see the
+   cross-review matrix in
+   [model-tiers.md](model-tiers.md#cross-review-matrix)).
 6. **Verify gate** — a deterministic `verify_cmd` per task (tests, build,
    `node --check`, a `grep` contract). It runs in the task's worktree
    *before* review; failure loops the task back to the implementer
    (max `config.MAX_FIX_ROUNDS` = 8 rounds per tier, then the task
    **escalates** to the next model in `config.ESCALATION_PATH` — default
-   `GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max`, env
+   `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`, env
    `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS` — with a fresh fix budget,
-   instead of failing).
+   instead of failing). There is no basic tier below medium, so a medium
+   task's first escalation is the top of the fleet.
 7. **Collision avoidance** — `files_hint` must be disjoint across
    dep-independent tasks; two parallel agents editing the same file is the
    main cause of `conflict` failures at merge time.
@@ -94,7 +96,7 @@ alloc → implement → gate ──pass──▶ review ──pass──▶ publ
          │   fix rounds exhausted
          ▼
       escalate_<tid>  ── next model in config.ESCALATION_PATH
-         │                 (GLM-5.3 → Kimi-K3 → DeepSeek-V4.1-Flash-thinking-max),
+         │                 (DeepSeek-V4.1-Flash-thinking-max → GLM-5.3),
          │                 fresh fix budget, latest failure carried as feedback;
          │                 the reviewer is re-chosen so it never shares the new
          │                 implementer's family (config.cross_family_reviewer)
@@ -137,11 +139,20 @@ alloc ─► implement ─► gate ─► review ─► publish ──► pr_rev
 `publish` commits, pushes `task/<id>`, and opens a PR against
 `config.BASE_BRANCH` (`main` by default). **Nothing has merged at this point.**
 
-`pr_review` runs `config.PR_REVIEWERS` reviewers in parallel on the real
+`pr_review` runs `config.PR_REVIEWERS` reviewers on the real
 `gh pr diff`. They come from families other than the implementer's and from
 each other. Every one must approve. A rejection posts the issues as a PR
 comment and returns the task to `implement`, whose next commit updates the
 same PR; `config.PR_MAX_ROUNDS` (3) bounds that loop.
+
+**In the two-family fleet of 2026-09-12 that is exactly ONE reviewer.** The
+cross-family requirement leaves one eligible family per implementer, so the
+PR gate is a single cross-family read — weaker than the two independent
+readings it was designed around. It is not silent: `pr_review` emits
+`task.pr_review_thin {task, pr, wanted, got, reviewers, implementer}`
+whenever the roster fielded fewer reviewers than `PR_REVIEWERS_WANTED`, and
+the **pre-merge review above is the compensating control** — the PR reviewer
+is the second read of a diff that already passed a cross-family gate.
 
 A reviewer that CRASHED did not review. If nobody objected but one never ran,
 the round is **inconclusive**: nothing is posted as `--request-changes`, the
@@ -186,8 +197,8 @@ becomes `task/<id>` → `development` → (manual promotion PR) → `main`, and
 **How many reviewers.** `PR_REVIEWERS_WANTED` (`ARC_PR_REVIEWERS`, default 2) is
 what the operator asked for. `PR_REVIEWERS` is what today's roster can deliver:
 an implementer's PR can only be read by the *other* review-capable families,
-so the ceiling is `families - 1` — 2 with three families, **1 after Kimi-K3
-leaves on 2026-09-19**. The effective value is the smaller, so the config never
+so the ceiling is `families - 1` — **1 with the two families of 2026-09-12**,
+and the effective value is the smaller. The config never
 promises a gate the fleet cannot staff; the daily audit reports delivered
 against wanted, and `task.pr_review_thin` fires on every PR that got fewer
 readers than asked.
