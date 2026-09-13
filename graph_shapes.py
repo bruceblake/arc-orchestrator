@@ -106,23 +106,29 @@ PATTERNS = [
      "sketch": _sketch(["contract"], [("contract", "side-a"), ("contract", "side-b"),
                                      ("side-a", "verify"), ("side-b", "verify")],
                        gather=("verify",))},
-    {"id": "router", "name": "Router (two-phase probe)",
-     "aliases": ["route", "classify", "probe", "two-phase"],
-     "gist": "Decide the branch before committing the fleet: a cheap probe "
-             "taskfile, then the real plan chained `after` it.",
+    {"id": "router", "name": "Router (probe → conditional branches)",
+     "aliases": ["route", "classify", "probe", "two-phase", "conditional"],
+     "gist": "A cheap probe writes a verdict; each branch task runs only if "
+             "its `when` holds against it.",
      "when": "A bug whose location is unknown; a migration that needs an "
              "inventory first; any goal where the right tier or split cannot "
              "be read off the goal text.",
-     "how": "Task-level edges are unconditional — every task you emit WILL run "
-            "— so routing happens at plan time. Phase 1: one medium-tier task "
-            "that locates the fault and lands a FAILING reproduction test "
-            "(verify_cmd: the test fails). Phase 2: a second taskfile declaring "
-            "`after: [phase-1]` with the fix, routed by what the probe found.",
+     "how": "ONE taskfile: a probe task with a `probe_cmd` that prints a JSON "
+            "verdict after its gate passes (e.g. {\"area\": \"frontend\"}), then "
+            "one task per branch with deps [probe] and `when`: {\"dep\": \"probe\", "
+            "\"key\": \"area\", \"equals\": \"frontend\"}. Branches whose condition "
+            "does not hold are recorded skipped, with everything downstream of "
+            "them. When the probe needs a human or a whole plan of its own, use "
+            "two taskfiles with the second `after` the first instead.",
      "pitfalls": ["A probe that lands code beyond the reproduction test "
-                  "contaminates phase 2's base — keep probes read-only-plus-test.",
-                  "Do not emit every branch 'and let the graph choose'; there "
-                  "is no conditional dep between tasks."],
-     "sketch": _sketch(["probe"], [("probe", "fix-basic"), ("probe", "fix-hard")])},
+                  "contaminates the branches' base — keep probes read-only-plus-test.",
+                  "Every branch's `when` must be satisfiable by the probe's "
+                  "verdict keys; a typo in `key` skips every branch."],
+     "sketch": {"starts": ["probe"],
+                "nodes": [{"name": "probe", "gather": False}, {"name": "fix-frontend", "gather": False},
+                          {"name": "fix-backend", "gather": False}],
+                "edges": [{"src": "probe", "dst": "fix-frontend", "conditional": True},
+                          {"src": "probe", "dst": "fix-backend", "conditional": True}]}},
     {"id": "evaluator", "name": "Evaluator-optimizer (built in)",
      "aliases": ["evaluator-optimizer", "reflection", "critic", "fix-loop"],
      "gist": "Generate → evaluate → fix, bounded. Every task already runs it.",
@@ -254,6 +260,7 @@ def classify(taskset):
     idset = set(ids)
     deps = {t["id"]: [d for d in (t.get("deps") or t.get("depends") or []) if d in idset]
             for t in tasks}
+    conditional = {t["id"] for t in tasks if isinstance(t.get("when"), dict) and t["when"]}
     children = {i: [] for i in ids}
     for tid, ds in deps.items():
         for d in ds:
@@ -289,6 +296,13 @@ def classify(taskset):
         shape, reason = "empty", "no tasks"
     elif n == 1:
         shape, reason = "single", "one task — the per-task pipeline is the whole graph"
+    elif conditional:
+        # Conditional deps (task.when): the branches are decided by a probe's
+        # verdict at run time, so this is a router whatever else the deps do.
+        probes = sorted({t.get("when", {}).get("dep") for t in tasks if t["id"] in conditional})
+        shape = "router"
+        reason = (f"{len(conditional)} task(s) run only if a verdict holds — "
+                  f"routed by {', '.join(p for p in probes if p)}")
     elif not joins and all(len(children[i]) <= 1 for i in ids) and len(heads) == 1:
         shape, reason = "chain", f"{n} tasks in one path — each waits for the previous PR to merge"
     elif not joins:
@@ -383,6 +397,13 @@ def planner_prose():
                  "slots is really batches — spread tiers or accept the latency.")
     lines.append("- Joins are real: a task with several deps waits for EVERY one of "
                  "them to merge (a gather node). List all of them; order does not matter.")
+    lines.append("- Conditional branches: give a probe task a \"probe_cmd\" (a shell "
+                 "command run in its worktree after its gate passes, printing one "
+                 "JSON object) and give each branch task deps [probe] plus \"when\": "
+                 "{\"dep\": \"probe\", \"key\": \"<field>\", \"equals\": <value>} "
+                 "(or \"in\": [...], \"truthy\": true, \"exists\": true). A branch whose "
+                 "condition does not hold is skipped, with everything downstream. "
+                 "Use this instead of emitting every branch unconditionally.")
     lines.append("- deps only when a task truly reads code another task writes. "
                  "Never chain for stylistic order — chains serialize the fleet.")
     lines.append("- Keep files_hint disjoint across tasks that run in parallel; two "
@@ -400,6 +421,7 @@ def planner_prose():
 def _engine():
     """What the graph engine supports today, checked against graph.py."""
     import graph as g
+    import code_tasks as ct
     have = [
         ("conditional edges", "graph.Edge when=", hasattr(g.Edge, "__init__") and
          "when" in g.Edge.__init__.__code__.co_varnames,
@@ -415,10 +437,11 @@ def _engine():
          "a whole graph as one node of another"),
         ("taskfile chaining", "project.after → chain_wait", True,
          "a project that allocates nothing until every task of another taskfile is merged"),
+        ("conditional deps between tasks", "task.when → Edge when= on the dep's probe verdict",
+         hasattr(ct, "when_holds"),
+         "a task runs only if a dependency's probe_cmd verdict satisfies its `when`; otherwise it and everything downstream are recorded skipped — a one-taskfile router"),
     ]
     missing = [
-        ("conditional deps between tasks",
-         "every task you write runs; a dep cannot say 'only if the probe found X' — route at plan time or use a second taskfile `after` the first"),
         ("tasks spawning tasks",
          "a task cannot add tasks to its own taskfile at runtime — the planner decides the set once; hierarchical work is rounds of taskfiles"),
         ("loops between tasks",
