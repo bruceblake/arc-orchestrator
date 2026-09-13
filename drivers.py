@@ -16,6 +16,7 @@ import pathlib
 import random
 import re
 import signal
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -981,6 +982,43 @@ class OpencodeDriver(Driver):
         return a + [prompt]
 
 
+def _dsh_log_line(e):
+    """Render one dsh session-log event as one transcript line (None: skip).
+
+    Only the event kinds that show what the agent is doing render; the
+    bookkeeping kinds (turn/meta, usage, ...) return None.
+    """
+    t, d = e.get("type"), e.get("data") or {}
+    ts = time.strftime("%H:%M:%S", time.localtime((e.get("time") or 0) / 1000))
+    step = d.get("step")
+    if t == "tool/call":
+        return (f"[dsh-log {ts} step {step}] TOOL {d.get('name')}: "
+                f"{str(d.get('arguments'))[:260]}")
+    if t == "tool/result":
+        parts = (d.get("message") or {}).get("content") or []
+        texts, err = [], ""
+        for p in parts:
+            if not isinstance(p, dict):
+                continue
+            if p.get("isError"):
+                err = " ERROR"
+            for sub in p.get("content") or []:
+                if isinstance(sub, dict) and sub.get("text"):
+                    texts.append(str(sub["text"]))
+            if p.get("text"):
+                texts.append(str(p["text"]))
+        return f"[dsh-log {ts} step {step}] RESULT{err}: {' '.join(texts).strip()[:400]}"
+    if t == "assistant/message":
+        parts = ((d.get("message") or {}).get("content")) or []
+        texts = [p.get("text", "") for p in parts
+                 if isinstance(p, dict) and p.get("type") == "text"]
+        text = " ".join(x for x in texts if x.strip())[:500]
+        if text:
+            tok = (d.get("usage") or {}).get("outputTokens", "?")
+            return f"[dsh-log {ts} step {step}] ASSISTANT: {text} (+{tok}tok)"
+    return None
+
+
 class DeepseekDriver(Driver):
     """DeepSeek's own harness (dsh, github.com/deepseek-ai/deepseek-harness).
 
@@ -1006,7 +1044,11 @@ class DeepseekDriver(Driver):
 
     Both pipes still land in the transcript file (what the dashboard tails);
     stdout is additionally kept verbatim as the result text, because that is
-    where the answer is when dsh prints one.
+    where the answer is when dsh prints one. Since the pipes are silent
+    mid-run by design, the transcript ALSO gets the session log rendered
+    live: whenever the probe sees it grow, new events are appended as
+    `[dsh-log <ts> step <n>] TOOL/RESULT/ASSISTANT ...` lines, so a
+    dashboard tail shows the chain of action instead of bare heartbeats.
 
     No session resume: `dsh --profile headless` accepts nothing but the task
     text, so an interrupted attempt simply retries the original prompt (the
@@ -1049,6 +1091,58 @@ class DeepseekDriver(Driver):
             return False
 
         return probe
+
+    @staticmethod
+    def _session_tail(worktree):
+        """Render NEW session-log events as transcript lines (closure).
+
+        Same mangled root as _session_probe. Each call re-reads the newest
+        session file and returns the rendered lines for events with a seq
+        past the last one seen. The full decode on every call is the simple
+        option: it only runs when the probe reports growth, and the sidecar
+        dsh_tail.py already proves a 20 s poll of it is cheap. A run whose
+        newest file CHANGES (a fresh attempt's session) restarts from seq 0
+        of that file — the backlog is that attempt's opening steps, not all
+        of history. Anything that breaks (no file yet, zstd missing, a
+        partial write) yields no lines, never an exception into the pump.
+        """
+        root = (Path.home() / ".dsh" / "sessions"
+                / ("--" + str(worktree).strip("/").replace("/", "-") + "--"))
+        current = [None]
+        last_seq = [-1]
+
+        def tail():
+            try:
+                files = sorted(
+                    root.glob("session-*/session.v3.jsonl.zstd"),
+                    key=lambda p: p.stat().st_mtime)
+            except OSError:
+                return []
+            if not files:
+                return []
+            if files[-1] != current[0]:
+                current[0] = files[-1]
+                last_seq[0] = -1
+            try:
+                out = subprocess.run(["zstd", "-dc", str(files[-1])],
+                                     capture_output=True, timeout=60).stdout
+            except (OSError, subprocess.SubprocessError):
+                return []
+            lines = []
+            for raw in out.decode(errors="replace").splitlines():
+                try:
+                    e = json.loads(raw)
+                except ValueError:
+                    continue
+                if (e.get("seq") or -1) <= last_seq[0]:
+                    continue
+                last_seq[0] = e.get("seq") or last_seq[0]
+                line = _dsh_log_line(e)
+                if line:
+                    lines.append(line)
+            return lines
+
+        return tail
 
     def __init__(self, model, role, bench=False, interactive=False):
         if not bench:
@@ -1094,12 +1188,13 @@ class DeepseekDriver(Driver):
         try:
             return await self._pump_dual(proc, argv, tpath, t0, task_id,
                                          attempt,
-                                         probe=self._session_probe(worktree))
+                                         probe=self._session_probe(worktree),
+                                         tail=self._session_tail(worktree))
         finally:
             await _terminate(proc)
 
     async def _pump_dual(self, proc, argv, tpath, t0, task_id, attempt,
-                         probe=None):
+                         probe=None, tail=None):
         """Driver._pump, multiplexed over both of dsh's pipes.
 
         Identical stall/deadline/heartbeat/forensics semantics to the stock
@@ -1107,7 +1202,10 @@ class DeepseekDriver(Driver):
         generic stream set into _pump risks the harness (opencode) the whole
         fleet already runs on. A chunk on EITHER pipe resets the idle clock,
         and so does the session-log probe: dsh's pipes can stay silent for
-        the whole run while it works, the session log cannot.
+        the whole run while it works, the session log cannot. When the probe
+        fires, `tail` renders the new session-log events into the transcript
+        (`_session_tail`), which is the only live chain of action a dsh run
+        ever shows.
         """
         out_chunks, err_chunks = [], []
         q = asyncio.Queue()
@@ -1143,6 +1241,10 @@ class DeepseekDriver(Driver):
                     if probe is not None and probe():
                         last_chunk_t = now
                         last_probe_t = now
+                        if tail is not None:
+                            for line in tail():
+                                fh.write(line.encode(errors="replace") + b"\n")
+                            fh.flush()
                     idle_for = now - last_chunk_t
                     if idle_for >= idle_budget or now >= deadline:
                         raise asyncio.TimeoutError
