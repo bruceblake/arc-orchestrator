@@ -1,16 +1,18 @@
 """HTTP contract tests for the orchestrator-chat and repo endpoints.
 
-GET /api/repos, POST /api/repos/create, POST /api/chat/start and
-GET /api/chat/poll are how the dashboard's chat UI talks to the planner.
-Two of them mutate: one creates git repos, one appends to a session file and
-spawns `main.py chat`. They are unauthenticated (Rule 6b), so the allowlist
-discipline is the entire security boundary — /api/chat/start must refuse any
+GET /api/repos, POST /api/repos/create, POST /api/repos/remote,
+POST /api/chat/start and GET /api/chat/poll are how the dashboard's chat UI
+talks to the planner. Three of them mutate: one creates git repos, one adds
+their GitHub remote, one appends to a session file and spawns `main.py chat`.
+They are unauthenticated (Rule 6b), so the allowlist discipline is the entire
+security boundary — /api/chat/start and /api/repos/remote must refuse any
 repo path that is not byte-identical to a /api/repos entry.
 
 Driven socket-less, like test_http_write.py: _spawn_logged is patched so no
 model is ever called and no `main.py chat` process ever starts — the tests
 assert on argv and the launch registry instead. Repo creation DOES run local
-git (init + one commit) against per-test temp dirs; nothing touches a remote.
+git (init + one commit) against per-test temp dirs; remote creation runs
+through the patched _ensure_remote hook, so no test ever talks to GitHub.
 """
 import json
 import os
@@ -136,10 +138,26 @@ class TestReposApi(_ChatCase):
         self.assertEqual([r["name"] for r in repos[1:]], ["a-repo", "b-repo"])
         self.assertNotIn("plain", [r["name"] for r in repos])
         for r in repos:
-            self.assertEqual(set(r), {"name", "path", "branch", "remote"})
+            self.assertEqual(set(r), {"name", "path", "branch", "remote",
+                                      "remote_url", "last_commit",
+                                      "last_subject", "projects"})
             self.assertIsInstance(r["branch"], str)
             self.assertIsInstance(r["remote"], bool)
+            self.assertTrue(r["remote_url"] is None
+                            or isinstance(r["remote_url"], str))
+            self.assertTrue(r["last_commit"] is None
+                            or isinstance(r["last_commit"], int))
+            self.assertTrue(r["last_subject"] is None
+                            or isinstance(r["last_subject"], str))
+            self.assertIsInstance(r["projects"], int)
         self.assertFalse(repos[1]["remote"])  # freshly inited: no remote
+        self.assertIsNone(repos[1]["remote_url"])
+        self.assertIsNone(repos[1]["last_commit"])  # and no commits yet
+        self.assertIsNone(repos[1]["last_subject"])
+        self.assertEqual(repos[1]["projects"], 0)   # no taskfiles target it
+        # the live repo has a history and taskfiles the picker can show
+        self.assertIsInstance(repos[0]["last_commit"], int)
+        self.assertIsInstance(repos[0]["last_subject"], str)
 
     def test_missing_repos_dir_still_lists_arc_orchestrator(self):
         os.environ["ARC_REPOS_DIR"] = str(self.tmp / "no-such-dir")
@@ -149,7 +167,21 @@ class TestReposApi(_ChatCase):
 
 
 class TestReposCreateApi(_ChatCase):
-    """POST /api/repos/create — local git init only, never a remote/push."""
+    """POST /api/repos/create — local git init, then a GitHub remote via the
+    patchable _ensure_remote hook (no test ever runs real gh)."""
+
+    def setUp(self):
+        super().setUp()
+        self.remote_calls = []
+        self.remote_result = (True, "https://github.com/x/good-repo")
+
+        def fake_ensure(path, name=None, private=True):
+            self.remote_calls.append((str(path), name, private))
+            return self.remote_result
+
+        patcher = mock.patch.object(dashboard, "_ensure_remote", fake_ensure)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def test_create_really_git_inits_the_repo(self):
         status, resp = self._post_json("/api/repos/create", {"name": "good-repo"})
@@ -164,6 +196,45 @@ class TestReposCreateApi(_ChatCase):
         self.assertIn("good-repo", (path / "README.md").read_text())
         names = [r["name"] for r in self._get("/api/repos")[1]["repos"]]
         self.assertIn("good-repo", names)
+
+    def test_create_also_ensures_a_remote(self):
+        status, resp = self._post_json("/api/repos/create", {"name": "good-repo"})
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["remote_url"], "https://github.com/x/good-repo")
+        self.assertEqual(resp["remote_note"], "created github.com/x/good-repo")
+        self.assertEqual(self.remote_calls,
+                         [(str(self.repos_dir / "good-repo"), "good-repo", True)])
+
+    def test_private_flag_reaches_the_hook(self):
+        self._post_json("/api/repos/create", {"name": "pub-repo", "private": False})
+        self.assertEqual(self.remote_calls[0][2], False)
+
+    def test_remote_false_means_local_only(self):
+        status, resp = self._post_json(
+            "/api/repos/create", {"name": "local-only", "remote": False})
+        self.assertEqual(status, 200)
+        self.assertIsNone(resp["remote_url"])
+        self.assertEqual(self.remote_calls, [])
+
+    def test_remote_failure_is_a_note_not_a_500(self):
+        # gh missing or unauthenticated must not bury the local repo: the
+        # 09-12 minecraft-test loss was a missing remote, not a broken repo.
+        self.remote_result = (False, "gh not authenticated")
+        status, resp = self._post_json("/api/repos/create", {"name": "good-repo"})
+        self.assertEqual(status, 200)
+        self.assertIsNone(resp["remote_url"])
+        self.assertIn("gh not authenticated", resp["remote_note"])
+        self.assertIn("local only", resp["remote_note"])
+        self.assertTrue((self.repos_dir / "good-repo" / ".git").is_dir())
+
+    def test_rejects_bad_private_and_remote_flags(self):
+        for flags in ({"private": "yes"}, {"remote": 1}, {"private": None}):
+            with self.subTest(flags=flags):
+                status, resp = self._post_json(
+                    "/api/repos/create", {"name": "flagged", **flags})
+                self.assertEqual(status, 400)
+                self.assertIn("error", resp)
+        self.assertEqual(self.remote_calls, [])
 
     def test_rejects_traversal_and_bad_names(self):
         for bad in ("../evil", "a/b", "No-Upper", "_bad", "", None, "x" * 42):
@@ -180,6 +251,60 @@ class TestReposCreateApi(_ChatCase):
         self.assertEqual(status, 409)
         self.assertTrue(resp["exists"])
         self.assertIn("error", resp)
+
+
+class TestReposRemoteApi(_ChatCase):
+    """POST /api/repos/remote — gh-backed remote creation for an EXISTING
+    checkout, gated by the same /api/repos allowlist as /api/chat/start."""
+
+    def setUp(self):
+        super().setUp()
+        self.remote_calls = []
+
+        def fake_ensure(path, name=None, private=True):
+            self.remote_calls.append((str(path), name, private))
+            return True, "https://github.com/x/listed"
+
+        patcher = mock.patch.object(dashboard, "_ensure_remote", fake_ensure)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_rejects_a_repo_not_on_the_allowlist(self):
+        # Rule 6b: never an arbitrary path — even a REAL git repo that is
+        # not on the /api/repos list is refused before gh is consulted.
+        rogue = self._init_repo("rogue")
+        (rogue / ".git").rename(self.repos_dir / "rogue-git")  # delist it
+        for bad in (str(self.tmp / "outside"), str(rogue), "/etc", "", None):
+            with self.subTest(repo=bad):
+                status, resp = self._post_json("/api/repos/remote", {"repo": bad})
+                self.assertIn(status, (400, 403))
+                self.assertIn("error", resp)
+        self.assertEqual(self.remote_calls, [])
+
+    def test_ensures_remote_for_a_listed_repo(self):
+        repo = self._init_repo("listed")
+        status, resp = self._post_json("/api/repos/remote", {"repo": str(repo)})
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["remote_url"], "https://github.com/x/listed")
+        self.assertEqual(resp["note"], "created github.com/x/listed")
+        self.assertEqual(self.remote_calls, [(str(repo), "listed", True)])
+
+    def test_failure_is_a_note_with_the_reason(self):
+        repo = self._init_repo("listed")
+        with mock.patch.object(dashboard, "_ensure_remote",
+                               return_value=(False, "gh not authenticated")):
+            status, resp = self._post_json("/api/repos/remote", {"repo": str(repo)})
+        self.assertEqual(status, 200)
+        self.assertIsNone(resp["remote_url"])
+        self.assertEqual(resp["note"], "gh not authenticated")
+
+    def test_rejects_bad_private_flag(self):
+        repo = self._init_repo("listed")
+        status, resp = self._post_json(
+            "/api/repos/remote", {"repo": str(repo), "private": "yes"})
+        self.assertEqual(status, 400)
+        self.assertIn("error", resp)
+        self.assertEqual(self.remote_calls, [])
 
 
 class TestChatApi(_ChatCase):
