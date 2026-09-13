@@ -15,7 +15,7 @@ Two models, two harnesses (operator decision 2026-09-12):
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
 | GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
-| DeepSeek-V4.1-Flash-thinking-max | `dsh` (`DeepseekDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
+| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
 
 **GLM-5.3 is the fleet's strongest model** — hard tier, the planner, the last
 escalation stage. **DeepSeek-V4.1-Flash-thinking-max (DS-max) is the
@@ -33,7 +33,7 @@ reviews, and **never plans**.
   harness instances per model via `drivers._gate` → `config.driver_limit`.
   It is the account cap divided by sessions-per-process (both harnesses hold
   about two ARC sessions at once: `config._SESSIONS_PER_PROCESS` is
-  `{"opencode": 2, "dsh": 2}`), so 10 ÷ 2 = 5
+  `{"opencode": 2, "reasonix": 2}`), so 10 ÷ 2 = 5
   and 4 ÷ 2 = 2. `ARC_DRIVER_HEADROOM` subtracts further; batch callers on the
   planner model would see one slot fewer (`INTERACTIVE_RESERVE`), but
   `_apply_reserve` skips the reserve while it would leave batch under
@@ -185,7 +185,7 @@ table, not an edit in six places on the morning it happens.
 |---|---|---|---|---|
 | DeepSeek-V4-Flash | opencode | medium | implement, PR-review | until 2026-09-12 |
 | Kimi-K3 | kimi | hard | all | retired 2026-09-12 (row deleted) |
-| DeepSeek-V4.1-Flash-thinking-max | dsh | medium | implement, review, PR-review | from 2026-09-12 |
+| DeepSeek-V4.1-Flash-thinking-max | reasonix (dsh 2026-09-12..13) | medium | implement, review, PR-review | from 2026-09-12 |
 | GLM-5.3 | opencode | hard | all | — |
 
 gpt-oss-120b was retired on 2026-09-11 (operator decision). There is no

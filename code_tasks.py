@@ -22,6 +22,7 @@ import gitstore
 import graft
 import drivers
 from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
+                     ReasonixDriver,
                      driver_for, transcript_tokens)
 from graph import Graph, GraphError
 
@@ -795,7 +796,7 @@ def _parse_approval(text):
 
 
 def _driver(model, role, policy):
-    """Implementer/reviewer driver. policy['harness'] maps model -> opencode|dsh
+    """Implementer/reviewer driver. policy['harness'] maps model -> opencode|dsh|reasonix
     (bench variants); default follows the roster row's harness, so a model
     whose ROSTER row moves harness moves with it."""
     pol = policy or {}
@@ -808,6 +809,8 @@ def _driver(model, role, policy):
         return KimiDriver(role, bench=bool(pol))
     if harness == "dsh":
         return DeepseekDriver(model, role, bench=bool(pol))
+    if harness == "reasonix":
+        return ReasonixDriver(model, role, bench=bool(pol))
     return OpencodeDriver(model, role, bench=bool(pol))
 
 

@@ -54,7 +54,7 @@ The roster is dated and API-validated (`config.ROSTER`); this is the
 
 | Model | Harness | Tier | Roles | Account cap | Driver slots |
 |---|---|---|---|---|---|
-| DeepSeek-V4.1-Flash-thinking-max | `dsh` | medium | implement/review/PR-review (never plans) | 10 | 5 |
+| DeepSeek-V4.1-Flash-thinking-max | `reasonix` | medium | implement/review/PR-review (never plans) | 10 | 5 |
 | GLM-5.3 | `opencode` | hard | implement/plan/review/PR-review; the planner | 4 | 2 |
 
 - Reviewer is always cross-family: `reviewer` names a family in
@@ -63,7 +63,7 @@ The roster is dated and API-validated (`config.ROSTER`); this is the
   to deepseek, DeepSeek's to glm.
 - Fan-out wider than a family's driver slots simply **queues** (leases are
   cross-process; over-cap tasks wait, they do not fail), and each harness has
-  its own cap of 5 (opencode for GLM-5.3, dsh for DeepSeek). Width beyond the
+  its own cap of 5 (opencode for GLM-5.3, reasonix for DeepSeek). Width beyond the
   cap costs latency, not correctness — but a fan-out of 6 tasks all routed
   to DeepSeek is really a chain of 2 batches (driver cap 5), so plan for it
   or spread tiers.

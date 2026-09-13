@@ -22,8 +22,9 @@ builds software — and this repo itself — as a directed graph of small tasks:
   pairing, via `main.py code plan` (`code_tasks.plan_tasks`).
 - All models implement. **GLM-5.3** takes the hard tier (multi-file reasoning,
   delicate design, architectural judgment) on top of planning and reviewing;
-  **DeepSeek-V4.1-Flash-thinking-max** (in **`dsh`**, DeepSeek's own harness —
-  `drivers.DeepseekDriver`) takes the medium/mechanical tier. DeepSeek is much
+  **DeepSeek-V4.1-Flash-thinking-max** (in **`reasonix`**, Reasonix — the
+  DeepSeek-native cache-first agent, `drivers.ReasonixDriver`; replaced `dsh`
+  by operator decision 2026-09-13) takes the medium/mechanical tier. DeepSeek is much
   faster and carries the implementation load; GLM-5.3 is the planner and the
   last escalation stage.
 - **Every implementation is gated and cross-reviewed before merge**: a
@@ -85,7 +86,7 @@ Routing is decided at plan time (by GLM-5.3 in
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
 | GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
-| DeepSeek-V4.1-Flash-thinking-max | `dsh` (`DeepseekDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
+| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
 
 **GLM-5.3 is the fleet's strongest model** — operator decision 2026-09-12:
 hard tier, the planner, and the last escalation stage. Its cap of 4 is the
@@ -161,7 +162,7 @@ medium tier. Tier reference: [docs/model-tiers.md](docs/model-tiers.md).
 Every task MUST be reviewed, and the reviewer MUST NOT be from the same model
 family as the implementer it reviews — family-based, not harness-based (the
 two families run different harnesses today anyway: GLM on `opencode`, DeepSeek
-on `dsh`).
+on `reasonix`).
 
 - `code_tasks.load_taskfile` (code_tasks.py:89-115) REQUIRES a cross-family
   reviewer, but it normalizes an off-roster token rather than rejecting it. A
@@ -403,19 +404,19 @@ merged work.
 |---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | `ARC_LIMIT_<FAMILY>` |
 | Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | dsh (deepseek): **5** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | reasonix (deepseek): **5** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
 on this fleet were gpt-oss 5, DeepSeek(V4-Flash) 5, GLM 4, Kimi 3 — that was
 the retired fleet: gpt-oss-120b and Kimi-K3 have since left it, and
 DeepSeek's current 10 is the provider-published figure for V4.1 (provider
 docs updated 2026-09-12), not a measurement of ours. A harness run
-(opencode, and dsh by the same assumption)
+(opencode, and reasonix by the same assumption)
 issues parallel tool calls and holds about TWO sessions at once, so a driver
 cap set equal to the session limit over-subscribes by that factor. Measured
 from the event log: 23 capacity rejections in four hours, GLM-5.3 refused with
 as few as TWO of our drivers live against a ceiling of four. Driver caps are
-therefore sessions // sessions-per-process; opencode and dsh hold two each
+therefore sessions // sessions-per-process; opencode and reasonix hold two each
 (`config._SESSIONS_PER_PROCESS`), so GLM 4 // 2 = 2 and DeepSeek 10 // 2 = 5.
 gpt-oss and DeepSeek were previously configured at 8 against a real
 ceiling of 5, so the fleet generated its own 400s under load and blamed the
@@ -423,13 +424,14 @@ provider.
 
 **The harness layer is the one people forget, and it is often the binding
 one.** Each harness now has its OWN pool, because the two models no longer
-share a binary: **opencode (GLM-5.3) is capped at 5 and dsh (DeepSeek) at 5**
+share a binary: **opencode (GLM-5.3) is capped at 5 and reasonix (DeepSeek) at 5**
 (`config._HARNESS_CAP`). Every opencode-backed model runs through ONE local
 binary backed by ONE ~240MB sqlite store in `~/.local/share/opencode`, so
 GLM's driver cap of 2 sits well under the opencode pool — the retired
 three-model fleet's GLM 2 + DeepSeek 5 = 7 opencode processes is history.
-dsh keeps its state as per-profile JSON under `$DSH_HOME`, with no central
-store, so its 5 mirrors opencode until a load test says otherwise. Measured
+reasonix keeps per-workspace session files under its own home
+(`config.REASONIX_FLEET_HOME`), with no central store, so its 5 mirrors
+opencode until a load test says otherwise. Measured
 on the shared opencode pool, with an identical prompt and a warm cache:
 
 | concurrent | 3 | 4 | 5 | 6 | 10 |
@@ -733,7 +735,7 @@ Top-level Python modules (one role each):
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
 | `graph_shapes.py` | The graph BETWEEN tasks (§1 "Two graphs"): the pattern catalogue as data (`PATTERNS`, with a drawable sketch each), `normalize_pattern` (label aliases → catalogue id, used by the loader), `classify` (the shape a taskfile's `deps` actually form: single/chain/fanout/fanin/diamond/hierarchical/mixed, width, depth, declared-vs-detected mismatch), `planner_prose` (the GRAPH DESIGN block of the planner prompt, from the catalogue and today's caps), `describe` (→ `GET /api/graph-shapes`: patterns, every taskfile classified, what the engine can and cannot express) |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local `git init` + one commit, then best-effort gh remote creation), `POST /api/repos/remote` (gh remote for an existing allowlisted checkout), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
-| `drivers.py` | Headless CLI harness drivers: `OpencodeDriver` (`opencode`, GLM-5.3) and `DeepseekDriver` (`dsh`, DeepSeek-V4.1-Flash-thinking-max — streams reasoning on stderr, prints only the final message on stdout, pumps both pipes for the stall clock, no session resume, 0 tokens reported); `KimiDriver` still exists for historical transcripts only (no live model runs the kimi harness); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
+| `drivers.py` | Headless CLI harness drivers: `OpencodeDriver` (`opencode`, GLM-5.3) and `ReasonixDriver` (`reasonix`, DeepSeek-V4.1-Flash-thinking-max since 2026-09-13 — `reasonix run --output-format stream-json`: every tool call, text delta and token receipt on stdout, final `{"type":"result"}` object carries the answer and session id; a private `REASONIX_HOME` generated by `reasonix_fleet_home`); `DeepseekDriver` (`dsh`, 2026-09-12..13, historical — streams reasoning on stderr, prints only the final message on stdout, pumps both pipes for the stall clock, no session resume, 0 tokens reported); `KimiDriver` still exists for historical transcripts only (no live model runs the kimi harness); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
 | `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (120 s per-git-op timeout); nothing merges locally |

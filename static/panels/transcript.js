@@ -41,7 +41,7 @@ async function pollTranscript() {
   catch (e) { return; } // keep last good content; next tick retries
   if (d.error) { pre.textContent = d.error; return; }
   $("#drawer-sub").textContent = $("#drawer-sub").textContent.split(" · ")[0] + ` · ${d.total_lines} lines`;
-  pre.textContent = d.lines.map(renderTranscriptLine).join("\n");
+  pre.textContent = d.lines.map(renderTranscriptLine).filter(x => x !== null).join("\n");
   if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 // The harnesses log completely different shapes and only one was ever handled:
@@ -53,6 +53,37 @@ async function pollTranscript() {
 function renderTranscriptLine(l) {
   let o;
   try { o = JSON.parse(l); } catch { return l.slice(0, 300); }
+
+  // reasonix (DeepSeek, 2026-09-13): {kind: ...} per event, one final
+  // {type: "result"}. Deltas (text/reasoning), phases and stream bookkeeping
+  // are dropped (null) — a run emits a hundred reasoning deltas, and the
+  // drawer should read as the chain of action, not the thinking buffer.
+  if (typeof o.kind === "string") {
+    const t = o.tool || {};
+    let arg = "";
+    if (typeof t.args === "string") {
+      try {
+        const a = JSON.parse(t.args);
+        arg = a.path || a.file_path || a.pattern || a.command || a.query || "";
+      } catch { arg = t.args.slice(0, 80); }
+    }
+    if (o.kind === "tool_dispatch") return t.partial ? null : `🔧 ${t.name || "tool"}${arg ? " " + String(arg).slice(0, 90) : ""}`;
+    if (o.kind === "tool_result") {
+      const body = String(t.output || "").replace(/\s+/g, " ").trim();
+      return `   ↳ ${body.slice(0, 200)}${body.length > 200 ? ` … (${body.length} chars)` : ""}`;
+    }
+    if (o.kind === "message") return (o.text || "").slice(0, 500) || null;
+    if (o.kind === "usage") {
+      const u = o.usage || {};
+      return `— usage (${u.totalTokens || "?"} tok, ${u.cacheHitTokens || 0} cached)`;
+    }
+    if (o.kind === "user_message") return `▸ ${(o.text || "").slice(0, 400)}`;
+    if (o.kind === "notice") return `— ${(o.text || o.message || "notice").toString().slice(0, 200)}`;
+    return null;
+  }
+  if (o.type === "result" && typeof o.result === "string") {
+    return `${o.is_error ? "✗" : "✓"} result: ${o.result.slice(0, 500)}`;
+  }
 
   if (typeof o.type === "string") {                    // opencode
     const p = o.part || {};

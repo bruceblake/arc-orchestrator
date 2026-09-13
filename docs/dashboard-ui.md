@@ -85,7 +85,7 @@ slot right now, and who is queued behind them.**
 - **Capacity cards** — one per harness *and* one per model, pips for held vs
   free. Harness rows come first because the harness is frequently the binding
   ceiling: a model can sit under its own cap while
-  its harness pool (opencode for GLM-5.3, dsh for DeepSeek) is saturated,
+  its harness pool (opencode for GLM-5.3, reasonix for DeepSeek) is saturated,
   which reads as "idle" exactly when it is most
   wrong. Amber = at cap, red = a queue behind it.
 - **Attempt rows** — each running and queued attempt with its task, role,

@@ -11,7 +11,7 @@ things:
 |---|---|---|---|
 | Per-account API caps | The ARC API itself (server-side, per API key) | 14 across both live models (deepseek 10 + glm 4) | **All** processes sharing the key |
 | Per-process driver semaphores | `drivers.py` in this process | 7 across both live models (deepseek 5 + glm 2) | One orchestrator run |
-| Per-harness pool | `drivers._harness_gate` + `harness:<name>` leases | opencode **5** + dsh **5** | Every model on that binary |
+| Per-harness pool | `drivers._harness_gate` + `harness:<name>` leases | opencode **5** + reasonix **5** | Every model on that binary |
 
 The layers are not the same number on purpose. The account caps are the hard
 ceiling the API will reject you for exceeding. The driver semaphores are what
@@ -53,7 +53,7 @@ carries.
 
 **`ARC_DRIVER_HEADROOM`** (default 0) reserves slots per model for interactive
 use of the same ARC account. Set it to `1` if you want to run an interactive
-`dsh`/`opencode` session alongside the fleet without contending; at 0 the fleet uses everything
+`reasonix`/`opencode` session alongside the fleet without contending; at 0 the fleet uses everything
 and an interactive session competes with it — a rejection there is retried on
 the capacity backoff, not fatal, but it will feel slow.
 
@@ -67,8 +67,8 @@ Before the per-model layers below, there is a limit that is easy to miss and is
 frequently the binding one: **every opencode-backed model shares ONE local
 binary and ONE ~240MB sqlite store** in `~/.local/share/opencode`. On the
 two-model fleet (2026-09-12) only GLM-5.3 runs opencode — DeepSeek moved to
-its own `dsh` harness — so the opencode pool now sees GLM's driver cap of 2
-against its ceiling of 5, and DeepSeek's 5 runs against the separate dsh pool
+its own `reasonix` harness (dsh from 2026-09-12 to 09-13) — so the opencode pool now sees GLM's driver cap of 2
+against its ceiling of 5, and DeepSeek's 5 runs against the separate reasonix pool
 of 5.
 
 Measured 2026-09-10, identical prompt, warm cache:
@@ -82,14 +82,15 @@ Past five it fails fast with an **empty stderr**. The fleet logged that as
 and its retry ladder repeated it four times per task, so self-inflicted
 contention looked like a provider outage. 42 such errors in half an hour.
 
-`config.harness_limit(harness)` caps it (opencode 5, dsh 5), enforced by
+`config.harness_limit(harness)` caps it (opencode 5, reasonix 5), enforced by
 `drivers._harness_gate` in-process and by a `harness:<name>` row in the same
 `driver_leases` table across processes.
 
 | Harness | Cap | Override |
 |---|---|---|
 | opencode (GLM-5.3) | 5 | `ARC_HARNESS_LIMIT_OPENCODE` |
-| dsh (DeepSeek-V4.1-Flash-thinking-max) | 5 | `ARC_HARNESS_LIMIT_DSH` |
+| reasonix (DeepSeek-V4.1-Flash-thinking-max) | 5 | `ARC_HARNESS_LIMIT_REASONIX` |
+| dsh (historical, 2026-09-12..13; no live model) | 5 | `ARC_HARNESS_LIMIT_DSH` |
 
 dsh (DeepSeek's own harness, swapped in 2026-09-12) keeps its state as
 per-profile JSON files under `$DSH_HOME` — no central store like opencode's
@@ -118,7 +119,7 @@ holding a worktree and a DB row while doing nothing. `Graph(max_in_flight=...)`
 bounds how many nodes execute concurrently within one run; the rest wait on
 their per-node queues holding no driver slot. `code_tasks.build_code_graph`
 sets it from `config.max_tasks_in_flight()` — default the total harness
-capacity (opencode 5 + dsh 5 = 10), override **`ARC_MAX_TASKS_IN_FLIGHT`**.
+capacity (opencode 5 + reasonix 5 = 10), override **`ARC_MAX_TASKS_IN_FLIGHT`**.
 The default exceeds the root count of every taskfile measured so far, so
 unconfigured runs behave exactly as before.
 
@@ -152,7 +153,7 @@ request is rejected with HTTP 400, which `pool._is_session_limit` recognises by
 ### Layer 2 — per-process driver semaphores (`drivers._MODEL_DRIVER_CAP`)
 
 The **code workload** does not call the API through `pool.chat`. It shells out
-to the `opencode` (GLM-5.3) and `dsh` (DeepSeek) CLIs (`drivers.py`), each of
+to the `opencode` (GLM-5.3) and `reasonix` (DeepSeek) CLIs (`drivers.py`), each of
 which makes its own
 API calls. Concurrent harness instances are bounded by a **per-model**
 semaphore, not a per-family one:
@@ -163,7 +164,7 @@ semaphore, not a per-family one:
 # is the provider-published figure (2026-09-12), the rest are measured.
 _MEASURED_CONCURRENCY = {"GLM-5.3": 4,
                          "DeepSeek-V4.1-Flash-thinking-max": 10}
-_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2}
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2}
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
 _MODEL_DRIVER_CAP = {m: max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)]
                             - DRIVER_HEADROOM)
@@ -172,7 +173,7 @@ _MODEL_DRIVER_CAP = {m: max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)]
 
 | Model | ARC sessions | Harness | Sessions per process | Driver cap |
 |---|---|---|---|---|
-| DeepSeek-V4.1-Flash-thinking-max | 10 | dsh | 2 | 5 |
+| DeepSeek-V4.1-Flash-thinking-max | 10 | reasonix | 2 | 5 |
 | GLM-5.3 | 4 | opencode | 2 | 2 |
 
 (`"kimi": 1` remains in `_SESSIONS_PER_PROCESS` only so a historical
@@ -184,7 +185,7 @@ session limit asks for twice the budget. Measured over four hours: 23 capacity
 rejections, GLM-5.3 refused with as few as TWO drivers live against a ceiling
 of four.
 
-Remember the harness pools above sit UNDER these: opencode and dsh are
+Remember the harness pools above sit UNDER these: opencode and reasonix are
 separate binaries with their own 5-slot pools, so a model's driver cap binds
 before its harness pool does on today's numbers.
 
@@ -216,11 +217,11 @@ cross-process truth.
 
 Summing the driver caps: **5 + 2 = 7**. That is the maximum number
 of harness instances one orchestrator run can have in flight at once, and it
-fits inside the two harness pools: DeepSeek's 5 into the 5-wide dsh pool,
+fits inside the two harness pools: DeepSeek's 5 into the 5-wide reasonix pool,
 GLM's 2 into the 5-wide opencode pool.
 
 ```
-DeepSeek-V4.1-max  5   ← medium implementers + reviewers/PR-reviewers (dsh)
+DeepSeek-V4.1-max  5   ← medium implementers + reviewers/PR-reviewers (reasonix)
 GLM-5.3            2   ← hard implementers + planner/reviewers (opencode)
 ────────────────
                    7   per-process ceiling
@@ -375,7 +376,17 @@ Note `config.MAX_RETRIES` is also used by `pool.py` for API request retries
 in the research workload; in the code workload the driver retry loop above is
 what governs a single harness firing.
 
-### `ARC_DSH_BIN` — where the dsh CLI lives
+### `ARC_REASONIX_BIN` / `ARC_REASONIX_HOME` — where the reasonix CLI and its fleet home live
+
+`config.reasonix_bin()` resolves the DeepSeek harness binary as **`$ARC_REASONIX_BIN`,
+else `reasonix` on PATH, else `~/.local/opt/node/bin/reasonix`**. The fleet
+runs it under a private `REASONIX_HOME` (`$ARC_REASONIX_HOME`, default
+`logs/reasonix-home/`) that `drivers.reasonix_fleet_home` regenerates from
+`ARC_API_KEY`, `ARC_BASE_URL` and the roster — reasonix reads provider keys
+only from `<home>/.env`, never the shell. See
+[runbook.md](runbook.md) § "DeepSeek's `reasonix` harness".
+
+### `ARC_DSH_BIN` — where the dsh CLI lives (historical, 2026-09-12..13)
 
 `config.dsh_bin()` resolves the DeepSeek harness binary: `$ARC_DSH_BIN` when
 set, otherwise `dsh` found on PATH, otherwise the npm-global install location
@@ -397,7 +408,7 @@ A task file has 12 tasks: 8 medium (DeepSeek-V4.1-Flash-thinking-max) and 4
 hard (GLM-5.3), all with no `deps` (so all
 are graph start nodes and become runnable at once). Driver caps: GLM-5.3 = 2,
 DeepSeek-V4.1-Flash-thinking-max = 5 — and the two harness pools are separate
-and 5 wide (opencode for GLM, dsh for DeepSeek).
+and 5 wide (opencode for GLM, reasonix for DeepSeek).
 
 **First wave — the implementers (12 of them) all start.** A
 per-model cap bites first:
@@ -408,7 +419,7 @@ per-model cap bites first:
 | DeepSeek-V4.1-Flash-thinking-max | 8 | 5 | 5 run, 3 queue on the model semaphore |
 
 **All 12 implementations do not run concurrently** in the first wave: 7 run
-(2 opencode + 5 dsh) against the two pools' 5 + 5, and the rest park in FIFO
+(2 opencode + 5 reasonix) against the two pools' 5 + 5, and the rest park in FIFO
 order on `drivers._gate(model)`.
 
 **What queues next — the reviews.** Cross-review is family-based: the 8
@@ -420,7 +431,7 @@ implementations still draining.
 
 **Why this is the bottleneck.** GLM-5.3 (cap 2) paces everything routed to it
 — the hard implementations AND every review of DeepSeek work, including the
-planner's own slot — while DeepSeek's 5-wide dsh pool drains the medium work.
+planner's own slot — while DeepSeek's 5-wide reasonix pool drains the medium work.
 The per-process ceiling of 7 is approached only when a batch is heavy on
 medium work and GLM-side reviews at the same time.
 

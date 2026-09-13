@@ -711,9 +711,14 @@ def cmd_doctor(args):
     # GLM-5.3, dsh for DeepSeek-V4.1-Flash-thinking-max (2026-09-12 fleet).
     # Derived, not a literal list — the doctor once kept demanding the retired
     # kimi binary and never checked dsh.
+    # Resolved the way the drivers resolve it (config.harness_bin): dsh and
+    # reasonix live in the npm prefix, which the service's shell does not
+    # have on PATH, and the doctor once failed a harness the fleet was
+    # running fine.
     for harness in sorted(set(config.MODEL_HARNESS.values())):
-        report(f"'{harness}' on PATH", shutil.which(harness) is not None,
-               f"the {harness} harness binary was not found on PATH")
+        exe = config.harness_bin(harness)
+        report(f"'{harness}' executable found", os.access(exe, os.X_OK),
+               f"the {harness} harness binary was not found (looked for {exe})")
 
     # graft is optional (graft.py: the fleet runs unchanged without it), so
     # its absence is INFO, not FAIL — but an operator should see whether the
