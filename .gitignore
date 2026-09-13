@@ -21,3 +21,6 @@ logs/
 # its graphs outside the worktrees, under ~/worktrees/.graft/). Regenerable.
 /graft/
 .ignore
+
+# Personal Claude Code permission overrides (not shared)
+.claude/settings.local.json
