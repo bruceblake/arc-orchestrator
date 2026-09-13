@@ -415,8 +415,10 @@ backend is unstable; it is documented in
 Per-model governor caps keep concurrent harness instances under the measured
 or provider-published ARC ceilings (deepseek 10, glm 4 on the two-model fleet of
 2026-09-12) minus an interactive reserve, and a **per-harness cap of 5 each**
-keeps opencode and dsh under their own pools — `main.py capacity` prints
-today's effective numbers. Override with `ARC_DRIVER_LIMIT_<FAMILY>`
+keeps opencode and dsh under their own pools — the effective numbers come from
+`config.driver_limit(model)` and `config.harness_limit(harness)`, computed
+from `_MODEL_DRIVER_CAP` / `_HARNESS_CAP`. Override
+with `ARC_DRIVER_LIMIT_<FAMILY>`
 (e.g. `ARC_DRIVER_LIMIT_DEEPSEEK=3`) or `ARC_HARNESS_LIMIT_<HARNESS>`.
 
 ### Per-task pipeline
@@ -425,7 +427,8 @@ today's effective numbers. Override with `ARC_DRIVER_LIMIT_<FAMILY>`
 alloc worktree (~/worktrees/<repo>/<id>, branch task/<id>, from main)
   → implementer writes code IN THE WORKTREE
   → verify gate (verify_cmd, cwd=worktree)
-  → cross-family review (strict-JSON verdict {"pass": ...}), fix loop ≤ 3
+  → cross-family review (strict-JSON verdict {"pass": ...}), fix loop ≤ 8
+    (ARC_MAX_FIX_ROUNDS; then tier escalation with a fresh budget)
   → publish commit (trailers: Harness/Model/Reviewer/Task-Id) + push + open PR
   → one cross-family PR review (`task.pr_review_thin` records the thin gate)
   → gh pr merge --squash --delete-branch (serialized)
@@ -480,9 +483,11 @@ already contains each dep's merge.
 - `code list` shows one row per task file in `~/tasks/` with per-project
   merge progress (declared vs. `merged` tasks, status counts, last activity);
   `--json` emits the same data for scripts. `main.py doctor` runs the
-  pre-flight checks (planner harness reachable, API key, harness binaries,
-  worktree/tasks dirs, timeout invariants, stale `running` rows) and exits
-  non-zero on any failure.
+  pre-flight checks (`ARC_API_KEY` set and not the placeholder, each live
+  harness binary on PATH — `opencode` and `dsh`, derived from
+  `config.MODEL_HARNESS` — the worktree/tasks dirs creatable, the timeout
+  invariant `DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT`, and no
+  stale `running` rows) and exits non-zero on any failure.
   `code reconcile` reaps everything a killed run left behind — stale
   `running` rows, driver leases held by dead processes, and orphaned
   worktrees. It refuses to run while a `code run` is alive, and never deletes

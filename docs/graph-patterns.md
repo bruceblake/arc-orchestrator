@@ -49,7 +49,8 @@ Two facts from the literature shape everything below:
 ### Model tiers and driver caps (fan-out arithmetic)
 
 The roster is dated and API-validated (`config.ROSTER`); this is the
-2026-09-12 snapshot — `main.py capacity` prints today's effective caps.
+2026-09-12 snapshot — the live numbers are `config.harness_limit()` /
+`config.driver_limit()` (`config._HARNESS_CAP`, `config._MODEL_DRIVER_CAP`).
 
 | Model | Harness | Tier | Roles | Account cap | Driver slots |
 |---|---|---|---|---|---|
@@ -279,12 +280,12 @@ Magentic-One's "stall → replan" is our resume/escalate, §9).
 ## 6. Evaluator-optimizer (reflection loop)
 
 ```
-   +--------------------- fix loop (≤ MAX_FIX_ROUNDS=3) --------------------+
+   +--------------------- fix loop (≤ MAX_FIX_ROUNDS=8) --------------------+
    v                                                                        |
 implement → gate(verify_cmd) → cross-review(other harness) → publish → PR
-   ^            |fail             |fail                       |2 PR reviewers
+   ^            |fail             |fail                       |1 PR reviewer
    +------------+-----------------+---------------------------+ any reject
-                     exhaust → escalate tier up (§9)          (≤3 rounds)
+                     exhaust → escalate tier up (§9)          (≤8 rounds)
 ```
 
 Generator + evaluator in a bounded loop until quality is met — Anthropic's

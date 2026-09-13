@@ -145,7 +145,8 @@ difficulty tier it was planned for (`config.IMPLEMENT_TIERS`).
   (`model_may`) — role enforcement is roster-driven, not a per-model
   if-chain. DeepSeek is refused the planner role by its roster row, which has
   no `planner`.
-- The planner prompt (code_tasks.py:333) assigns implementers by tier:
+- The planner prompt (`code_tasks._routing_tiers_prose`, code_tasks.py:1565)
+  assigns implementers by tier:
   DeepSeek-V4.1-Flash-thinking-max for medium/mechanical tasks, GLM-5.3 for
   hard.
 
@@ -159,13 +160,21 @@ family as the implementer it reviews — family-based, not harness-based (the
 two families run different harnesses today anyway: GLM on `opencode`, DeepSeek
 on `dsh`).
 
-- `code_tasks.load_taskfile` (validation condition at code_tasks.py:89;
-  raises at code_tasks.py:96 and :101) raises `ValueError` unless
-  `reviewer` is one of `"glm"` or `"deepseek"` — the families of
-  `config.REVIEW_FAMILIES` — and again (code_tasks.py:114-115) if the reviewer
-  family is the implementer's own (the reviewer-remap at :94 and the
-  cross-family flip at :104-105 apply only to a taskfile remapped off a
-  retired model). With two families the cross-review pairing
+- `code_tasks.load_taskfile` (code_tasks.py:89-115) REQUIRES a cross-family
+  reviewer, but it normalizes an off-roster token rather than rejecting it. A
+  `reviewer` naming a family that is not live today (e.g. `"kimi"` on an
+  otherwise-valid GLM-5.3 task) is silently remapped to
+  `config.cross_family_reviewer(model)` at code_tasks.py:94 — that branch tests
+  the REVIEWER family, not the task's model, so it fires for any taskfile whose
+  reviewer is outside `config.REVIEW_FAMILIES`; code_tasks.py:96 raises only
+  when no cross-family reviewer exists at all. The raise at code_tasks.py:101
+  is reached only under a bench `policy` reviewers override (benchmarking
+  exception, below), not on the normal path, and the same-family `ValueError`
+  at code_tasks.py:114-115 is what a hand-written same-family `reviewer` hits.
+  The cross-family flip at code_tasks.py:104-105 is narrower still: it is gated
+  on `model != planned_model`, so it applies only to a task whose model was
+  remapped off a retired one — a normal taskfile with a same-family reviewer is
+  rejected, not flipped. With two families the cross-review pairing
   is exact: **GLM-5.3 work is reviewed by deepseek; DeepSeek-V4.1-Flash-thinking-max
   work is reviewed by glm** (`config.cross_family_reviewer`: the strongest
   review-capable family that is not the implementer's).
@@ -206,7 +215,7 @@ on `dsh`).
   a capacity error, a harness fault — returns `crashed`, and the task retries
   the REVIEW rather than going back to the implementer. Spending a fix round on
   it sends the implementer to repair code nobody criticised. Bounded by
-  `config.MAX_REVIEW_CRASHES` (`ARC_MAX_REVIEW_CRASHES`, default 3), kept
+  `config.MAX_REVIEW_CRASHES` (`ARC_MAX_REVIEW_CRASHES`, default 10), kept
   separate from the fix budget for the same reason `PR_MAX_INCONCLUSIVE` is
   separate from `PR_MAX_ROUNDS`.
 
@@ -244,7 +253,8 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   direct edits on `main` (or any shared branch) by harnesses. A task that
   edits documentation is planned, routed, gated, reviewed and merged exactly
   like one that edits code — the pipeline is path-agnostic, and every
-  implementer harness runs with cwd = its worktree (drivers.py:484), so
+  implementer harness runs with cwd = its worktree (drivers.py:775 for
+  opencode, drivers.py:1201 for dsh), so
   there is no "too small for a worktree" path, not even for a one-line doc
   fix.
 
@@ -257,7 +267,7 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
 - The gate MUST pass before review happens (edge `gate_<tid> ->
   review_<tid>` fires only `when r["passed"]`, code_tasks.py:256).
 - A gate or review failure loops back to `implement` with the failure output
-  as feedback while `runs <= config.MAX_FIX_ROUNDS` (3, override
+  as feedback while `runs <= config.MAX_FIX_ROUNDS` (8, override
   `ARC_MAX_FIX_ROUNDS`). Exhausting the fix rounds does **not** fail the task
   yet: it **escalates one tier up `config.ESCALATION_PATH`** (default
   `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`, overrides
@@ -277,8 +287,11 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   is not evidence the model was too weak, and escalating on it sends every
   interrupted task to the scarcest tier simultaneously.
   Only when the last tier exhausts is the task marked `failed`, and
-  the failure message names the last model tried (`exhausted escalation up
-  to GLM-5.3`, code_tasks.py:243). Concurrency footnote: worst-case harness
+  the failure message names how many escalations were taken and the model
+  they ended on (`exhausted escalation: N escalation(s), ended on <last>`,
+  code_tasks.py:1409-1410; the older "up to <model>" wording was removed
+  because it mislabelled PR-round and cancelled-run failures as escalation
+  failures — code_tasks.py:1378-1381). Concurrency footnote: worst-case harness
   runs per task multiply by tier count (fix rounds × tiers); all caps of
   Rule 6 still apply.
 - The loader permits an empty `verify_cmd` (it then passes trivially,
@@ -323,7 +336,7 @@ PR** in the life of the repo.
 - **Unanimous approval is required** among the reviewers who did run. Any
   rejection posts the blocking issues as a PR comment and sends the task back
   to `implement`; the next commit updates the same PR and a new round begins.
-- The loop is bounded by `config.PR_MAX_ROUNDS` (default 3); exhausting it
+- The loop is bounded by `config.PR_MAX_ROUNDS` (default 8); exhausting it
   fails the task rather than looping forever.
 - **Under `ARC_ALLOW_SAME_FAMILY_REVIEW=1`** (the TEMPORARY override in
   Rule 2) the pool may hold the implementer's own family, so a PR review can
@@ -335,7 +348,7 @@ PR** in the life of the repo.
   implementer, and the retry comes from `config.PR_MAX_INCONCLUSIVE` — kept
   separate from `PR_MAX_ROUNDS` so infrastructure failures cannot eat the
   rounds reserved for real disagreement about the code (`ARC_PR_MAX_INCONCLUSIVE`,
-  default 3). A genuine objection still beats a crash. Before this, a crash was posted to a public PR as
+  default 10). A genuine objection still beats a crash. Before this, a crash was posted to a public PR as
   "changes requested: reviewer crashed" and sent the implementer to fix issues
   that did not exist.
 - **A conflicting PR is resynced, not abandoned.** `pr_merge` merges the
@@ -343,7 +356,7 @@ PR** in the life of the repo.
   on failure so a genuine overlap never leaves a half-merged worktree for the
   next publish to commit), pushes, and routes back to `pr_review` — the diff
   changed, so the approval it already has no longer covers it. Bounded by
-  `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 2). A real textual conflict still stops,
+  `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 6). A real textual conflict still stops,
   recording which files disagree.
 - **Resuming a task whose PR is open re-attaches to it.** `in_review` and
   `conflict` tasks restart at `publish`, which finds the existing worktree and
@@ -427,7 +440,7 @@ available if its harness is full, which is why `code_tasks._reviewer_pressure`
 scores a reviewer on whichever ceiling binds first.
 
 - The **account caps are per API key, not per process** — other agents and
-  interactive sessions share them (config.py:88).
+  interactive sessions share them (config.py:125).
 - The **driver semaphores bound concurrent harness instances of one MODEL in
   this process**; `ARC_DRIVER_HEADROOM` reserves slots for interactive use of
   the same account.
@@ -521,7 +534,7 @@ processes and move git refs on the same terms.
   the capacity backoff exists for; the long silences are a separate,
   still-unexplained failure.)
   Retries use exponential
-  backoff (capped at 30 s) up to `config.MAX_RETRIES` = 4. If every retry
+  backoff (capped at 30 s) up to `config.MAX_RETRIES` = 12. If every retry
   fails, the attempt is recorded as a harness run (exit 1) and treated as a
   failed attempt — the task re-enters the bounded fix loop and, if the
   outage persists through the fix rounds and escalation tiers, ends `failed`

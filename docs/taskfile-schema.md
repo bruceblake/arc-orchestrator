@@ -139,8 +139,11 @@ the implementer:
 
 With two families the pairing is forced; the scheduler still load-balances PR
 reviewers at run time (`_reviewer_pressure`).
-A taskfile that names a reviewer family which has since left the roster is
-remapped (`code_tasks.RETIRED_MODELS`), not rejected. The TEMPORARY operator
+A taskfile that names a reviewer family which is not live today is
+remapped by `config.cross_family_reviewer` (code_tasks.py:94), not rejected —
+the remap tests the REVIEWER family, so it covers `"kimi"` on any task, not
+only tasks whose `model` came off `code_tasks.RETIRED_MODELS` (that table
+remaps the task's `model` field alone). The TEMPORARY operator
 override `ARC_ALLOW_SAME_FAMILY_REVIEW=1` suspends the cross-family
 requirement (same-family DeepSeek reviews) while GLM-5.3's backend is
 unstable; see [concurrency-limits.md](concurrency-limits.md).
@@ -381,7 +384,8 @@ alloc (worktree on task/<id>, branched from the base branch — main by default)
                                     └─ pr_review (ONE cross-family reviewer in the
                                        two-family fleet; task.pr_review_thin records it)
                                          ├─ approved → pr_merge (squash into the base branch)
-                                         └─ rejected → back to implement, same PR, max 3 rounds
+                                         └─ rejected → back to implement, same PR,
+                                            max 8 rounds (ARC_PR_MAX_ROUNDS)
 ```
 
 Nothing is merged locally. The pull request is the gate, so a reviewer's

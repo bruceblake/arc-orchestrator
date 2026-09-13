@@ -1,13 +1,15 @@
-# Orchestration Contract (DeepSeek-V4.1-Flash-thinking-max is the orchestrator)
+# Orchestration Contract (GLM-5.3 is the orchestrator)
 
-DeepSeek-V4.1-Flash-thinking-max is the **brain** of the code fleet. When a
-goal arrives — via `main.py code plan "<goal>" <repo>` or the dashboard's
-plan tab — DeepSeek-V4.1-Flash-thinking-max designs the entire execution
+GLM-5.3 is the **brain** of the code fleet: it holds the planner role and is
+`config.PLANNER_MODEL`. When a goal arrives — via
+`main.py code plan "<goal>" <repo>` or the dashboard's plan tab — GLM-5.3
+(the `planner` driver, `code_tasks.py:1824`) designs the entire execution
 plan. The graph runner (`code_tasks.build_code_graph` + `graph.py`) executes
 it **verbatim**. There is no runtime triage: every routing decision below is
-made by the DeepSeek-V4.1-Flash-thinking-max plan (or by whoever writes a
-task file by hand, under the same rules, enforced by
-`code_tasks.load_taskfile`).
+made by the GLM-5.3 plan (or by whoever writes a task file by hand, under the
+same rules, enforced by `code_tasks.load_taskfile`).
+DeepSeek-V4.1-Flash-thinking-max's roles are
+(implementer, reviewer, pr_reviewer) — it **never plans**.
 
 ## What the orchestrator decides
 
@@ -143,7 +145,7 @@ alloc ─► implement ─► gate ─► review ─► publish ──► pr_rev
 `gh pr diff`. They come from families other than the implementer's and from
 each other. Every one must approve. A rejection posts the issues as a PR
 comment and returns the task to `implement`, whose next commit updates the
-same PR; `config.PR_MAX_ROUNDS` (3) bounds that loop.
+same PR; `config.PR_MAX_ROUNDS` (8) bounds that loop.
 
 **In the two-family fleet of 2026-09-12 that is exactly ONE reviewer.** The
 cross-family requirement leaves one eligible family per implementer, so the
@@ -169,7 +171,7 @@ A PR GitHub reports as `CONFLICTING` is **resynced before being given up on**:
 `gitstore.sync_with_base` merges the current base into the task branch (and
 aborts on failure, so a genuine overlap never leaves a half-merged worktree),
 pushes, and routes back to `pr_review` — the diff changed, so the approval it
-already holds no longer covers it. `config.PR_MAX_RESYNCS` (2) bounds it. Only
+already holds no longer covers it. `config.PR_MAX_RESYNCS` (6) bounds it. Only
 a real textual conflict records status `conflict`, and it records which files
 disagree.
 

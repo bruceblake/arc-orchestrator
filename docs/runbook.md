@@ -408,8 +408,8 @@ new one:
 
   Within a run the same tier-escalation happens live: a task that exhausts
   `MAX_FIX_ROUNDS` at one model escalates instead of failing, and the final
-  failure message names the last model tried (`exhausted escalation up to
-  GLM-5.3`).
+  failure message reports how many escalations were taken and the model they
+  ended on (`exhausted escalation: N escalation(s), ended on <model>`).
 - `conflict` tasks are **retried at the same model** (a merge conflict is not
   a capability signal) and resume at `publish`, re-attached to the existing
   worktree and PR: the branch is synced with the current base
@@ -496,9 +496,11 @@ a compiled binary — so this is a global setting. Interactive plan mode is
 still available on demand with `kimi --plan`.
 
 `main.py code run` used to refuse to start when it detected plan mode was on,
-naming the config file (`--force` overrides), and `tests/test_config.py` failed
-if this box was ever reconfigured back; that guard is gone now that the kimi
-harness is gone.
+naming the config file (`--force` overrides). That guard still exists in
+`main.py` (main.py:298-311) but is **dormant**: it fires only when a live
+roster model runs the kimi harness, and none does since Kimi-K3's 2026-09-12
+retirement — it is retained for a future kimi-harness model, and only its
+unit test was removed from `tests/test_config.py`.
 
 **How to spot the general shape** (a harness that researches but never edits):
 the implementer transcript shows plan/approval tool calls, or the worktree has
@@ -724,11 +726,18 @@ it has already seen.
 Every task now ends in a pull request, and the PR is what merges it.
 
 ```
-task/<id>  ──push──►  PR into main  ──2 approvals──►  merged (squash)
+task/<id>  ──push──►  PR into main  ──1 cross-family approval──►  merged (squash)
                               │
                               └── rejected → back to the implementer,
-                                  same PR, new commits, new round (max 3)
+                                  same PR, new commits, new round (max 8)
 ```
+
+`config.PR_REVIEWERS` resolves to **1** in the two-family fleet (reviewers must
+be cross-family, and each task has exactly one opposite family), so a PR merges
+after a single unanimous cross-family review — the pre-merge review of
+`reviewer` is the second, earlier read. When the roster cannot field
+`config.PR_REVIEWERS_WANTED`, `pr_review` emits `task.pr_review_thin` so the
+thin review is visible (see [orchestration-contract.md](orchestration-contract.md)).
 
 - Watch it: `gh pr list`, or the project detail view, which links each task's
   PR. A task sitting at status `in_review` is waiting on reviewers.
@@ -781,10 +790,11 @@ resume the task file to land them.
 
 ### Task failed (`exhausted escalation`)
 
-The implementer failed the verify gate or review `MAX_FIX_ROUNDS` (default 3)
+The implementer failed the verify gate or review `MAX_FIX_ROUNDS` (default 8)
 times **at every tier of `config.ESCALATION_PATH`**, so the task is marked
-`failed` — the failure message names the last model tried (`exhausted
-escalation up to GLM-5.3`). To debug:
+`failed` — the failure message reports how many escalations were taken and the
+model they ended on (`exhausted escalation: N escalation(s), ended on
+<model>`). To debug:
 
 ```bash
 ls -t /home/proxyie/arc-orchestrator/logs/harness/<task>-x*-implementer-*.jsonl
@@ -846,7 +856,7 @@ ps aux | grep -E 'dsh|opencode'
 
 The orchestrator reaps a hung driver itself: `drivers.py` kills the child
 after `DRIVER_TIMEOUT` (default **2700s**) and reports a `driver.error`. A
-`driver.error` counts against `MAX_RETRIES` (default 4) before the task fails.
+`driver.error` counts against `MAX_RETRIES` (default 12) before the task fails.
 If a `dsh`/`opencode` process is still alive past that, it is either running
 a fresh attempt, retrying with backoff, or genuinely orphaned — kill it with
 `kill <pid>` only after confirming it is not the current active attempt on the
