@@ -28,6 +28,10 @@ from helpers import capture_events  # noqa: F401  (sys.path)
 from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 
 import config
+
+# A reviewer token these tests are indifferent to; it must simply be a live
+# cross-family token, not the retired "kimi" of the three-model fleet.
+REV = config.cross_family_reviewer("GLM-5.3")
 import dashboard
 from store import Store
 
@@ -205,7 +209,7 @@ class ArchivedAttentionArchiveApi(unittest.TestCase):
     def test_warns_but_still_archives_a_project_with_failed_tasks(self):
         path = self._taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", ENTRY, "kimi", "failed")
+            str(path), "t1", "one", ENTRY, REV, "failed")
         resp, code = dashboard._archive_project({"file": "proj.json", "archived": True})
         self.assertEqual(code, 200)
         self.assertIn("warning", resp)
@@ -217,11 +221,11 @@ class ArchivedAttentionArchiveApi(unittest.TestCase):
     def test_warns_for_conflict_tasks_too(self):
         path = self._taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", "GLM-5.3", "kimi", "conflict")
+            str(path), "t1", "one", "GLM-5.3", REV, "conflict")
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t2", "two", "GLM-5.3", "kimi", "failed")
+            str(path), "t2", "two", "GLM-5.3", REV, "failed")
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t3", "three", "GLM-5.3", "kimi", "merged")
+            str(path), "t3", "three", "GLM-5.3", REV, "merged")
         resp, code = dashboard._archive_project({"file": "proj.json", "archived": True})
         self.assertEqual(code, 200)
         self.assertIn("2 task(s) ended failed/conflict", resp["warning"])
@@ -229,7 +233,7 @@ class ArchivedAttentionArchiveApi(unittest.TestCase):
     def test_no_warning_when_nothing_failed(self):
         path = self._taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", "GLM-5.3", "kimi", "merged")
+            str(path), "t1", "one", "GLM-5.3", REV, "merged")
         resp, code = dashboard._archive_project({"file": "proj.json", "archived": True})
         self.assertEqual(code, 200)
         self.assertNotIn("warning", resp)
@@ -237,7 +241,7 @@ class ArchivedAttentionArchiveApi(unittest.TestCase):
     def test_restoring_never_warns(self):
         path = self._taskfile()
         dashboard.Handler.store.upsert_code_task(
-            str(path), "t1", "one", "GLM-5.3", "kimi", "failed")
+            str(path), "t1", "one", "GLM-5.3", REV, "failed")
         dashboard.Handler.store.set_project_archived(str(path), True)
         resp, code = dashboard._archive_project({"file": "proj.json", "archived": False})
         self.assertEqual(code, 200)

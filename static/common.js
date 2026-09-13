@@ -8,9 +8,16 @@
 
 // Model display names. phone.html used to abbreviate harder ("K3", "GLM",
 // "120B", "V4"); index.html's longer labels are canonical, so the phone page
-// now spells model names out too.
-const SHORT = {"Kimi-K3":"Kimi K3","GLM-5.3":"GLM 5.3","gpt-oss-120b":"gpt-oss 120B","DeepSeek-V4-Flash":"DeepSeek V4 Flash","DeepSeek-V4.1-Flash":"DeepSeek V4.1 Flash","DeepSeek-V4.1-Flash-thinking-max":"DeepSeek V4.1 Flash max"};
+// now spells model names out too. Retired models stay mapped (and say so) so
+// historical usage/harness_runs rows still render a name, never a raw id.
+const SHORT = {"GLM-5.3":"GLM 5.3","DeepSeek-V4.1-Flash-thinking-max":"DeepSeek V4.1 Flash max","DeepSeek-V4.1-Flash":"DeepSeek V4.1 Flash","Kimi-K3":"Kimi K3 (retired)","gpt-oss-120b":"gpt-oss 120B (retired)","DeepSeek-V4-Flash":"DeepSeek V4 Flash (retired)"};
 const short = m => SHORT[m] || m || "—";
+
+// The fleet plans with config.PLANNER_MODEL (GLM-5.3 on the 2026-09-12
+// two-model roster). Pages say its name in prompts and thinking states; keep
+// that ONE constant here so a roster move is one edit, and so nothing spells
+// out a retired model (Kimi-K3) as if it were live.
+const PLANNER_SHORT = "GLM 5.3";
 
 // Seconds → "45s" / "12m" / "1.4h". index.html's, verbatim.
 const tick = s => { s = Math.round(s||0); if (s < 60) return s+"s"; if (s < 3600) return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; };

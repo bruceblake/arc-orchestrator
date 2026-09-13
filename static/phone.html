@@ -194,7 +194,7 @@ button.act.danger { border-color: var(--err); color: var(--err); }
   <select class="fsel" id="plan-repo" aria-label="Repository"></select>
   <div id="plan-transcript" class="empty">no chat yet</div>
   <div class="kv" style="margin-top:8px;">
-    <input type="text" id="plan-input" placeholder="Ask Kimi‑K3" style="flex:1;" aria-label="Chat message" />
+    <input type="text" id="plan-input" placeholder="Ask the planner" style="flex:1;" aria-label="Chat message" />
     <button class="act" id="plan-send">Send</button>
     <button class="act" id="plan-mic" style="display:none;">🎤</button>
   </div>
@@ -250,10 +250,12 @@ function familyOf(x) {
   if (!x) return "";
   if (x.family) return x.family;
   var m = String(x.model || "").toLowerCase();
-  if (m.indexOf("kimi") >= 0) return "kimi";
   if (m.indexOf("glm") >= 0) return "glm";
-  if (m.indexOf("gpt-oss") >= 0) return "gpt-oss";
   if (m.indexOf("deepseek") >= 0) return "deepseek";
+  // Historical only (both retired 2026-09-12): old rows and event-log entries
+  // still carry these names and need a colour, not a routing option.
+  if (m.indexOf("kimi") >= 0) return "kimi";
+  if (m.indexOf("gpt-oss") >= 0) return "gpt-oss";
   return "";
 }
 
@@ -851,7 +853,7 @@ function setPlanBusy(busy) {
   const send = $("#plan-send");
   if (send) send.disabled = busy;
   const sub = $("#plan-sub");
-  if (sub) sub.textContent = busy ? "Kimi‑K3 is thinking…" : "Select a repo to start planning";
+  if (sub) sub.textContent = busy ? "the planner is thinking…" : "Select a repo to start planning";
 }
 
 function startPlanPoll() {

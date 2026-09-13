@@ -19,9 +19,14 @@ class Roles:
         """Rotate the four round roles across the live families.
 
         The modulus is len(FAMILY_ORDER), not the literal 4 it was written as:
-        the roster had four families when this was written, has three since
-        gpt-oss was removed (2026-09-12), and `fams[i % 4]` raised IndexError
-        on the very first node of every round the moment it did not.
+        the roster had four families when this was written, has two since
+        gpt-oss was removed and Kimi-K3 retired (both 2026-09-12), and
+        `fams[i % 4]` raised IndexError on the very first node of every round
+        the moment it did not. With two families the four roles wrap by parity:
+        questions (i%n) and verify ((i+2)%n) land on one family, synthesize
+        ((i+1)%n) and seeds ((i+3)%n) on the other, so the invariant that
+        actually holds is verify-family != synthesize-family — which is the
+        cross-family check this rotation exists to produce.
         """
         i = self.i
         self.i += 1

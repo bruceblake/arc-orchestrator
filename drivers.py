@@ -1,11 +1,16 @@
-"""Headless CLI drivers for the coding harnesses (kimi, opencode).
+"""Headless CLI drivers for the coding harnesses (opencode, dsh; kimi retired).
 
-Role map (hard rule): gpt-oss-120b handles very basic implementation,
-DeepSeek-V4.1-Flash-thinking-max medium implementation, and GLM-5.3 / Kimi-K3 (kimi CLI) the
-hard tasks plus all planning and reviewing. A task is always reviewed by the
-*other* of kimi/glm when a strong model implemented it. ARC rejects over-limit
+Role map (hard rule): the fleet is TWO models since 2026-09-12 —
+DeepSeek-V4.1-Flash-thinking-max (the `dsh` harness) implements and
+reviews/PR-reviews the medium tier, and GLM-5.3 (opencode) plans, implements
+the hard tier, and reviews. A task is always reviewed by a *different model
+family* than the one that implemented it (Rule 2). ARC rejects over-limit
 requests per model, so per-model semaphores cap concurrent harness instances
 below the account limits (config.driver_limit).
+
+KimiDriver remains importable so historical transcripts and harness_runs rows
+still resolve, but its model is off the roster: constructing it raises
+ValueError (Kimi-K3 retired by operator decision 2026-09-12).
 """
 import asyncio
 import contextlib
@@ -75,9 +80,10 @@ def _gate(model):
 def _harness_gate(harness):
     """The whole harness's slot, shared by every model it serves.
 
-    Distinct from the per-model gate: opencode runs GLM, DeepSeek and gpt-oss
-    through one local binary backed by one sqlite store, so their model caps
-    sum to far more than the harness can survive.
+    Distinct from the per-model gate: every opencode-backed model (GLM-5.3
+    today; DeepSeek, GLM and gpt-oss historically) runs through one local
+    binary backed by one sqlite store, so their model caps can sum to more
+    than the harness can survive.
     """
     key = f"harness:{harness}"
     if key not in _semaphores:
@@ -920,19 +926,27 @@ class Driver:
 
 
 class KimiDriver(Driver):
+    """HISTORICAL — Kimi-K3 is retired (operator decision 2026-09-12).
+
+    Importable so old transcripts, harness_runs rows and the usage page keep
+    resolving, but it can never run: `Kimi-K3` is not in config.MODEL_ROLES,
+    so __init__ raises ValueError pointing the caller at a live model. The
+    kimi CLI harness is likewise absent from config.MODEL_HARNESS.
+    """
     harness = "kimi"
     model = "Kimi-K3"
 
     def __init__(self, role, bench=False, interactive=False):
         _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
         if not bench:
-            # Kimi-K3 is withdrawn on 2026-09-19. After that this driver has
-            # no model to drive; constructing it must fail loudly rather than
-            # send a request to a model that no longer exists.
+            # Kimi-K3 is off the roster as of 2026-09-12 (retired early by
+            # operator decision; its ROSTER row was deleted). Constructing
+            # this driver must fail loudly rather than send a request to a
+            # model the fleet may no longer route to.
             if self.model not in config.MODEL_ROLES:
                 raise ValueError("Kimi-K3 is not on today's roster — it was "
-                                 "withdrawn; route this role to config.PLANNER_MODEL "
-                                 "or another live model")
+                                 "retired 2026-09-12; route this role to "
+                                 "config.PLANNER_MODEL or another live model")
             need = "planner" if role in _GH_OPS else role
             if not config.model_may(self.model, need):
                 raise ValueError(f"KimiDriver may hold "
@@ -1334,3 +1348,23 @@ class DeepseekDriver(Driver):
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             None, str(tpath), out.strip()[-3000:],
                             round(time.monotonic() - t0, 1), 0, 0, 0)
+
+
+def driver_for(model, role, bench=False, interactive=False):
+    """The driver for `model` on the harness its ROSTER row names.
+
+    ONE mapping from model -> harness, shared by code_tasks, gh_ops and
+    orchchat, so a hand-kept harness choice here cannot drift from the roster
+    the way a per-model if-chain did. A model with no roster row (retired:
+    Kimi-K3, gpt-oss-120b, DeepSeek-V4-Flash) raises ValueError instead of
+    silently falling back to opencode.
+    """
+    harness = config.MODEL_HARNESS.get(model)
+    if harness is None:
+        raise ValueError(f"{model!r} is not on today's roster "
+                         f"({sorted(config.MODEL_HARNESS)})")
+    if harness == "kimi":
+        return KimiDriver(role, bench=bench, interactive=interactive)
+    if harness == "dsh":
+        return DeepseekDriver(model, role, bench=bench, interactive=interactive)
+    return OpencodeDriver(model, role, bench=bench, interactive=interactive)

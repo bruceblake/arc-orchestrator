@@ -6,7 +6,8 @@ Three suites:
 - "original": hand-written function tasks created for this repo (2026) with
   tricky-but-deterministic edge cases — contamination-resistant signal.
 - "package": multi-file mini-project specs with pre-written tests, meant for
-  CLI harnesses (opencode/kimi) and the multi-block direct harness.
+  CLI harnesses (opencode; the kimi CLI is historical) and the
+  multi-block direct harness.
 
 Every task is a dict:
   task_id   unique slug

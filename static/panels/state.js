@@ -69,14 +69,20 @@ $("#f-repo").onchange = e => { FILT.r = e.target.value; saveHash(); renderProjec
 $("#f-status").onchange = e => { FILT.s = e.target.value; saveHash(); renderProjects(); };
 $("#f-model").onchange = e => { FILT.m = e.target.value; saveHash(); renderProjects(); renderAgents(); };
 $("#f-q").oninput = e => { FILT.q = e.target.value; saveHash(); renderProjects(); };
-const FOUR_MODELS = ["gpt-oss-120b", "DeepSeek-V4.1-Flash-thinking-max", "GLM-5.3", "Kimi-K3"];
+// Seed for the model filter: today's LIVE roster (2026-09-12, two models).
+// Retired models (Kimi-K3, gpt-oss-120b, DeepSeek-V4-Flash) must not be offered
+// as a live choice — they still appear below when the API reports historical
+// usage for them, because the filter merges observed models in. The server's
+// config.ROSTER is authoritative; this list only pre-fills the dropdown for
+// models that have no data yet.
+const FLEET_MODELS = ["GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"];
 function rebuildFilterOptions() {
   const repos = [...new Set(PROJECTS.map(p => p.repo || ""))].sort();
   $("#f-repo").style.display = repos.length > 1 ? "" : "none";
   setOptions("#f-repo", [["", "All repos"], ...repos.map(r => [r, repoShort(r)])], FILT.r);
   const models = new Set(AGENTS.filter(a => a.task && a.model).map(a => a.model));
   (FLEET ? FLEET.models || [] : []).forEach(m => models.add(m.model));
-  const list = [...FOUR_MODELS, ...[...models].filter(m => !FOUR_MODELS.includes(m)).sort()];
+  const list = [...FLEET_MODELS, ...[...models].filter(m => !FLEET_MODELS.includes(m)).sort()];
   setOptions("#f-model", [["", "All models"], ...list.map(m => [m, short(m)])], FILT.m);
 }
 function setOptions(sel, pairs, keep) {
@@ -89,7 +95,9 @@ function setOptions(sel, pairs, keep) {
   } else if (cur !== el.value) { /* normalized */ }
 }
 
-const revShort = r => r === "kimi" ? "Kimi K3" : r === "glm" ? "GLM 5.3" : short(r);
+// Reviewer family tokens: short() maps the live ones (glm, deepseek) and falls
+// through to the raw token for a historical `kimi` row.
+const revShort = r => r === "glm" ? "GLM 5.3" : short(r);
 
 
 let GH = null;

@@ -9,7 +9,7 @@ import pathlib
 import os
 import unittest
 
-from helpers import capture_events, needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: F401  (sys.path)
+from helpers import capture_events, ENTRY, STRONGEST  # noqa: F401  (sys.path)
 
 import config
 
@@ -86,6 +86,43 @@ class RoutingInvariants(unittest.TestCase):
         self.assertEqual(tier_of[config.ESCALATION_PATH[-1]], config.TIER_ORDER[-1],
                          "the last step must land in the strongest tier")
 
+    def test_the_planner_holds_a_planner_capable_roster_role(self):
+        """PLANNER_MODEL must be a roster model the roster TRUSTS to plan.
+
+        The two-model fleet (2026-09-12): GLM-5.3 plans; DeepSeek-V4.1-Flash-
+        thinking-max implements and reviews but never plans. Stated as the
+        rule — not "PLANNER_MODEL == GLM-5.3" — so a roster move that grants
+        planner to another model does not need this test edited.
+        """
+        planner = config.PLANNER_MODEL
+        self.assertIsNotNone(planner, "no planner-capable model on the roster")
+        self.assertIn(planner, config.MODEL_ROLES)
+        self.assertTrue(config.model_may(planner, "planner"),
+                        f"{planner} is the planner but the roster does not "
+                        "grant it the planner role")
+        # And it is constructible: roster role and driver enforcement must agree.
+        drivers = __import__("drivers")
+        self.assertEqual(drivers.driver_for(planner, "planner").role, "planner")
+
+    def test_every_model_below_the_top_has_an_escalation_successor(self):
+        """A non-top implementer must reach a stronger tier on escalation."""
+        top = config.ESCALATION_PATH[-1]
+        for model in config.ESCALATION_PATH:
+            if model == top:
+                continue
+            self.assertIn(model, config.ESCALATION_PATH)
+            self.assertLess(config.ESCALATION_PATH.index(model),
+                            len(config.ESCALATION_PATH) - 1,
+                            f"{model} has no successor in {config.ESCALATION_PATH}")
+        self.assertGreaterEqual(len(config.ESCALATION_PATH), 2,
+                                "a one-model path cannot escalate anywhere")
+
+    def test_every_live_implementer_is_on_the_escalation_path(self):
+        """Otherwise a task routed to it could never escalate."""
+        for model in config.IMPLEMENTER_MODELS:
+            self.assertIn(model, config.ESCALATION_PATH,
+                          f"{model} implements but is off the escalation path")
+
     def test_a_driver_cap_never_over_subscribes_its_session_budget(self):
         """The bug this unit change fixes: caps set equal to the session limit.
 
@@ -140,17 +177,21 @@ class HarnessContextBudget(unittest.TestCase):
             "kimi compaction never completes; firing it earlier is strictly "
             "worse than not firing it")
 
-    def test_kimi_gets_an_alias_only_when_the_config_defines_it(self):
-        """A missing alias must degrade to the default model, not fail the run
-        with 'model not found'."""
-        real = config.harness_model(STRONGEST, "kimi")
-        self.assertIn(real, (None, "arc/kimi-k3-fleet"))
-        orig = config.KIMI_CONFIG
-        config.KIMI_CONFIG = pathlib.Path("/nonexistent/config.toml")
-        try:
-            self.assertIsNone(config.harness_model(STRONGEST, "kimi"))
-        finally:
-            config.KIMI_CONFIG = orig
+    def test_no_live_model_runs_on_the_retired_kimi_harness(self):
+        """Kimi-K3 left the fleet on 2026-09-12; nothing live maps to its CLI."""
+        self.assertNotIn("kimi", set(config.MODEL_HARNESS.values()))
+        self.assertNotIn("kimi", config.FAMILIES,
+                         "a retired family in FAMILIES keeps `main.py ask "
+                         "--family kimi` reaching a retired model")
+        self.assertNotIn("Kimi-K3", config.MODEL_ROLES)
+
+    def test_kimi_wire_model_still_prices_historical_tokens(self):
+        """The wire log carries no model name and is the only token source for
+        old kimi-harness runs, so the reader must still name Kimi-K3 — falling
+        back to it now that no live model uses that harness."""
+        self.assertEqual(config.kimi_wire_model(), "Kimi-K3")
+        self.assertTrue(config._price_for(config.kimi_wire_model()),
+                        "historical kimi tokens must not render $0.00")
 
     def test_opencode_never_gets_a_model_alias(self):
         """opencode sends the model KEY to the API, so a renamed alias comes
@@ -162,7 +203,7 @@ class HarnessContextBudget(unittest.TestCase):
         orig = config.USE_FLEET_ALIASES
         config.USE_FLEET_ALIASES = False
         try:
-            self.assertIsNone(config.harness_model(STRONGEST, "kimi"))
+            self.assertIsNone(config.harness_model("Kimi-K3", "kimi"))
         finally:
             config.USE_FLEET_ALIASES = orig
 
@@ -247,9 +288,9 @@ class PRReviewerCountInvariants(unittest.TestCase):
 
     def test_pr_reviewers_support_cross_review(self):
         # Two independent readings is the POLICY (PR_REVIEWERS_WANTED). Whether
-        # today's roster can deliver it is a separate fact: after Kimi-K3 leaves
-        # there is one other family per implementer, and the effective count
-        # honestly drops to 1 — the roster audit reports the gap.
+        # today's roster can deliver it is a separate fact: with two families
+        # (2026-09-12) there is one other family per implementer, and the
+        # effective count honestly drops to 1 — the roster audit reports the gap.
         self.assertGreaterEqual(config.PR_REVIEWERS_WANTED, 2,
                                 "the operator's policy is two independent reads")
         if len(config.PR_REVIEW_FAMILIES) >= 3:
@@ -339,14 +380,15 @@ class HarnessContextBounds(unittest.TestCase):
 
 
 class DriverCapsMatchMeasuredReality(unittest.TestCase):
-    """Driver caps must equal what ARC actually serves, not a guess.
+    """Every model's account cap must equal its published/measured ceiling.
 
-    Measured 2026-09-10 by ramping concurrent requests until rejection, with
-    the fleet's own usage counted in: gpt-oss 5, DeepSeek 5, GLM 4, Kimi 3.
-    The config claimed 10 account / 8 drivers for gpt-oss and DeepSeek, so the
-    fleet over-subscribed by 3 and generated its own 400s under load — then
-    the capacity backoff blamed the provider. GLM and Kimi were under by one
-    slot each, wasting capacity the operator had paid for.
+    _MEASURED_CONCURRENCY is the one ceiling table: rows whose concurrency was
+    ramped until ARC rejected (measured 2026-09-10 — gpt-oss 5, GLM 4, Kimi 3,
+    the retired fleet) and rows the provider publishes instead (DeepSeek 10,
+    provider docs 2026-09-12). The old config claimed 10 account / 8 drivers
+    for gpt-oss and DeepSeek — over-subscribed by 3, so the fleet generated
+    its own 400s under load and the capacity backoff blamed the provider,
+    while GLM and Kimi sat one slot under their real ceilings.
     """
 
     def test_no_model_is_over_subscribed(self):
@@ -395,14 +437,20 @@ class HarnessConcurrencyCeiling(unittest.TestCase):
     def test_opencode_sits_at_the_measured_ceiling(self):
         self.assertEqual(config.harness_limit("opencode"), 5)
 
-    @needs_kimi
-
-    def test_kimi_is_not_throttled_below_its_model_cap(self):
-        # About KIMI specifically — the kimi CLI serves one model, so its
-        # harness cap must not sit below that model's own. STRONGEST stopped
-        # meaning Kimi the day DeepSeek 4.1-thinking-max took the top tier.
-        self.assertGreaterEqual(config.harness_limit("kimi"),
-                                config.driver_limit("Kimi-K3"))
+    def test_no_live_harness_is_throttled_below_its_models_caps(self):
+        # Derived per harness: a harness cap below the sum of its models'
+        # driver caps throttles them. The sum can legitimately EXCEED the
+        # harness cap when the harness is the binding ceiling (opencode: 5),
+        # so this asserts the roster invariant that fails loudly instead —
+        # each harness limit is positive and no model's driver cap exceeds
+        # its own account cap.
+        for harness in set(config.MODEL_HARNESS.values()):
+            self.assertGreater(config.harness_limit(harness), 0)
+        for model, fam in config.MODEL_FAMILY.items():
+            self.assertLessEqual(config.driver_limit(model),
+                                 config.family_limit(fam))
+        self.assertNotIn("kimi", set(config.MODEL_HARNESS.values()),
+                         "no live model runs the retired kimi harness")
 
     def test_an_unknown_harness_still_gets_a_finite_cap(self):
         self.assertGreater(config.harness_limit("nope"), 0)

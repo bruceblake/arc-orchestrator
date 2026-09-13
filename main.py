@@ -295,7 +295,10 @@ def cmd_code(args):
         log = logging.getLogger("code-cmd")
         import gitstore as _gs
         await _gs.ensure_base_branch(Path(args.repo or taskset["repo"]).resolve())
-        if config.kimi_plan_mode_on():
+        # Only when a live model actually runs the kimi harness (Kimi-K3 was
+        # retired 2026-09-12; nothing does today, so this is a no-op and the
+        # check stays for a future kimi-harness model).
+        if "kimi" in config.MODEL_HARNESS.values() and config.kimi_plan_mode_on():
             log.error(
                 "kimi is configured with default_plan_mode = true (%s).\n"
                 "Headless agents will research and propose instead of editing: "
@@ -675,7 +678,7 @@ def cmd_doctor(args):
         if not ok:
             failures += 1
 
-    if config.kimi_plan_mode_on():
+    if "kimi" in config.MODEL_HARNESS.values() and config.kimi_plan_mode_on():
         report("kimi plan mode off", False,
                f"default_plan_mode = true in {config.KIMI_CONFIG}; plan mode makes "
                "headless agents research and propose instead of edit — leaving it "
@@ -683,14 +686,19 @@ def cmd_doctor(args):
                "This silently wasted most fleet runs before it was found; set "
                f"default_plan_mode = false in {config.KIMI_CONFIG}")
     else:
-        report("kimi plan mode off", True)
+        report("kimi plan mode off", True,
+               "no live model runs the kimi harness (Kimi-K3 retired 2026-09-12)")
 
     key = config.API_KEY
     report("ARC_API_KEY set", bool(key) and "PASTE-YOUR-KEY" not in key,
            "ARC_API_KEY is missing or still the placeholder — add your key from "
            "llm.arc.vt.edu to the .env file")
 
-    for harness in ("kimi", "opencode"):
+    # Every harness a LIVE roster model runs must be on PATH: opencode for
+    # GLM-5.3, dsh for DeepSeek-V4.1-Flash-thinking-max (2026-09-12 fleet).
+    # Derived, not a literal list — the doctor once kept demanding the retired
+    # kimi binary and never checked dsh.
+    for harness in sorted(set(config.MODEL_HARNESS.values())):
         report(f"'{harness}' on PATH", shutil.which(harness) is not None,
                f"the {harness} harness binary was not found on PATH")
 
@@ -858,7 +866,11 @@ def main():
     gp_p.add_argument("--post", action="store_true",
                       help="submit via gh pr review (default: print only)")
     for gp in (gt_p, gi_p, gp_p):
-        gp.add_argument("--model", choices=["Kimi-K3", "GLM-5.3"], default=None,
+        # Planner-capable live models only: gh roles need planner permission
+        # (GLM-5.3 today; DeepSeek-V4.1-Flash-thinking-max does not plan), and a
+        # retired name must not be offered at all.
+        gp.add_argument("--model", choices=[m for m, roles in config.MODEL_ROLES.items()
+                                            if "planner" in roles], default=None,
                         help=f"agent model (default {config.GH_MODEL})")
         gp.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 

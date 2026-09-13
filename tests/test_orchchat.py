@@ -1,9 +1,9 @@
 """Tests for the conversational planning engine (orchchat.py).
 
-The Kimi-K3 driver is replaced with an in-process stub, so these tests
-make no network calls and touch no real harness. Session and taskfile
-paths are redirected to a process-private temp area set up before config
-is imported (the helpers import writes that redirect into config).
+The planner driver is replaced with an in-process stub, so these tests make
+no network calls and touch no real harness. Session and taskfile paths are
+redirected to a process-private temp area set up before config is imported
+(the helpers import writes that redirect into config).
 """
 
 import asyncio
@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def _planner_cls(reply="", error=None):
-    """A KimiDriver stand-in that records its call and returns a canned reply."""
+    """A planner-driver stand-in that records its call and returns a canned reply."""
     state = {"calls": 0, "prompt": None, "worktree": None, "task_id": None}
 
     class _Stub:
@@ -49,7 +49,7 @@ def _planner_cls(reply="", error=None):
             state["task_id"] = task_id
             if error is not None:
                 raise error
-            return DriverResult(harness="kimi", model=STRONGEST,
+            return DriverResult(harness=config.MODEL_HARNESS[STRONGEST], model=STRONGEST,
                                 role="planner", exit_code=0, text=reply)
 
     return _Stub, state
@@ -104,9 +104,9 @@ class TestOrchChat(unittest.TestCase):
             turns = self._user_turns("please build the thing")
         self._write_turns(session, turns)
         cls, state = _planner_cls(reply, error)
-        # orchchat._planner_driver() chooses the class from the roster (Kimi
-        # today, GLM once Kimi is withdrawn), so patch the FACTORY — patching
-        # KimiDriver alone stopped covering the path the day the roster moved.
+        # orchchat._planner_driver() chooses the driver from the roster (GLM on
+        # the 2026-09-12 two-model fleet), so patch the FACTORY — patching a
+        # driver class alone stopped covering the path the day the roster moved.
         with mock.patch.object(orchchat, "_planner_driver",
                                lambda: cls("planner", interactive=True)):
             code = asyncio.run(orchchat.run_turn(session, str(repo)))
@@ -243,14 +243,14 @@ class TestOrchChatFailures(TestOrchChat):
     def test_driver_failure_appends_turn_exit_zero(self):
         repo = self._make_repo()
         code, state, spath = self._run(
-            error=RuntimeError("kimi exploded"), repo=repo)
+            error=RuntimeError("the harness exploded"), repo=repo)
         self.assertEqual(code, 0)
         self.assertEqual(state["calls"], 1)
         self.assertEqual(self._taskfiles(), [])
         last = self._read_turns(spath)[-1]
         self.assertEqual(last["role"], "assistant")
         self.assertIn("planner failed", last["text"])
-        self.assertIn("kimi exploded", last["error"])
+        self.assertIn("the harness exploded", last["error"])
 
     def test_empty_reply_records_error(self):
         repo = self._make_repo()
@@ -325,13 +325,13 @@ class TestOrchChatReplyText(unittest.TestCase):
             with open(tpath, "w", encoding="utf-8") as f:
                 f.write(json.dumps({"role": "user", "content": "prompt"}) + "\n")
                 f.write(json.dumps({"role": "assistant", "content": big}) + "\n")
-            res = DriverResult(harness="kimi", model=STRONGEST, role="planner",
+            res = DriverResult(harness=config.MODEL_HARNESS[STRONGEST], model=STRONGEST, role="planner",
                                exit_code=0, text=big[-3000:],
                                transcript_path=str(tpath))
             self.assertEqual(orchchat._reply_text(res), big)
 
     def test_falls_back_to_capped_text(self):
-        res = DriverResult(harness="kimi", model=STRONGEST, role="planner",
+        res = DriverResult(harness=config.MODEL_HARNESS[STRONGEST], model=STRONGEST, role="planner",
                            exit_code=0, text="short")
         self.assertEqual(orchchat._reply_text(res), "short")
 

@@ -292,7 +292,8 @@ class CorruptStateEventLogTests(unittest.TestCase):
             json.dumps({"ts": 2, "type": "driver.start", "task": "t1"}),
             ">>>>>>> task/abc",
             json.dumps({"ts": 3, "type": "driver.done", "task": "t1",
-                        "tokens": 7, "seconds": 1.5, "harness": "kimi",
+                        "tokens": 7, "seconds": 1.5,
+                        "harness": config.MODEL_HARNESS[STRONGEST],
                         "model": STRONGEST, "role": "implementer",
                         "attempt": 1}),
         ])
@@ -400,8 +401,8 @@ class CorruptStateStoreDirTests(unittest.TestCase):
         db.parent.mkdir(parents=True)
         store = Store(str(db))
         self.addCleanup(store.conn.close)
-        store.upsert_code_task("tf.json", "t1", "T", "GLM-5.3", "kimi",
-                               "merged")
+        store.upsert_code_task("tf.json", "t1", "T", "GLM-5.3",
+                               config.cross_family_reviewer("GLM-5.3"), "merged")
         rows = store.code_tasks_all()
         self.assertEqual([(r["id"], r["status"]) for r in rows],
                          [("t1", "merged")])
@@ -442,7 +443,9 @@ class CorruptStateConcurrentStoreTests(unittest.TestCase):
             try:
                 for i in range(30):
                     store.upsert_code_task("tf.json", f"{tag}{i}", "T",
-                                           "GLM-5.3", "kimi", "merged")
+                                           "GLM-5.3",
+                                           config.cross_family_reviewer("GLM-5.3"),
+                                           "merged")
                     store.save_harness_run(f"{tag}{i}", "opencode", "GLM-5.3",
                                            "implementer", 1, 0, "x.jsonl",
                                            1.0)

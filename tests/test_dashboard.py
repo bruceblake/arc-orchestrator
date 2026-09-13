@@ -12,9 +12,9 @@ import unittest
 from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path)
-from helpers import needs_kimi, needs_deepseek_v4, needs_three_families, ENTRY, STRONGEST  # noqa: E402,F401
+from helpers import ENTRY, STRONGEST  # noqa: E402,F401
 from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
-from helpers import KIMI_HARNESS_MODEL, needs_kimi_harness, PRICE_PAIR, needs_two_rates  # noqa: E402,F401
+from helpers import PRICE_PAIR, needs_two_rates  # noqa: E402,F401
 
 import config
 import code_tasks
@@ -39,11 +39,11 @@ class SessionAttribution(unittest.TestCase):
 class InflightAttribution(unittest.TestCase):
     """A fleet driver must be counted once, not once per accounting layer.
 
-    The fleet spawns the kimi CLI, which writes its own kimi-code wire log. The
-    driver was therefore counted both from its driver.start event AND from that
-    wire log, so one driver read as several agents against the ARC account cap
-    — and a retried task inflated it further, because each killed attempt
-    leaves an unanswered llm.request that looks live for 10 minutes.
+    The retired kimi CLI (Kimi-K3, until 2026-09-12) also wrote a kimi-code wire
+    log. A driver was therefore counted both from its driver.start event AND
+    from that wire log, so one driver read as several agents against the ARC
+    account cap — and a retried task inflated it further, because each killed
+    attempt leaves an unanswered llm.request that looks live for 10 minutes.
     """
 
     def setUp(self):
@@ -75,16 +75,18 @@ class InflightAttribution(unittest.TestCase):
 
     def test_an_unmatched_driver_start_counts_as_one_agent(self):
         now = time.time()
-        self.write_events({"ts": now - 30, "type": "driver.start", "harness": "kimi",
+        self.write_events({"ts": now - 30, "type": "driver.start", "harness": config.MODEL_HARNESS[STRONGEST],
                            "model": STRONGEST, "role": "implementer",
                            "task": "t1", "attempt": 1})
         rows, _ = dashboard._collect_inflight(now, None)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["source"], "driver:kimi")
+        self.assertEqual(rows[0]["source"],
+                         "driver:" + config.MODEL_HARNESS[STRONGEST])
 
     def test_a_settled_driver_counts_as_none(self):
         now = time.time()
-        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 30, "type": "driver.start", **base},
                           {"ts": now - 5, "type": "driver.done", **base})
@@ -94,7 +96,8 @@ class InflightAttribution(unittest.TestCase):
     def test_a_cancelled_driver_settles_too(self):
         """Without driver.cancelled this lingered as a phantom for ~19 min."""
         now = time.time()
-        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 30, "type": "driver.start", **base},
                           {"ts": now - 5, "type": "driver.cancelled", **base})
@@ -104,7 +107,7 @@ class InflightAttribution(unittest.TestCase):
     def test_a_stale_driver_start_is_pruned(self):
         now = time.time()
         self.write_events({"ts": now - dashboard.DRIVER_STALE_S - 60,
-                           "type": "driver.start", "harness": "kimi",
+                           "type": "driver.start", "harness": config.MODEL_HARNESS[STRONGEST],
                            "model": STRONGEST, "role": "implementer",
                            "task": "t1", "attempt": 1})
         rows, _ = dashboard._collect_inflight(now, None)
@@ -114,7 +117,8 @@ class InflightAttribution(unittest.TestCase):
         """last_event_s must read the newest liveness event, not the start —
         a live agent shows a fresh heartbeat age, not its total runtime."""
         now = time.time()
-        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 12, "type": "driver.heartbeat", **base})
@@ -125,7 +129,8 @@ class InflightAttribution(unittest.TestCase):
 
     def test_a_stalled_driver_is_flagged(self):
         now = time.time()
-        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 12, "type": "driver.stalled", **base})
@@ -138,7 +143,8 @@ class InflightAttribution(unittest.TestCase):
         past the 300s stall threshold it must flag the row even with no
         driver.stalled event."""
         now = time.time()
-        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 5, "type": "driver.progress",
@@ -150,7 +156,8 @@ class InflightAttribution(unittest.TestCase):
         """driver.done must clear the liveness record with the start — a
         settled run must not keep reporting a heartbeat age."""
         now = time.time()
-        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer",
                 "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 90, "type": "driver.start", **base},
                           {"ts": now - 30, "type": "driver.heartbeat", **base},
@@ -846,12 +853,14 @@ class ProjectTaskModelPricing(unittest.TestCase):
                             f"{rev} reviewer tokens must not be priced at "
                             f"{impl}'s rate")
 
-    @needs_kimi_harness
     def test_kimi_wire_extra_is_priced_at_kimi_completion_rate(self):
-        # The wire log belongs to the kimi HARNESS, so its tokens price at the
-        # kimi-harness model's rate. This asserted STRONGEST's rate, which was
-        # only ever right because Kimi-K3 happened to be the top tier.
-        kimi = KIMI_HARNESS_MODEL
+        # HISTORICAL: the kimi wire log is the only token source for the retired
+        # kimi-harness runs, and its tokens must still price at the kimi rate
+        # ($0.00 would misreport every old task's cost). The model comes from
+        # config.kimi_wire_model(), the same reader the dashboard uses — a
+        # literal here broke the day Kimi-K3 left the roster.
+        kimi = config.kimi_wire_model()
+        self.assertTrue(config._price_for(kimi), "kimi must stay priced")
         self._taskfile(model=kimi, reviewer=config.cross_family_reviewer(kimi))
         dashboard._kimi_tokens_by_task = lambda: {"t1": 2000}
         # No driver.done for kimi: the wire log is the only source of its tokens,
@@ -968,11 +977,11 @@ class ManualEscalation(unittest.TestCase):
         self.tf = Path(self.dir) / "p.json"
         self.tf.write_text(json.dumps({"project": {"repo": "/x", "title": "p", "tasks": [
             {"id": "t1", "title": "T", "prompt": "p", "model": config.ESCALATION_PATH[0],
-             "reviewer": "kimi", "verify_cmd": "", "files_hint": [], "deps": []}]}}))
+             "reviewer": STRONGEST_REVIEWER, "verify_cmd": "", "files_hint": [], "deps": []}]}}))
         self._store = dashboard.Handler.store
         dashboard.Handler.store = _store.Store(":memory:")
         dashboard.Handler.store.upsert_code_task(str(self.tf), "t1", "T", config.ESCALATION_PATH[0],
-                                                 "kimi", "running")
+                                                 STRONGEST_REVIEWER, "running")
         self.addCleanup(setattr, dashboard.Handler, "store", self._store)
         import reconcile
         self._live = reconcile.live_runs

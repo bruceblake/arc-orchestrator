@@ -298,11 +298,11 @@ override = os.getenv(f"ARC_LIMIT_{name.upper().replace('-', '_')}")
 |---|---|
 | deepseek | `ARC_LIMIT_DEEPSEEK` |
 | glm | `ARC_LIMIT_GLM` |
-| kimi | `ARC_LIMIT_KIMI` |
 
-Example: `ARC_LIMIT_KIMI=1`. This raises/lowers the **account-cap** layer
+Example: `ARC_LIMIT_DEEPSEEK=6`. This raises/lowers the **account-cap** layer
 (used by `pool.py`'s families and reported as `capacity`). It does **not**
-change the driver semaphores.
+change the driver semaphores. The kimi family's limit knob retired with the
+family itself on 2026-09-12; config no longer reads it.
 
 ### `ARC_DRIVER_LIMIT_<FAMILY>` — override the driver semaphore layer
 
@@ -314,22 +314,22 @@ override = os.getenv(f"ARC_DRIVER_LIMIT_{MODEL_FAMILY[model].upper().replace('-'
 ```
 
 `MODEL_FAMILY` is derived from the live roster (`config.ROSTER`) and maps
-`DeepSeek-V4.1-Flash-thinking-max → deepseek`, `GLM-5.3 → glm`,
-`Kimi-K3 → kimi`, so:
+`DeepSeek-V4.1-Flash-thinking-max → deepseek` and `GLM-5.3 → glm` on the
+two-model fleet (2026-09-12), so:
 
 | Model (family) | Env var |
 |---|---|
 | DeepSeek-V4.1-Flash-thinking-max (`deepseek`) | `ARC_DRIVER_LIMIT_DEEPSEEK` |
 | GLM-5.3 (`glm`) | `ARC_DRIVER_LIMIT_GLM` |
-| Kimi-K3 (`kimi`) | `ARC_DRIVER_LIMIT_KIMI` |
 
-Example: `ARC_DRIVER_LIMIT_KIMI=1` (the README's example).
+Example: `ARC_DRIVER_LIMIT_DEEPSEEK=3`. (The kimi family's driver-limit knob
+retired with the family on 2026-09-12 and is no longer minted or read.)
 
 ### When to raise them
 
 | Situation | What to do |
 |---|---|
-| **Dedicated box** — no interactive `kimi`/`opencode` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=4`, `ARC_DRIVER_LIMIT_KIMI=3`) to run the fleet flat-out. |
+| **Dedicated box** — no interactive `opencode`/`dsh` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=4`, `ARC_DRIVER_LIMIT_DEEPSEEK=5`) to run the fleet flat-out. |
 | You have a **higher account tier** | Raise `ARC_LIMIT_<FAMILY>` *and* the matching `ARC_DRIVER_LIMIT_<FAMILY>`. The account cap is server-side, so raising only the driver cap can hit the API's 400 "session limit" rejection. |
 | **Shared box** (you also use `kimi-code` / `opencode` by hand) | Keep defaults. The whole point of the driver caps is to leave headroom for your own sessions. |
 

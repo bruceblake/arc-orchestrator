@@ -28,7 +28,11 @@ import config
 log = logging.getLogger("bench")
 
 OUTPUT_ROOT = Path(config.ROOT) / "logs" / "bench"
-DEFAULT_HARNESSES = ["direct", "fanout", "fixloop", "review", "opencode", "kimi"]
+# "kimi" is deliberately NOT a default: Kimi-K3 was retired 2026-09-12 and no
+# live family resolves to that harness any more. SOLVERS keeps it so an
+# explicit historical invocation still runs, but a default bench run must
+# not spawn a retired CLI.
+DEFAULT_HARNESSES = ["direct", "fanout", "fixloop", "review", "opencode"]
 FUNCTION_FILE = "solution.py"
 
 
@@ -337,7 +341,8 @@ _CLI_PROMPT = (
 
 
 async def solve_cli(pool, task, spec, workdir, *, harness, max_rounds=3, **kw):
-    """Drive a real CLI agent (kimi / opencode) in the task workdir."""
+    """Drive a real CLI agent (opencode, or the historical kimi) in the
+    task workdir."""
     t0 = time.monotonic()
     import drivers
     if pool.dry_run:

@@ -133,14 +133,17 @@ class UsageRangeInflight(UsageRangeBase):
         window: cutting it from the 1h view would hide a real account-cap
         breach while still showing 24h worth of dead history."""
         now = time.time()
-        base = {"harness": "kimi", "model": STRONGEST, "role": "implementer",
-                "task": "t1", "attempt": 1}
+        # A live pair: the model's own roster harness, so the fixture cannot
+        # imply a live model running on a retired CLI.
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer", "task": "t1", "attempt": 1}
         self.write_events({"ts": now - 30, "type": "driver.start", **base})
         for r in ("1h", "24h", "7d", "all"):
             with self.subTest(range=r):
                 res = dashboard._usage(None, r)
                 self.assertEqual(len(res["inflight"]), 1)
-                self.assertEqual(res["inflight"][0]["source"], "driver:kimi")
+                self.assertEqual(res["inflight"][0]["source"],
+                                 "driver:" + config.MODEL_HARNESS[STRONGEST])
 
     def test_inflight_is_not_cut_even_when_the_start_is_outside_the_window(self):
         """A run that started more than an hour ago but is still live must stay
@@ -158,7 +161,8 @@ class UsageRangeInflight(UsageRangeBase):
         self.assertLess(age, dashboard.POOL_STALE_S,
                         "test needs a start that is not yet pruned as stale")
         self.write_events({"ts": now - age, "type": "request_start",
-                           "req_id": "req-1", "family": "gpt-oss",
+                           "req_id": "req-1",
+                           "family": config.MODEL_FAMILY[config.ESCALATION_PATH[0]],
                            "model": config.ESCALATION_PATH[0]})
         res = dashboard._usage(None, "1h")
         self.assertEqual(len(res["inflight"]), 1)

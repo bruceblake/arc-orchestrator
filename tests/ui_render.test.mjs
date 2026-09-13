@@ -188,7 +188,7 @@ const cnt = (s, sub) => s.split(sub).length - 1;
 
 __setSlots({ totals: { running: 2, waiting: 1, reviewers_waiting: 1, capacity: 8 },
              harnesses: [ { harness: "opencode", cap: 5, running: 5, waiting: 1, free: 0 },
-                          { harness: "kimi", cap: 3, running: 2, waiting: 0, free: 1 } ] });
+                          { harness: "dsh", cap: 5, running: 2, waiting: 0, free: 3 } ] });
 __setGH({ now: 1, ready: true, base: "development", prod: "main", repo_url: "http://x",
           prs: [ { state: "OPEN", number: 1, title: "a" }, { state: "MERGED", number: 2 } ], stranded: 1 });
 __setProjects([ { file: "a.json", title: "alpha", statuses: { merged: 2, failed: 1, conflict: 1 } },

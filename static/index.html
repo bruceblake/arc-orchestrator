@@ -81,7 +81,7 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .dialog input, .dialog textarea, .dialog select { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 10px; }
 .dialog textarea { resize: vertical; }
 .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
-/* ---- plan-with-kimi chat ---- */
+/* ---- plan-with-the-planner chat ---- */
 .chat-dialog { display: flex; flex-direction: column; max-height: 86vh; }
 .chat-dialog h3 { margin-bottom: 6px; }
 .chat-repo { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 8px; }
@@ -383,7 +383,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <span style="flex:1"></span>
         <span id="phase-filter"></span>
         <button class="act" id="btn-show-archived">show archived</button>
-        <button class="act" id="btn-chat" aria-label="Plan with Kimi-K3 in chat">💬 Chat</button>
+        <button class="act" id="btn-chat" aria-label="Plan with the fleet planner in chat">💬 Chat</button>
         <button class="act primary" id="btn-new" aria-label="Create a new project">+ New project</button>
       </h2>
       <div id="projects"></div>
@@ -432,11 +432,11 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   <div class="dialog">
     <h3>New project</h3>
     <div class="tabs">
-      <button class="pill tab on" data-t="plan">Plan with Kimi-K3</button>
+      <button class="pill tab on" data-t="plan">Plan with the planner</button>
       <button class="pill tab" data-t="json">Write tasks JSON</button>
     </div>
     <div id="tab-plan">
-      <div class="hint">Describe the goal in one or two sentences — Kimi-K3 drafts the task DAG (implemented by gpt-oss/DeepSeek, reviewed by GLM/Kimi) into ~/tasks/.</div>
+      <div class="hint">Describe the goal in one or two sentences — the fleet planner drafts the task DAG (the two-model fleet: DeepSeek-V4.1-Flash-thinking-max implements and reviews, GLM-5.3 plans and reviews, every task cross-reviewed by the other family) into ~/tasks/.</div>
       <label class="hint" for="p-repo">repo</label>
       <select id="p-repo">
         <option>/home/proxyie/minecraft-web</option>
@@ -471,7 +471,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 
 <div class="modal" id="chatmodal">
   <div class="dialog chat-dialog">
-    <h3>Plan with Kimi-K3 <span class="pill hint" id="c-session"></span></h3>
+    <h3>Plan with the planner <span class="pill hint" id="c-session"></span></h3>
     <label class="hint" for="c-repo">repo</label>
     <select id="c-repo"></select>
     <div class="chat-log" id="c-log"></div>
