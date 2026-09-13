@@ -1384,7 +1384,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.conflict", task=tid, pr=number, reason=note,
                             files=conflicts[:20])
                 return {"merged": False, "reason": "conflict"}
-            ok, note = await gitstore.merge_pr(repo, number)
+            if state.get("state") == "MERGED":
+                # Someone merged it while the fleet was still reviewing — an
+                # operator from the GitHub UI, or a hand merge of a backlog.
+                # That is the outcome this node exists to reach, not a
+                # failure: `gh pr merge` on a merged PR exits non-zero, and
+                # treating that as a conflict marked the task failed and
+                # stalled every task that depended on it.
+                events.emit("task.merged_externally", task=tid, pr=number)
+                ok, note = True, "already merged"
+            else:
+                ok, note = await gitstore.merge_pr(repo, number)
             if not ok:
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "conflict", error=note, finished=True)
