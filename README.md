@@ -4,7 +4,7 @@ Runs research questions past every live AI model family at once (via Virginia
 Tech's ARC LLM API), has them critique each other, verifies the results, and
 stores everything in SQLite. A second workload has the models build a browser
 game piece by piece, and a third drives the two-model coding fleet
-(GLM-5.3 on `opencode`, DeepSeek-V4.1-Flash-thinking-max on `dsh`) through a
+(GLM-5.3 on `opencode`, DeepSeek-V4.1-Flash-thinking-max on `reasonix`) through a
 governed per-task pipeline. A web dashboard shows it all live — and you can
 open that dashboard from your laptop or phone.
 
@@ -328,6 +328,9 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_GRAFT` | 1 | code-graph hints for harness runs (needs the `graft` binary; `0` = off, for an A/B) |
 | `ARC_GRAFT_BIN` | (unset) | path to the `graft` binary; unset = `graft` on PATH, then `~/.local/opt/node/bin` |
 | `ARC_GRAFT_HINTS` | 3 | `file:line` spans from the code graph handed to an implementer |
+| `ARC_REASONIX_BIN` | reasonix | the reasonix CLI; unset = `reasonix` on PATH, then `~/.local/opt/node/bin/reasonix` |
+| `ARC_REASONIX_HOME` | logs/reasonix-home | the fleet's private `REASONIX_HOME` (generated config.toml + .env holding the ARC key) |
+| `ARC_HARNESS_LIMIT_REASONIX` | 5 | max concurrent reasonix processes (the DeepSeek harness pool) |
 | `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
 | `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
 
@@ -403,7 +406,8 @@ the service evolves. Only `config.py`, `work.py`, and `.env` ever need touching.
 
 A third workload (`code_tasks.py`) drives coding agents as first-class
 harnesses: instead of talking to the ARC API directly, it shells out to the
-`opencode` (GLM-5.3) and `dsh` (DeepSeek's own harness) CLIs, which do their
+`opencode` (GLM-5.3) and `reasonix` (Reasonix, the DeepSeek-native
+cache-first agent) CLIs, which do their
 own tool use (file edits, shell commands) inside per-task git worktrees. The
 orchestrator is the only git actor — harnesses only write files inside their
 worktree.
@@ -412,7 +416,7 @@ worktree.
 
 | Model | Harness CLI | Tier, allowed roles |
 |---|---|---|
-| `DeepSeek-V4.1-Flash-thinking-max` | `dsh` | medium — implement, review, PR-review; never plans. Much faster than GLM-5.3, so it carries the implementation load |
+| `DeepSeek-V4.1-Flash-thinking-max` | `reasonix` | medium — implement, review, PR-review; never plans. Much faster than GLM-5.3, so it carries the implementation load |
 | `GLM-5.3` | `opencode` | hard — implement, plan, review, PR-review; the fleet's strongest model, the `code plan` planner, and the last escalation stage |
 
 Every implementation must pass a deterministic verify gate (a shell command
@@ -428,7 +432,7 @@ backend is unstable; it is documented in
 Per-model governor caps keep concurrent harness instances under the measured
 or provider-published ARC ceilings (deepseek 10, glm 4 on the two-model fleet of
 2026-09-12) minus an interactive reserve, and a **per-harness cap of 5 each**
-keeps opencode and dsh under their own pools — the effective numbers come from
+keeps opencode and reasonix under their own pools — the effective numbers come from
 `config.driver_limit(model)` and `config.harness_limit(harness)`, computed
 from `_MODEL_DRIVER_CAP` / `_HARNESS_CAP`. Override
 with `ARC_DRIVER_LIMIT_<FAMILY>`
@@ -535,8 +539,9 @@ the fleet's number from `task.budget` tokens before and after.
   merge progress (declared vs. `merged` tasks, status counts, last activity);
   `--json` emits the same data for scripts. `main.py doctor` runs the
   pre-flight checks (`ARC_API_KEY` set and not the placeholder, each live
-  harness binary on PATH — `opencode` and `dsh`, derived from
-  `config.MODEL_HARNESS` — the worktree/tasks dirs creatable, the timeout
+  harness binary found — `opencode` and `reasonix`, derived from
+  `config.MODEL_HARNESS` and resolved through `config.harness_bin` — the
+  worktree/tasks dirs creatable, the timeout
   invariant `DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT`, and no
   stale `running` rows) and exits non-zero on any failure.
   `code reconcile` reaps everything a killed run left behind — stale

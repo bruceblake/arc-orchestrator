@@ -56,9 +56,10 @@ cd /home/proxyie/arc-orchestrator
 
 - Runs the passive checks that catch misconfiguration *before* a run burns
   model calls on it: `ARC_API_KEY` is set and not the
-  placeholder, every harness a live model runs (`opencode` for GLM-5.3, `dsh`
-  for DeepSeek-V4.1-Flash-thinking-max — derived from the roster, not a
-  literal list) is on `PATH`, the
+  placeholder, every harness a live model runs (`opencode` for GLM-5.3,
+  `reasonix` for DeepSeek-V4.1-Flash-thinking-max — derived from the roster,
+  not a literal list) resolves to an executable (`config.harness_bin`: PATH,
+  then the npm prefix), the
   worktree and tasks directories are creatable, the timeout invariants hold
   (`DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT`), and there are
   no stale `running` task rows. It also prints (never fails on) whether the
@@ -110,13 +111,75 @@ runs a single harness invocation, so the timeout applies to the whole planner
 turn; `ARC_PLANNER_IDLE_TIMEOUT` still applies independently if the planner
 goes silent (see "A harness went quiet").
 
-### 2.1b DeepSeek's `dsh` harness (setup)
+### 2.1b DeepSeek's `reasonix` harness (setup)
 
-DeepSeek-V4.1-Flash-thinking-max does **not** run on opencode. It runs on
-**`dsh`**, DeepSeek's own harness
+DeepSeek-V4.1-Flash-thinking-max does **not** run on opencode. Since
+2026-09-13 (operator decision) it runs on **`reasonix`** — Reasonix, the
+DeepSeek-native cache-first coding agent
+([github.com/esengine/DeepSeek-Reasonix](https://github.com/esengine/DeepSeek-Reasonix),
+npm `reasonix`, MIT) — replacing `dsh` (§2.1c, kept for history).
+`drivers.ReasonixDriver` wraps it.
+
+**1. Install the binary.** A prebuilt native binary per platform, no compiler:
+
+```bash
+export PATH=~/.local/opt/node/bin:$PATH
+npm install -g reasonix
+reasonix --version         # reasonix v1.38.7 on 2026-09-13
+```
+
+`config.reasonix_bin()` resolves it as **`$ARC_REASONIX_BIN`, else `reasonix`
+on PATH, else `~/.local/opt/node/bin/reasonix`** — npm's global bin is not
+on the service's PATH. `main.py doctor` reports `'reasonix' executable found`.
+
+**2. Nothing else — the fleet owns its config.** reasonix reads provider keys
+ONLY from `<REASONIX_HOME>/.env` (its docs are explicit that the shell
+environment is not a fallback) and its settings from `<REASONIX_HOME>/config.toml`.
+`drivers.reasonix_fleet_home` generates both under `logs/reasonix-home/`
+(`ARC_REASONIX_HOME`) from `ARC_API_KEY`, `ARC_BASE_URL` and the roster, and
+rewrites them only when those change: one `arc` provider of `kind = "openai"`
+over the ARC base URL listing every live model, `[permissions] mode = "allow"`,
+`[sandbox] bash = "off"`, telemetry off. The operator's own `~/.reasonix` is
+never touched. The sandbox is off on purpose: without bubblewrap reasonix's
+shell tool *refuses to run* ("refusing to run unconfined"), and a gate that
+cannot run tests fails every task.
+
+Every invocation is
+`reasonix run --model arc/<model> --permission-mode bypassPermissions
+--output-format stream-json <prompt>` with `REASONIX_HOME` pointed at that
+directory and the worktree as cwd (`bypassPermissions` is the headless
+posture the 1.38 binary accepts; the docs' `danger-full-access` is rejected).
+Check it by hand:
+
+```bash
+REASONIX_HOME=logs/reasonix-home REASONIX_TELEMETRY=off reasonix run --model arc/DeepSeek-V4.1-Flash-thinking-max --permission-mode bypassPermissions --output-format json "Reply with exactly: ok"
+```
+
+**3. What the driver sees.** stdout is one JSON object per line — tool
+dispatches/results, `text` deltas, `reasoning`, a `usage` receipt after every
+model round-trip (`promptTokens` includes prefix-cache hits: 6720 of 6881 on
+the first fleet run) — ending in `{"type": "result", "result": "<answer>",
+"session_id": ..., "is_error": ...}`. So, unlike dsh:
+
+- the base `Driver` pump and stall clock see real progress, and the
+  transcript the dashboard tails is the agent's actual activity;
+- `parse_transcript` takes the answer from the result object (a reviewer's
+  JSON verdict is exactly `result`), not from the phase chatter;
+- `transcript_tokens` prices the run from the receipts — DeepSeek work is
+  cost-attributed again;
+- a provider error is the same object with `is_error: true` and ARC's text in
+  `result` ("concurrent session limit reached for model 'X'") plus a non-zero
+  exit, which the capacity ladder recognises through the existing markers;
+- resume is `-c` (continue the newest session in the worktree).
+
+### 2.1c DeepSeek's `dsh` harness (2026-09-12..13, historical)
+
+`dsh`, DeepSeek's own harness
 ([github.com/deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)),
-swapped in by operator decision 2026-09-12. `drivers.DeepseekDriver` wraps it.
-Three things must be right or the model is simply unavailable.
+ran DeepSeek-V4.1-Flash-thinking-max for one day before reasonix replaced
+it. `drivers.DeepseekDriver` stays so old transcripts and `harness_runs` rows
+still resolve, and a bench policy can still pin `"harness": {"<model>": "dsh"}`.
+What follows is how it was set up, for that case only.
 
 **1. Install the binary** (npm-global; installed on this box 2026-09-12 at
 `~/.local/opt/node/bin/dsh`):
@@ -730,7 +793,8 @@ How each budget is applied — interactive sessions keep the harness defaults:
 | harness | mechanism |
 | --- | --- |
 | opencode | generated `~/.config/opencode/opencode-fleet.json`, selected per-process via `$OPENCODE_CONFIG` |
-| dsh (DeepSeek) | no alias mechanism: the model and `reasoningEffort` come from `~/.dsh/cordis.patch.yml` (§2.1b), and dsh has no `ARC_*_CONTEXT` budget |
+| reasonix (DeepSeek) | the fleet's generated `logs/reasonix-home/config.toml` (§2.1b): `--model arc/<model>` passes the ARC id verbatim; `context_window` there mirrors `ARC_OPENCODE_CONTEXT` |
+| dsh (historical) | no alias mechanism: the model and `reasoningEffort` came from `~/.dsh/cordis.patch.yml` (§2.1c) |
 
 opencode needs the whole-file approach because it sends the model **key** to
 the API — a differently-keyed alias comes back `{"detail":"Model not found"}`.
@@ -877,13 +941,13 @@ editor, which does the same thing.
 Check for orphaned harness processes:
 
 ```bash
-ps aux | grep -E 'dsh|opencode'
+ps aux | grep -E 'reasonix|opencode'
 ```
 
 The orchestrator reaps a hung driver itself: `drivers.py` kills the child
 after `DRIVER_TIMEOUT` (default **2700s**) and reports a `driver.error`. A
 `driver.error` counts against `MAX_RETRIES` (default 12) before the task fails.
-If a `dsh`/`opencode` process is still alive past that, it is either running
+If a `reasonix`/`opencode` process is still alive past that, it is either running
 a fresh attempt, retrying with backoff, or genuinely orphaned — kill it with
 `kill <pid>` only after confirming it is not the current active attempt on the
 dashboard.
