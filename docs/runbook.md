@@ -94,11 +94,13 @@ cd /home/proxyie/arc-orchestrator
 
 GLM-5.3 planning is **slow on big goals**. The planner's total-runtime
 backstop is `ARC_PLANNER_TIMEOUT`, and today it defaults to 5400 s precisely
-because of this; before per-role budgets the one shared `DRIVER_TIMEOUT` was
-2700 s and killed a large plan mid-generation.
+because of this (the same figure `ARC_DRIVER_TIMEOUT` carries today, so
+planning's wall clock is unchanged — what the per-role split buys is that a
+shorter implementer budget no longer also shortens the planner's).
 
-Measured 2026-09-12 (on the shared 2700 s cap): a large goal hit the driver
-timeout mid-generation — the planner was still writing the plan. The retry
+Measured 2026-09-12 (`ARC_DRIVER_TIMEOUT` was 2700 s at the time): a large
+goal hit the driver timeout mid-generation — the planner was still writing
+the plan. The retry
 then went wrong in a second way: instead of emitting plan JSON the model
 looped, producing essay after essay of prose about the repo, and the run never
 recovered a taskfile from it. Both halves are expensive and both are avoided
@@ -121,6 +123,15 @@ fleet: `config.ROLE_TIMEOUT` gives the planner the longest budget, because it
 is the slowest job and runs on the scarcest model, while an implementer
 iterates in short steps and should fail fast and cheap instead of holding a
 slot for 90 minutes.
+
+**This LOWERS the implementer's wall clock, from `ARC_DRIVER_TIMEOUT` (5400 s)
+to 2700 s, and raises nothing.** It is the intended trade — a mechanical task
+that has run 45 minutes is usually retrying rather than converging, and the
+idle tripwire (840 s of silence) is what catches a genuinely dead harness in
+minutes, not this outer cap. If a real implementer starts being cut off
+mid-work, raise `ARC_IMPLEMENTER_TIMEOUT`; do not lower the inner budgets.
+Note the implementer is the role that carries the load, so this is the knob to
+watch after any fleet change.
 
 | Env var | Role | Default | Meaning |
 |---|---|---|---|
@@ -663,7 +674,8 @@ probability of killing a healthy request at >=40k context:
 These are **lower bounds**: a step we killed leaves no `step.end`, so it is
 absent from the telemetry entirely and the real tail is worse.
 
-`config.DRIVER_TIMEOUT` (2700s) bounds the total cost, so a genuinely dead
+`config.DRIVER_TIMEOUT` (5400s, or the role's own total budget — 2700s for an
+implementer) bounds the total cost, so a genuinely dead
 request costs one idle window, not the whole budget.
 
 **Forensics.** Every stall event still records, gathered from `/proc` before
@@ -984,7 +996,8 @@ ps aux | grep -E 'reasonix|opencode'
 ```
 
 The orchestrator reaps a hung driver itself: `drivers.py` kills the child
-after `DRIVER_TIMEOUT` (default **2700s**) and reports a `driver.error`. A
+after the role's total budget (`ROLE_TIMEOUT`; `ARC_DRIVER_TIMEOUT` default
+**5400s**, an implementer gets 2700s) and reports a `driver.error`. A
 `driver.error` counts against `MAX_RETRIES` (default 12) before the task fails.
 If a `reasonix`/`opencode` process is still alive past that, it is either running
 a fresh attempt, retrying with backoff, or genuinely orphaned — kill it with
