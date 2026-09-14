@@ -532,7 +532,8 @@ def _impl_prompt(t, feedback, hints=""):
         "500-line file emitted in one response is the single most likely way "
         "to fail this task.\n"
         + locate +
-        "read only the line ranges you need, never a whole large file.\n"
+        "keep every read to just the line ranges you need — never open a "
+        "whole large file.\n"
         "- Do not re-read a file you have already seen; rely on what is "
         "already in the conversation.\n"
         "- Work in several small edits, each one verified, rather than one "
