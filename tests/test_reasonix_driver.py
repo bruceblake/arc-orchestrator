@@ -82,7 +82,10 @@ class Argv(unittest.TestCase):
         a = d.argv("do the thing", None)
         self.assertTrue(a[0].endswith("reasonix"))
         self.assertEqual(a[1], "run")
-        self.assertEqual(a[a.index("--model") + 1], f"arc/{DS}")
+        self.assertEqual(drivers._reasonix_provider(DS),
+                         "arc-deepseek-v4-1-flash-thinking-max")
+        self.assertEqual(a[a.index("--model") + 1],
+                         f"{drivers._reasonix_provider(DS)}/{DS}")
         self.assertEqual(a[a.index("--permission-mode") + 1], "bypassPermissions")
         self.assertEqual(a[a.index("--output-format") + 1], "stream-json")
         self.assertEqual(a[-1], "do the thing")
@@ -111,13 +114,34 @@ class FleetHome(unittest.TestCase):
         cfg = (home / "config.toml").read_text()
         self.assertIn('kind           = "openai"', cfg)
         self.assertIn('base_url       = "https://llm-api.example/api/v1"', cfg)
-        self.assertIn(f'"{DS}"', cfg)
+        self.assertIn(f'models         = ["{DS}"]', cfg)
         self.assertIn('api_key_env    = "ARC_API_KEY"', cfg)
         self.assertIn('bash = "off"', cfg, "no bubblewrap here: the shell tool must not refuse")
         self.assertIn('mode = "allow"', cfg)
         env = home / ".env"
         self.assertEqual(env.read_text(), "ARC_API_KEY=sk-test-123\n")
         self.assertEqual(stat.S_IMODE(env.stat().st_mode), 0o600)
+
+    def test_one_provider_per_model_with_its_real_context_window(self):
+        # context_window is PER-PROVIDER and windows differ 4x across the
+        # roster, so models may not share one entry: at a shared window
+        # DeepSeek compacted at ~52K of its 512K and the loop-guard refused
+        # the model's writes mid-task (fleet-ops, 2026-09-13).
+        cfg = (Path(drivers.reasonix_fleet_home()) / "config.toml").read_text()
+        ds, glm = drivers._reasonix_provider(DS), drivers._reasonix_provider("GLM-5.3")
+        self.assertNotEqual(ds, glm)
+        self.assertIn(f'name           = "{ds}"', cfg)
+        self.assertIn(f'name           = "{glm}"', cfg)
+        self.assertIn(f'default_model = "{ds}/{DS}"', cfg)
+        self.assertIn(f"context_window = {config.reasonix_context(DS)}", cfg)
+        self.assertIn(f"context_window = {config.reasonix_context('GLM-5.3')}", cfg)
+        self.assertEqual(config.reasonix_context(DS), 524288,
+                         "ARC docs 2026-09-12: every V4.1-Flash variant is 512K")
+        self.assertEqual(config.reasonix_context("DeepSeek-V4.1-Flash-thinking-low"),
+                         524288, "the prefix covers every thinking variant")
+        self.assertEqual(config.reasonix_context("GLM-5.3"), 131072)
+        self.assertIn(f"bash_timeout_seconds = {int(config.GATE_TIMEOUT)}", cfg,
+                      "an implementer's own ./check.sh must survive the harness bash")
 
     def test_regenerated_only_when_inputs_change(self):
         home = Path(drivers.reasonix_fleet_home())

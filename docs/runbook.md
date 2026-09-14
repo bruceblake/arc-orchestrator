@@ -136,23 +136,29 @@ on the service's PATH. `main.py doctor` reports `'reasonix' executable found`.
 ONLY from `<REASONIX_HOME>/.env` (its docs are explicit that the shell
 environment is not a fallback) and its settings from `<REASONIX_HOME>/config.toml`.
 `drivers.reasonix_fleet_home` generates both under `logs/reasonix-home/`
-(`ARC_REASONIX_HOME`) from `ARC_API_KEY`, `ARC_BASE_URL` and the roster, and
-rewrites them only when those change: one `arc` provider of `kind = "openai"`
-over the ARC base URL listing every live model, `[permissions] mode = "allow"`,
+(`ARC_REASONIX_HOME`) from `ARC_API_KEY`, `ARC_BASE_URL`, the roster and the
+per-model context windows, and
+rewrites them only when those change: one `[[providers]]` entry per live model
+(`name = "arc-<slug>"`, `kind = "openai"`, over the ARC base URL) each carrying
+its real `context_window` (DeepSeek 512K, GLM 128K — see the budget table
+below), `[tools] bash_timeout_seconds` matching `ARC_GATE_TIMEOUT`,
+`[permissions] mode = "allow"`,
 `[sandbox] bash = "off"`, telemetry off. The operator's own `~/.reasonix` is
 never touched. The sandbox is off on purpose: without bubblewrap reasonix's
 shell tool *refuses to run* ("refusing to run unconfined"), and a gate that
 cannot run tests fails every task.
 
 Every invocation is
-`reasonix run --model arc/<model> --permission-mode bypassPermissions
+`reasonix run --model <provider-slug>/<model> --permission-mode bypassPermissions
 --output-format stream-json <prompt>` with `REASONIX_HOME` pointed at that
 directory and the worktree as cwd (`bypassPermissions` is the headless
 posture the 1.38 binary accepts; the docs' `danger-full-access` is rejected).
+The slug is the model's own provider (`drivers._reasonix_provider`): context
+windows are per-provider, so each model gets one.
 Check it by hand:
 
 ```bash
-REASONIX_HOME=logs/reasonix-home REASONIX_TELEMETRY=off reasonix run --model arc/DeepSeek-V4.1-Flash-thinking-max --permission-mode bypassPermissions --output-format json "Reply with exactly: ok"
+REASONIX_HOME=logs/reasonix-home REASONIX_TELEMETRY=off reasonix run --model arc-deepseek-v4-1-flash-thinking-max/DeepSeek-V4.1-Flash-thinking-max --permission-mode bypassPermissions --output-format json "Reply with exactly: ok"
 ```
 
 **3. What the driver sees.** stdout is one JSON object per line — tool
@@ -786,6 +792,7 @@ compaction differs (measured 2026-09-09):
 | harness | compaction | budget | why |
 | --- | --- | --- | --- |
 | opencode (GLM-5.3) | **works** — fired twice inside one GLM-5.3 run, which then carried on to 621KB (vs ~350KB at the default, where it never compacted) | `ARC_OPENCODE_CONTEXT`, default **65536** | a smaller budget keeps each request small enough to come back |
+| reasonix (DeepSeek) | **works** — folds at `compact_ratio` × `context_window` and carries on | per model: `ARC_REASONIX_CONTEXT_DEEPSEEK` default **524288** (512K real), `ARC_REASONIX_CONTEXT` default **131072** for the rest — the ARC-docs window, NOT opencode's | borrowing opencode's 65536 folded every long session at ~52K (one fold discarded 393,635 tokens) until the loop-guard refused the model's own writes — fleet-ops, 2026-09-13 |
 | kimi (retired 2026-09-12) | **never completed** — 20 `full_compaction.begin` across the whole session history, 0 `full_compaction.end`, interactive sessions included | `ARC_KIMI_CONTEXT`, default **131072** (kept for old logs) | lowering it only reaches that dead end sooner (tried, measured, reverted) |
 
 How each budget is applied — interactive sessions keep the harness defaults:
@@ -793,7 +800,7 @@ How each budget is applied — interactive sessions keep the harness defaults:
 | harness | mechanism |
 | --- | --- |
 | opencode | generated `~/.config/opencode/opencode-fleet.json`, selected per-process via `$OPENCODE_CONFIG` |
-| reasonix (DeepSeek) | the fleet's generated `logs/reasonix-home/config.toml` (§2.1b): `--model arc/<model>` passes the ARC id verbatim; `context_window` there mirrors `ARC_OPENCODE_CONTEXT` |
+| reasonix (DeepSeek) | the fleet's generated `logs/reasonix-home/config.toml` (§2.1b): `--model <slug>/<model>` picks the model's own `[[providers]]` entry, which carries its real `context_window` (`config.reasonix_context`, per ARC docs) |
 | dsh (historical) | no alias mechanism: the model and `reasoningEffort` came from `~/.dsh/cordis.patch.yml` (§2.1c) |
 
 opencode needs the whole-file approach because it sends the model **key** to
