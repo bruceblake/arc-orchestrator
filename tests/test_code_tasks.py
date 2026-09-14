@@ -1951,3 +1951,89 @@ class AnExternallyMergedPullRequestIsNotAConflict(unittest.TestCase):
         self.assertTrue(out["merged"])
         self.assertEqual(calls, ["merge_pr"])
         self.assertIsNone(ev.first("task.merged_externally"))
+
+
+class PlanAmendmentWiring(unittest.TestCase):
+    """The plan-amendment channel (plan_amend.py) is grafted into the graph.
+
+    plan_amend's own behaviour lives in test_plan_amend.py; here we pin the
+    WIRING, by source slice like the other ownership tests: every agent run
+    harvests the proposals file (success AND crash paths — a reviewer that
+    crashed may still have written one), publish sweeps once more before its
+    `git add -A`, and the prompts only offer the channel when handed the real
+    task ids (a guessed dep target costs a rejection).
+    """
+
+    def _slice(self, start, end):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index(start):]
+        return body[:body.index(end)]
+
+    def test_roster_built_from_the_whole_taskfile(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        self.assertIn('roster = ([(tid, t["title"]) for tid, t in tasks.items()]',
+                      src)
+
+    def test_bench_virtual_taskfile_gets_no_channel(self):
+        # orchbench passes a key like `orchbench:<variant>:<stamp>` — no file
+        # on disk. Bench prompts must not drift from their fixed form, and a
+        # proposal can never apply to a file that is not there, so both the
+        # roster and the harvest guard out on a missing taskfile.
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        self.assertIn("if taskfile and Path(taskfile).is_file() else None", src)
+        hp = src.index("def harvest_proposals")
+        self.assertIn("not Path(taskfile).is_file()", src[hp:hp + 900])
+
+    def test_adds_never_stage_the_channel_file(self):
+        # publish() and diff_full()'s intent-to-add both use `git add -A`;
+        # a surviving proposals file must not land in the PR or the review
+        # diff even then. The pathspec exclusion is the belt to harvest's
+        # delete suspenders.
+        import gitstore
+        src = pathlib.Path(gitstore.__file__).read_text()
+        self.assertEqual(src.count('":!.arc/plan_proposals.jsonl"'), 2)
+
+    def test_implement_harvests_on_success_and_crash(self):
+        body = self._slice("async def implement(ctx):", "async def gate(ctx):")
+        self.assertEqual(body.count('harvest_proposals(tid, wt, "implementer"'), 2)
+
+    def test_review_harvests_on_success_and_crash(self):
+        body = self._slice("async def review(ctx):", "async def publish(ctx):")
+        self.assertGreaterEqual(body.count('harvest_proposals(tid, wt, "reviewer"'), 2)
+
+    def test_pr_reviewer_harvests_on_success_and_crash(self):
+        body = self._slice("async def pr_reviewer(ctx):", "async def pr_review(ctx)")
+        self.assertEqual(body.count('harvest_proposals(tid, wt, "pr-reviewer"'), 2)
+
+    def test_publish_sweeps_before_committing(self):
+        body = self._slice("async def publish(ctx):", "async def pr_reviewer(ctx):")
+        sweep = body.index('harvest_proposals(tid, wt, "publish-sweep"')
+        commit = body.index("gitstore.publish(")
+        self.assertLess(sweep, commit,
+                        "publish commits with `git add -A`; the proposal file "
+                        "must be collected (and deleted) first or it lands in the PR")
+
+    def _task(self):
+        return dict(BASIC, files_hint=[], verify_cmd="true")
+
+    def test_prompts_offer_the_channel_only_with_a_roster(self):
+        import plan_amend
+        roster = [("t1", "T1"), ("t2", "T2")]
+        p = code_tasks._impl_prompt(self._task(), "", roster=roster)
+        self.assertIn(plan_amend.PROPOSALS_REL, p)
+        self.assertIn("t1, t2", p, "dep targets come from the real ids")
+        for m in config.IMPLEMENTER_MODELS:
+            self.assertIn(m, p)
+        self.assertNotIn(plan_amend.PROPOSALS_REL,
+                         code_tasks._impl_prompt(self._task(), ""))
+
+    def test_review_and_pr_review_prompts_offer_it_too(self):
+        import plan_amend
+        roster = [("t1", "T1"), ("t2", "T2")]
+        r = code_tasks._review_prompt(self._task(), "diff", roster=roster)
+        pr = code_tasks._pr_review_prompt(self._task(), "diff", 2, 1, "",
+                                          roster=roster)
+        self.assertIn(plan_amend.PROPOSALS_REL, r)
+        self.assertIn(plan_amend.PROPOSALS_REL, pr)
+        self.assertNotIn(plan_amend.PROPOSALS_REL,
+                         code_tasks._review_prompt(self._task(), "diff"))

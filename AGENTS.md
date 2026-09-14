@@ -307,6 +307,40 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   build, or a targeted check — something whose exit code actually depends on
   the change being correct.
 
+### Rule 4b — The plan is a living document; agents may amend it
+
+Any implementer or reviewer (pre-merge or PR) MAY propose changes to the
+taskfile it is running against — the best information about the plan arrives
+inside the run, not at plan time. The channel is
+`.arc/plan_proposals.jsonl` in the per-task worktree (one JSON per line;
+kinds `note | edit_scope | change_verify | change_model | add_task |
+split_task`), offered in every implement/review prompt with the real task
+ids and legal models (`plan_amend.prompt_block`).
+
+- Graph nodes HARVEST the file right after every agent run — crash paths
+  included — and publish sweeps once more before committing (publish uses
+  `git add -A`; the channel file must never land in a PR). Harvest = read +
+  immediately delete, then validate + apply + record (`plan_amend.harvest`).
+- Validation re-parses the WHOLE candidate file through the real loader
+  (`code_tasks.load_taskfile`, policy included — Rules 1/2/8 hold for agents
+  exactly as for planners); a proposal that makes the file invalid is rolled
+  back and rejected while its siblings still apply.
+- **The freeze boundary is the `code_tasks` row status** (v1): only tasks
+  with no row or a `failed`/`skipped` row may be mutated — `merged`,
+  `running`, `in_review` and `conflict` reject (attach a `note` instead; it
+  always lands). **The in-flight DAG never rewires**: amendments take effect
+  on resume (re-running `code run <taskfile>` re-parses the file), for tasks
+  with no row yet, and for downstream chain gates that parse the file when
+  their wait ends.
+- Never: remove/rename tasks, resurrect an id with a row (resume would skip
+  new work keyed to a merged row), empty a verify gate (Rule 4), touch
+  project-level keys.
+- Every proposal lands in the `plan_proposals` table and as a `plan.amend`
+  event regardless of outcome; read it via the read-only
+  `GET /api/plan-proposals` route. Full schema and boundary:
+  [docs/taskfile-schema.md](docs/taskfile-schema.md) § "The plan is a living
+  document".
+
 ### Rule 5 — The pull request is the gate; nothing merges without approvals
 
 **No task merges locally. Ever.** `publish` (code_tasks.py) commits the
@@ -756,6 +790,7 @@ Top-level Python modules (one role each):
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), `chat` (one conversational planner turn over a session jsonl — module `orchchat.py`), and `code {plan,run,status,bench}` |
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
+| `plan_amend.py` | The living-plan channel (Rule 4b): prompt schema, `.arc/plan_proposals.jsonl` harvest (read + delete before `git add -A`), loader-validated amendment of the taskfile with per-entry rollback, `plan_proposals` recording |
 | `pool.py` | `AsyncOpenAI` request pool for the research workload: per-family semaphores, retry/backoff, token accounting |
 | `scheduler.py` | `Supervisor`: runs research rounds continuously (pipeline concurrency, round cooldown, periodic stats) |
 | `store.py` | sqlite persistence: `rounds`, `items`, `answers`, `seeds`, `builds`, `build_modules`, `harness_runs`, `code_tasks` |

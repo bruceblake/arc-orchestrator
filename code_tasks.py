@@ -11,7 +11,9 @@ routing/review rules to measure what the governance defaults buy.
 import asyncio
 import json
 import logging
+import os
 import re
+import tempfile
 import time
 from pathlib import Path
 
@@ -21,6 +23,7 @@ import events
 import gitstore
 import graft
 import drivers
+import plan_amend
 from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
                      ReasonixDriver,
                      driver_for, transcript_tokens)
@@ -493,13 +496,16 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
-def _impl_prompt(t, feedback, hints=""):
+def _impl_prompt(t, feedback, hints="", roster=None):
     """The implementer's whole world: the task, where its code is, the rules.
 
     `hints` is graft.hints_block output — the file:line spans the code graph
     ranks for this task — or "" when there is no graph. With hints the agent
     is told to READ those ranges first; without them it is told to search,
-    which is what it would do anyway, just more expensively.
+    which is what it would do anyway, just more expensively. `roster` (every
+    task id + title in the plan) turns the plan-amendment channel on: without
+    the real ids a proposal can only guess dep targets, and a guess costs a
+    rejection.
     """
     p = (
         f"You are implementing one task in this repository.\n\n"
@@ -543,6 +549,8 @@ def _impl_prompt(t, feedback, hints=""):
     )
     if feedback:
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"
+    if roster:
+        p += plan_amend.prompt_block(roster)
     return p
 
 
@@ -765,8 +773,8 @@ def _rework_feedback(tid, results):
     return "\n\n".join(parts)
 
 
-def _review_prompt(t, diff, impact=""):
-    return (
+def _review_prompt(t, diff, impact="", roster=None):
+    p = (
         f"You are reviewing an implementation produced by another AI agent.\n\n"
         f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
         f"The implementation already passed its automated verify gate "
@@ -777,6 +785,9 @@ def _review_prompt(t, diff, impact=""):
         '{"pass": true}  or  {"pass": false, "issues": ["specific issue 1", ...]}\n'
         "Pass only if the change fully and correctly implements the spec."
     )
+    if roster:
+        p += plan_amend.prompt_block(roster)
+    return p
 
 
 def _parse_verdict(text):
@@ -802,7 +813,8 @@ def _parse_verdict(text):
             "issues": ["reviewer returned no parseable verdict"]}
 
 
-def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact=""):
+def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
+                      roster=None):
     """Prompt for a reviewer reading a real pull request.
 
     Deliberately different from the pre-PR review: this reviewer can BLOCK the
@@ -840,6 +852,8 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact=""):
           "Reply with STRICT JSON only, no prose:\n"
           '{"approve": true}  or  '
           '{"approve": false, "issues": ["file.py:42 — problem and fix", ...]}')
+    if roster:
+        p += plan_amend.prompt_block(roster)
     return p
 
 
@@ -953,6 +967,29 @@ async def _run_probe(cmd, wt):
     return None, f"probe_cmd printed no JSON object: {text.strip()[-400:]}"
 
 
+def _amendment_validator(taskfile, pol):
+    """Whole-file validation for proposed plan amendments.
+
+    The candidate plan is piped through the SAME loader a hand-written
+    taskfile goes through — policy included — so an agent proposal cannot
+    sneak a routing, reviewer-pairing, or dependency shape past Rules 1/2/8
+    just because it arrived through a worktree instead of a planner.
+    """
+    def validate(data):
+        fd, tmp = tempfile.mkstemp(dir=str(Path(taskfile).parent),
+                                   prefix=".amend-check-", suffix=".json")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f)
+            load_taskfile(tmp, policy=pol)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+    return validate
+
+
 def build_code_graph(store, taskset, taskfile="", policy=None):
     repo = taskset["repo"]
     tasks = taskset["tasks"]
@@ -965,6 +1002,38 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     # Task nodes with no in-task deps ("heads") start the graph — directly
     # when there is no `after`, else behind the chain_wait gate.
     heads = []
+
+    # The plan-amendment channel (plan_amend.py): agents may propose changes
+    # to the plan from inside their worktree. The roster is what makes
+    # proposals actionable — dep targets and edit targets are named by id, so
+    # the prompts carry the real ids rather than leave agents to guess them.
+    # Bench passes a virtual key (`orchbench:<variant>:<stamp>` — no file on
+    # disk): no roster, no harvest. Bench prompts must not drift from their
+    # fixed form, and a proposal can never apply to a file that is not there.
+    roster = ([(tid, t["title"]) for tid, t in tasks.items()]
+              if taskfile and Path(taskfile).is_file() else None)
+
+    def harvest_proposals(tid, wt, role, model):
+        """Collect any plan proposals an agent left in its worktree.
+
+        Runs after EVERY agent session (implement, review, PR review — the
+        crash paths too: a harness that died mid-run may still have written
+        the file) and once more inside publish as a pre-commit sweep, because
+        publish's `git add -A` would otherwise commit a leftover. A harvest
+        failure must never take a node down — but it must never vanish
+        either (Rule 7b).
+        """
+        if not taskfile or store is None or not Path(taskfile).is_file():
+            return
+        try:
+            plan_amend.harvest(store, taskfile, Path(wt), proposer=tid,
+                               role=role, model=model,
+                               validate=_amendment_validator(taskfile, pol))
+        except Exception as exc:
+            fp = errors.capture(exc, task=tid, model=model,
+                                node=f"plan_amend_{tid}", role=role)
+            log.warning("plan-amendment harvest failed for %s (%s): %s",
+                        tid, fp, exc)
 
     # --- resume: statuses recorded by earlier runs of THIS taskfile ----------
     # Re-running `code run <taskfile>` is a resume of the same project: merged
@@ -1244,7 +1313,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             resume = _resume_session(results, tid, model)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback, hints), wt,
+                    _impl_prompt(t, feedback, hints, roster), wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -1262,10 +1331,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("driver.error", task=tid, role="implementer",
                             model=model, attempt=attempt,
                             error=str(exc)[:200], fingerprint=fp)
+                harvest_proposals(tid, wt, "implementer", model)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
             store.save_harness_run(tid, driver.harness, model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
+            harvest_proposals(tid, wt, "implementer", model)
             return {"session_id": res.session_id, "harness": driver.harness,
                     "model": model}
 
@@ -1358,7 +1429,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
             try:
-                res = await driver.run(_review_prompt(t, diff, impact), wt,
+                res = await driver.run(_review_prompt(t, diff, impact, roster), wt,
                                        task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -1380,12 +1451,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # errors, and it was recorded as "exhausted escalation" on work
                 # that was never rejected. Same distinction pr_review already
                 # makes — the diff has not been read, so retry the REVIEW.
+                harvest_proposals(tid, wt, "reviewer", driver.model)
                 return {"pass": False, "crashed": True,
                         "issues": [f"reviewer crashed: {exc}"[:200]]}
             verdict = _parse_verdict(res.text)
             store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
+            harvest_proposals(tid, wt, "reviewer", driver.model)
             if verdict.get("truncated"):
                 # The session ended without a verdict (e.g. stopped mid-analysis
                 # with a question). Same rule as a crash: the diff was never
@@ -1437,6 +1510,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)
+            # Belt-and-suspenders harvest: implement/review collect proposals
+            # right after their runs, but a crash between write and collect
+            # leaves .arc/plan_proposals.jsonl in the worktree — and publish
+            # does `git add -A`, so without this sweep the channel file would
+            # land in the PR. Also catches proposals from PR-review rework.
+            harvest_proposals(tid, wt, "publish-sweep", "")
             impl = results.get(f"implement_{tid}", {})
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
             # COMMIT FIRST, then sync. `git merge` refuses to run over local
@@ -1596,24 +1675,28 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             checkpointed and retryable on its own."""
             it = ctx["spawn"]
             model = it["model"]
+            wt = None
             try:
                 drv = _driver(model, "pr_reviewer", pol)
                 wt = await worktree(ctx)
                 impact = await graft.blast(wt, base, task=tid)
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
-                                      it["prior_issues"], impact),
+                                      it["prior_issues"], impact, roster),
                     wt, task_id=f"{tid}-pr{it['round']}")
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather
                 # than sending the implementer to fix nothing.
+                if wt is not None:
+                    harvest_proposals(tid, wt, "pr-reviewer", model)
                 return {"model": model, "approve": False, "crashed": True,
                         "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
             verdict = _parse_approval(res.text)
             store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
                                    it["round"], res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
+            harvest_proposals(tid, wt, "pr-reviewer", model)
             if verdict.get("truncated"):
                 # Session ended without a verdict — a reviewer that never
                 # reviewed. Crashed, not a rejection: the join retries the

@@ -396,6 +396,85 @@ The base branch is `main` unless `ARC_BASE_BRANCH` says otherwise. With
 `ARC_BASE_BRANCH=development`, `development` reaches `main` only through
 `main.py code promote`, which opens a PR for a human to merge.
 
+## 4c. The plan is a living document — agent amendments (`plan_amend.py`)
+
+A planner decomposes once, but the best information about the plan arrives
+*inside* the run: an implementer discovers its task is really two tasks, a
+reviewer sees the verify gate does not test the spec. Any agent
+(implementer, pre-merge reviewer, PR reviewer) may therefore propose changes
+to the taskfile it is running against, by appending **one JSON object per
+line** to:
+
+```
+.arc/plan_proposals.jsonl        (inside its own worktree; create .arc/)
+```
+
+The graph nodes read and **immediately delete** this file right after every
+agent run (implement, review, PR-review — success and crash paths alike) and
+once more in publish before `git add -A` runs, so the file can **never be
+committed into a PR**. Each proposal is then validated by the *same loader*
+the taskfile came from (`code_tasks.load_taskfile`, policy included — Rules
+1/2/8 hold for agents exactly as for planners) and the survivors are applied
+by rewriting the taskfile atomically.
+
+### Proposal kinds
+
+```jsonc
+{"kind":"note","task":"<id>","note":"observation, risk, or follow-up"}
+{"kind":"edit_scope","task":"<id>","title":"...","prompt":"...","files_hint":["..."]}
+{"kind":"change_verify","task":"<id>","verify_cmd":"<shell command>"}
+{"kind":"change_model","task":"<id>","model":"<model>"}   // reviewer auto-flips
+                                                          // if the pairing goes same-family
+{"kind":"add_task","taskspec":{"id":"<new-id>","title":"...","prompt":"...",
+        "model":"<model>","verify_cmd":"<shell command>","deps":["<id>"]}}
+{"kind":"split_task","task":"<id>","into":[{"id":"<new-id>","title":"...",
+        "prompt":"...","verify_cmd":"<shell command>","deps":["<id>"]}, ...]}
+```
+
+`"task"` always names an **existing** task in the same file. New ids go in
+`taskspec` (add) or `into` (split, 2–4 pieces). A split's pieces inherit the
+target's `model` and `verify_cmd` unless overridden, the first piece **always
+carries the target's `deps`** (any deps it declares are unioned in, never a
+replacement — dropping the target's upstream would start the piece before its
+input exists), and every task that depended on the target re-points to **all**
+pieces. A `when`-conditional task cannot be split, and neither can a task
+another `when` reads — re-point the condition by hand first.
+
+Two things v1 deliberately has no kind for: **adding a dep to an existing
+task** (write an `add_task` whose `deps` name it, or attach a `note` for the
+planner/operator), and **conditional new tasks** (`add_task` /
+`split_task` produce plain unconditional tasks — no `when` / `probe_cmd` in
+proposals).
+
+### The honesty boundary (v1)
+
+- **Only tasks that have not started may be mutated.** `merged` is history;
+  `running` / `in_review` / `conflict` mean a live agent or an open PR is
+  acting on the old text right now. Both reject. `failed` / `skipped` tasks
+  MAY be amended — resume re-reads the file. A `note` lands on any task
+  regardless.
+- **The in-flight DAG never rewires.** This run's graph was built from the
+  file as it was; amendments take effect when the run **resumes** (`code run
+  <taskfile>` re-parses it), for tasks with no row yet, and for downstream
+  chain gates that parse this file when their wait ends.
+- Never removes or renames a task, never resurrects an id that has a
+  `code_tasks` row (a new task filed under a merged id would be skipped by
+  resume as already done), never empties a verify gate (Rule 4), never
+  touches project-level keys.
+- A proposal that leaves the whole file invalid under the loader is rolled
+  back and rejected; its siblings still apply.
+
+### The trail
+
+Every proposal — applied, rejected, or merely noted — is recorded in the
+`plan_proposals` table (`taskfile, target, proposer, role, model, kind,
+action, reason, payload`) and emitted as a `plan.amend` event. Read it with:
+
+```
+GET /api/plan-proposals[?file=<taskfile.json>][&limit=N]   (dashboard, read-only)
+```
+
+
 ## 5. Authoring tips
 
 - **Write `verify_cmd` first.** It is the contract: a command that fails when

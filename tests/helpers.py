@@ -93,6 +93,13 @@ class FakeStore:
         self.verdicts = getattr(self, "verdicts", {})
         self.verdicts[(taskfile, tid)] = verdict
 
+    def save_plan_proposal(self, *a, **kw):
+        self.plan_proposals = getattr(self, "plan_proposals", [])
+        self.plan_proposals.append((a, kw))
+
+    def list_plan_proposals(self, taskfile=None, limit=100):
+        return []
+
 
 # --- roster-aware fixture names ------------------------------------------
 # The model roster is DATED (config.ROSTER): names change on the provider's
