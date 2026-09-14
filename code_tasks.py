@@ -611,6 +611,23 @@ def _tally_reviews(outcomes):
     return issues, approvals, crashed, approved, bool(crashed) and not issues
 
 
+def _collect_follow_ups(outcomes):
+    """`[model] text` for every PRE-EXISTING finding the round filed.
+
+    Module-level for the same reason `_tally_reviews` is: the join's feedback
+    path must be tested against the real thing. These are recorded on
+    `task.pr_reviewed` and never become PR-requested changes — a reviewer
+    reads the full diff, so a wart the task never touched used to block a
+    merge and burn one of the implementer's fix rounds on work it did not do.
+    """
+    out = []
+    for model, v in outcomes:
+        if v.get("crashed"):
+            continue
+        out.extend(f"[{model}] {f}" for f in v.get("follow_ups") or [])
+    return out
+
+
 def _tier_index_m(model):
     try:
         return config.ESCALATION_PATH.index(model)
@@ -765,18 +782,111 @@ def _rework_feedback(tid, results):
     return "\n\n".join(parts)
 
 
-def _review_prompt(t, diff, impact=""):
+SCOPE_BLOCKING = "introduced-by-this-diff"
+SCOPE_PRE_EXISTING = "pre-existing"
+
+
+def _split_by_scope(raw_issues, raw_follow_ups=()):
+    """(blocking, follow_ups) for one reviewer verdict.
+
+    Reviewers read the FULL diff, so a wart the task never touched used to
+    block a merge and burn one of the implementer's fix rounds on work it did
+    not do. Every issue is now labelled, and the LABEL decides whether it may
+    block:
+
+      * `introduced-by-this-diff` — the change itself causes it. Blocks.
+      * `pre-existing` — already there before this task touched anything.
+        Collected as a follow-up: recorded and surfaced, never a merge
+        blocker, never a fix round.
+
+    An UNLABELLED issue (the old flat `{"issues": ["plain text"]}` format)
+    counts as blocking: a reviewer that said something was wrong must not have
+    it quietly dropped by a parser upgrade.
+    """
+    blocking, follow = [], []
+    for it in raw_issues or []:
+        if isinstance(it, dict):
+            label = str(it.get("label") or "").strip().lower()
+            text = str(it.get("text") or it.get("issue") or "").strip()
+            if label == SCOPE_PRE_EXISTING:
+                follow.append(text or str(it))
+                continue
+            blocking.append(text or str(it))
+        else:
+            blocking.append(str(it))
+    for f in raw_follow_ups or []:
+        text = f.get("text") if isinstance(f, dict) else f
+        if str(text or "").strip():
+            follow.append(str(text))
+    return blocking, follow
+
+
+def _scope_lock_prose(flag):
+    """The SCOPE LOCK block both reviewer prompts end with.
+
+    Written once: the pre-merge reviewer and the PR reviewer must hold the
+    same line about what may block, or a change bounced for a pre-existing
+    reason is re-implemented against nothing.
+    """
     return (
+        "SCOPE LOCK — an issue may only BLOCK this change if THIS DIFF "
+        "introduced it. Label every issue you report:\n"
+        f'- "{SCOPE_BLOCKING}" — this change causes it. These block.\n'
+        f'- "{SCOPE_PRE_EXISTING}" — it was already there before this task '
+        "touched anything (a flaky test, a wart in a file this diff merely "
+        "passes through, an unrelated defect). These do NOT block: list them "
+        "under follow_ups, where they are recorded and tracked separately.\n"
+        "Do not silently drop a real pre-existing finding — labelling it is "
+        "what keeps it visible without holding this change hostage.\n\n"
+        "Reply with STRICT JSON only, no prose:\n"
+        f'{{"{flag}": true, "issues": [], "follow_ups": []}}  or  '
+        f'{{"{flag}": false, "issues": [{{"label": "{SCOPE_BLOCKING}", '
+        f'"text": "file.py:42 — problem and what fixes it"}}], '
+        '"follow_ups": ["file.py:9 — pre-existing, not this diff\'s job"]}\n'
+        f'Set "{flag}" false ONLY when at least one issue is labelled '
+        f'"{SCOPE_BLOCKING}". A "{SCOPE_PRE_EXISTING}" issue goes in follow_ups '
+        f'and never sets "{flag}" false.'
+    )
+
+
+def _review_prompt(t, diff, impact=""):
+    p = (
         f"You are reviewing an implementation produced by another AI agent.\n\n"
         f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
         f"The implementation already passed its automated verify gate "
         f"({t['verify_cmd'] or 'none'}). Here is the full diff:\n\n{diff}\n\n"
         + graft.impact_block(impact) +
         "Review for: spec compliance, correctness, and scope discipline "
-        "(nothing unrelated). Reply with STRICT JSON only, no prose, of the form:\n"
-        '{"pass": true}  or  {"pass": false, "issues": ["specific issue 1", ...]}\n'
-        "Pass only if the change fully and correctly implements the spec."
+        "(nothing unrelated).\n"
     )
+    if config.REQUIRE_TESTS:
+        p += ("A code change MUST come with tests that would FAIL without it. "
+              "Documentation-only changes are exempt.\n")
+    p += "\n" + _scope_lock_prose("pass")
+    return p
+
+
+def _verdict_dict(obj, flag):
+    """Scope-locked verdict built from a parsed reviewer JSON object.
+
+    The LABELS decide, not the flag the model typed: the rule is that the flag
+    is false ONLY when at least one issue is `introduced-by-this-diff`. A
+    reviewer that wrote `false` while filing nothing but pre-existing findings
+    was voting to hold this change hostage for work it did not do, so the
+    label wins and the round passes with those findings kept as follow-ups.
+    The reverse stays fail-closed: a blocking issue blocks even if the model
+    typed true.
+    """
+    blocking, follow = _split_by_scope(obj.get("issues"), obj.get("follow_ups"))
+    if not blocking and not follow and not obj.get(flag):
+        # A bare rejection naming nothing: fail closed, but say so — a merge
+        # must never rest on a verdict with no readable reason.
+        blocking = [f'reviewer rejected it ("{flag}": false) without naming '
+                    "an issue this diff introduced"]
+    out = {flag: not blocking, "issues": blocking}
+    if follow:
+        out["follow_ups"] = follow
+    return out
 
 
 def _parse_verdict(text):
@@ -784,6 +894,11 @@ def _parse_verdict(text):
 
     The flat regex could not span braces inside quoted code in the verdict
     prose (e.g. "{WORLD_X,WORLD_Z,WORLD_H}"), silently dropping real verdicts.
+
+    Scope-locked (review-scope-lock): `issues` are the BLOCKING ones and
+    `follow_ups`, present only when a reviewer filed one, carries the
+    pre-existing findings. The old flat format still parses, and its
+    unlabelled issues are blocking.
     """
     spans = []
     for m in re.finditer(r"\{", text):
@@ -796,8 +911,7 @@ def _parse_verdict(text):
         except ValueError:
             continue
         if isinstance(obj, dict) and "pass" in obj:
-            return {"pass": bool(obj["pass"]),
-                    "issues": [str(i) for i in obj.get("issues", [])]}
+            return _verdict_dict(obj, "pass")
     return {"pass": False, "truncated": True,
             "issues": ["reviewer returned no parseable verdict"]}
 
@@ -833,18 +947,21 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact=""):
               "without it. Reject if there are none, if they only assert the "
               "code runs, or if they miss the behaviour the spec describes. "
               "Documentation-only changes are exempt.\n")
-    p += ("4. SCOPE — nothing unrelated to the spec.\n\n"
+    p += ("4. SCOPE — nothing unrelated to the spec. An issue this diff did "
+          "not introduce is not yours to block on.\n\n"
           "Review independently: do not assume another reviewer checked "
           "something. Be specific — name the file and line, say what is wrong "
-          "and what would fix it. Vague objections waste a whole round.\n\n"
-          "Reply with STRICT JSON only, no prose:\n"
-          '{"approve": true}  or  '
-          '{"approve": false, "issues": ["file.py:42 — problem and fix", ...]}')
+          "and what would fix it. Vague objections waste a whole round.\n\n")
+    p += _scope_lock_prose("approve")
     return p
 
 
 def _parse_approval(text):
-    """Last balanced span carrying an "approve" key wins; fails closed."""
+    """Last balanced span carrying an "approve" key wins; fails closed.
+
+    Scope-locked like `_parse_verdict` (review-scope-lock): `issues` are the
+    BLOCKING ones, `follow_ups` the pre-existing findings, and an old flat
+    verdict's unlabelled issues are blocking."""
     spans = []
     for m in re.finditer(r"\{", text):
         span = _balanced_span(text, m.start())
@@ -856,8 +973,7 @@ def _parse_approval(text):
         except ValueError:
             continue
         if isinstance(obj, dict) and "approve" in obj:
-            return {"approve": bool(obj["approve"]),
-                    "issues": [str(i) for i in obj.get("issues", [])]}
+            return _verdict_dict(obj, "approve")
     return {"approve": False, "truncated": True,
             "issues": ["reviewer returned no parseable verdict"]}
 
@@ -1399,7 +1515,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         "issues": ["reviewer session ended without a verdict"]}
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
                         reviewer=rev_tok,
-                        n_issues=len(verdict.get("issues") or []))
+                        n_issues=len(verdict.get("issues") or []),
+                        # Pre-existing findings a reviewer filed while reading
+                        # the full diff: recorded so they are not lost, and
+                        # deliberately NOT in `issues` — they must never block
+                        # the merge or cost the implementer a fix round.
+                        follow_ups=(verdict.get("follow_ups") or [])[:10],
+                        n_follow_ups=len(verdict.get("follow_ups") or []))
             return verdict
 
         async def escalate(ctx):
@@ -1638,12 +1760,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             outcomes = [(v.get("model"), v) for v in verdicts]
             issues, approvals, crashed, approved, inconclusive = \
                 _tally_reviews(outcomes)
+            follow_ups = _collect_follow_ups(outcomes)
             prior_incon = (prior_r or {}).get("inconclusive_n", 0)
             inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
                         reviewers=chosen, n_issues=len(issues),
                         issues=[i[:400] for i in issues[:10]],
+                        # Pre-existing findings, recorded and never blocking:
+                        # they do not reach the implementer and cost no round.
+                        follow_ups=[f[:400] for f in follow_ups[:10]],
+                        n_follow_ups=len(follow_ups),
                         crashed=crashed, inconclusive=inconclusive)
             # Post each verdict AS A GITHUB REVIEW so the trail is visible where
             # a human looks for it. A crashed reviewer gets a neutral note, never
@@ -1656,6 +1783,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     body = (f"**{model}** (round {round_n}) — "
                             + ("approved." if v["approve"] else "changes requested:\n\n"
                                + "\n".join(f"- {i}" for i in v["issues"][:20])))
+                    if v.get("follow_ups"):
+                        body += ("\n\nNoted, non-blocking (pre-existing, not "
+                                 "introduced by this diff):\n"
+                                 + "\n".join(f"- {f}" for f in v["follow_ups"][:10]))
                 rc = 1
                 if not v.get("crashed"):
                     rc, _, _ = await gitstore._gh(
@@ -1673,6 +1804,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                          round_n, "\n".join(f"- {i}" for i in issues[:20]))],
                     cwd=repo)
             return {"approved": approved, "issues": issues,
+                    "follow_ups": follow_ups,
                     "approvals": approvals, "reviewers": chosen,
                     "crashed": crashed, "inconclusive": inconclusive,
                     "inconclusive_n": inconclusive_n,
