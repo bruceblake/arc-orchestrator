@@ -237,6 +237,32 @@ ROLE_IDLE_TIMEOUT = {
 
 def idle_timeout_for(role):
     return ROLE_IDLE_TIMEOUT.get(role, DRIVER_IDLE_TIMEOUT)
+# Per-role TOTAL budgets: the wall clock that bounds ONE harness invocation.
+# The idle budget above is the stall tripwire (no output at all); this is the
+# outer cap on the whole run. They used to be one number, DRIVER_TIMEOUT, for
+# every role — so a planner doing one long agentic read of the repo was cut off
+# at the same point as a mechanical implementer making thirty small edits. The
+# planner gets the longest budget (the slowest job, on the fleet's scarcest
+# model), a reviewer reads one diff and answers, and an implementer iterates in
+# short steps so it fails fast and cheap. An unlisted role falls back to
+# DRIVER_TIMEOUT.
+ROLE_TIMEOUT = {
+    "planner": float(os.getenv("ARC_PLANNER_TIMEOUT", "5400")),
+    "reviewer": float(os.getenv("ARC_REVIEWER_TIMEOUT", "3600")),
+    "implementer": float(os.getenv("ARC_IMPLEMENTER_TIMEOUT", "2700")),
+}
+
+
+def total_timeout_for(role):
+    return ROLE_TIMEOUT.get(role, DRIVER_TIMEOUT)
+
+
+def longest_total_timeout(roles=None):
+    """The longest total budget any of `roles` (default: every role) can hold a
+    driver lease for. Never less than DRIVER_TIMEOUT, the fallback budget."""
+    names = ROLE_TIMEOUT if roles is None else roles
+    return max([DRIVER_TIMEOUT]
+               + [ROLE_TIMEOUT[r] for r in names if r in ROLE_TIMEOUT])
 # While a driver runs, emit driver.progress this often: bytes written, idle
 # time, and a /proc sample. Makes a live agent's progress observable instead of
 # inferred from transcript file size, and gives the stall event a CPU baseline
@@ -250,15 +276,16 @@ DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP",
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
-# first). Must exceed DRIVER_TIMEOUT + retry backoffs.
+# first). Must exceed the longest role budget + retry backoffs.
 # DERIVED, not a free constant: a lease reaped while its driver is still
 # running lets another driver take the slot, and the model goes over its ARC
 # cap — the exact failure the leases exist to prevent. It must therefore
-# outlast the longest an attempt can legitimately hold one, which is
-# DRIVER_TIMEOUT plus the retry backoff before the next attempt. Pinning this
-# to a literal meant raising DRIVER_TIMEOUT silently broke the invariant.
+# outlast the longest an attempt can legitimately hold one, which is the
+# LONGEST role budget (a planner gets 5400s, not DRIVER_TIMEOUT) plus the retry
+# backoff before the next attempt. Pinning this to a literal, or measuring it
+# against DRIVER_TIMEOUT alone, silently broke the invariant.
 DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
-    DRIVER_TIMEOUT + DRIVER_CAPACITY_BACKOFF_CAP + 300)
+    longest_total_timeout() + DRIVER_CAPACITY_BACKOFF_CAP + 300)
 # How long a driver may wait for a per-model lease before giving up. Without a
 # bound this wait was `while True:` — a task could queue behind a saturated
 # model forever, before its own timeout clock had even started. Exceeding it

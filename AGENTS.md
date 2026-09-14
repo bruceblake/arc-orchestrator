@@ -216,7 +216,9 @@ on `reasonix`).
   (edge `review_<tid> -> publish_<tid>`, code_tasks.py:257).
 
 - **A reviewer that CRASHED did not review.** A pre-merge reviewer that dies —
-  a capacity error, a harness fault — returns `crashed`, and the task retries
+  a capacity error, a harness fault — or whose session ends **without emitting
+  a parseable verdict** (e.g. stops mid-analysis with a question) returns
+  `crashed`, and the task retries
   the REVIEW rather than going back to the implementer. Spending a fix round on
   it sends the implementer to repair code nobody criticised. Bounded by
   `config.MAX_REVIEW_CRASHES` (`ARC_MAX_REVIEW_CRASHES`, default 20), kept
@@ -227,6 +229,10 @@ on `reasonix`).
   times while its reviewer hit 18 consecutive capacity errors; each crash was
   recorded as a rejection, the implementer was sent to fix nothing, and the
   task finally died as "exhausted escalation" on work that was never rejected.
+  The no-verdict variant cost a round too: a GLM reviewer analyzed PR #50 for
+  47 minutes, then ended its session with a question instead of the verdict
+  JSON — the missing verdict fail-closed to a rejection, bouncing the
+  implementer to fix issues that were never delivered.
 
 Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-contract.md).
 
@@ -347,7 +353,8 @@ PR** in the life of the repo.
   be a same-family second pass. Nothing else changes: unanimity, the round
   budget, and `task.pr_review_thin` all still apply.
 - **A reviewer that crashed did not review.** If no reviewer objects but one
-  never ran, the round is *inconclusive*, not a rejection: nothing is posted
+  never ran — or its session ended without a parseable verdict — the round is
+  *inconclusive*, not a rejection: nothing is posted
   as `--request-changes`, the task goes back to `pr_review` rather than to the
   implementer, and the retry comes from `config.PR_MAX_INCONCLUSIVE` — kept
   separate from `PR_MAX_ROUNDS` so infrastructure failures cannot eat the

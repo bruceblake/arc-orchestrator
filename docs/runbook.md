@@ -90,26 +90,67 @@ cd /home/proxyie/arc-orchestrator
 - Review the generated file in `~/tasks/` and edit it by hand if needed
   (schema rules are in `docs/taskfile-schema.md`).
 
-#### Planning a large goal — raise `ARC_DRIVER_TIMEOUT` first
+#### Planning a large goal — the planner already has the longest budget
 
-GLM-5.3 planning is **slow on big goals**, and the default 2700 s
-`config.DRIVER_TIMEOUT` is a total-runtime backstop that will kill it.
+GLM-5.3 planning is **slow on big goals**. The planner's total-runtime
+backstop is `ARC_PLANNER_TIMEOUT`, and today it defaults to 5400 s precisely
+because of this (the same figure `ARC_DRIVER_TIMEOUT` carries today, so
+planning's wall clock is unchanged — what the per-role split buys is that a
+shorter implementer budget no longer also shortens the planner's).
 
-Measured 2026-09-12: a large goal hit the 2700 s driver timeout
-mid-generation — the planner was still writing the plan. The retry then went
-wrong in a second way: instead of emitting plan JSON the model looped,
-producing essay after essay of prose about the repo, and the run never
+Measured 2026-09-12 (`ARC_DRIVER_TIMEOUT` was 2700 s at the time): a large
+goal hit the driver timeout mid-generation — the planner was still writing
+the plan. The retry
+then went wrong in a second way: instead of emitting plan JSON the model
+looped, producing essay after essay of prose about the repo, and the run never
 recovered a taskfile from it. Both halves are expensive and both are avoided
-by giving the planner room:
+by giving the planner room, which is now the default:
 
 ```bash
-ARC_DRIVER_TIMEOUT=5400 .venv/bin/python main.py code plan "<goal>" /path/to/repo
+ARC_PLANNER_TIMEOUT=7200 .venv/bin/python main.py code plan "<goal>" /path/to/repo
 ```
 
-5400 s (90 min) is the working figure for a large goal. `main.py code plan`
-runs a single harness invocation, so the timeout applies to the whole planner
-turn; `ARC_PLANNER_IDLE_TIMEOUT` still applies independently if the planner
-goes silent (see "A harness went quiet").
+5400 s (90 min) is the working figure for a large goal, and is what you get
+without setting anything; a goal that is larger still can be given more, as
+above. `main.py code plan` runs a single harness invocation, so the budget
+applies to the whole planner turn; `ARC_PLANNER_IDLE_TIMEOUT` still applies
+independently if the planner goes silent (see "A harness went quiet").
+
+#### Per-role total budgets (`ROLE_TIMEOUT`)
+
+The total-runtime backstop is **per role**, not one number for the whole
+fleet: `config.ROLE_TIMEOUT` gives the planner the longest budget, because it
+is the slowest job and runs on the scarcest model, while an implementer
+iterates in short steps and should fail fast and cheap instead of holding a
+slot for 90 minutes.
+
+**This LOWERS the implementer's wall clock, from `ARC_DRIVER_TIMEOUT` (5400 s)
+to 2700 s, and raises nothing.** It is the intended trade — a mechanical task
+that has run 45 minutes is usually retrying rather than converging, and the
+idle tripwire (840 s of silence) is what catches a genuinely dead harness in
+minutes, not this outer cap. If a real implementer starts being cut off
+mid-work, raise `ARC_IMPLEMENTER_TIMEOUT`; do not lower the inner budgets.
+Note the implementer is the role that carries the load, so this is the knob to
+watch after any fleet change.
+
+| Env var | Role | Default | Meaning |
+|---|---|---|---|
+| `ARC_PLANNER_TIMEOUT` | `planner` | `5400` | one long agentic read + one JSON plan |
+| `ARC_REVIEWER_TIMEOUT` | `reviewer` | `3600` | reads one diff and answers |
+| `ARC_IMPLEMENTER_TIMEOUT` | `implementer` | `2700` | many small edits; fail fast |
+
+A role not listed here (including `pr_reviewer`, which reviews an already-open
+PR) falls back to `ARC_DRIVER_TIMEOUT`. The **idle** budget is a separate
+knob and stays role-independent for reviewer and implementer — see "A harness
+went quiet".
+
+This is the knob `driver.timeout` reports, and the one the planner workaround
+above existed for: a planner now gets 5400 s without anyone exporting
+`ARC_DRIVER_TIMEOUT`. **`DRIVER_LEASE_TTL` is derived from the longest role
+budget**, so raising any role's budget stretches the leases with it — a lease
+reaped while its driver still runs would let the model go over its ARC cap,
+which is the exact failure the leases exist to prevent. `main.py status`
+reports that invariant.
 
 ### 2.1b DeepSeek's `reasonix` harness (setup)
 
@@ -594,7 +635,8 @@ retired three-model fleet: every planner "stall" on 2026-09-11/12 fired after
 exactly 59 bytes — the version handshake — with other drivers live, i.e. a
 healthy process killed for being queued, and the retry ladder then repeated it
 eight more times. GLM-5.3, today's planner, is slower still; on very large
-goals raise `ARC_DRIVER_TIMEOUT` as in §2.1 rather than the idle budget.)
+goals the planner's longer total budget (`ARC_PLANNER_TIMEOUT`, default 5400 s)
+already gives it room — see §2.1.)
 
 **Chat does not queue behind the fleet.** `ARC_INTERACTIVE_RESERVE` (default 1)
 holds one slot on the planner model back from batch work, so a chat reply
@@ -632,7 +674,8 @@ probability of killing a healthy request at >=40k context:
 These are **lower bounds**: a step we killed leaves no `step.end`, so it is
 absent from the telemetry entirely and the real tail is worse.
 
-`config.DRIVER_TIMEOUT` (2700s) bounds the total cost, so a genuinely dead
+`config.DRIVER_TIMEOUT` (5400s, or the role's own total budget — 2700s for an
+implementer) bounds the total cost, so a genuinely dead
 request costs one idle window, not the whole budget.
 
 **Forensics.** Every stall event still records, gathered from `/proc` before
@@ -677,7 +720,7 @@ The vocabulary, in the order an attempt produces it:
 | `driver.heartbeat` | every ≤15s while the pump loop runs (`HEARTBEAT_INTERVAL`, drivers.py) | `bytes`, `idle_s`, `seconds` |
 | `driver.progress` | every `ARC_DRIVER_PROGRESS_INTERVAL` (60s) with a `/proc` sample | `state`, `cpu_delta_s`, `blocked`, `last_activity` |
 | `driver.stalled` | idle > `ARC_DRIVER_IDLE_TIMEOUT`, killed after forensics | see table above |
-| `driver.timeout` | total runtime > `ARC_DRIVER_TIMEOUT`, killed | `seconds` |
+| `driver.timeout` | total runtime > the role's budget (`ARC_PLANNER_TIMEOUT` / `ARC_REVIEWER_TIMEOUT` / `ARC_IMPLEMENTER_TIMEOUT`), killed | `seconds` |
 | `driver.done` / `driver.error` | attempt exited | exit code / error, transcript path |
 | `driver.cancelled` / `driver.cap_timeout` | run cancelled / lease wait gave out | — |
 | `driver.stale` | dashboard pruned a `driver.start` with no end (killed run) | `age_s` |
@@ -749,8 +792,9 @@ Mitigations, in order of effect:
    specific change. `code_tasks._impl_prompt` now instructs the implementer to
    make targeted edits even when the task sounds like a rewrite.
 2. Keep tasks small enough that no single response needs to be long.
-3. `ARC_DRIVER_TIMEOUT` (2700s) bounds a task that is retrying productively;
-   it is a backstop, not a cure — raising it buys time at ~5 min per retry.
+3. The implementer's total budget (`ARC_IMPLEMENTER_TIMEOUT`, 2700s) bounds a
+   task that is retrying productively; it is a backstop, not a cure — raising
+   it buys time at ~5 min per retry.
 
 Note the retired kimi harness requested `maxTokens = 131072` (derived from
 `max_context_size`; no
@@ -952,7 +996,8 @@ ps aux | grep -E 'reasonix|opencode'
 ```
 
 The orchestrator reaps a hung driver itself: `drivers.py` kills the child
-after `DRIVER_TIMEOUT` (default **2700s**) and reports a `driver.error`. A
+after the role's total budget (`ROLE_TIMEOUT`; `ARC_DRIVER_TIMEOUT` default
+**5400s**, an implementer gets 2700s) and reports a `driver.error`. A
 `driver.error` counts against `MAX_RETRIES` (default 12) before the task fails.
 If a `reasonix`/`opencode` process is still alive past that, it is either running
 a fresh attempt, retrying with backoff, or genuinely orphaned — kill it with
