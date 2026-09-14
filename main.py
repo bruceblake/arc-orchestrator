@@ -743,12 +743,17 @@ def cmd_doctor(args):
             ok, detail = False, f"cannot create {path}: {exc}"
         report(f"{label} exists or can be created ({path})", ok, detail)
 
-    report("timeouts: DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT",
-           config.DRIVER_LEASE_TTL > config.DRIVER_TIMEOUT > config.DRIVER_IDLE_TIMEOUT,
+    longest_total = config.longest_total_timeout()
+    role_budgets = "/".join(f"{role}={config.ROLE_TIMEOUT[role]}"
+                            for role in ("planner", "reviewer", "implementer")
+                            if role in config.ROLE_TIMEOUT)
+    report("timeouts: DRIVER_LEASE_TTL > longest role budget > DRIVER_IDLE_TIMEOUT",
+           config.DRIVER_LEASE_TTL > longest_total > config.DRIVER_IDLE_TIMEOUT,
            f"DRIVER_LEASE_TTL={config.DRIVER_LEASE_TTL}s, "
+           f"longest role budget={longest_total}s ({role_budgets}), "
            f"DRIVER_TIMEOUT={config.DRIVER_TIMEOUT}s, "
            f"DRIVER_IDLE_TIMEOUT={config.DRIVER_IDLE_TIMEOUT}s — leases must outlive "
-           "a harness run and the idle timeout must stay under the total cap")
+           "the longest harness run and the idle timeout must stay under the total cap")
 
     if reconcile.live_runs():
         report("no stale 'running' code_tasks", True)
