@@ -915,7 +915,7 @@ class Driver:
         last_hb_t = time.monotonic()
         last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
         last_cpu = None
-        deadline = t0 + config.DRIVER_TIMEOUT
+        deadline = t0 + config.total_timeout_for(self.role)
         interval = config.DRIVER_PROGRESS_INTERVAL
 
         def written():
@@ -988,7 +988,7 @@ class Driver:
             stalled = idle >= idle_budget - 1
             kind = "stalled" if stalled else "timed out"
             limit = (f"{idle_budget}s idle" if stalled
-                     else f"{config.DRIVER_TIMEOUT}s total")
+                     else f"{config.total_timeout_for(self.role)}s total")
             cpu_delta = (round(snap["cpu_s"] - last_cpu, 2)
                          if last_cpu is not None and "cpu_s" in snap else None)
             # Blocked, burning no CPU, with an unanswered request outstanding =
@@ -1351,7 +1351,7 @@ class DeepseekDriver(Driver):
         last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
         last_cpu = None
         last_probe_t = None
-        deadline = t0 + config.DRIVER_TIMEOUT
+        deadline = t0 + config.total_timeout_for(self.role)
         interval = config.DRIVER_PROGRESS_INTERVAL
         idle_budget = config.idle_timeout_for(self.role)
 
@@ -1427,7 +1427,7 @@ class DeepseekDriver(Driver):
             stalled = idle >= idle_budget - 1
             kind = "stalled" if stalled else "timed out"
             limit = (f"{idle_budget}s idle" if stalled
-                     else f"{config.DRIVER_TIMEOUT}s total")
+                     else f"{config.total_timeout_for(self.role)}s total")
             cpu_delta = (round(snap["cpu_s"] - last_cpu, 2)
                          if last_cpu is not None and "cpu_s" in snap else None)
             blocked = (snap.get("state") in ("S", "D") and (cpu_delta or 0) < 0.5)
