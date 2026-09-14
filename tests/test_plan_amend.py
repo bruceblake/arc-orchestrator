@@ -115,6 +115,22 @@ class TestChannel(_Base):
         trunc = [r for r in self.rows() if r["action"] == "rejected"]
         self.assertIn("batch truncated", trunc[0]["reason"])
 
+    def test_exactly_max_batch_gets_no_truncation_sentinel(self):
+        # The cap is a ceiling, not a tripwire: a batch that fills it exactly
+        # is complete, and must not be followed by a spurious rejection.
+        d = self.tmp / ".arc"
+        d.mkdir()
+        with (d / "plan_proposals.jsonl").open("w") as f:
+            for i in range(plan_amend.MAX_PER_BATCH):
+                f.write(json.dumps({"kind": "note", "task": "t1",
+                                    "note": f"n{i}"}) + "\n")
+        entries = plan_amend.read_proposals(self.tmp)
+        self.assertEqual(len(entries), plan_amend.MAX_PER_BATCH)
+        self.assertNotIn({"_truncated": True}, entries)
+        counts = self.apply(entries)
+        self.assertEqual(counts["noted"], plan_amend.MAX_PER_BATCH)
+        self.assertEqual(counts["rejected"], 0)
+
 
 class TestNote(_Base):
     def test_note_recorded_and_file_unchanged(self):

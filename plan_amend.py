@@ -138,18 +138,15 @@ def read_proposals(wt):
         # The anti-`git add -A` guarantee rests on this delete; its failure
         # must be visible, and harvest() retries it after applying.
         log.warning("plan-amend: could not delete %s after reading: %s", p, exc)
+    lines = [ln for ln in (l.strip() for l in raw.splitlines()) if ln]
     entries = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
+    for line in lines[:MAX_PER_BATCH]:
         try:
             entries.append(json.loads(line))
         except ValueError:
             entries.append({"_malformed": line[:300]})
-        if len(entries) >= MAX_PER_BATCH:
-            truncated = True
-            break
+    if len(lines) > MAX_PER_BATCH:
+        truncated = True
     if truncated:
         # Dropping proposals silently would make a runaway agent invisible.
         # The sentinel is itself recorded (rejected), so the batch's tail
