@@ -2040,6 +2040,93 @@ def _git_block(repo, gh=None):
     return info
 
 
+def _transcript_span(fpath):
+    """(birth epoch, seconds) from a transcript's own event timestamps.
+
+    stat times lie for streamed transcripts that rewrite on flush; the first
+    and last event timestamps are the attempt's real start and length. Falls
+    back to mtime/None for empty or unreadable files.
+    """
+    try:
+        raw = fpath.read_bytes()
+        if not raw:
+            raise ValueError("empty")
+        first = raw.split(b"\n", 1)[0]
+        last = raw.rstrip().rsplit(b"\n", 1)[-1]
+        t0 = json.loads(first).get("timestamp")
+        t1 = json.loads(last).get("timestamp")
+        if not isinstance(t0, (int, float)) or not isinstance(t1, (int, float)):
+            raise ValueError("no timestamps")
+        return t0 / 1000.0, max(0.0, round((t1 - t0) / 1000.0))
+    except Exception:
+        try:
+            return fpath.stat().st_mtime, None
+        except OSError:
+            return time.time(), None
+
+
+def _live_transcript_rows(task_ids, finished, task_rows):
+    """Synthetic harness-run rows for transcripts on disk with no DB row.
+
+    Rule 7 streams transcripts live, but the harness_runs row is written only
+    when the driver call RETURNS (code_tasks.save_harness_run); a killed run
+    process or a cancelled graph leaves a transcript with no row, and the
+    project view reported "no runs yet" for a task that had run many times
+    (empty-diff-publish, 2026-09-14). The file on disk is the fact: merge in
+    what the DB never recorded, flagged live while it is still being written.
+    """
+    try:
+        hdir = Path(config.ROOT, "logs", "harness")
+        live_s = config.DRIVER_IDLE_TIMEOUT + 60
+        now = time.time()
+        have = {Path(r.get("transcript") or "").name for r in finished}
+        task_row = {r.get("id"): r for r in task_rows if r.get("id")}
+        synth = []
+        for tid in task_ids:
+            if not tid:
+                continue
+            pat = re.compile(re.escape(tid)
+                             + r"-(?:x\d+|pr\d+)-([a-z_]+)-(\d+)\.jsonl")
+            for f in sorted(hdir.glob(f"{tid}-*.jsonl")):
+                if f.name in have:
+                    continue
+                m = pat.fullmatch(f.name)
+                if not m:
+                    continue
+                live = False
+                try:
+                    live = (now - f.stat().st_mtime) <= live_s
+                except OSError:
+                    continue
+                # Birth/length come from the stream's own event timestamps —
+                # a driver that rewrites the file on flush makes stat's ctime
+                # worthless (it made a 90-minute attempt look 7 seconds old).
+                birth, span = _transcript_span(f)
+                role = m.group(1)
+                trow = task_row.get(tid) or {}
+                model = trow.get("model")
+                if role != "implementer":
+                    model = config.REVIEW_FAMILIES.get(
+                        trow.get("reviewer"), model or trow.get("reviewer"))
+                synth.append({
+                    "task_id": tid, "harness": config.MODEL_HARNESS.get(model),
+                    "model": model, "role": role, "attempt": int(m.group(2)),
+                    "exit_code": None, "seconds": span,
+                    "verdict": None, "transcript": f.name,
+                    "created_at": datetime.fromtimestamp(birth).isoformat(),
+                    "live": live})
+
+        def ts(r):
+            try:
+                return datetime.fromisoformat(r.get("created_at") or "").timestamp()
+            except (TypeError, ValueError):
+                return 0.0
+
+        return sorted(list(finished) + synth, key=ts, reverse=True)
+    except Exception:
+        return finished
+
+
 def _project_detail(store, fname):
     if not re.fullmatch(r"[\w.-]+\.json", fname or ""):
         return {"error": "bad file name"}, 400
@@ -2061,6 +2148,7 @@ def _project_detail(store, fname):
         runs = store.harness_runs_for(ids) if store else []
     except Exception:
         rows, runs = [], []
+    runs = _live_transcript_rows(ids, runs, rows)
     loop_stats = _task_loop_stats(store, ids)
     for r in rows:
         ls = loop_stats.get(r.get("id"))
