@@ -330,7 +330,7 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_GRAFT_HINTS` | 3 | `file:line` spans from the code graph handed to an implementer |
 | `ARC_REASONIX_BIN` | reasonix | the reasonix CLI; unset = `reasonix` on PATH, then `~/.local/opt/node/bin/reasonix` |
 | `ARC_REASONIX_HOME` | logs/reasonix-home | the fleet's private `REASONIX_HOME` (generated config.toml + .env holding the ARC key) |
-| `ARC_HARNESS_LIMIT_REASONIX` | 5 | max concurrent reasonix processes (the DeepSeek harness pool) |
+| `ARC_HARNESS_LIMIT_REASONIX` | 7 | max concurrent reasonix processes (the DeepSeek harness pool); 7/7 measured clean 2026-09-14 |
 | `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
 | `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
 
@@ -424,10 +424,9 @@ run inside the worktree) and then a review by the *other* model family — a
 reviewer never shares a family with the implementer it reviews
 (**GLM-5.3 → deepseek, DeepSeek → glm**). Rejections
 feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 16).
-`ARC_ALLOW_SAME_FAMILY_REVIEW=1` is a TEMPORARY operator-authorized override
-(2026-09-12) that suspends the cross-family requirement while GLM-5.3's
-backend is unstable; it is documented in
-[docs/concurrency-limits.md](docs/concurrency-limits.md).
+Cross-family review is unconditional: the temporary same-family-review
+override (2026-09-12..14, while GLM-5.3's backend was unstable) was removed
+once it stabilised.
 
 Per-model governor caps keep concurrent harness instances under the measured
 or provider-published ARC ceilings (deepseek 10, glm 4 on the two-model fleet of

@@ -60,10 +60,11 @@ def load_taskfile(path, policy=None):
     # rather than rejected — the plan is still good.
     reviewers = tuple(pol.get("reviewers", tuple(config.REVIEW_FAMILIES)))
     review_on = pol.get("review", True)
-    # config.ALLOW_SAME_FAMILY_REVIEW is the operator's TEMPORARY all-DeepSeek
-    # routing (2026-09-12, GLM backend unstable); suspends cross-review — see
-    # the flag's comment in config.py.
-    allow_self = bool(pol.get("allow_self_review")) or config.ALLOW_SAME_FAMILY_REVIEW
+    # Self-review is a bench-variant knob only. The fleet-wide escape hatch
+    # (config.ALLOW_SAME_FAMILY_REVIEW, ARC_ALLOW_SAME_FAMILY_REVIEW) existed
+    # 2026-09-12..14 while GLM-5.3's backend was unstable, and was removed
+    # once it stabilised: cross-review is unconditional again.
+    allow_self = bool(pol.get("allow_self_review"))
     tasks = {}
     for t in data["project"]["tasks"]:
         tid = t["id"]
@@ -576,8 +577,7 @@ def _eligible_pr_reviewers(impl_fam, pol):
     """
     out = []
     for m in config.ESCALATION_PATH[::-1]:  # strongest first, from the roster
-        if (config.MODEL_FAMILY.get(m) == impl_fam
-                and not config.ALLOW_SAME_FAMILY_REVIEW):
+        if config.MODEL_FAMILY.get(m) == impl_fam:
             continue
         try:
             _driver(m, "pr_reviewer", pol)
@@ -652,6 +652,70 @@ def _reviewer_for(t, model):
     if current in config.REVIEW_FAMILIES and current != fam:
         return current
     return config.cross_family_reviewer(model) or current
+
+
+_GATE_FAILURE = re.compile(
+    r"^(FAIL|ERROR): |^AssertionError|^Traceback \(most recent call last\)"
+    r"|^FAILED\b|^not ok\b|^✗|^_{2,}.+_{2,}$|^E\s+(AssertionError|\w+Error\b)")
+
+
+def _gate_failures(output, limit=12):
+    """The gate-output lines that NAME what failed, first occurrence order.
+
+    The fix loop hands the implementer the last 2000 characters of gate
+    output — on a check.sh run that is the unittest summary and the shell's
+    own echo, which say THAT something failed, not WHAT. empty-diff-publish
+    failed its worktree gate on exactly one of 1046 tests, the failing line
+    ("FAIL: test_every_edge_condition_reads_as_english ...") sat a hundred
+    lines above the cut, and the implementer was told only "unit tests
+    failed". The full log is on disk (log_path) for a human; the model
+    needs the names IN the feedback.
+
+    Covers unittest `FAIL:`/`ERROR:`, pytest short summaries (`FAILED x::y`,
+    needs `-rf`), pytest's default FAILURES-section underlines
+    (`_____ test_x _____`) and its `E`-prefixed exception lines, TAP
+    (`not ok`), and bare tracebacks (`^Traceback`, `^AssertionError`).
+    Pytest without a FAILURES section (xdist summary-only modes, `-q`
+    pass-with-warnings) and TAP `# TODO` expected failures yield lines a
+    green run could print — so the caller prepends the names block only
+    when the gate actually failed (see gate()).
+    """
+    hits, seen = [], set()
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line or line in seen or not _GATE_FAILURE.search(line):
+            continue
+        seen.add(line)
+        hits.append(line[:200])
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _resume_session(results, tid, model):
+    """The harness session to continue for this fix round, or None.
+
+    A rework is the SAME model mending the SAME worktree it just wrote, fed
+    the gate/review feedback: continuing its harness session keeps the
+    context it already paid for. Re-reading the repo is the dominant cost of
+    a hard task (measured 60–85 min before the first edit on GLM-5.3), and
+    every fix round re-paid it in full. A tier change starts fresh — the
+    escalating model has no stake in another model's session, and its
+    harness may not even read the previous harness's session files. A run
+    restart also starts fresh (the graph context is new and alloc may have
+    reset the branch), because there is no previous attempt in `results`.
+    """
+    prev = (results or {}).get(f"implement_{tid}") or {}
+    if prev.get("model") == model and prev.get("session_id"):
+        # Both live drivers map a truthy session id to `-c` = "continue the
+        # newest session in the workspace", discarding the actual id — safe
+        # here because the only other writer (the reviewer) is always the
+        # OTHER harness with a session store the implementer's harness
+        # cannot read. A bench policy that puts implementer and reviewer on
+        # the same harness in one worktree (e.g. kimi-via-opencode) must NOT
+        # reuse sessions — the implementer would resume the reviewer's.
+        return prev["session_id"]
+    return None
 
 
 def _rework_feedback(tid, results):
@@ -1171,10 +1235,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # Graph hints are recomputed per attempt: a rework's spans should
             # point at the code as it is NOW, after the previous attempt.
             hints = await graft.hints(t, wt)
+            # A rework continues the previous attempt's harness session when
+            # the model is unchanged: the alternative is re-reading the whole
+            # repo per round (60-85 min measured). Both harnesses express
+            # this as `-c` (continue the newest session in the workspace, and
+            # the worktree is per-task): drivers.py argv treats a truthy
+            # session_id as exactly that flag.
+            resume = _resume_session(results, tid, model)
             try:
                 res = await driver.run(
                     _impl_prompt(t, feedback, hints), wt,
-                    task_id=f"{tid}-x{attempt}")
+                    session_id=resume, task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1195,7 +1266,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         "harness": driver.harness}
             store.save_harness_run(tid, driver.harness, model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
-            return {"session_id": res.session_id, "harness": driver.harness}
+            return {"session_id": res.session_id, "harness": driver.harness,
+                    "model": model}
 
         async def gate(ctx):
             cmd = t["verify_cmd"]
@@ -1221,23 +1293,41 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 await drivers._terminate(proc)
                 return {"passed": False, "output": f"gate timed out after {config.GATE_TIMEOUT}s",
                         "log_path": None}
-            output = out.decode(errors="replace")[-2000:]
+            full = out.decode(errors="replace")
+            passed = proc.returncode == 0
+            names = _gate_failures(full)
+            output = full[-2000:]
+            if names and not passed:
+                # Names first, tail second: the implementer reads this top
+                # down, and WHICH check failed matters more than the last
+                # screenful of output above the unittest summary (which is
+                # where the names used to be lost — see _gate_failures).
+                # Failure-only: on a pass the output is observability, not
+                # feedback, and a names-looking line in green output (a
+                # caught exception printed by an expected-error test) would
+                # be a lie.
+                block = "failing checks:\n" + "\n".join(f"  {n}" for n in names)
+                output = (block + "\n...\n" + full[-1400:])[:2400]
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0)
             log_path = None
             try:
                 log_dir = Path(config.ROOT) / "logs" / "gates"
                 log_dir.mkdir(parents=True, exist_ok=True)
                 log_path = str(log_dir / f"{tid}-x{attempt}.log")
-                Path(log_path).write_text(out.decode(errors="replace"))
+                Path(log_path).write_text(full)
             except OSError:
                 log_path = None
-            passed = proc.returncode == 0
             # Attribution and a reason, not just a boolean: a bare
             # {"passed": false} in the log cannot be tied to a task or acted
             # on, and this is the per-node progress signal the dashboard reads.
+            if passed:
+                tail = None
+            elif names:
+                tail = ("failing: " + "; ".join(names))[-400:]
+            else:
+                tail = output.strip()[-400:]
             events.emit("task.gate", task=tid, attempt=attempt, passed=passed,
-                        log=log_path, cmd=cmd[:120],
-                        tail=None if passed else output.strip()[-400:])
+                        log=log_path, cmd=cmd[:120], tail=tail)
             verdict = None
             if passed and t.get("probe_cmd"):
                 verdict, perr = await _run_probe(t["probe_cmd"], wt)

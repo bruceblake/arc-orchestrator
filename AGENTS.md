@@ -188,16 +188,12 @@ on `reasonix`).
   `DeepseekDriver(<model>, "reviewer")` accordingly, sending the full
   diff (`gitstore.diff_full`) with the original spec; the verdict must be
   JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
-- **TEMPORARY (operator-authorized 2026-09-12): `ARC_ALLOW_SAME_FAMILY_REVIEW=1`
-  suspends the cross-family half of this rule.** While GLM-5.3's provider
-  backend was unstable (90s+ stalls and capacity flapping, measured and logged
-  2026-09-12), review may be SAME-family — DeepSeek reviewing DeepSeek — so
-  the fleet is not down whenever GLM-5.3 is. It is read once into
-  `config.ALLOW_SAME_FAMILY_REVIEW` and consumed at `code_tasks.py:64`
-  (loader) and `code_tasks.py:456` (reviewer pool). A same-family review is a
-  second pass by the same model, NOT an independent reading; unset it as soon
-  as GLM-5.3 is stable again. It is the ONLY sanctioned exception — a
-  taskfile must never hard-code a same-family `reviewer` in place of it.
+- **Cross-family review is unconditional — there is no escape hatch.** The
+  temporary `ARC_*` same-family-review override (operator-authorized
+  2026-09-12 while GLM-5.3's provider backend was unstable) was removed
+  2026-09-14 once GLM-5.3 stabilised: a same-family review is a second pass
+  by the same model, NOT an independent reading, and the loader now always
+  rejects it.
 - **`reviewer` and `pr_reviewer` are different roles.** `reviewer` is this
   pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5):
   judging a bounded diff against a spec is a much smaller job than authoring
@@ -348,10 +344,10 @@ PR** in the life of the repo.
   to `implement`; the next commit updates the same PR and a new round begins.
 - The loop is bounded by `config.PR_MAX_ROUNDS` (default 16); exhausting it
   fails the task rather than looping forever.
-- **Under `ARC_ALLOW_SAME_FAMILY_REVIEW=1`** (the TEMPORARY override in
-  Rule 2) the pool may hold the implementer's own family, so a PR review can
-  be a same-family second pass. Nothing else changes: unanimity, the round
-  budget, and `task.pr_review_thin` all still apply.
+- The pool only holds families other than the implementer's — with the
+  2026-09-14 removal of the same-family override this is unconditional:
+  unanimity, the round budget, and `task.pr_review_thin` always apply on a
+  genuinely independent reading.
 - **A reviewer that crashed did not review.** If no reviewer objects but one
   never ran — or its session ended without a parseable verdict — the round is
   *inconclusive*, not a rejection: nothing is posted
@@ -411,7 +407,7 @@ merged work.
 |---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | `ARC_LIMIT_<FAMILY>` |
 | Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | reasonix (deepseek): **5** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | reasonix (deepseek): **7** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
 on this fleet were gpt-oss 5, DeepSeek(V4-Flash) 5, GLM 4, Kimi 3 — that was
@@ -431,15 +427,16 @@ provider.
 
 **The harness layer is the one people forget, and it is often the binding
 one.** Each harness now has its OWN pool, because the two models no longer
-share a binary: **opencode (GLM-5.3) is capped at 5 and reasonix (DeepSeek) at 5**
+share a binary: **opencode (GLM-5.3) is capped at 5 and reasonix (DeepSeek) at 7**
 (`config._HARNESS_CAP`). Every opencode-backed model runs through ONE local
 binary backed by ONE ~240MB sqlite store in `~/.local/share/opencode`, so
 GLM's driver cap of 2 sits well under the opencode pool — the retired
 three-model fleet's GLM 2 + DeepSeek 5 = 7 opencode processes is history.
 reasonix keeps per-workspace session files under its own home
-(`config.REASONIX_FLEET_HOME`), with no central store, so its 5 mirrors
-opencode until a load test says otherwise. Measured
-on the shared opencode pool, with an identical prompt and a warm cache:
+(`config.REASONIX_FLEET_HOME`), with no central store, and its load test ran
+2026-09-14: 3/3, 6/6 and 7/7 concurrent one-shot runs exited clean with no
+ARC capacity rejections — no cliff up to 7, where opencode's was at 6.
+Measured on the shared opencode pool, with an identical prompt and a warm cache:
 
 | concurrent | 3 | 4 | 5 | 6 | 10 |
 |---|---|---|---|---|---|
