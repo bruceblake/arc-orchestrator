@@ -170,6 +170,20 @@ CREATE TABLE IF NOT EXISTS graph_state(
   updated_at REAL NOT NULL,
   PRIMARY KEY (graph, node)
 );
+CREATE TABLE IF NOT EXISTS plan_proposals(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  taskfile TEXT NOT NULL,
+  target TEXT,
+  proposer TEXT,
+  role TEXT,
+  model TEXT,
+  kind TEXT,
+  action TEXT NOT NULL,
+  reason TEXT,
+  payload TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_plan_proposals_taskfile ON plan_proposals(taskfile);
 """
 
 
@@ -629,6 +643,30 @@ class Store:
                     "WHERE taskfile=? ORDER BY id", (taskfile,),
                 ).fetchall()
             ]
+
+    def save_plan_proposal(self, taskfile, target, proposer, role, model,
+                           kind, action, reason, payload):
+        with self.lock:
+            self.conn.execute(
+                "INSERT INTO plan_proposals(taskfile, target, proposer, role, "
+                "model, kind, action, reason, payload, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (taskfile, target, proposer, role, model, kind, action,
+                 reason, payload, _now()),
+            )
+            self.conn.commit()
+
+    def list_plan_proposals(self, taskfile=None, limit=100):
+        sql = ("SELECT id, taskfile, target, proposer, role, model, kind, "
+               "action, reason, payload, created_at FROM plan_proposals")
+        args = []
+        if taskfile is not None:
+            sql += " WHERE taskfile=?"
+            args.append(taskfile)
+        sql += " ORDER BY id DESC LIMIT ?"
+        args.append(limit)
+        with self.lock:
+            return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
     def harness_runs_prefix(self, task_id_prefix):
         with self.lock:

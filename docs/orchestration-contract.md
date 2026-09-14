@@ -112,6 +112,23 @@ Statuses recorded in `code_tasks`: `pending → running → merged |
 conflict | failed`. `conflict` = merge collision; `failed` = fix rounds
 exhausted on the final escalation tier.
 
+### The plan may be amended mid-run (`plan_amend`)
+
+The taskfile a run was planned from is a living document. Every implement,
+review and PR-review prompt carries the amendment schema, and the node
+HARVESTS `.arc/plan_proposals.jsonl` from the worktree right after every
+agent run — on the crash path too (a reviewer that died may still have
+written a proposal) — plus one sweep in publish before `git add -A`, so the
+channel file is deleted before it can ever be committed (and publish's
+`git add -A` pathspec-excludes `.arc/plan_proposals.jsonl` anyway — same for
+the review diff's intent-to-add). Each proposal is
+validated by the same loader the taskfile came from and applied by an atomic
+rewrite; the freeze boundary is the task's `code_tasks` status (only
+unstarted or failed/skipped tasks mutate), and the in-flight DAG never
+rewires — amendments take effect on resume, for tasks with no row yet, and
+for downstream chain gates. Kinds, boundary and trail:
+[taskfile-schema.md](taskfile-schema.md) § "The plan is a living document".
+
 ## Project chains (before the per-task pipeline)
 
 A taskfile with `project.after` prefixes the whole shape above with one

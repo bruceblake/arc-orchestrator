@@ -20,7 +20,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import capture_events  # noqa: F401  (sys.path)
+from helpers import ENTRY, capture_events  # noqa: F401  (sys.path)
 
 import config
 import dashboard
@@ -387,3 +387,58 @@ class HttpParamsUsage(EndpointCase):
         self.assertIsInstance(body["families"], list)
         self.assertIsInstance(body["totals"], dict)
         self.assertIn("inflight", body)
+
+
+class HttpParamsPlanProposals(EndpointCase):
+    """/api/plan-proposals is the read-only window into the plan_proposals
+    table (plan_amend.py's trail of who wanted to change the plan). file= is
+    a bare taskfile basename under TASKS_DIR — same allowlist discipline as
+    /api/task-diff (AGENTS.md Rule 6b) — and limit= is clamped, never fatal."""
+
+    def setUp(self):
+        super().setUp()
+        self.st = dashboard.Handler.store
+
+    def _mk(self, taskfile, i=0, action="noted"):
+        self.st.save_plan_proposal(taskfile, f"t{i}", "t9", "implementer",
+                                   ENTRY, "note", action, "a reason",
+                                   '{"kind":"note"}')
+
+    def test_no_file_param_lists_everything(self):
+        """The fleet-wide view: every proposal, newest first."""
+        self._mk("a.json")
+        self._mk("b.json")
+        req = self.get("/api/plan-proposals")
+        self.assertEqual(req.status, 200)
+        self.assertEqual(len(req.json()["proposals"]), 2)
+
+    def test_file_filter_matches_only_that_taskfile(self):
+        """The drawer asks for one plan's trail; the filter is exact."""
+        a = str((Path(config.TASKS_DIR) / "a.json").resolve())
+        self._mk(a)
+        self._mk(str((Path(config.TASKS_DIR) / "b.json").resolve()))
+        rows = self.get("/api/plan-proposals?file=a.json").json()["proposals"]
+        self.assertEqual([r["taskfile"] for r in rows], [a])
+
+    def test_bad_file_name_is_a_400_json_error(self):
+        """A wrong file param degrades to machine-readable JSON, never 500."""
+        self.assert_error(self.get("/api/plan-proposals?file=noext"), 400)
+        self.assert_error(self.get("/api/plan-proposals?file=.."), 400)
+
+    def test_traversal_names_are_rejected(self):
+        """file= is one path segment, never a path (Rule 6b)."""
+        for name in TRAVERSALS:
+            with self.subTest(name=name):
+                self.assert_error(self.get(f"/api/plan-proposals?file={name}"),
+                                  400)
+
+    def test_limit_clamped_never_fatal(self):
+        """Huge, zero and non-numeric limits clamp instead of erroring."""
+        for i in range(3):
+            self._mk("a.json", i)
+        q = "/api/plan-proposals?limit="
+        self.assertEqual(len(self.get(q + "2").json()["proposals"]), 2)
+        self.assertEqual(len(self.get(q + "1").json()["proposals"]), 1)
+        self.assertEqual(len(self.get(q + "0").json()["proposals"]), 1)   # →1
+        self.assertEqual(len(self.get(q + "99999").json()["proposals"]), 3)  # →500
+        self.assertEqual(len(self.get(q + "bogus").json()["proposals"]), 3)  # →100

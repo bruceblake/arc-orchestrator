@@ -165,7 +165,10 @@ async def diff_full(wt, base, max_chars=24000):
     time — the more the fleet parallelized, the more often correct work was
     rejected and escalated to a stronger model for no reason.
     """
-    await _git(["add", "-A", "-N"], cwd=wt, check=False)  # intent-to-add
+    # Same `.arc` exclusion as publish(): a surviving proposals file must not
+    # leak into the diff reviewers read either.
+    await _git(["add", "-A", "-N", "--", ".", ":!.arc/plan_proposals.jsonl"],
+               cwd=wt, check=False)  # intent-to-add
     rc, mb, _ = await _git(["merge-base", base, "HEAD"], cwd=wt, check=False)
     ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
     _, diff, _ = await _git(["diff", ref], cwd=wt, check=False)
@@ -179,7 +182,13 @@ async def publish(wt, message, trailers=None):
     _, st, _ = await _git(["status", "--porcelain"], cwd=wt)
     if not st.strip():
         return None
-    await _git(["add", "-A"], cwd=wt)
+    # `.arc/plan_proposals.jsonl` is the plan-amendment channel (plan_amend.py)
+    # — an orchestrator<->agent runtime file, never PR content. Harvest deletes
+    # it before publish runs, and this pathspec is the belt to those
+    # suspenders for the day a delete fails (plan.amend.channel_survives
+    # events are the alarm). Verified against git 2.54: the exclusion leaves
+    # the file unstaged even when present.
+    await _git(["add", "-A", "--", ".", ":!.arc/plan_proposals.jsonl"], cwd=wt)
     args = ["commit", "-q", "-m", message]
     if trailers:
         args += ["-m", "\n".join(f"{k}: {v}" for k, v in trailers.items())]

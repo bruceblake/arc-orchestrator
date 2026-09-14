@@ -3627,6 +3627,23 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_task_deliverable(
                     _valid_repo(proj.get("repo") or ""), q.get("task", [""])[0],
                     want_patch=q.get("patch", ["0"])[0] == "1"))
+            if u.path == "/api/plan-proposals":
+                # Read-only view of the plan_proposals table (plan_amend.py).
+                # file= is a bare taskfile name under TASKS_DIR, never a path —
+                # same allowlist discipline as /api/task-diff (AGENTS.md Rule 6b).
+                q = parse_qs(u.query)
+                fname = q.get("file", [""])[0]
+                taskfile = None
+                if fname:
+                    if not re.fullmatch(r"[\w.-]+\.json", fname):
+                        return self._json({"error": "bad file name"}, 400)
+                    taskfile = str((Path(config.TASKS_DIR) / fname).resolve())
+                try:
+                    limit = min(max(int(q.get("limit", ["100"])[0]), 1), 500)
+                except ValueError:
+                    limit = 100
+                return self._json({"proposals": Handler.store.list_plan_proposals(
+                    taskfile, limit)})
             if u.path == "/api/run-log":
                 # The stdout/stderr of a run or plan process the dashboard
                 # launched (logs/run-*.log, logs/plan-*.log) — what "view log"
