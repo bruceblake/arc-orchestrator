@@ -130,10 +130,22 @@ def graph_dir(worktree):
 def env_for(worktree, base=None):
     """Environment additions for a process that should see this graph."""
     env = dict(base or {})
-    if not available():
+    exe = binary()
+    if exe is None:
         return env
     env["GRAFT_DIR"] = str(graph_dir(worktree))
     env["DO_NOT_TRACK"] = "1"        # graft's telemetry; the fleet is headless
+    # binary() looks PAST PATH (the node-prefix fallback above): the run
+    # process resolves graft, but the harness child's shell inherits a PATH
+    # without that directory and the model's own `graft ...` calls die with
+    # "command not found" — empty-diff-publish burned three implementer
+    # timeouts re-reading the repo on grep ladders because of exactly this.
+    # Put the binary's directory on the child's PATH; graft's env-node
+    # shebang also finds the node binary that lives beside it there.
+    bindir = os.path.dirname(exe)
+    path = env.get("PATH") or os.environ.get("PATH", os.defpath)
+    if bindir and bindir not in path.split(os.pathsep):
+        env["PATH"] = bindir + os.pathsep + path
     return env
 
 

@@ -190,6 +190,19 @@ class GraphLocation(unittest.TestCase):
         self.assertEqual(env["GRAFT_DIR"], str(graft.graph_dir("/x/wt")))
         self.assertEqual(env["DO_NOT_TRACK"], "1")
 
+    def test_env_puts_a_fallback_dirs_binary_on_the_childs_path(self):
+        """binary() finds graft past PATH; the model's shell calls must too."""
+        bindir = str(Path.home() / ".local" / "opt" / "node" / "bin")
+        with graft_binary(bindir + "/graft"):
+            env = graft.env_for("/x/wt", {"PATH": "/usr/bin:/bin"})
+        self.assertEqual(env["PATH"].split(os.pathsep)[0], bindir)
+        self.assertTrue(env["PATH"].endswith("/usr/bin:/bin"))
+
+    def test_env_leaves_an_already_resolving_path_alone(self):
+        with graft_binary("/usr/bin/graft"):
+            env = graft.env_for("/x/wt", {"PATH": "/usr/bin:/bin"})
+        self.assertEqual(env["PATH"], "/usr/bin:/bin")
+
 
 class Hints(unittest.TestCase):
     def test_hints_build_then_ask_and_take_the_top_k(self):
