@@ -249,9 +249,9 @@ function renderTasks(d) {
     const sr = document.createElement("tr"); sr.className = "subrow"; sr.style.display = "none";
     const why = row.error ? `<div class="errbox">${esc(row.error)}</div>` : "";
     sr.innerHTML = `<td colspan="8">${why}${t.verify_cmd ? `<div class="hint" style="margin:4px 0">verify: <b>${esc(t.verify_cmd)}</b></div>` : ""}${runs.length ? runs.map(r =>
-      `<div style="padding:3px 0"><span class="tag">${esc(r.role)}</span> <span class="tag">${esc(r.harness)}</span>
-        attempt ${r.attempt} · exit ${r.exit_code} · ${r.seconds ? tick(r.seconds) : "?"} · ${esc(r.verdict || "")}
-        ${r.transcript ? `<button class="act" data-t="${attr(String(r.transcript).split("/").pop())}" data-m="${attr(short(r.model))}" data-r="${attr(r.role)}" data-task="${attr(t.id)}">transcript</button>` : ""}</div>`).join("")
+      `<div style="padding:3px 0"><span class="tag">${esc(r.role)}</span> <span class="tag">${esc(r.harness || "?")}</span>
+        attempt ${r.attempt}${r.live ? ' · <b>running now</b>' : ` · exit ${r.exit_code ?? "?"}`} · ${r.seconds ? tick(r.seconds) : "?"} · ${esc(r.verdict || "")}
+        ${r.transcript ? `<button class="act" data-t="${attr(String(r.transcript).split("/").pop())}" data-m="${attr(short(r.model || "?"))}" data-r="${attr(r.role)}" data-task="${attr(t.id)}">transcript</button>` : ""}</div>`).join("")
       : '<span class="hint">no runs yet</span>'} <div class="hint" style="margin-top:4px">prompt: ${esc((t.prompt || "").slice(0, 260))}…</div></td>`;
     tr.onclick = () => sr.style.display = sr.style.display === "none" ? "" : "none";
     tb.appendChild(tr); tb.appendChild(lr); tb.appendChild(sr);
