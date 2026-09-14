@@ -17,7 +17,14 @@ import config
 class TimeoutInvariants(unittest.TestCase):
     """Timeout invariants ensure lease, idle, and capacity backoff ordering prevents drivers from exceeding ARC caps.
 
-    If DRIVER_LEASE_TTL is not longer than DRIVER_TIMEOUT, a lease could be reclaimed while a driver is still running, allowing another driver to take the slot and cause the model to exceed its account cap. DRIVER_IDLE_TIMEOUT is deliberately the binding stall detector — a harness silent that long is waiting on a request that is not coming back, so it is killed rather than waited out — and DRIVER_TIMEOUT is the wall-clock backstop a step above it, never the stall detector itself."""
+    If DRIVER_LEASE_TTL is not longer than the longest an attempt can hold a
+    lease, a lease could be reclaimed while a driver is still running, allowing
+    another driver to take the slot and cause the model to exceed its account
+    cap. Since 2026-09-14 total budgets default to 0 = unlimited (operator
+    directive): DRIVER_IDLE_TIMEOUT is then not merely the binding stall
+    detector but the ONLY kill — a harness silent that long is waiting on a
+    request that is not coming back — and the lease TTL falls back to a fixed
+    24h bound instead of a derivation from the budgets."""
     def test_lease_outlasts_the_longest_an_attempt_can_hold_it(self):
         longest_hold = config.DRIVER_TIMEOUT + config.DRIVER_CAPACITY_BACKOFF_CAP
         self.assertGreater(
@@ -26,8 +33,15 @@ class TimeoutInvariants(unittest.TestCase):
             "would take the slot and the model would go over its ARC cap")
 
     def test_idle_timeout_is_the_binding_stall_detector(self):
-        self.assertLess(config.DRIVER_IDLE_TIMEOUT, config.DRIVER_TIMEOUT,
-                        "the wall clock must be a backstop, not the stall detector")
+        if config.DRIVER_TIMEOUT > 0:
+            self.assertLess(config.DRIVER_IDLE_TIMEOUT, config.DRIVER_TIMEOUT,
+                            "the wall clock must be a backstop, not the stall detector")
+        else:
+            # Unlimited totals (the default): the idle budget is the only kill,
+            # and the lease TTL must be the fixed 24h fallback.
+            self.assertGreaterEqual(config.DRIVER_LEASE_TTL, 86400,
+                                    "with unlimited budgets the lease TTL must "
+                                    "fall back to a fixed generous bound")
 
     def test_capacity_backoff_exceeds_the_crash_backoff(self):
         crash_max = min(30, 2 ** config.MAX_RETRIES)
@@ -226,6 +240,11 @@ class IdleTimeoutClearsTheLatencyTail(unittest.TestCase):
             "slow is not dead: this kills requests ARC would have answered")
 
     def test_total_timeout_allows_several_slow_steps(self):
+        if config.DRIVER_TIMEOUT <= 0:
+            # Total budgets are unlimited by default (operator directive
+            # 2026-09-14): nothing bounds the wall clock, which trivially
+            # satisfies "must not become the binding limit".
+            self.skipTest("total budgets unlimited by default; idle is the only kill")
         self.assertGreaterEqual(
             config.DRIVER_TIMEOUT, config.DRIVER_IDLE_TIMEOUT * 4,
             "the wall clock must not become the binding limit again")
@@ -493,9 +512,15 @@ class PerRoleIdleBudgets(unittest.TestCase):
     def test_every_role_budget_fits_inside_the_outer_deadline(self):
         # The idle clock must fire BEFORE the hard timeout, or the hard timeout
         # is the only thing that ever fires and the idle diagnosis is lost.
+        # With total budgets unlimited by default (0), there is no outer
+        # deadline and the idle kill is the only bound BY DESIGN — nothing to
+        # assert beyond the budgets being positive.
         for role, budget in config.ROLE_IDLE_TIMEOUT.items():
-            self.assertLess(budget, config.DRIVER_TIMEOUT,
-                            f"{role}'s idle budget must stay under DRIVER_TIMEOUT")
+            self.assertGreater(budget, 0, f"{role}'s idle budget must be positive")
+            total = config.total_timeout_for(role)
+            if total > 0:
+                self.assertLess(budget, total,
+                                f"{role}'s idle budget must stay under its total budget")
 
     def test_the_planner_budget_covers_a_queued_first_token(self):
         # The measured time-to-first-token tail is ~309 s unloaded; at cap the

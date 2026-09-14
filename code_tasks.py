@@ -1703,13 +1703,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # One reviewer per node, with the per-node policy the fan-out makes
         # possible: a harness that dies on the way in is retried HERE, and the
         # join only ever sees crashes that survived the retries. The timeout is
-        # a backstop above the driver's own; a reviewer cannot hold the join
-        # open indefinitely.
+        # a backstop above the driver's own when a total budget is configured
+        # (None when budgets are unlimited — the driver's idle kill still
+        # bounds silence), so a reviewer cannot hold the join open indefinitely.
         from graph import Retry
+        _rev_total = config.total_timeout_for("reviewer")
         g.node(f"pr_reviewer_{tid}", pr_reviewer,
                retry=Retry(attempts=3, backoff=20.0, max_backoff=120.0,
                            on=(DriverError,)),
-               timeout=config.DRIVER_TIMEOUT + 600)
+               timeout=(_rev_total + 600) if _rev_total > 0 else None)
         # Declared so validate() sees them; at runtime Spawn and the join do
         # the routing and these two edges never fire on their own.
         g.edge(f"pr_fanout_{tid}", f"pr_reviewer_{tid}")

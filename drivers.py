@@ -951,7 +951,8 @@ class Driver:
         last_hb_t = time.monotonic()
         last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
         last_cpu = None
-        deadline = t0 + config.total_timeout_for(self.role)
+        total_budget = config.total_timeout_for(self.role)
+        deadline = t0 + total_budget if total_budget > 0 else float("inf")
         interval = config.DRIVER_PROGRESS_INTERVAL
 
         def written():
@@ -1387,7 +1388,8 @@ class DeepseekDriver(Driver):
         last_hb = None  # (bytes, idle_s) as of the last driver.heartbeat
         last_cpu = None
         last_probe_t = None
-        deadline = t0 + config.total_timeout_for(self.role)
+        total_budget = config.total_timeout_for(self.role)
+        deadline = t0 + total_budget if total_budget > 0 else float("inf")
         interval = config.DRIVER_PROGRESS_INTERVAL
         idle_budget = config.idle_timeout_for(self.role)
 

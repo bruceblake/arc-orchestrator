@@ -747,13 +747,24 @@ def cmd_doctor(args):
     role_budgets = "/".join(f"{role}={config.ROLE_TIMEOUT[role]}"
                             for role in ("planner", "reviewer", "implementer")
                             if role in config.ROLE_TIMEOUT)
-    report("timeouts: DRIVER_LEASE_TTL > longest role budget > DRIVER_IDLE_TIMEOUT",
-           config.DRIVER_LEASE_TTL > longest_total > config.DRIVER_IDLE_TIMEOUT,
+    if longest_total > 0:
+        timeouts_ok = (config.DRIVER_LEASE_TTL
+                       > longest_total > config.DRIVER_IDLE_TIMEOUT)
+        timeouts_why = ("leases must outlive the longest harness run and the "
+                        "idle timeout must stay under the total cap")
+    else:
+        # Total budgets are unlimited (0): no finite cap to compare against,
+        # so the lease TTL just needs to be the fixed generous bound (24h).
+        timeouts_ok = config.DRIVER_LEASE_TTL >= 86400
+        timeouts_why = ("total budgets are unlimited (0); the lease TTL falls "
+                        "back to a fixed 24h bound (pid liveness is checked "
+                        "before it condemns a row)")
+    report("timeouts: DRIVER_LEASE_TTL outlives the longest harness run",
+           timeouts_ok,
            f"DRIVER_LEASE_TTL={config.DRIVER_LEASE_TTL}s, "
            f"longest role budget={longest_total}s ({role_budgets}), "
            f"DRIVER_TIMEOUT={config.DRIVER_TIMEOUT}s, "
-           f"DRIVER_IDLE_TIMEOUT={config.DRIVER_IDLE_TIMEOUT}s — leases must outlive "
-           "the longest harness run and the idle timeout must stay under the total cap")
+           f"DRIVER_IDLE_TIMEOUT={config.DRIVER_IDLE_TIMEOUT}s — {timeouts_why}")
 
     if reconcile.live_runs():
         report("no stale 'running' code_tasks", True)

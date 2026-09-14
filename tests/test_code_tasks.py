@@ -1659,7 +1659,14 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
         n = g.nodes["pr_reviewer_t1"]
         self.assertIsNotNone(n.retry)
         self.assertEqual(n.retry.on, (code_tasks.DriverError,))
-        self.assertGreater(n.timeout, config.DRIVER_TIMEOUT)
+        reviewer_total = config.total_timeout_for("reviewer")
+        if reviewer_total > 0:
+            self.assertGreater(n.timeout, reviewer_total)
+        else:
+            # Unlimited budgets (the default): no node timeout — graph.Node's
+            # None = unbounded, and the driver's idle kill still bounds a
+            # silent reviewer.
+            self.assertIsNone(n.timeout)
 
     def test_the_fanout_returns_a_spawn_with_one_item_per_reviewer(self):
         """Run the real pr_fanout node against stubbed git/store."""

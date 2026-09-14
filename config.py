@@ -188,16 +188,17 @@ TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 # literal home directory, which made the dashboard — and its tests — refuse
 # every path on any other machine.
 REPO_ROOT = os.getenv("ARC_REPO_ROOT") or str(Path.home())
-# Outer backstop only. DRIVER_IDLE_TIMEOUT below is the instrument that
-# actually detects a hung harness, and it is the precise one: it measures
-# silence. This wall clock exists for the pathological case where a harness
-# dribbles output forever without converging.
-#
-# It was 900s, which made it the BINDING limit on real work rather than a
-# backstop: an implement was killed at exactly 900s having written 149KB with
-# only 80s of idle — it was demonstrably still working, and each such kill
-# costs a full retry (MAX_RETRIES, so an hour per task).
-DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "5400"))
+# Total wall-clock budget for ONE harness invocation: 0 = UNLIMITED, and that
+# is the default since 2026-09-14 (operator directive). Total budgets were the
+# binding constraint on real work all of 09-13/14: GLM-5.3 reads for 60–85
+# minutes before its first edit on a hard task, and every total budget tried
+# (900s, 2700s, 5400s) killed it mid-task with zero edits — the 5400s kill
+# landed at the exact moment it had located all four edit sites in
+# code_tasks.py. The IDLE budget below is kept and is now the only kill: it
+# fires on silence, which a working harness never produces (measured
+# time-to-first-token tail: 308.9s, far under it). Set ARC_DRIVER_TIMEOUT or
+# a per-role value in ROLE_TIMEOUT to opt a cap back in.
+DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "0"))
 # A harness that produces no stdout for this long is killed and retried.
 #
 # This is NOT a hang detector, and treating it as one cost real work. ARC
@@ -218,8 +219,9 @@ DRIVER_TIMEOUT = float(os.getenv("ARC_DRIVER_TIMEOUT", "5400"))
 #
 # 420s clears the observed tail, and the default was doubled to 840s on 09-13
 # by operator directive (patience over speed; tokens are not the scarce
-# resource). A genuinely dead request costs its idle budget in minutes;
-# DRIVER_TIMEOUT bounds the total. Shortening this to "fail fast" trades a
+# resource). A genuinely dead request costs its idle budget in minutes; a
+# configured total budget (none by default) bounds the whole run. Shortening
+# this to "fail fast" trades a
 # small latency saving for a large chance of destroying finished work.
 DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "840"))
 # Per-role idle budgets. An implementer edits in many small steps and going
@@ -237,29 +239,29 @@ ROLE_IDLE_TIMEOUT = {
 
 def idle_timeout_for(role):
     return ROLE_IDLE_TIMEOUT.get(role, DRIVER_IDLE_TIMEOUT)
-# Per-role TOTAL budgets: the wall clock that bounds ONE harness invocation.
-# The idle budget above is the stall tripwire (no output at all); this is the
-# outer cap on the whole run. They used to be one number, DRIVER_TIMEOUT, for
-# every role — so a planner doing one long agentic read of the repo was cut off
-# at the same point as a mechanical implementer making thirty small edits. The
-# planner gets the longest budget (the slowest job, on the fleet's scarcest
-# model), a reviewer reads one diff and answers, and an implementer iterates in
-# short steps so it fails fast and cheap. An unlisted role falls back to
-# DRIVER_TIMEOUT.
+# Per-role TOTAL budgets, same 0 = unlimited semantics as DRIVER_TIMEOUT.
+# These carried finite defaults (planner 5400 / reviewer 3600 / implementer
+# 2700, the "role budgets" of PR #50) until 2026-09-14, when the operator
+# removed total budgets entirely: the 2700s implementer cap alone produced
+# six consecutive zero-edit attempts on one hard task (see DRIVER_TIMEOUT).
+# An unlisted role falls back to DRIVER_TIMEOUT.
 ROLE_TIMEOUT = {
-    "planner": float(os.getenv("ARC_PLANNER_TIMEOUT", "5400")),
-    "reviewer": float(os.getenv("ARC_REVIEWER_TIMEOUT", "3600")),
-    "implementer": float(os.getenv("ARC_IMPLEMENTER_TIMEOUT", "2700")),
+    "planner": float(os.getenv("ARC_PLANNER_TIMEOUT", "0")),
+    "reviewer": float(os.getenv("ARC_REVIEWER_TIMEOUT", "0")),
+    "implementer": float(os.getenv("ARC_IMPLEMENTER_TIMEOUT", "0")),
 }
 
 
 def total_timeout_for(role):
+    """Seconds ONE harness invocation may run in total; 0 = no wall-clock cap
+    (the idle budget is then the only kill)."""
     return ROLE_TIMEOUT.get(role, DRIVER_TIMEOUT)
 
 
 def longest_total_timeout(roles=None):
-    """The longest total budget any of `roles` (default: every role) can hold a
-    driver lease for. Never less than DRIVER_TIMEOUT, the fallback budget."""
+    """The longest total budget any of `roles` (default: every role) can hold
+    a driver lease for. 0 when every budget is unlimited — callers must then
+    fall back to a fixed generous bound (see DRIVER_LEASE_TTL)."""
     names = ROLE_TIMEOUT if roles is None else roles
     return max([DRIVER_TIMEOUT]
                + [ROLE_TIMEOUT[r] for r in names if r in ROLE_TIMEOUT])
@@ -276,16 +278,18 @@ DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP",
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
-# first). Must exceed the longest role budget + retry backoffs.
-# DERIVED, not a free constant: a lease reaped while its driver is still
-# running lets another driver take the slot, and the model goes over its ARC
-# cap — the exact failure the leases exist to prevent. It must therefore
-# outlast the longest an attempt can legitimately hold one, which is the
-# LONGEST role budget (a planner gets 5400s, not DRIVER_TIMEOUT) plus the retry
-# backoff before the next attempt. Pinning this to a literal, or measuring it
-# against DRIVER_TIMEOUT alone, silently broke the invariant.
+# first). Must outlast the longest an attempt can legitimately hold a lease.
+# DERIVED, not a free constant: with finite role budgets that is the longest
+# budget plus the retry backoff before the next attempt; with unlimited
+# budgets (the default since 2026-09-14) there is no such bound, so it falls
+# back to a fixed 24h — a single harness attempt older than a day is
+# pathological, and pid liveness is always consulted before the TTL condemns
+# a row. A lease reaped while its driver is still running lets another driver
+# take the slot, and the model goes over its ARC cap — the exact failure the
+# leases exist to prevent.
 DRIVER_LEASE_TTL = float(os.getenv("ARC_DRIVER_LEASE_TTL", "0")) or (
-    longest_total_timeout() + DRIVER_CAPACITY_BACKOFF_CAP + 300)
+    (longest_total_timeout() + DRIVER_CAPACITY_BACKOFF_CAP + 300)
+    if longest_total_timeout() > 0 else 86400.0)
 # How long a driver may wait for a per-model lease before giving up. Without a
 # bound this wait was `while True:` — a task could queue behind a saturated
 # model forever, before its own timeout clock had even started. Exceeding it

@@ -60,8 +60,9 @@ cd /home/proxyie/arc-orchestrator
   `reasonix` for DeepSeek-V4.1-Flash-thinking-max — derived from the roster,
   not a literal list) resolves to an executable (`config.harness_bin`: PATH,
   then the npm prefix), the
-  worktree and tasks directories are creatable, the timeout invariants hold
-  (`DRIVER_LEASE_TTL > DRIVER_TIMEOUT > DRIVER_IDLE_TIMEOUT`), and there are
+  worktree and tasks directories are creatable, the timeout invariant holds
+  (`DRIVER_LEASE_TTL` outlives the longest total budget — derived from it when
+  budgets are finite, a fixed 24 h when they are unlimited), and there are
   no stale `running` task rows. It also prints (never fails on) whether the
   optional `graft` code-graph binary is found — `PASS graft code-graph
   hints: on` — since that is the difference between a harness reading three
@@ -90,67 +91,60 @@ cd /home/proxyie/arc-orchestrator
 - Review the generated file in `~/tasks/` and edit it by hand if needed
   (schema rules are in `docs/taskfile-schema.md`).
 
-#### Planning a large goal — the planner already has the longest budget
+#### Planning a large goal — no total budget by default
 
-GLM-5.3 planning is **slow on big goals**. The planner's total-runtime
-backstop is `ARC_PLANNER_TIMEOUT`, and today it defaults to 5400 s precisely
-because of this (the same figure `ARC_DRIVER_TIMEOUT` carries today, so
-planning's wall clock is unchanged — what the per-role split buys is that a
-shorter implementer budget no longer also shortens the planner's).
+GLM-5.3 planning is **slow on big goals**: one long agentic read of the repo,
+then a single JSON plan. There is no total wall-clock budget by default —
+`ARC_PLANNER_TIMEOUT` defaults to 0 = unlimited (since 2026-09-14) — so a
+large goal needs no env var. What still applies is the planner **idle**
+budget (`ARC_PLANNER_IDLE_TIMEOUT`, 3000 s): a planner that produces no
+stdout for that long is treated as dead and retried. Fifty minutes of
+silence, while a healthy planner streams tool calls or plan text nearly
+constantly.
 
-Measured 2026-09-12 (`ARC_DRIVER_TIMEOUT` was 2700 s at the time): a large
-goal hit the driver timeout mid-generation — the planner was still writing
-the plan. The retry
-then went wrong in a second way: instead of emitting plan JSON the model
-looped, producing essay after essay of prose about the repo, and the run never
-recovered a taskfile from it. Both halves are expensive and both are avoided
-by giving the planner room, which is now the default:
+History: total budgets existed because a killed planner used to loop essays
+instead of recovering (measured 2026-09-12, a large goal hit the 2700 s cap
+mid-generation and the retry never produced a taskfile). The caps then became
+the thing killing healthy work all of 09-13/14 — GLM-5.3 reads for 60–85 min
+before its first edit on a hard task — so the operator removed them. To opt a
+cap back in for one run:
 
 ```bash
 ARC_PLANNER_TIMEOUT=7200 .venv/bin/python main.py code plan "<goal>" /path/to/repo
 ```
 
-5400 s (90 min) is the working figure for a large goal, and is what you get
-without setting anything; a goal that is larger still can be given more, as
-above. `main.py code plan` runs a single harness invocation, so the budget
-applies to the whole planner turn; `ARC_PLANNER_IDLE_TIMEOUT` still applies
-independently if the planner goes silent (see "A harness went quiet").
+`main.py code plan` runs a single harness invocation, so a cap set this way
+applies to the whole planner turn; the idle budget applies independently of
+any total cap (see "A harness went quiet").
 
-#### Per-role total budgets (`ROLE_TIMEOUT`)
+#### Per-role total budgets (`ROLE_TIMEOUT`) — all unlimited by default
 
-The total-runtime backstop is **per role**, not one number for the whole
-fleet: `config.ROLE_TIMEOUT` gives the planner the longest budget, because it
-is the slowest job and runs on the scarcest model, while an implementer
-iterates in short steps and should fail fast and cheap instead of holding a
-slot for 90 minutes.
-
-**This LOWERS the implementer's wall clock, from `ARC_DRIVER_TIMEOUT` (5400 s)
-to 2700 s, and raises nothing.** It is the intended trade — a mechanical task
-that has run 45 minutes is usually retrying rather than converging, and the
-idle tripwire (840 s of silence) is what catches a genuinely dead harness in
-minutes, not this outer cap. If a real implementer starts being cut off
-mid-work, raise `ARC_IMPLEMENTER_TIMEOUT`; do not lower the inner budgets.
-Note the implementer is the role that carries the load, so this is the knob to
-watch after any fleet change.
+`config.ROLE_TIMEOUT` holds one total wall-clock budget per role; **every
+default is 0 = unlimited since 2026-09-14** (operator directive), and
+`ARC_DRIVER_TIMEOUT` — the fallback for unlisted roles such as `pr_reviewer` —
+is 0 too. A finite value opts a cap back in for that role only.
 
 | Env var | Role | Default | Meaning |
 |---|---|---|---|
-| `ARC_PLANNER_TIMEOUT` | `planner` | `5400` | one long agentic read + one JSON plan |
-| `ARC_REVIEWER_TIMEOUT` | `reviewer` | `3600` | reads one diff and answers |
-| `ARC_IMPLEMENTER_TIMEOUT` | `implementer` | `2700` | many small edits; fail fast |
+| `ARC_PLANNER_TIMEOUT` | `planner` | `0` (unlimited) | one long agentic read + one JSON plan |
+| `ARC_REVIEWER_TIMEOUT` | `reviewer` | `0` (unlimited) | reads one diff and answers |
+| `ARC_IMPLEMENTER_TIMEOUT` | `implementer` | `0` (unlimited) | many small edits |
 
-A role not listed here (including `pr_reviewer`, which reviews an already-open
-PR) falls back to `ARC_DRIVER_TIMEOUT`. The **idle** budget is a separate
-knob and stays role-independent for reviewer and implementer — see "A harness
-went quiet".
+Why unlimited: finite total budgets were the binding constraint on real work,
+not a safety net. The 2700 s implementer cap (PR #50's "role budgets")
+produced six consecutive zero-edit attempts on one hard task — GLM-5.3 spends
+60–85 minutes reading before its first edit, so every cap tried
+(900/2700/5400 s) killed it mid-read or at the edit point. The kill that
+remains is the **idle** budget (`ARC_DRIVER_IDLE_TIMEOUT`, 840 s; planner
+3000 s): a working harness streams constantly, the measured
+time-to-first-token tail is 308.9 s, and a dead request produces silence.
+Silence is a reliable dead signal; wall clocks were not.
 
-This is the knob `driver.timeout` reports, and the one the planner workaround
-above existed for: a planner now gets 5400 s without anyone exporting
-`ARC_DRIVER_TIMEOUT`. **`DRIVER_LEASE_TTL` is derived from the longest role
-budget**, so raising any role's budget stretches the leases with it — a lease
-reaped while its driver still runs would let the model go over its ARC cap,
-which is the exact failure the leases exist to prevent. `main.py status`
-reports that invariant.
+**`DRIVER_LEASE_TTL` is derived from the longest role budget** when budgets
+are finite (longest + `DRIVER_CAPACITY_BACKOFF_CAP` + 300) and falls back to
+a fixed 24 h when they are unlimited — a lease reaped while its driver still
+runs would let the model go over its ARC cap, the exact failure the leases
+exist to prevent. `main.py audit` checks the invariant.
 
 ### 2.1b DeepSeek's `reasonix` harness (setup)
 

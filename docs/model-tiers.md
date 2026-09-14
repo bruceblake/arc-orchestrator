@@ -97,8 +97,9 @@ design, or architectural judgment.
 - GLM-5.3 is the main orchestrator/planner:
   `main.py code plan` invokes `plan_tasks`, which runs
   `OpencodeDriver(config.PLANNER_MODEL, "planner")`. GLM-5.3 planning is slow
-  on big goals — see [runbook.md](runbook.md) § "Planning a large goal" for
-  the `ARC_DRIVER_TIMEOUT=5400` workaround.
+  on big goals — fine: total budgets are unlimited by default and the planner
+  idle budget is 3000 s. See [runbook.md](runbook.md) § "Planning a large
+  goal".
 
 ## Cross-review matrix
 

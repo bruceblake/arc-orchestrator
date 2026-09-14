@@ -109,7 +109,8 @@ class WatchdogCase(unittest.TestCase):
 class RecentProgressIsNotStalled(WatchdogCase):
     """A long implement node is normal work, not a stall.
 
-    The threshold sits above DRIVER_TIMEOUT precisely so an in-flight driver
+    The threshold sits above the longest harness run (the total budget, or the
+    stale bound when budgets are unlimited) precisely so an in-flight driver
     never trips it; if recent completions still read as stalled, the alarm
     fires on healthy runs and gets ignored.
     """

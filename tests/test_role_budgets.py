@@ -1,13 +1,16 @@
-"""Per-role TOTAL budgets for a harness invocation.
+"""Per-role TOTAL budgets for a harness invocation — unlimited by default.
 
-Every harness used to get DRIVER_TIMEOUT regardless of role, so a slow planner
-doing one long agentic read of the repo ate the same wall clock as a mechanical
-implementer. These tests pin the per-role budgets, their env overrides, and the
-lease invariant that must be computed against the LONGEST role budget — or a
-lease expires while its driver is still running.
+These tests originally pinned per-role wall-clock budgets (planner 5400,
+reviewer 3600, implementer 2700 — PR #50) so a slow planner and a mechanical
+implementer each got their own room. On 2026-09-14 the operator revoked total
+budgets entirely ("just get rid of timeouts") after the wall clock — not a
+fault — killed GLM-5.3 seven times in one night on the same task, every kill
+landing mid-read with zero edits written. Total budgets now default to ``0``
+= unlimited; the idle tripwire (``config.idle_timeout_for``) is the only
+harness kill, and the lease invariant falls back to a fixed bound.
 
 Nothing here spawns a harness: the deadline is a computation
-(``t0 + config.total_timeout_for(role)``) and is asserted as one.
+(``t0 + budget if budget > 0 else float("inf")``) and is asserted as one.
 """
 import os
 import pathlib
@@ -23,17 +26,17 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 
 class RoleBudgets(unittest.TestCase):
-    """A planner, a reviewer and an implementer need different wall clocks."""
+    """Roles keep SEPARATE env knobs; by default every one of them is off."""
 
     def test_each_role_has_its_own_total_budget(self):
-        self.assertEqual(config.total_timeout_for("planner"), 5400)
-        self.assertEqual(config.total_timeout_for("reviewer"), 3600)
-        self.assertEqual(config.total_timeout_for("implementer"), 2700)
-        # The point of the change: the slowest role gets the most room.
-        self.assertGreater(config.total_timeout_for("planner"),
-                           config.total_timeout_for("reviewer"))
-        self.assertGreater(config.total_timeout_for("reviewer"),
-                           config.total_timeout_for("implementer"))
+        # Unlimited by default: the wall clock never fires. A role budget is a
+        # knob you can still turn (env override), not a deadline that exists.
+        self.assertTrue(config.ROLE_TIMEOUT, "ROLE_TIMEOUT itself went missing")
+        for role in ("planner", "reviewer", "implementer"):
+            self.assertIn(role, config.ROLE_TIMEOUT,
+                          f"{role} lost its (now unlimited) budget knob")
+            self.assertEqual(config.total_timeout_for(role), 0,
+                             f"{role}'s total budget should default to unlimited")
 
     def test_an_unlisted_role_gets_the_global_default(self):
         for role in ("pr_reviewer", "anything-else", ""):
@@ -93,14 +96,15 @@ class TheLeaseOutlastsTheLongestRole(unittest.TestCase):
             config.DRIVER_LEASE_TTL, longest_hold,
             "a lease could be reaped while a planner is still running")
 
-    def test_the_planner_budget_is_the_one_that_stretches_the_lease(self):
-        # If the planner's budget were the same as DRIVER_TIMEOUT the invariant
-        # would pass by luck; assert which role actually drives the maximum.
-        self.assertEqual(
-            max(config.ROLE_TIMEOUT, key=lambda r: config.ROLE_TIMEOUT[r]),
-            "planner")
-        self.assertGreaterEqual(config.ROLE_TIMEOUT["planner"],
-                                config.DRIVER_TIMEOUT)
+    def test_unlimited_budgets_use_the_fixed_lease_fallback(self):
+        # With every total at 0 there is no "longest run" to derive the lease
+        # from, so the TTL must fall back to a fixed, generous bound instead of
+        # collapsing to (0 + backoff + 300).
+        if config.longest_total_timeout() > 0:
+            self.skipTest("budgets are configured; the derived invariant applies")
+        self.assertGreaterEqual(
+            config.DRIVER_LEASE_TTL, 86400,
+            "unlimited budgets need a generous fixed lease TTL")
 
     def test_status_reports_the_lease_against_the_longest_role(self):
         src = (ROOT / "main.py").read_text()
@@ -111,20 +115,24 @@ class TheLeaseOutlastsTheLongestRole(unittest.TestCase):
 class TheDeadlineHonoursTheRole(unittest.TestCase):
     """Both drivers must compute the deadline from the role, not the global."""
 
-    def test_the_deadline_math_uses_the_role_budget(self):
+    def test_an_unlimited_budget_means_no_deadline(self):
         t0 = 1000.0
-        self.assertEqual((t0 + config.total_timeout_for("planner")) - t0,
-                         config.total_timeout_for("planner"))
-        self.assertGreater(t0 + config.total_timeout_for("planner"),
-                           t0 + config.total_timeout_for("implementer"))
+        for role in list(config.ROLE_TIMEOUT) + ["nobody"]:
+            budget = config.total_timeout_for(role)
+            deadline = t0 + budget if budget > 0 else float("inf")
+            self.assertEqual(deadline, float("inf"),
+                             f"{role!r} still gets a finite deadline by default")
 
     def test_both_drivers_read_the_role_budget_for_the_deadline(self):
         src = (ROOT / "drivers.py").read_text()
         self.assertNotIn("t0 + config.DRIVER_TIMEOUT", src,
                          "a driver still hard-codes the global total budget")
         # One deadline per pump: opencode's and reasonix's.
-        self.assertEqual(src.count("deadline = t0 + config.total_timeout_for(self.role)"),
-                         2)
+        self.assertEqual(
+            src.count("total_budget = config.total_timeout_for(self.role)"), 2)
+        self.assertEqual(
+            src.count('deadline = t0 + total_budget if total_budget > 0 else float("inf")'),
+            2)
 
     def test_the_timeout_event_reports_the_budget_that_actually_fired(self):
         src = (ROOT / "drivers.py").read_text()

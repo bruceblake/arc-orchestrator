@@ -467,8 +467,9 @@ scores a reviewer on whichever ceiling binds first.
   `driver.cap_wait {model, task, in_use, cap}` about once a minute — that event
   is the warning surface for "a new task is about to exceed concurrency".
   Leases are reaped when older than `config.DRIVER_LEASE_TTL` (derived as
-  `DRIVER_TIMEOUT + DRIVER_CAPACITY_BACKOFF_CAP + 300`, 6300 s at defaults) or when
-  the owning pid is dead, so killed runs never deadlock the fleet.
+  `longest_total_timeout() + DRIVER_CAPACITY_BACKOFF_CAP + 300` when total
+  budgets are finite, a fixed 24 h when they are unlimited — the default) or
+  when the owning pid is dead, so killed runs never deadlock the fleet.
 - For the research workload, `pool.py` additionally enforces per-family
   `asyncio.Semaphore(config.family_limit(f))` client-side.
 - Full explanation, including how the ARC API rejects over-limit requests:
@@ -537,12 +538,21 @@ processes and move git refs on the same terms.
 - The dashboard Projects DAG view renders the loops: fix-loop attempts as
   dashed amber self-arcs with xN counts, `conflict` nodes in **orange**
   (distinct from `failed` red), and the last review verdict on each node.
-- Harness-level resilience: `config.DRIVER_TIMEOUT` = 5400 s per harness
-  invocation (override `ARC_DRIVER_TIMEOUT`) as a total-runtime backstop, and
-  `config.DRIVER_IDLE_TIMEOUT` = 840 s (override `ARC_DRIVER_IDLE_TIMEOUT`) as
+- Harness-level resilience: there is **no total wall-clock budget** by
+  default (`config.DRIVER_TIMEOUT` and the per-role `config.ROLE_TIMEOUT`
+  map are all 0 = unlimited since 2026-09-14; opt a cap back in via
+  `ARC_DRIVER_TIMEOUT` / `ARC_PLANNER_TIMEOUT` / `ARC_REVIEWER_TIMEOUT` /
+  `ARC_IMPLEMENTER_TIMEOUT`). Total budgets kept killing healthy work —
+  GLM-5.3 reads for 60–85 min before its first edit on a hard task, and
+  every total cap tried (900/2700/5400 s) killed it mid-task with zero
+  edits, the last at the moment it had located every edit site. The one
+  kill that remains is `config.DRIVER_IDLE_TIMEOUT` = 840 s (override
+  `ARC_DRIVER_IDLE_TIMEOUT`, planner 3000 s via `ARC_PLANNER_IDLE_TIMEOUT`),
   a **stall detector**: a harness that produces no stdout for that long is
   waiting on a request that is not coming back, so it is killed and retried
-  rather than waited out. Every stall records forensics first — process state,
+  rather than waited out. A working harness streams constantly and the
+  measured time-to-first-token tail is 308.9 s, far under the budget, so
+  silence is the only honest "dead" signal. Every stall records forensics first — process state,
   CPU delta, last tool calls, and whether an API request is outstanding — see
   [docs/runbook.md](docs/runbook.md) § "A harness stalled".
   (An earlier version of this rule said ARC "holds rejected/queued requests
@@ -787,9 +797,9 @@ The full operator runbook, with troubleshooting, is
 1. **Plan** — `.venv/bin/python main.py code plan "<goal>" /path/to/repo`
    (GLM-5.3 drafts a taskfile into
    `~/tasks/<slug>.json` and prints the
-   resolved DAG). For a large goal, raise the driver timeout first —
-   `ARC_DRIVER_TIMEOUT=5400 .venv/bin/python main.py code plan ...`
-   ([docs/runbook.md](docs/runbook.md) § "Planning a large goal").
+   resolved DAG). Total budgets are unlimited by default, so a large goal
+   needs no timeout env var (the planner idle budget is 3000 s;
+   [docs/runbook.md](docs/runbook.md) § "Planning a large goal").
 2. **Review the taskfile** — read and hand-edit `~/tasks/<slug>.json`:
    check tier routing, reviewer pairing, deps, and that every `verify_cmd` is
    honest. Schema reference: [docs/taskfile-schema.md](docs/taskfile-schema.md).

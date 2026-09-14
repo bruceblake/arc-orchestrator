@@ -148,11 +148,12 @@ class UsageRangeInflight(UsageRangeBase):
     def test_inflight_is_not_cut_even_when_the_start_is_outside_the_window(self):
         """A run that started more than an hour ago but is still live must stay
         in the 1h inflight list — the cutoff trims the totals, never the
-        live-agent count. A driver.start can't prove this: the stale-prune
-        threshold (DRIVER_TIMEOUT + 240s, ~49 min) is SHORTER than an hour, so
-        a driver started before the 1h cutoff is already pruned as stale. A
-        pool request is the right vehicle — its stale threshold is
-        POOL_STALE_S (7200s), comfortably longer than an hour.
+        live-agent count. A driver.start can't prove this robustly: the
+        stale-prune threshold (DRIVER_STALE_S — 240 s past the longest total
+        budget when budgets are finite) is shorter than an hour in that
+        configuration. A pool request is always the right vehicle — its stale
+        threshold is POOL_STALE_S (7200s), comfortably longer than an hour
+        regardless of the budget policy.
         """
         now = time.time()
         age = (dashboard.POOL_STALE_S + 3600) // 2

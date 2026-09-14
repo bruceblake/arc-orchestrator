@@ -172,10 +172,14 @@ def _ts(v):
 
 _kimi_cache = {}  # wire.jsonl path -> {"key": (size, mtime_ns), "agg": parsed}
 STALE_INFLIGHT_S = 600  # ignore unanswered llm.request older than this (dead client)
-# An unmatched driver.start can never outlive DRIVER_TIMEOUT + retry backoff:
+# An unmatched driver.start settles within its total budget + retry backoff:
 # the driver itself errors (and settles) every attempt it owns. Anything older
-# belongs to a killed run and must not count against concurrency caps.
-DRIVER_STALE_S = config.DRIVER_TIMEOUT + 240
+# belongs to a killed run and must not count against concurrency caps. With
+# unlimited budgets (the default) the 24h lease TTL is the only outer bound.
+_longest_total = config.longest_total_timeout()
+DRIVER_STALE_S = float(os.getenv("ARC_DRIVER_STALE_S", "0")) or (
+    (_longest_total + 240) if _longest_total > 0
+    else config.DRIVER_LEASE_TTL + 240)
 POOL_STALE_S = 7200  # unmatched pool request_start older than this is a dead client
 _stale_emitted = set()  # keys already reported via driver.stale / request.stale
 _over_emitted = set()   # families already reported via inflight.over_cap
@@ -2833,12 +2837,13 @@ _HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
 # it is MOVING. Only these events mean a unit of work actually advanced.
 _PROGRESS_EVENTS = ("node_end", "task.gate", "task.merged", "driver.done")
 
-# Nothing legitimate goes quiet for longer than one driver attempt plus gate
-# and retry slack: DRIVER_TIMEOUT bounds a single harness run, so a threshold
-# below it flags every long implement node as stalled — the false alarm that
-# gets a watchdog ignored. Override with ARC_STALL_THRESHOLD_S.
+# Nothing legitimate goes quiet for longer than one harness attempt's total
+# budget plus gate and retry slack — when budgets are finite. With unlimited
+# budgets (the default) the stale-driver bound stands in, or every long
+# implement node reads as stalled — the false alarm that gets a watchdog
+# ignored. Override with ARC_STALL_THRESHOLD_S.
 WATCHDOG_STALL_S = float(os.getenv(
-    "ARC_STALL_THRESHOLD_S", str(int(config.DRIVER_TIMEOUT) + 900)))
+    "ARC_STALL_THRESHOLD_S", str(int(DRIVER_STALE_S) + 900)))
 
 
 def _stall_diagnosis(q, live_runs, running_rows, stalled_for_s):
