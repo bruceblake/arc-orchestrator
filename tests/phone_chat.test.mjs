@@ -123,7 +123,9 @@ function loadPage(withSR) {
   const api = new Function(EXTERNALS + "\n" + JS + "\n" +
     "return {S, j, jpost, handleSpeechResult, setMicLive, getPlanSession," +
     " sendPlanMessage, pollPlan, renderPlanTranscript, renderPlanTaskcard," +
-    " loadPlanHistory, loadPlanRepos, onPlanRepoChange, wireRun, runProject, init};")();
+    " loadPlanHistory, loadPlanRepos, onPlanRepoChange, wireRun, runProject, init," +
+    " loadPlanSessions, onPlanSessionChange, newPlanSession, freshPlanSession," +
+    " showPlanSession};")();
   const el = id => document.getElementById(id);
   return {
     api, el,
@@ -398,6 +400,88 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   await arun(async () => { p3.api.onPlanRepoChange(); await tick(20); }, "onPlanRepoChange() create rejected");
   globalThis.prompt = () => null;
   ok(p3.alertLog().includes("Repo exists"), "create network/json failure alerts Repo exists");
+}
+
+// ---- 13. session picker + New chat in the plan view --------------------------
+{
+  const p = loadPage(false);
+  p.el("plan-repo").value = "/r/demo.json";
+  p.setImpl({ status: 200, json: async () => ({ sessions: [
+    { name: "plan-demo-json", turns: 4, mtime: 300 },
+    { name: "plan-other", turns: 1, mtime: 100 } ] }) });
+  await arun(async () => { p.api.loadPlanSessions(); await tick(20); }, "loadPlanSessions()");
+  ok(p.el("plan-sessions").innerHTML.includes('value="plan-demo-json"')
+     && p.el("plan-sessions").innerHTML.includes('value="plan-other"'),
+     "session picker lists the sessions the backend returned");
+  ok(p.el("plan-sessions").innerHTML.includes("(4)"), "session picker shows turn counts");
+
+  // The active session is named in the header the phone layout has room for.
+  ok(p.el("plan-sub").textContent.includes("plan-demo-json"),
+     "header names the active session");
+
+  // With no active session yet, the repo-derived id is what the panel opens.
+  const p2 = loadPage(false);
+  p2.el("plan-repo").value = "/r/demo.json";
+  p2.setImpl({ status: 200, json: async () => ({
+    sessions: [], turns: [], running: false }) });
+  await arun(async () => { p2.api.loadPlanHistory(); await tick(20); }, "loadPlanHistory() picks the repo session");
+  const polls = p2.fetchLog().filter(f => f.url.includes("/api/chat/poll"));
+  ok(polls.length >= 1 && polls[0].url.includes("session=plan-demo-json"),
+     "history loads the repo's own session");
+  ok(p2.el("plan-sub").textContent.includes("plan-demo-json"),
+     "header names the session the panel opened");
+}
+
+// ---- 14. New chat makes a fresh session and clears the panel -----------------
+{
+  ok(loadPage(false).api.freshPlanSession("plan-demo-json", []) === "plan-demo-json",
+     "fresh session: the base id when nothing holds it");
+  ok(loadPage(false).api.freshPlanSession("plan-demo-json", ["plan-demo-json"]) === "plan-demo-json-2",
+     "fresh session: -2 when the base id is taken");
+  const longBase = "plan-" + "y".repeat(40);
+  ok(loadPage(false).api.freshPlanSession(longBase, [longBase]).length <= 40,
+     "fresh session: stays inside the backend's 40-char session rule");
+
+  const p = loadPage(false);
+  p.el("plan-repo").value = "/r/demo.json";
+  p.setImpl({ status: 200, json: async () => ({ sessions: [
+    { name: "plan-demo-json", turns: 4, mtime: 300 } ], turns: [], running: false }) });
+  await arun(async () => { p.api.loadPlanSessions(); await tick(20); }, "loadPlanSessions() before new chat");
+  p.el("plan-transcript").innerHTML = "old conversation";
+  p.api.newPlanSession();
+  await tick(20);
+  ok(p.el("plan-transcript").innerHTML === "no chat yet",
+     "new chat empties the transcript");
+  ok(/plan-demo-json-2/.test(p.el("plan-sub").textContent),
+     "new chat: the header names the fresh session, not the old one");
+
+  // And a message sent from the fresh panel goes to the fresh session.
+  p.el("plan-input").value = "build it";
+  p.api.sendPlanMessage();
+  await tick(20);
+  const starts = p.fetchLog().filter(f => f.url === "/api/chat/start");
+  ok(starts.length === 1 && JSON.parse(starts[0].opts.body).session === "plan-demo-json-2",
+     "new chat: the next send carries the fresh session id");
+}
+
+// ---- 15. switching sessions loads that session's turns ------------------------
+{
+  const p = loadPage(false);
+  p.el("plan-repo").value = "/r/demo.json";
+  p.setImpl({ status: 200, json: async () => ({ sessions: [
+    { name: "plan-demo-json", turns: 2, mtime: 300 },
+    { name: "plan-side", turns: 1, mtime: 200 } ],
+    turns: [{ role: "user", text: "from the side session" }], running: false }) });
+  await arun(async () => { p.api.loadPlanSessions(); await tick(20); }, "loadPlanSessions() before switch");
+  p.el("plan-sessions").value = "plan-side";
+  await arun(async () => { await p.api.onPlanSessionChange(); await tick(20); }, "onPlanSessionChange()");
+  ok(p.el("plan-transcript").innerHTML.includes("from the side session"),
+     "switching sessions loads the picked session's turns");
+  ok(p.el("plan-sub").textContent.includes("plan-side"),
+     "switching sessions updates the header");
+  const polls = p.fetchLog().filter(f => f.url.includes("/api/chat/poll"));
+  ok(polls.length >= 1 && polls[polls.length - 1].url.includes("session=plan-side"),
+     "switching sessions polls the picked session, not the old one");
 }
 
 // ---- done ---------------------------------------------------------------------

@@ -86,6 +86,9 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .chat-dialog { display: flex; flex-direction: column; max-height: 86vh; }
 .chat-dialog h3 { margin-bottom: 6px; }
 .chat-repo { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 8px; }
+.chat-sessionbar { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
+.chat-sessionbar .hint { flex: none; }
+.chat-sessionbar select { flex: 1; min-width: 0; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }
 .chat-log { flex: 1; overflow-y: auto; max-height: 60vh; min-height: 160px; display: flex; flex-direction: column; gap: 8px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: #0d1117; }
 .chat-turn { display: flex; flex-direction: column; gap: 4px; max-width: 86%; }
 .chat-turn.user { align-self: flex-end; align-items: flex-end; }
@@ -472,9 +475,14 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 
 <div class="modal" id="chatmodal">
   <div class="dialog chat-dialog">
-    <h3>Plan with the planner <span class="pill hint" id="c-session"></span></h3>
+    <h3>Plan with the planner <span class="pill hint" id="c-session" aria-live="polite"></span></h3>
     <label class="hint" for="c-repo">repo</label>
-    <select id="c-repo"></select>
+    <select id="c-repo" aria-label="repo"></select>
+    <div class="chat-sessionbar">
+      <label class="hint" for="c-sessions">session</label>
+      <select id="c-sessions" aria-label="chat session"></select>
+      <button class="act" id="c-new" aria-label="Start a new chat in a fresh session">＋ new chat</button>
+    </div>
     <div class="chat-log" id="c-log"></div>
     <div class="chat-input">
       <button class="act" id="c-mic" title="speak" style="display:none" aria-label="Use speech input">🎤</button>

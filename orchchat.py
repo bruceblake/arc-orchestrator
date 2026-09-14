@@ -89,6 +89,66 @@ def load_session(path):
     return turns
 
 
+def _read_turns(path):
+    """Every readable turn of a session file, oldest first.
+
+    The tolerant sibling of `load_session`, which is for the session this
+    process owns and may raise. This one feeds the session PICKER, where a
+    half-written line (the dashboard appends while a turn runs) or an
+    unreadable file must cost at most the turns it hides — never the whole
+    listing, and never a 500 on a route that only reads a directory.
+    """
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+    turns = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            turns.append(json.loads(line))
+        except ValueError:
+            continue
+    return turns
+
+
+def list_sessions():
+    """Every session the dashboard can show: [{name, turns, mtime}], newest first.
+
+    One entry per `$ARC_CHAT_DIR/<session>.jsonl` whose name is a legal
+    session id and which holds at least one readable turn. Files that cannot
+    be read or parsed — and directories, and anything that is not a session
+    file — are SKIPPED, never reported: the picker offers sessions the
+    operator can actually open, and this route must never answer 500.
+    """
+    out = []
+    try:
+        entries = sorted(chat_dir().iterdir())
+    except OSError:                      # no dir yet, or unreadable
+        return []
+    for path in entries:
+        name = path.name
+        if not name.endswith(".jsonl"):
+            continue
+        name = name[: -len(".jsonl")]
+        if not SESSION_RE.fullmatch(name):
+            continue
+        try:
+            if not path.is_file():
+                continue
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        turns = _read_turns(path)
+        if not turns:
+            continue
+        out.append({"name": name, "turns": len(turns), "mtime": mtime})
+    out.sort(key=lambda s: (s["mtime"], s["name"]), reverse=True)
+    return out
+
+
 def append_turn(path, turn):
     """Append one turn; a turn is one JSON object per line."""
     chat_dir().mkdir(parents=True, exist_ok=True)
