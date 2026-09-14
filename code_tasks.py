@@ -1352,7 +1352,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # COMMIT FIRST, then sync. `git merge` refuses to run over local
             # modifications it would overwrite, and at this point the agent's
             # entire output is uncommitted in the worktree.
-            head = await gitstore.publish(
+            fresh_head = await gitstore.publish(
                 wt, f"task({tid}): {t['title']}",
                 {"Harness": impl.get("harness", "?"), "Model": model,
                  "Reviewer": rev, "Task-Id": tid})
@@ -1382,10 +1382,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         "conflicts": conflicts, "base": base}
             if resynced:
                 events.emit("task.resynced", task=tid, base=base, note=note)
-                # The merge commit is new work: re-read HEAD so the push below
-                # sends it even when the agent itself changed nothing.
-                head = head or await gitstore.head(wt)
-            if head is None:
+            if fresh_head is None:
                 # No new commit. On a RESUME the branch is already pushed and
                 # its PR already open, so re-attach rather than re-implementing
                 # and throwing that diff away. But if a PR review round has
@@ -1393,6 +1390,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # produced nothing — re-reviewing an identical diff would just
                 # burn reviewers to reach the same verdict, so let it fail.
                 reworked = f"pr_review_{tid}" in ctx.get("results", {})
+                if not reworked and not await gitstore.branch_ahead(
+                        repo, tid, base):
+                    store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                           "merged", finished=True)
+                    events.emit("task.merged", task=tid,
+                                note="empty diff: nothing to publish")
+                    await gitstore.cleanup(repo, tid)
+                    return {"published": False, "merged": True, "empty": True,
+                            "head": None}
                 if resynced:
                     # The merge commit only exists locally until this runs, and
                     # the re-attach path below does no pushing of its own.
@@ -1415,7 +1421,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.failed", task=tid,
                             reason=("rework produced no changes" if reworked
                                     else "no changes to publish"))
-                return {"published": False, "reason": "no changes"}
+                return {"published": False, "merged": False,
+                        "reason": "no changes"}
             ok, note = await gitstore.push_task_branch(repo, tid)
             if not ok:
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
@@ -1440,8 +1447,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                    "in_review", branch=f"task/{tid}")
             events.emit("task.pr_opened", task=tid, url=url, number=number,
-                        head=head, note=note)
-            return {"published": True, "pr": number, "url": url, "head": head}
+                        head=fresh_head, note=note)
+            return {"published": True, "pr": number, "url": url, "head": fresh_head}
 
         async def pr_fanout(ctx):
             """Pick the reviewers and SPAWN one graph node per reviewer.
@@ -1586,6 +1593,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             rv = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
             number = rv.get("pr")
             model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
+            pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
+            if pub.get("empty") and pub.get("merged"):
+                gate_res = ctx.get("results", {}).get(f"gate_{tid}") or {}
+                return {"merged": True, "pr": None,
+                        "verdict": gate_res.get("verdict")}
             state = await gitstore.pr_state(repo, number)
             if state.get("mergeable") == "CONFLICTING":
                 # Try to resolve it before giving up. Most conflicts here are
@@ -1795,7 +1807,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         g.edge(f"publish_{tid}", f"alloc_{tid}",
                when=lambda r, c, i=tid: not r.get("published")
                and not r.get("resolve")
+               and not r.get("merged")
                and f"alloc_{i}" not in c.get("results", {}))
+        g.edge(f"publish_{tid}", f"pr_merge_{tid}",
+               when=lambda r, c: bool(r.get("empty")), on_drain=True)
         # in_review resumes at publish, which finds the already-open PR and
         # hands it straight to pr_review — restarting at alloc would discard a
         # pushed branch and an open pull request.

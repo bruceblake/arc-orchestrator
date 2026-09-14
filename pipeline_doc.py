@@ -36,6 +36,7 @@ EDGE_MEANING = {
     ("publish", "pr_fanout"): "the branch pushed and a PR is open",
     ("publish", "implement"): "the branch conflicts with the base and needs a human-shaped fix",
     ("publish", "alloc"): "no worktree to resume — start the task over",
+    ("publish", "pr_merge"): "the diff was empty, nothing to review — pass the merge through",
     ("pr_fanout", "pr_reviewer"): "one child per chosen reviewer (dynamic fan-out)",
     ("pr_fanout", "pr_review"): "there was no PR to review",
     ("pr_reviewer", "pr_review"): "every reviewer has finished (the join)",
