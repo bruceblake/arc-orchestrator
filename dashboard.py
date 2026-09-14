@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, urlparse
 
 import config
 import gitstore
+import orchchat
 from store import Store
 
 log = logging.getLogger("dashboard")
@@ -2809,6 +2810,21 @@ def _chat_poll(session, since):
             "taskfile": taskfile}
 
 
+def _chat_sessions():
+    """GET /api/chat/sessions — every readable session, newest first.
+
+    Read-only and parameterless, so it cannot widen the unauthenticated
+    surface Rule 6b describes. The listing lives in orchchat.list_sessions so
+    the dashboard and `main.py chat` agree on what a session file is; this
+    wrapper adds the one guarantee the picker needs from the route: it never
+    fails. An unreadable chat dir is an empty list, not a 500.
+    """
+    try:
+        return {"sessions": orchchat.list_sessions()}
+    except Exception:                # a listing must never break the picker
+        return {"sessions": []}
+
+
 _HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
                     "driver.cap_wait", "inflight.over_cap", "task.failed",
                     "task.conflict", "graph.draining", "run.interrupted")
@@ -3489,6 +3505,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     since = 0
                 return self._json(_chat_poll(session, since))
+            if u.path == "/api/chat/sessions":
+                return self._json(_chat_sessions())
             if u.path == "/api/project":
                 q = parse_qs(u.query)
                 obj, code = _project_detail(Handler.store, q.get("file", [""])[0])

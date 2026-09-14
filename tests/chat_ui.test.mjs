@@ -56,6 +56,7 @@ const mod = new Function(externals + "\n" + js
   + " if ('REPO' in o) CHAT_REPO=o.REPO;"
   + " if ('REPOS' in o) CHAT_REPOS=o.REPOS;"
   + " if ('SESSION' in o) CHAT_SESSION=o.SESSION;"
+  + " if ('SESSIONS' in o) CHAT_SESSIONS=o.SESSIONS;"
   + " if ('TURNS' in o) CHAT_TURNS=o.TURNS;"
   + " if ('LAST' in o) CHAT_LAST=o.LAST;"
   + " if ('RUNNING' in o) CHAT_RUNNING=o.RUNNING;"
@@ -64,12 +65,14 @@ const mod = new Function(externals + "\n" + js
   + " };"
   + "\nglobalThis.__getChat = () => ({"
   + " REPO: CHAT_REPO, REPOS: CHAT_REPOS, SESSION: CHAT_SESSION,"
+  + " SESSIONS: CHAT_SESSIONS,"
   + " TURNS: CHAT_TURNS, LAST: CHAT_LAST, RUNNING: CHAT_RUNNING,"
   + " LISTENING: CHAT_LISTENING, FINAL: CHAT_SPEECH_FINAL"
   + " });"
   + "\nreturn {chatSend, chatPoll, chatRender, chatTurnHTML, chatTaskcardHTML,"
   + " chatEmptyState, chatSupportsSpeech, chatUpdateMic, chatMic, chatStopMic,"
-  + " chatLoadRepos, chatNewRepo, chatStartSession, chatOpen};");
+  + " chatLoadRepos, chatNewRepo, chatStartSession, chatOpen,"
+  + " chatLoadSessions, chatSelectSession, chatNewSession, chatFreshSession};");
 const c = mod();
 
 let n = 0;
@@ -190,6 +193,91 @@ const repoHTML = document.querySelector("#c-repo").innerHTML;
 ok(repoHTML.includes("new repo…"), "repo picker offers a 'new repo…' option");
 ok(repoHTML.includes('value="/x/alpha"') && repoHTML.includes('value="/x/beta"'),
    "repo picker lists fetched repos");
+globalThis.fetch = async () => ({ json: async () => ({}), status: 200 });
+
+// ---- session picker: lists what the backend serves -------------------------
+const srv = { "/api/chat/sessions": { sessions: [
+  { name: "plan-beta", turns: 3, mtime: 300 },
+  { name: "plan-alpha", turns: 1, mtime: 100 } ] } };
+globalThis.fetch = async url => ({
+  json: async () => (srv[String(url).split("?")[0]] || {}), status: 200 });
+__setChat({ SESSION: "plan-beta", SESSIONS: [], TURNS: [] });
+await c.chatLoadSessions();
+const sessHTML = document.querySelector("#c-sessions").innerHTML;
+ok(sessHTML.includes('value="plan-beta"') && sessHTML.includes('value="plan-alpha"'),
+   "session picker lists the sessions the backend returned");
+ok(__getChat().SESSIONS.length === 2, "session picker keeps the listing in state");
+ok(document.querySelector("#c-sessions").value === "plan-beta",
+   "session picker selects the active session");
+ok(document.querySelector("#c-session").textContent === "plan-beta",
+   "header shows the active session name");
+
+// A session with no turns yet (a brand-new one) is still selectable.
+__setChat({ SESSION: "plan-fresh", SESSIONS: [], TURNS: [] });
+await c.chatLoadSessions();
+ok(document.querySelector("#c-sessions").innerHTML.includes('value="plan-fresh"'),
+   "the active session is offered even before the backend lists it");
+
+// A failing listing degrades to an empty picker, it does not throw.
+globalThis.fetch = async () => { throw new Error("down"); };
+__setChat({ SESSION: "plan-x", TURNS: [] });
+await c.chatLoadSessions();
+ok(__getChat().SESSIONS.length === 0, "a failing listing leaves an empty session list");
+ok(document.querySelector("#c-sessions").innerHTML.includes("plan-x"),
+   "a failing listing still keeps the active session selectable");
+globalThis.fetch = async () => ({ json: async () => ({}), status: 200 });
+
+// ---- new chat: a fresh id, an empty panel ----------------------------------
+ok(c.chatFreshSession("plan-alpha", []) === "plan-alpha",
+   "fresh session: the base id when nothing holds it");
+ok(c.chatFreshSession("plan-alpha", ["plan-alpha"]) === "plan-alpha-2",
+   "fresh session: -2 when the base id is taken");
+ok(c.chatFreshSession("plan-alpha", ["plan-alpha", "plan-alpha-2"]) === "plan-alpha-3",
+   "fresh session: the next free suffix");
+const longBase = "plan-" + "x".repeat(40);
+ok(c.chatFreshSession(longBase, [longBase]).length <= 40,
+   "fresh session: the id stays inside the backend's 40-char session rule");
+
+globalThis.fetch = async url => ({
+  json: async () => (srv[String(url).split("?")[0]] || {}), status: 200 });
+// /x/gamma has no session on disk, so its base id is free.
+__setChat({ REPO: "/x/gamma", SESSION: "plan-beta", SESSIONS: [], TURNS: [], LAST: 0 });
+await c.chatNewSession();
+const fresh = __getChat().SESSION;
+ok(fresh === "plan-gamma", "new chat: uses the repo's session when it is free");
+ok(__getChat().TURNS.length === 0, "new chat: clears the rendered transcript");
+ok(__getChat().LAST === 0, "new chat: restarts the poll cursor");
+ok(document.querySelector("#c-session").textContent === fresh,
+   "new chat: header shows the new session name");
+ok(!document.querySelector("#c-log").innerHTML.includes("chat-taskcard"),
+   "new chat: the panel is emptied");
+
+// With the repo's base id already on disk, New chat must not reuse it.
+__setChat({ REPO: "/x/beta", SESSION: "plan-beta", SESSIONS: [], TURNS: [] });
+await c.chatNewSession();
+const fresh2 = __getChat().SESSION;
+ok(fresh2 !== "plan-beta" && fresh2.startsWith("plan-beta-"),
+   "new chat: steps aside from an existing session of the same repo");
+
+// ---- switching sessions rebuilds the transcript from zero ------------------
+__setChat({ SESSION: "plan-alpha", TURNS: [{ role: "user", text: "old" }], LAST: 9 });
+const seen = [];
+globalThis.fetch = async url => {
+  seen.push(String(url));
+  return { json: async () => (String(url).startsWith("/api/chat/poll")
+    ? { turns: [{ role: "user", text: "from beta" }], running: false }
+    : srv[String(url).split("?")[0]] || {}), status: 200 };
+};
+await c.chatSelectSession("plan-beta");
+const after = __getChat();
+ok(after.SESSION === "plan-beta", "session switch: activates the picked session");
+ok(after.LAST === 1, "session switch: poll cursor restarts at the new session's turns");
+ok(after.TURNS.length === 1 && after.TURNS[0].text === "from beta",
+   "session switch: the transcript is rebuilt from the picked session alone");
+ok(seen.some(u => u.includes("session=plan-beta")), "session switch: polls the picked session");
+ok(!after.TURNS.some(t => t.text === "old"),
+   "session switch: never splices the previous session's turns in");
+
 globalThis.fetch = async () => ({ json: async () => ({}), status: 200 });
 
 if (failures.length) {

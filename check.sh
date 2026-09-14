@@ -144,6 +144,16 @@ PYEOF
     if ! node tests/phone_render.test.mjs; then
         echo "FAIL: phone page render functions misbehave"; rc=1
     fi
+    # The dashboard chat panel: session picker, new chat, speech, send/poll.
+    # Both chat suites landed with the feature and guarded nothing until they
+    # got a line here — the explicit list is what actually runs them.
+    if ! node tests/chat_ui.test.mjs; then
+        echo "FAIL: dashboard chat panel misbehaves"; rc=1
+    fi
+    # And the phone page's Plan chat, which has its own session controls.
+    if ! node tests/phone_chat.test.mjs; then
+        echo "FAIL: phone plan chat misbehaves"; rc=1
+    fi
     if [ -f tests/usage_visibility.test.mjs ] && ! node tests/usage_visibility.test.mjs; then
         echo "FAIL: usage.html keeps polling a tab nobody is looking at"; rc=1
     fi

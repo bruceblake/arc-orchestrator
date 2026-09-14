@@ -26,10 +26,25 @@ function chatSessionFor(path) {
   return "plan-" + (slug || "repo");
 }
 
+// "New chat" needs an id no live session holds yet: the repo's base id, then
+// `-2`, `-3`, … Deterministic, so the operator can recognise the session in
+// the picker, and the suffix is cut to keep the whole id inside the backend's
+// ^[a-z0-9][a-z0-9-]{0,39}$ rule.
+function chatFreshSession(base, taken) {
+  const used = new Set(taken || []);
+  if (!used.has(base)) return base;
+  for (let i = 2; i < 1000; i++) {
+    const id = base.slice(0, 39 - (String(i).length + 1)) + "-" + i;
+    if (!used.has(id)) return id;
+  }
+  return base;
+}
+
 // ---- state ----
 let CHAT_REPO = "";        // selected repo path (the picker value)
 let CHAT_REPOS = [];       // all repos from /api/repos
 let CHAT_SESSION = "";     // active session id
+let CHAT_SESSIONS = [];    // known sessions from /api/chat/sessions
 let CHAT_TURNS = [];       // turns rendered so far
 let CHAT_LAST = 0;         // how many turns already drawn (poll since=)
 let CHAT_RUNNING = false;  // whether a chat turn is in flight
@@ -45,15 +60,47 @@ function chatSetSend(busy) {
   s.textContent = busy ? "…" : "send";
 }
 
-function chatStartSession() {
-  CHAT_SESSION = chatSessionFor(CHAT_REPO);
+function chatSetSession(id) {
+  CHAT_SESSION = id || "";
   const sess = $("#c-session");
   if (sess) sess.textContent = CHAT_SESSION;
+  const sel = $("#c-sessions");
+  if (sel && CHAT_SESSION) sel.value = CHAT_SESSION;
+}
+
+// Reset the panel onto `id` (the repo's session unless a picker choice won),
+// clear the transcript and load that session's history. CHAT_LAST is a count
+// into ONE session's turns, so it always restarts at 0 here.
+async function chatStartSession(id) {
+  chatSetSession(id || chatSessionFor(CHAT_REPO));
   CHAT_TURNS = [];
   CHAT_LAST = 0;
   CHAT_RUNNING = false;
   chatSetSend(false);
-  $("#c-log").innerHTML = chatEmptyState();
+  const log = $("#c-log");
+  if (log) log.innerHTML = chatEmptyState();
+  await chatPoll();
+}
+
+// Switch to a session the operator picked.
+async function chatSelectSession(name) {
+  if (!name || name === CHAT_SESSION) { chatSessionSelect(); return; }
+  stopChatPoll();
+  await chatStartSession(name);
+  startChatPoll();
+}
+
+// "New chat": a fresh id — the base one, or the next free `-N` — an empty
+// panel, and a refreshed picker so the new session is listed right away. The
+// listing is loaded FIRST so an existing session of this repo is stepped over
+// rather than reopened: "new chat" must not show the old conversation.
+async function chatNewSession() {
+  stopChatPoll();
+  await chatLoadSessions();
+  await chatStartSession(chatFreshSession(chatSessionFor(CHAT_REPO),
+                                          CHAT_SESSIONS.map(s => s.name)));
+  await chatLoadSessions();
+  startChatPoll();
 }
 
 function chatUpdateMic() {
@@ -132,12 +179,41 @@ async function chatNewRepo() {
     CHAT_REPO = body.path;
     await chatLoadRepos();
     if (msg) { msg.className = ""; msg.textContent = ""; }
+    await chatLoadSessions();
     chatStartSession();
-    chatPoll();
   } else {
     if (msg) { msg.className = "err"; msg.textContent = (body.error || "failed to create repo"); }
     chatRepoSelect();
   }
+}
+
+// ---- sessions ----
+// The picker lists what the backend can already read: GET /api/chat/sessions
+// returns {sessions:[{name,turns,mtime}]} newest first and never 500s. A
+// failure here degrades the picker to "whatever we already know", never the
+// panel.
+async function chatLoadSessions() {
+  let sessions = [];
+  try {
+    const data = await jget("/api/chat/sessions");
+    sessions = (data && data.sessions) || [];
+  } catch (e) { sessions = []; }
+  CHAT_SESSIONS = sessions;
+  const sel = $("#c-sessions");
+  if (!sel) return;
+  const known = sessions.slice();
+  if (CHAT_SESSION && !known.some(s => s.name === CHAT_SESSION)) {
+    known.unshift({ name: CHAT_SESSION, turns: CHAT_TURNS.length, mtime: 0 });
+  }
+  sel.innerHTML = known.map(s => `<option value="${attr(s.name)}">${esc(s.name)} (${s.turns})</option>`).join("");
+  sel.value = CHAT_SESSION;
+  const head = $("#c-session");
+  if (head) head.textContent = CHAT_SESSION;
+}
+
+function chatSessionSelect() {
+  const sel = $("#c-sessions");
+  if (sel && CHAT_SESSION) sel.value = CHAT_SESSION;
 }
 
 async function chatPoll() {
@@ -261,6 +337,16 @@ function chatMic() {
   }
 }
 
+// ---- poll lifecycle ----
+function startChatPoll() {
+  if (CHAT_POLL) clearInterval(CHAT_POLL);
+  CHAT_POLL = setInterval(chatPoll, 3000);
+}
+
+function stopChatPoll() {
+  if (CHAT_POLL) { clearInterval(CHAT_POLL); CHAT_POLL = null; }
+}
+
 // ---- open / close ----
 async function chatOpen() {
   const modal = $("#chatmodal");
@@ -268,17 +354,16 @@ async function chatOpen() {
   const msg = $("#c-msg");
   if (msg) { msg.className = ""; msg.textContent = ""; }
   await chatLoadRepos();
+  await chatLoadSessions();
   chatStartSession();
   chatUpdateMic();
-  if (CHAT_POLL) clearInterval(CHAT_POLL);
-  CHAT_POLL = setInterval(chatPoll, 3000);
-  chatPoll();
+  startChatPoll();
 }
 
 function chatClose() {
   const modal = $("#chatmodal");
   if (modal) modal.classList.remove("open");
-  if (CHAT_POLL) { clearInterval(CHAT_POLL); CHAT_POLL = null; }
+  stopChatPoll();
   chatStopMic();
 }
 
@@ -296,8 +381,14 @@ function chatClose() {
   const repo = $("#c-repo");
   if (repo) repo.onchange = () => {
     if (repo.value === CHAT_NEW) { chatNewRepo(); return; }
-    CHAT_REPO = repo.value; chatStartSession(); chatPoll();
+    CHAT_REPO = repo.value;
+    chatStartSession(chatSessionFor(CHAT_REPO));
+    chatLoadSessions();
   };
+  const sessions = $("#c-sessions");
+  if (sessions) sessions.onchange = () => chatSelectSession(sessions.value);
+  const fresh = $("#c-new");
+  if (fresh) fresh.onclick = chatNewSession;
   const log = $("#c-log");
   if (log) log.onclick = chatCardClick;
   if (modal) modal.onclick = ev => { if (ev.target === modal) chatClose(); };

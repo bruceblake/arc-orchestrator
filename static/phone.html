@@ -192,6 +192,10 @@ button.act.danger { border-color: var(--err); color: var(--err); }
   <h1>Plan</h1>
   <p class="sub" id="plan-sub">Select a repo to start planning</p>
   <select class="fsel" id="plan-repo" aria-label="Repository"></select>
+  <div class="kv" style="margin-top:6px;">
+    <select class="fsel" id="plan-sessions" aria-label="Chat session" style="flex:1;"></select>
+    <button class="act" id="plan-new">New chat</button>
+  </div>
   <div id="plan-transcript" class="empty">no chat yet</div>
   <div class="kv" style="margin-top:8px;">
     <input type="text" id="plan-input" placeholder="Ask the planner" style="flex:1;" aria-label="Chat message" />
@@ -736,6 +740,7 @@ function init() {
   // Initialize plan view
   // Defer loading repos to avoid premature fetch in test environments
   $("#plan-send").onclick = sendPlanMessage;
+  $("#plan-new").onclick = newPlanSession;
   $("#plan-input").onkeydown = function(e){ if(e.key==='Enter'){ e.preventDefault(); sendPlanMessage(); } };
     // Speech recognition setup
     const mic = $("#plan-mic");
@@ -809,6 +814,9 @@ function loadPlanRepos(selectPath) {
     }
     planRepoPath = sel.value;
     sel.onchange = onPlanRepoChange;
+    // The repo picker chose the repo, so the repo-derived session is the one
+    // to open — a session picked for the previous repo must not carry over.
+    planSession = null;
     loadPlanHistory();
   }).catch(function () {});
 }
@@ -828,10 +836,14 @@ function onPlanRepoChange() {
   }
   planRepoPath = sel.value;
   stopPlanPoll();
+  // A repo switch means a different default session; drop the picked one so
+  // the new repo's own session is used.
+  planSession = null;
   loadPlanHistory();
 }
 
 let planSession = null;
+let planSessions = [];
 let planTurns = [];
 let planPollTimer = null;
 let planRepoPath = "";
@@ -849,11 +861,91 @@ function getPlanSession() {
   return "plan-" + slug;
 }
 
+// A "New chat" id no live session holds yet: the repo's base id, then `-2`,
+// `-3`, … — the whole id stays inside the backend's session-id rule.
+function freshPlanSession(base, taken) {
+  const used = taken || [];
+  if (used.indexOf(base) === -1) return base;
+  for (let i = 2; i < 1000; i++) {
+    const id = base.slice(0, 39 - (String(i).length + 1)) + "-" + i;
+    if (used.indexOf(id) === -1) return id;
+  }
+  return base;
+}
+
+// The active session name belongs in the panel subtitle, which is the only
+// header the phone layout has room for.
+function showPlanSession() {
+  const sub = $("#plan-sub");
+  if (!sub) return;
+  if (planSession) sub.textContent = "session " + planSession;
+  else sub.textContent = "Select a repo to start planning";
+}
+
+function setPlanSession(id) {
+  planSession = id || null;
+  const sel = $("#plan-sessions");
+  if (sel && planSession) sel.value = planSession;
+  showPlanSession();
+}
+
+async function loadPlanSessions() {
+  let sessions = [];
+  try {
+    const data = await j("/api/chat/sessions");
+    sessions = (data && data.sessions) || [];
+  } catch (e) { sessions = []; }
+  planSessions = sessions;
+  // No session yet (first open of the panel) — adopt the repo's own, so the
+  // header names it and the picker highlights it.
+  if (!planSession) planSession = getPlanSession();
+  const sel = $("#plan-sessions");
+  if (!sel) return;
+  const known = sessions.slice();
+  if (planSession && !known.some(function (s) { return s.name === planSession; })) {
+    known.unshift({ name: planSession, turns: planTurns.length, mtime: 0 });
+  }
+  sel.innerHTML = known.map(function (s) {
+    return '<option value="' + esc(s.name) + '">' + esc(s.name) + " (" + s.turns + ")</option>";
+  }).join("");
+  sel.value = planSession || "";
+  sel.onchange = onPlanSessionChange;
+  showPlanSession();
+}
+
 function setPlanBusy(busy) {
   const send = $("#plan-send");
   if (send) send.disabled = busy;
+  // The subtitle carries the ACTIVE SESSION now, so busy must not blank it:
+  // saying "the planner is thinking…" is the job of the transcript spinner.
+  showPlanSession();
   const sub = $("#plan-sub");
-  if (sub) sub.textContent = busy ? "the planner is thinking…" : "Select a repo to start planning";
+  if (sub && busy && planSession) sub.textContent = "session " + planSession + " — thinking…";
+}
+
+// A new chat is a NEW session id; switching is a different session on the same
+// repo. Both rebuild the transcript from zero, because planTurns.length is the
+// poll cursor into ONE session's turns.
+async function newPlanSession() {
+  const base = getPlanSession();
+  if (!base) { alert("Select repo"); return; }
+  stopPlanPoll();
+  planTurns = [];
+  planSession = freshPlanSession(base, planSessions.map(function (s) { return s.name; }));
+  renderPlanTranscript();
+  renderPlanTaskcard();
+  setPlanBusy(false);
+  await loadPlanSessions();
+}
+
+async function onPlanSessionChange() {
+  const sel = $("#plan-sessions");
+  if (!sel) return;
+  const name = sel.value;
+  if (!name || name === planSession) { showPlanSession(); return; }
+  stopPlanPoll();
+  setPlanSession(name);
+  loadPlanHistory();
 }
 
 function startPlanPoll() {
@@ -876,7 +968,9 @@ function sendPlanMessage() {
   const repoEl = $("#plan-repo");
   const repo = repoEl ? repoEl.value : "";
   if (!repo || repo === "__new__") { alert("Select repo"); return; }
-  planSession = getPlanSession();
+  // Send into the ACTIVE session — the operator may have picked one or made a
+  // new chat. Only fall back to the repo-derived id when none is active.
+  if (!planSession) planSession = getPlanSession();
   planTurns = [];
   if (input) input.value = "";
   setPlanBusy(true);
@@ -913,6 +1007,7 @@ async function pollPlan() {
   } else {
     setPlanBusy(false);
     stopPlanPoll();
+    loadPlanSessions();   // a finished turn may be the session's first
   }
 }
 
@@ -953,13 +1048,17 @@ function renderPlanTaskcard() {
 }
 
 function loadPlanHistory() {
-  planSession = getPlanSession();
-  if (!planSession) return;
+  // A picker choice wins over the repo-derived id; loadPlanSessions() keeps
+  // the two in step, and the transcript always restarts from turn 0.
+  if (!planSession) planSession = getPlanSession();
+  if (!planSession) { renderPlanTranscript(); showPlanSession(); return; }
   planTurns = [];
+  showPlanSession();
   j("/api/chat/poll?session=" + encodeURIComponent(planSession) + "&since=0").then(function (data) {
     planTurns = (data && data.turns) || [];
     renderPlanTranscript();
     renderPlanTaskcard();
+    loadPlanSessions();
     if (data && data.running) {
       setPlanBusy(true);
       startPlanPoll();
