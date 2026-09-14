@@ -734,7 +734,8 @@ def _parse_verdict(text):
         if isinstance(obj, dict) and "pass" in obj:
             return {"pass": bool(obj["pass"]),
                     "issues": [str(i) for i in obj.get("issues", [])]}
-    return {"pass": False, "issues": ["reviewer returned no parseable verdict"]}
+    return {"pass": False, "truncated": True,
+            "issues": ["reviewer returned no parseable verdict"]}
 
 
 def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact=""):
@@ -793,7 +794,8 @@ def _parse_approval(text):
         if isinstance(obj, dict) and "approve" in obj:
             return {"approve": bool(obj["approve"]),
                     "issues": [str(i) for i in obj.get("issues", [])]}
-    return {"approve": False, "issues": ["reviewer returned no parseable verdict"]}
+    return {"approve": False, "truncated": True,
+            "issues": ["reviewer returned no parseable verdict"]}
 
 
 def _driver(model, role, policy):
@@ -1294,6 +1296,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
+            if verdict.get("truncated"):
+                # The session ended without a verdict (e.g. stopped mid-analysis
+                # with a question). Same rule as a crash: the diff was never
+                # judged, so retry the REVIEW — don't bounce the implementer to
+                # fix issues that were never delivered.
+                events.emit("driver.error", task=tid, role="reviewer",
+                            fingerprint="reviewer.no_verdict",
+                            model=driver.model,
+                            error="review ended without a parseable verdict")
+                return {"pass": False, "crashed": True,
+                        "issues": ["reviewer session ended without a verdict"]}
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
                         reviewer=rev_tok,
                         n_issues=len(verdict.get("issues") or []))
@@ -1504,6 +1517,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, drv.harness, model, "pr-reviewer",
                                    it["round"], res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
+            if verdict.get("truncated"):
+                # Session ended without a verdict — a reviewer that never
+                # reviewed. Crashed, not a rejection: the join retries the
+                # round from PR_MAX_INCONCLUSIVE, not the implementer's rounds.
+                return {"model": model, "approve": False, "crashed": True,
+                        "issues": [f"reviewer {model} session ended without "
+                                   "a verdict"]}
             verdict["model"] = model
             return verdict
 

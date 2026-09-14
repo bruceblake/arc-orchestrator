@@ -156,8 +156,9 @@ whenever the roster fielded fewer reviewers than `PR_REVIEWERS_WANTED`, and
 the **pre-merge review above is the compensating control** — the PR reviewer
 is the second read of a diff that already passed a cross-family gate.
 
-A reviewer that CRASHED did not review. If nobody objected but one never ran,
-the round is **inconclusive**: nothing is posted as `--request-changes`, the
+A reviewer that CRASHED did not review. If nobody objected but one never ran —
+or its session ended without a parseable verdict — the round is
+**inconclusive**: nothing is posted as `--request-changes`, the
 task returns to `pr_review` rather than to `implement`, and the retry budget is
 `config.PR_MAX_INCONCLUSIVE` — separate from `PR_MAX_ROUNDS` so an
 infrastructure failure cannot consume a round reserved for real disagreement.

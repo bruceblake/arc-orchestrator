@@ -246,6 +246,21 @@ class ParseVerdict(unittest.TestCase):
         self.assertFalse(v["pass"], "a missing verdict must never count as a pass")
         self.assertTrue(v["issues"])
 
+    def test_missing_verdict_is_marked_truncated(self):
+        # A session that ends with a question instead of a verdict (observed:
+        # a reviewer asked "Want me to continue?" after 47 minutes of analysis)
+        # must be distinguishable from a real rejection.
+        v = code_tasks._parse_verdict(
+            "I checked all three files and found two minor doc issues. "
+            "Want me to continue with the test run and finish the verdict?")
+        self.assertFalse(v["pass"])
+        self.assertTrue(v.get("truncated"))
+        self.assertFalse(
+            code_tasks._parse_verdict('{"pass": true}').get("truncated"))
+        self.assertFalse(
+            code_tasks._parse_verdict(
+                '{"pass": false, "issues": ["x"]}').get("truncated"))
+
 
 class CapabilityFailureClassification(unittest.TestCase):
     """Only a real capability failure may burn a stronger model tier."""
@@ -583,6 +598,15 @@ class PullRequestIsTheGate(unittest.TestCase):
             'first {"approve": true} then actually {"approve": false, "issues": ["x"]}')
         self.assertFalse(v["approve"], "the last verdict is the reviewer's answer")
         self.assertEqual(v["issues"], ["x"])
+
+    def test_missing_approval_is_marked_truncated(self):
+        v = code_tasks._parse_approval(
+            "I read the diff and the tests pass locally. "
+            "Want me to continue and post the verdict?")
+        self.assertFalse(v["approve"])
+        self.assertTrue(v.get("truncated"))
+        self.assertFalse(
+            code_tasks._parse_approval('{"approve": true}').get("truncated"))
 
 
 class DescribeReportsTheRealBase(unittest.TestCase):
