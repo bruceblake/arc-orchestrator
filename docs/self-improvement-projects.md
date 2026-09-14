@@ -22,6 +22,35 @@ Start with `selftest-untested-modules.json`. It is the safest — four
 independent tasks that only ADD test files, so nothing existing can regress,
 and it exercises the full fan-out path.
 
+## Queued roadmap (bigger than one taskfile)
+
+These are multi-project efforts, executed in order. Each becomes its own
+taskfile written when its turn comes; this list is the durable queue.
+
+1. **Serve-migration** — move the fleet drivers off one-shot harness
+   processes onto `opencode serve`-mode sessions (session binding via
+   `x-opencode-directory`, `prompt_async`, SSE). The capacity-400 that
+   arrives as a structured `session.error` with `isRetryable:false` must be
+   special-cased retryable (it means account-cap full, not task failure);
+   `/instance/dispose` ends sessions instantly. Chained so nothing else
+   builds on the old driver shape.
+2. **Lloyd-style loop orchestrator** — a manager agent with a tickets table
+   (sqlite, its own db), a mission note (who/what/how), a pulse loop over
+   logs + recent merges + backlog, and a plan-review gate before non-trivial
+   builds. Taskfile declares `project.after` the serve-migration taskfile.
+3. **Frontend/backend decoupling (2026-09-13 request)** — split the
+   monolithic `dashboard.py` (static files + JSON APIs + process spawning in
+   one http.server) into a dedicated **backend API service** (read APIs,
+   mutating routes, process supervision, event log, one bind address; clean
+   route allowlist per Rule 6b) and a **separate frontend service** serving
+   the SPA (`static/`), talking to the backend over versioned endpoints.
+   Replace timer polling with server-push (SSE/websocket) for events, agents
+   and transcripts. Searchable API surface from day one: today the frontend
+   calls ~15 ad-hoc routes; the split is when they get a schema. Must keep
+   `start.sh`/`stop.sh` and the deploy/ systemd units working (they gain one
+   more unit), and Rule 6b's unauthenticated-LAN posture stays intact. Chain
+   `after` serve-migration.
+
 ## How these are shaped, and why
 
 Every rule below came from a failure on 2026-09-09. See
