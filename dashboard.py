@@ -23,7 +23,7 @@ import socket
 import sqlite3
 import subprocess
 import time
-from datetime import datetime
+from datetime import date as _date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -59,10 +59,86 @@ _RANGE_SECONDS = {"1h": 3600, "3h": 3 * 3600, "6h": 6 * 3600,
 def _range_cutoff(range_key, now):
     """Epoch seconds the window starts at, or None for 'all'."""
     if range_key == "today":
-        lt = time.localtime(now)
-        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0,
-                            lt.tm_wday, lt.tm_yday, lt.tm_isdst))
+        return _day_window(time.strftime("%Y-%m-%d", time.localtime(now)))[0]
     return None if range_key == "all" else now - _RANGE_SECONDS[range_key]
+
+
+def _day_window(date_s):
+    """(start_epoch, end_epoch) — the half-open window of one calendar day.
+
+    ONE definition of "a day" for both cuts of the same traffic: the daily
+    window ("today") and /api/usage/hourly?date=. Two copies would disagree at
+    a DST boundary or off a midnight edge, and the operator would be looking
+    at two views of the same day with different numbers and no way to tell
+    which to believe. tm_isdst=-1 lets mktime resolve the flag.
+
+    The end is the NEXT CALENDAR day's midnight, re-derived from the date, not
+    `start + 86400`. A local day is 23 or 25 hours long across a DST
+    transition: a fixed 86400 ends at 23:00 on the fall-back day (dropping an
+    hour the daily rows still count) and runs into the next local day on the
+    spring-forward one (stealing an hour the daily rows count under the other
+    date). That is how the daily and hourly views came to disagree on those
+    two days a year. Because the window is the span between two consecutive
+    local midnights, "inside [start, end)" and "local date == date_s" are the
+    SAME predicate — and that is the one the daily rows are keyed by.
+    """
+    y, m, d = (int(p) for p in date_s.split("-"))
+    start = time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
+    nxt = _date(y, m, d) + timedelta(days=1)
+    end = time.mktime((nxt.year, nxt.month, nxt.day, 0, 0, 0, 0, 0, -1))
+    return start, end
+
+
+def _bucket_points(points, start, n_buckets, bucket_secs, locate=None):
+    """Cut `points` into `n_buckets` buckets — the ONE bucketing.
+
+    `points` carries the (ts, family, model, requests, ok, errors,
+    failed_attempts, tokens, task_runs) tuples the event walk in _usage emits.
+    Every counter is carried EXPLICITLY rather than derived: a crashed driver
+    attempt is not a failed request (it adds to failed_attempts without adding
+    a request), so an `ok = requests - errors` identity would report -1 for it
+    and the hourly buckets would disagree with the daily totals beside them.
+    Returns (buckets, totals, by_model): buckets[i]["totals"]/["by_model"] hold
+    the counters in that slice, totals sums the whole window, and by_model sums
+    it keyed by model. Points outside the window (or without a usable ts) are
+    dropped, never clamped into an edge bucket.
+
+    `locate` names the bucket for a ts, or None to drop the point. The default
+    is the fixed-width `(ts - start) // bucket_secs`, which is right only when
+    a bucket IS a fixed number of seconds. The hourly view passes one that
+    reads the LOCAL hour, because its buckets are labelled wall-clock hours:
+    fixed-width arithmetic assumes a 86400 s day, so after an intra-day DST
+    transition every later label is off by an hour and the day's own 25th hour
+    has no bucket to fall into.
+    """
+    def zero():
+        return {"requests": 0, "ok": 0, "errors": 0, "failed_attempts": 0,
+                "tokens": 0, "task_runs": 0}
+
+    buckets = [{"totals": zero(), "by_model": {}} for _ in range(n_buckets)]
+    totals = zero()
+    by_model = {}
+    for ts, _family, model, req, ok, err, failed, tok, tr in points:
+        if not ts or ts < start:
+            continue
+        if locate is None:
+            idx = int((ts - start) // bucket_secs)
+        else:
+            idx = locate(ts)
+        if idx is None or idx < 0 or idx >= n_buckets:
+            continue
+        for acc in (buckets[idx]["totals"], totals):
+            acc["requests"] += req
+            acc["ok"] += ok
+            acc["errors"] += err
+            acc["failed_attempts"] += failed
+            acc["tokens"] += tok
+            acc["task_runs"] += tr
+        for acc in (buckets[idx]["by_model"].setdefault(model, {"requests": 0, "tokens": 0}),
+                    by_model.setdefault(model, {"requests": 0, "tokens": 0})):
+            acc["requests"] += req
+            acc["tokens"] += tok
+    return buckets, totals, by_model
 
 _launch_registry = {}  # abspath taskfile -> {"pid", "log", "started", "dry_run"}
 
@@ -582,7 +658,7 @@ def _window_kimi_models(turns, cutoff):
     return models
 
 
-def _usage(store=None, range_key=None, include_series=False):
+def _usage(store=None, range_key=None, include_series=False, window=None, with_points=False):
     """Usage aggregates for /api/usage, honoring the requested range.
 
     `range_key` selects the aggregation window: 1h/3h/6h/today/24h/7d/all. A
@@ -593,6 +669,12 @@ def _usage(store=None, range_key=None, include_series=False):
     bounds totals, per-model/family rows, and the series points, while the
     in-flight list is never trimmed — a live agent is current by definition.
 
+    `window=(start, end)` pins the cut to an explicit half-open epoch range
+    instead of `range_key` — the hook /api/usage/hourly uses so an arbitrary
+    calendar day re-cuts THE SAME walk rather than filtering events itself.
+    `with_points=True` additionally returns the raw walk points as `points`,
+    which is what the hourly bucketer reads.
+
     Per-model `cost` prices prompt/completion tokens at each model's rate via
     `config.cost_of`. Where an event reports a token count but no prompt/
     completion breakdown, the excess is priced at the completion rate, so the
@@ -600,7 +682,8 @@ def _usage(store=None, range_key=None, include_series=False):
     """
     now = time.time()
     range_key = range_key if range_key in RANGES else "1h"
-    cutoff = _range_cutoff(range_key, now)
+    cutoff = window[0] if window else _range_cutoff(range_key, now)
+    win_end = window[1] if window else None
 
     def new_model(model, family, source):
         return {"model": model, "pretty": _pretty(model), "family": family, "source": source,
@@ -620,15 +703,43 @@ def _usage(store=None, range_key=None, include_series=False):
     by_family = {f: new_family(f) for f in config.FAMILY_ORDER}
     totals = {"requests": 0, "ok": 0, "errors": 0, "failed_attempts": 0, "tokens": 0,
               "prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0}
-    pts = []  # (ts, family, req_delta, tok_delta, task_run_delta)
+    # (ts, family, model, requests, ok, errors, failed_attempts, tokens,
+    # task_runs). The hourly view (/api/usage/hourly) buckets exactly these
+    # points, so a counter added to the event walk reaches BOTH cuts — the
+    # alternative, an hourly walk with its own filter, reports different
+    # numbers for the same day and nobody can tell which of the two is wrong.
+    pts = []
     done_tok_keys = set()
+
+    def in_window(ts):
+        """Is this event inside the requested cut? — the ONE window test.
+
+        Every filter below (the event walk, the opencode backfill, the kimi
+        turns) goes through it, so the daily row and the hourly buckets for one
+        date can never disagree about which events count. A missing ts is
+        outside every bounded window: it cannot be placed in a bucket.
+        """
+        if ts is None:
+            return False
+        if cutoff is not None and ts < cutoff:
+            return False
+        if win_end is not None and ts >= win_end:
+            return False
+        return True
 
     # models/inflight/points for kimi-code sessions up front (cached, shared with inflight)
     inflight, kimi = _collect_inflight(now, store)
 
     ev_lines = _load_event_lines()
     lines = ev_lines
-    if cutoff is not None:
+    if window is not None:
+        # An explicit window scans from a seek point just before the day, and
+        # the in-loop `win_end` check bounds the end. The seek alone is not
+        # enough: events are append-ordered but not timestamp-ordered (a
+        # killed run can write a stale ts later), and a day cut must not
+        # inherit the neighbours' traffic.
+        lines = ev_lines[_first_event_at_or_after(ev_lines, cutoff - 86400):]
+    elif cutoff is not None:
         lines = ev_lines[_first_event_at_or_after(ev_lines, cutoff):]
     for line in lines:
         try:
@@ -636,6 +747,10 @@ def _usage(store=None, range_key=None, include_series=False):
         except Exception:
             continue
         etype = e.get("type")
+        if win_end is not None and not in_window(_ts(e.get("ts"))):
+            # An explicit day window is exclusive at the end: an event at
+            # 00:00:00 tomorrow belongs to tomorrow's buckets, not tonight's.
+            continue
         if etype in ("driver.start", "driver.done", "driver.error"):
             if etype == "driver.start":
                 continue
@@ -656,7 +771,7 @@ def _usage(store=None, range_key=None, include_series=False):
                 # provider refusing, not the work being wrong.
                 ts = _ts(e.get("ts"))
                 if ts:
-                    pts.append((ts, family, 0, 0, 0, 1))
+                    pts.append((ts, family, model, 0, 0, 0, 1, 0, 0))
                 continue
             mod["requests"] += 1
             mod["ok"] += 1
@@ -683,7 +798,7 @@ def _usage(store=None, range_key=None, include_series=False):
                 totals["prompt_tokens"] += ptoks
                 totals["completion_tokens"] += ctoks
             if ts:
-                pts.append((ts, family, 1, toks, 1, 0))
+                pts.append((ts, family, model, 1, 1, 0, 0, toks, 1))
             continue
         if etype not in ("request", "request_start", "request_end"):
             continue
@@ -721,7 +836,7 @@ def _usage(store=None, range_key=None, include_series=False):
             if isinstance(lat, (int, float)):
                 mod["latency_total_ms"] += lat
             if ts:
-                pts.append((ts, family, 1, tokens, 0, 0))
+                pts.append((ts, family, model, 1, 1, 0, 0, tokens, 0))
         else:
             mod["errors"] += 1
             fam["errors"] += 1
@@ -730,11 +845,11 @@ def _usage(store=None, range_key=None, include_series=False):
             # traffic dipping during an outage rather than errors spiking — the
             # shape that makes a bad hour look like a quiet one.
             if ts:
-                pts.append((ts, family, 1, 0, 0, 1))
+                pts.append((ts, family, model, 1, 0, 1, 0, 0, 0))
 
     # Backfill opencode tokens from transcripts for pre-plumbing runs.
     for ts, model, toks, ptoks, ctoks in _opencode_token_backfill(store, done_tok_keys):
-        if cutoff is not None and (ts is None or ts < cutoff):
+        if not in_window(ts):
             continue
         family = config.MODEL_FAMILY.get(model, "harness")
         mod = by_model.setdefault((family, model, "driver:opencode"),
@@ -750,14 +865,22 @@ def _usage(store=None, range_key=None, include_series=False):
         totals["completion_tokens"] += ctoks
         if mod["last_ts"] is None or ts > mod["last_ts"]:
             mod["last_ts"] = ts
-        pts.append((ts, family, 0, toks, 0, 0))
+        pts.append((ts, family, model, 0, 0, 0, 0, toks, 0))
 
     # Merge kimi-code CLI sessions so the dashboard also shows interactive traffic,
     # which goes straight to llm-api.arc.vt.edu and never touches the event log.
-    # A windowed range narrows kimi's per-model totals from its per-turn log; the
-    # all-time `models` stays the historical view for range=all.
-    pts.extend((ts, "kimi-code", req, tok, 0, 0) for ts, req, tok in kimi["points"]
-               if cutoff is None or (ts is not None and ts >= cutoff))
+    #
+    # The per-TURN log is the source, not the coarser `points`: it carries the
+    # model and every counter separately, and it is what the daily per-model
+    # rows are summed from (_window_kimi_models). kimi credits `ok` from a
+    # different wire event (usage.record) than `requests` (llm.request), so a
+    # stream that knows only requests/tokens cannot express it — deriving
+    # ok = requests there made the hourly buckets disagree with the daily row
+    # for the same day, the exact drift this endpoint exists to avoid.
+    for t, real, rd, pd, cd, ok_delta in kimi.get("turns", []):
+        if not in_window(t):
+            continue
+        pts.append((t, "kimi-code", real, rd, ok_delta, 0, 0, pd + cd, 0))
     kimi_models = kimi["models"] if cutoff is None else _window_kimi_models(kimi.get("turns", []), cutoff)
     if kimi_models:
         fam = new_family("kimi-code")
@@ -831,7 +954,7 @@ def _usage(store=None, range_key=None, include_series=False):
         series = {f: [{"t": start + i * bucket, "requests": 0, "tokens": 0,
                        "errors": 0} for i in range(n)]
                   for f in config.FAMILY_ORDER}
-        for ts, family, req, tok, _tr, err in pts:
+        for ts, family, _model, req, _ok, err, failed, tok, _tr in pts:
             if not ts or ts < start:
                 continue
             idx = int((ts - start) // bucket)
@@ -842,21 +965,34 @@ def _usage(store=None, range_key=None, include_series=False):
                                                   for i in range(n)])
             pts_list[idx]["requests"] += req
             pts_list[idx]["tokens"] += tok
-            pts_list[idx]["errors"] += err
+            # The timeline's "errors" band is a badness counter, not the totals'
+            # request-error counter: the original walk emitted a point for BOTH
+            # a failed request and a crashed driver attempt, and an hour of
+            # capacity rejections must still read as a bad hour. Same semantics,
+            # now summed from the two explicit deltas instead of one conflated
+            # one.
+            pts_list[idx]["errors"] += err + failed
 
-    day0 = int(now // 86400)
+    # The 30-day breakdown is a list of LOCAL calendar days. It used to bucket
+    # by UTC day (ts // 86400) while LABELLING the bucket with local time, so
+    # the row called "09-13" actually held local 09-12 20:00-24:00 — four hours
+    # of traffic sitting under the wrong date for anyone east or west of UTC,
+    # and the reason /api/usage/hourly could not agree with it. Bucketing
+    # through _day_window keeps a label and its contents the same day, the same
+    # definition range=today uses.
+    today0 = _today_str()
     daily = []
     day_idx = {}
-    for i in range(30):
-        d = day0 - 29 + i
-        rec = {"date": time.strftime("%Y-%m-%d", time.localtime(d * 86400)),
+    for ds in _last_dates(30, today0):
+        start, _end = _day_window(ds)
+        rec = {"date": ds,
                "requests": 0, "tokens": 0, "task_runs": 0, "families": {}}
-        day_idx[d] = rec
+        day_idx[start] = rec
         daily.append(rec)
-    for ts, family, req, tok, tr, _err in pts:
+    for ts, family, _model, req, _ok, _err, _failed, tok, tr in pts:
         if not ts:
             continue
-        rec = day_idx.get(int(ts // 86400))
+        rec = day_idx.get(_day_window(_ds(ts))[0])
         if rec is None:
             continue
         rec["requests"] += req
@@ -896,7 +1032,99 @@ def _usage(store=None, range_key=None, include_series=False):
            "totals": totals}
     if include_series:
         res["series"] = series
+    if with_points:
+        res["points"] = pts
     return res
+
+
+def _ds(ts):
+    """Local calendar date (YYYY-MM-DD) of an epoch timestamp."""
+    return time.strftime("%Y-%m-%d", time.localtime(ts))
+
+
+def _today_str():
+    return _ds(time.time())
+
+
+def _last_dates(n, today_s=None):
+    """The `n` calendar dates ending today, oldest first — as date STRINGS.
+
+    Stepping by CALENDAR date rather than subtracting 86400s from an epoch.
+    A fixed-size day drifts across a DST change: `_ds(today0 - k*86400)`
+    re-derives the SAME local date twice and a whole calendar date is missing
+    from the list (verified with TZ=America/New_York, today=2026-03-09: no
+    2026-03-08 row). Every point dated that missing day then finds no row in
+    the daily index and is skipped, so a full day of traffic disappears from
+    the daily view for the 30 days that follow each spring-forward.
+    date+timedelta has no such hole.
+    """
+    end = _date.fromisoformat(today_s or _today_str())
+    return [(end - timedelta(days=n - 1 - i)).isoformat() for i in range(n)]
+
+
+def _day_points(store, date_s):
+    """The event-walk points of ONE calendar day — the shared collection.
+
+    Walks the SAME aggregation the daily view uses (`_usage`, with the window
+    pinned to the day) and returns its points plus the window bounds. `_usage`
+    already restricted them to [start, end) through its own `in_window`, so
+    there is no second filter here to drift from it — and a second filter is
+    exactly how the two cuts of one day would come to disagree.
+    """
+    start, end = _day_window(date_s)
+    usage = _usage(store, "all", window=(start, end), with_points=True)
+    return usage.get("points") or [], start, end
+
+
+def _usage_hourly(store, date_s):
+    """Usage for one calendar date, cut into 24 one-hour buckets.
+
+    Shape: {date, hours: [{hour, by_model, totals}] × 24, totals}. Every hour
+    is present even with no traffic — a missing bar and a zero bar look
+    different to an operator scanning a chart, and "nothing happened at 04:00"
+    is the answer they came for. `totals` sums the day, so it agrees with the
+    daily view's row for the same date by construction (same points, same
+    filter). Raises ValueError for a malformed or impossible date.
+
+    Hour h is the local wall-clock hour h of `date`, so its label matches what
+    it holds on every day of the year: the bucket is chosen by reading the ts's
+    own local hour, not by `start + h*3600`. Fixed-width arithmetic assumes a
+    86400 s day, so on a transition day it mislabels every hour after the
+    change by one and has nowhere to put the 25th hour of a fall-back day —
+    those points were dropped and the day's totals silently disagreed with the
+    daily view beside them.
+    """
+    # Strictly YYYY-MM-DD. _date.fromisoformat alone is too permissive in
+    # 3.11+ (it takes "20260910" and "2026-9-1"), and a date the route
+    # silently reinterpreted would show a day the operator never asked for.
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date_s or ""):
+        raise ValueError(f"date must be YYYY-MM-DD: {date_s!r}")
+    try:
+        day = _date.fromisoformat(date_s)
+        day + timedelta(days=1)  # 9999-12-31 parses but has no next day
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(f"not a calendar date: {date_s} ({exc})")
+    points, start, _end = _day_points(store, date_s)
+
+    def local_hour(ts):
+        """Bucket index of `ts` = its local hour, or None if another date.
+
+        [start, end) is exactly the span between this date's midnight and the
+        next one, so a ts inside it is on `date` and its local hour is a valid
+        0..23 bucket even on a 23- or 25-hour day, where the 23rd hour repeats
+        and falls in the same bucket twice.
+        """
+        lt = time.localtime(ts)
+        if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (day.year, day.month, day.day):
+            return None
+        return lt.tm_hour
+
+    buckets, totals, _by_model = _bucket_points(points, start, 24, 3600,
+                                                locate=local_hour)
+    hours = []
+    for i, b in enumerate(buckets):
+        hours.append({"hour": i, "by_model": b["by_model"], "totals": b["totals"]})
+    return {"date": date_s, "hours": hours, "totals": totals}
 
 
 _fleet_cache = {"key": 0.0, "models": [], "totals": {}}  # refreshed at most every ~2s
@@ -3220,6 +3448,19 @@ class Handler(BaseHTTPRequestHandler):
                 range_key = q.get("range", ["1h"])[0]
                 include_series = q.get("series", ["0"])[0] == "1"
                 return self._json(_usage(Handler.store, range_key, include_series))
+            if u.path == "/api/usage/hourly":
+                # keep_blank_values: an explicit `?date=` is a malformed date,
+                # not an absent one. Only a MISSING param means today.
+                q = parse_qs(u.query, keep_blank_values=True)
+                # A missing ?date= means "today" — the page's default and the
+                # question an operator asks. A malformed one is a 400 with a
+                # JSON error rather than a silent fallback: quietly showing
+                # today's numbers under a typo'd date is how a UI lies.
+                date_s = q.get("date", [_today_str()])[0]
+                try:
+                    return self._json(_usage_hourly(Handler.store, date_s))
+                except ValueError as exc:
+                    return self._json({"error": str(exc), "date": date_s}, 400)
             if u.path == "/api/fleet":
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/queue":
