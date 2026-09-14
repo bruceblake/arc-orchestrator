@@ -63,7 +63,7 @@ The roster is dated and API-validated (`config.ROSTER`); this is the
   to deepseek, DeepSeek's to glm.
 - Fan-out wider than a family's driver slots simply **queues** (leases are
   cross-process; over-cap tasks wait, they do not fail), and each harness has
-  its own cap of 5 (opencode for GLM-5.3, reasonix for DeepSeek). Width beyond the
+  its own cap (5 for opencode / GLM-5.3, 7 for reasonix / DeepSeek). Width beyond the
   cap costs latency, not correctness — but a fan-out of 6 tasks all routed
   to DeepSeek is really a chain of 2 batches (driver cap 5), so plan for it
   or spread tiers.

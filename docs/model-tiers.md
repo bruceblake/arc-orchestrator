@@ -40,11 +40,12 @@ reviews, and **never plans**.
   `MIN_BATCH_SLOTS` = 2 — and GLM-5.3's cap **is** 2, so no reserve is applied
   there (an interactive chat queues instead of cutting the planner to one).
 - GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
-  **`dsh`**, DeepSeek's own harness (`drivers.DeepseekDriver`, binary via
-  `config.dsh_bin()`), set up in
-  [runbook.md](runbook.md) § "DeepSeek's `dsh` harness". The driver caps
-  apply per model; the **harness** pools are separate and 5 each
-  (`config._HARNESS_CAP`), so neither model can starve the other's binary.
+  **`reasonix`** (`drivers.ReasonixDriver`, binary via `config.reasonix_bin()`).
+  The driver caps apply per model; the **harness** pools are separate —
+  5 opencode, 7 reasonix (`config._HARNESS_CAP`) — so neither model can
+  starve the other's binary. reasonix 7 was measured 2026-09-14: 3/3, 6/6
+  and 7/7 concurrent one-shot runs all exited 0 cleanly (opencode's
+  equivalent cliff was at 6).
 - **Kimi-K3 was retired from this repo on 2026-09-12** by operator decision:
   its ROSTER row was deleted, it is gone from `config.FAMILIES` and from every
   live role, and no table above can name it as current. `drivers.KimiDriver`
@@ -126,12 +127,12 @@ the miss is not silent — `pr_review` emits
 pre-merge review above is the compensating control: the PR review is the
 second read of a change that already passed a cross-family gate.
 
-**TEMPORARY (operator-authorized 2026-09-12):** with
-`ARC_ALLOW_SAME_FAMILY_REVIEW=1` (`config.ALLOW_SAME_FAMILY_REVIEW`) the
-cross-family half of both rules is suspended — DeepSeek may review DeepSeek —
-while GLM-5.3's provider backend is unstable. It is a second pass by the same
-model, not an independent reading; see
-[concurrency-limits.md](concurrency-limits.md).
+**History:** a temporary `ARC_*` same-family-review override
+(operator-authorized 2026-09-12, GLM-5.3's provider backend unstable)
+suspended the cross-family half of both rules; it was removed 2026-09-14
+once GLM-5.3 stabilised. A
+same-family review is a second pass by the same model, not an independent
+reading, and is rejected again.
 
 ## How to pick a tier
 

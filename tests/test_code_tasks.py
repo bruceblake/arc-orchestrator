@@ -94,25 +94,13 @@ class LoadTaskfile(unittest.TestCase):
         self.assertIn("must be an implementer", str(cm.exception))
 
     def test_rejects_same_family_review(self):
+        """Cross-family review is UNCONDITIONAL: no env var or config flag
+        may suspend it. (The 2026-09-12..14 operator hatch
+        ARC_ALLOW_SAME_FAMILY_REVIEW was removed once GLM-5.3 stabilised.)"""
         bad = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         with self.assertRaises(ValueError) as cm:
             code_tasks.load_taskfile(taskfile([bad]))
         self.assertIn("must not be the harness", str(cm.exception))
-
-    def test_the_same_family_escape_hatch_is_off_by_default(self):
-        """ARC_ALLOW_SAME_FAMILY_REVIEW is the operator's TEMPORARY override
-        (2026-09-12, GLM backend unstable). The default must stay
-        cross-family; the hatch is a separate, explicit opt-in."""
-        self.assertFalse(config.ALLOW_SAME_FAMILY_REVIEW,
-                         "the suite must exercise the default governance")
-        orig = config.ALLOW_SAME_FAMILY_REVIEW
-        config.ALLOW_SAME_FAMILY_REVIEW = True
-        try:
-            same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
-            ts = code_tasks.load_taskfile(taskfile([same]))
-            self.assertEqual(ts["tasks"]["t1"]["reviewer"], STRONGEST_FAMILY)
-        finally:
-            config.ALLOW_SAME_FAMILY_REVIEW = orig
 
     def test_rejects_duplicate_ids(self):
         with self.assertRaises(ValueError):
@@ -331,6 +319,117 @@ class ExtractPlanJson(unittest.TestCase):
 
     def test_returns_none_when_absent(self):
         self.assertIsNone(code_tasks._extract_plan_json('{"not": "a plan"}'))
+
+
+class GateFeedbackNamesTheFailures(unittest.TestCase):
+    """The fix loop must hand the implementer WHAT failed, not THAT it failed.
+
+    The gate feedback used to be the last 2000 characters of output — on a
+    check.sh run that is the unittest summary and the shell's echo, which say
+    nothing. empty-diff-publish failed its worktree gate on exactly one of
+    1046 tests, the FAIL line sat a hundred lines above the cut, and the
+    implementer was told only "unit tests failed" — twice.
+    """
+
+    def test_names_unittest_failures_above_the_tail_cut(self):
+        out = ("ok\n" * 200
+               + "FAIL: test_every_edge_condition_reads_as_english "
+                 "(tests.test_x.X)\n"
+               + "AssertionError: 'merged' != 'conflict'\n"
+               + "ok\n" * 200
+               + "FAILED (failures=1)\n")
+        names = code_tasks._gate_failures(out)
+        self.assertTrue(any(n.startswith("FAIL: test_every_edge_condition")
+                            for n in names), names)
+        self.assertTrue(any(n.startswith("AssertionError:") for n in names),
+                        names)
+
+    def test_a_clean_suite_names_nothing(self):
+        self.assertEqual(code_tasks._gate_failures("ok\n" * 50 + "OK\n"), [])
+
+    def test_dedups_and_caps(self):
+        out = ("FAILED tests/test_a.py\n" * 30 + "not ok 1 smoke\n" * 3)
+        names = code_tasks._gate_failures(out, limit=2)
+        self.assertEqual(len(names), 2)
+        self.assertEqual(names[0], "FAILED tests/test_a.py")
+
+    def test_mid_line_mentions_do_not_count(self):
+        # Anchored at line start: prose ABOUT a failure is not the failure.
+        self.assertEqual(code_tasks._gate_failures(
+            "rerun with FAILED verbosity for details\n"), [])
+
+    def test_names_pytest_default_failures_section(self):
+        # Default pytest output (no -rf): the check names live in the
+        # FAILURES-section underlines and the E-prefixed exception lines —
+        # without patterns for them a pytest-repo gate silently got the old
+        # nameless feedback.
+        out = (".....F..\n"
+               + "=" * 32 + " FAILURES " + "=" * 32 + "\n"
+               + "_" * 20 + " test_totals_handle_empty_days " + "_" * 20 + "\n"
+               + "\n    def test_totals_handle_empty_days():\n"
+               + ">       assert totals() == 0\n"
+               + "E       AssertionError: assert {'n': 0} == 0\n"
+               + "\ntests/test_usage.py:44: AssertionError\n"
+               + "=" * 74 + "\n1 failed, 8 passed in 0.42s\n")
+        names = code_tasks._gate_failures(out)
+        self.assertTrue(any("test_totals_handle_empty_days" in n
+                            for n in names), names)
+        self.assertTrue(any(n.startswith("E") and "AssertionError" in n
+                            for n in names), names)
+
+    def test_names_block_is_failure_only(self):
+        # A green run whose output merely LOOKS like a failure (an
+        # expected-error test printing its caught traceback, a TAP '# TODO'
+        # not-ok) must not get a "failing checks" header — the names block is
+        # feedback, and pass-path output is only observability.
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        self.assertIn("if names and not passed:", src)
+
+    def test_gate_feedback_lists_names_before_the_tail(self):
+        # Wiring, pinned by source slice like the other ownership tests.
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def gate(ctx):"):]
+        body = body[:body.index("async def review(ctx):")]
+        self.assertIn("_gate_failures(full)", body)
+        self.assertIn('"failing checks:\\n"', body)
+
+
+class AFixRoundContinuesTheHarnessSession(unittest.TestCase):
+    """A rework is the same model mending the same worktree: reuse its session.
+
+    Re-reading the repo is the dominant cost of a hard task (60–85 minutes
+    measured before GLM-5.3's first edit), and every fix round re-paid it from
+    scratch. A tier change starts fresh — another model owns no part of the
+    previous session, and one harness may not read another's session files.
+    """
+
+    def test_same_model_continues(self):
+        results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3"}}
+        self.assertEqual(code_tasks._resume_session(results, "t1", "GLM-5.3"),
+                         "s-1")
+
+    def test_escalation_starts_fresh(self):
+        results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3"}}
+        other = next(m for m in config.ESCALATION_PATH if m != "GLM-5.3")
+        self.assertIsNone(code_tasks._resume_session(results, "t1", other))
+
+    def test_a_crash_starts_fresh(self):
+        # The crash path returns no model/session_id, so the next attempt is
+        # cold — continuing a dead harness's session re-enters its crash.
+        results = {"implement_t1": {"crashed": True, "harness": "opencode"}}
+        self.assertIsNone(code_tasks._resume_session(results, "t1", "GLM-5.3"))
+
+    def test_first_attempt_and_missing_results_start_fresh(self):
+        self.assertIsNone(code_tasks._resume_session({}, "t1", "GLM-5.3"))
+        self.assertIsNone(code_tasks._resume_session(None, "t1", "GLM-5.3"))
+
+    def test_implement_passes_the_session_through(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def implement(ctx):"):]
+        body = body[:body.index("async def gate(ctx):")]
+        self.assertIn("session_id=resume", body)
+        self.assertIn('"session_id": res.session_id', body,
+                      "the next round needs the id this one produced")
 
 
 class GateTimeoutKillsTheWholeTree(unittest.TestCase):

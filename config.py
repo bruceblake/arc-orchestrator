@@ -592,17 +592,6 @@ _DEFAULT_PATH = [m for tier in TIER_ORDER for m, _f, _h, t, _c, _r in _LIVE if t
 PR_REVIEWERS = max(1, min(PR_REVIEWERS_WANTED, len(PR_REVIEW_FAMILIES) - 1))
 
 
-# OPERATOR-AUTHORIZED 2026-09-12, TEMPORARY: while GLM-5.3's provider backend
-# was unstable (90s+ stalls and capacity flapping, measured and logged
-# 2026-09-12), review may be SAME-family — DeepSeek reviewing DeepSeek — so
-# the fleet is not down whenever GLM-5.3 is. This suspends the cross-review
-# halves of AGENTS.md Rule 2 and Rule 5: a review is no longer an independent
-# reading by a different harness, only a second pass by the same model. Remove
-# this (and the two consumption points in code_tasks.py) once GLM-5.3 is
-# stable again.
-ALLOW_SAME_FAMILY_REVIEW = os.getenv("ARC_ALLOW_SAME_FAMILY_REVIEW", "") == "1"
-
-
 def model_may(model, role):
     """May this model hold this role today? Unknown model -> False."""
     return role in MODEL_ROLES.get(model, set())
@@ -824,12 +813,27 @@ _MODEL_DRIVER_CAP = {
 # dsh (added 2026-09-12) keeps its state as per-profile JSON files under
 # $DSH_HOME — no central store like opencode's sqlite — so it gets no measured
 # cliff yet; 5 mirrors opencode until a load test says otherwise. reasonix
-# (2026-09-13) likewise keeps per-workspace session files under its home with
-# no shared database, so it starts at the same 5.
+# (2026-09-13) likewise keeps per-workspace session files under its home. Its
+# load test ran 2026-09-14 (concurrent one-shot runs, warm cache, DeepSeek on
+# an account cap of 10):
+#
+#     3 concurrent   3/3 ok
+#     6 concurrent   6/6 ok
+#     7 concurrent   7/7 ok
+#
+# No empty-output failures and no ARC capacity rejections — no local
+# contention anywhere up to 7, unlike opencode's sqlite cliff at 6. The pool
+# goes to 7. Note the tension with _SESSIONS_PER_PROCESS=2 below: if a
+# reasonix process really does hold two ARC sessions at once the way opencode
+# does, 7 processes would over-subscribe the account cap of 10 — the probe
+# showing zero capacity rejections at 7 says they don't in practice (mostly
+# single-flight, HTTP/2-multiplexed connections), but if ARC 400s ever
+# reappear under a full reasonix pool, this is the knob
+# (ARC_HARNESS_LIMIT_REASONIX) to turn first.
 # ("kimi" stays in _SESSIONS_PER_PROCESS only so a historical transcript's
 # harness still resolves; no live model maps to that harness. "dsh" stays in
 # _HARNESS_CAP for the same reason since reasonix replaced it on 2026-09-13.)
-_HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 5}
+_HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 7}
 
 
 def kimi_wire_model():
@@ -909,7 +913,7 @@ def max_tasks_in_flight():
             return max(1, int(override))
         except ValueError:
             pass
-    return sum(harness_limit(h) for h in _HARNESS_CAP)
+    return sum(harness_limit(h) for h in set(MODEL_HARNESS.values()))
 
 # --- token cost attribution -------------------------------------------------
 # OPERATOR-SUPPLIED estimates, USD per MILLION tokens, for attributing a dollar

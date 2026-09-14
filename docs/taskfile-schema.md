@@ -145,10 +145,9 @@ A taskfile that names a reviewer family which is not live today is
 remapped by `config.cross_family_reviewer` (code_tasks.py:94), not rejected —
 the remap tests the REVIEWER family, so it covers `"kimi"` on any task, not
 only tasks whose `model` came off `code_tasks.RETIRED_MODELS` (that table
-remaps the task's `model` field alone). The TEMPORARY operator
-override `ARC_ALLOW_SAME_FAMILY_REVIEW=1` suspends the cross-family
-requirement (same-family DeepSeek reviews) while GLM-5.3's backend is
-unstable; see [concurrency-limits.md](concurrency-limits.md).
+remaps the task's `model` field alone). The 2026-09-12 same-family override
+(an `ARC_*` env var, for GLM-5.3's backend instability) was
+removed 2026-09-14; cross-family review is unconditional again.
 
 ### The verify gate (`verify_cmd`)
 
@@ -265,10 +264,9 @@ to the implementer with the issue list.
 6. **Reviewer must be a live review family** (missing defaults to `""`, rejected):
    `ValueError: task {tid}: reviewer must be one of deepseek|glm, got {reviewer!r}`
 7. **Cross-family rule** — the reviewer must not share the implementer's
-   family (`config.cross_family_reviewer`):
+   family (`config.cross_family_reviewer`), enforced unconditionally (the
+   2026-09-12..14 same-family-review override was removed):
    `ValueError: task {tid}: reviewer {reviewer!r} must not be the harness that implemented ({model}); use the other one`
-   (`ARC_ALLOW_SAME_FAMILY_REVIEW=1` — TEMPORARY, 2026-09-12 — suspends this
-   check at `code_tasks.py:64`.)
 8. **Unknown deps** — every `deps` entry must be a task id in this file:
    `ValueError: task {tid}: unknown dep {d!r}`
 9. **No cycles** — topological sort over deps:
