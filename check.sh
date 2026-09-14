@@ -147,6 +147,12 @@ PYEOF
     if [ -f tests/usage_visibility.test.mjs ] && ! node tests/usage_visibility.test.mjs; then
         echo "FAIL: usage.html keeps polling a tab nobody is looking at"; rc=1
     fi
+    # The hourly view: the date picker, the stacked bar chart and the
+    # per-model table. Landing the feature without this entry is how a page
+    # ships a control that renders nothing.
+    if [ -f tests/usage_hourly.test.mjs ] && ! node tests/usage_hourly.test.mjs; then
+        echo "FAIL: usage.html hourly view misbehaves"; rc=1
+    fi
     # The projects list: compact cards, the filter bar, the URL-hash round
     # trip, and the workload DAGs. This file landed with the feature (#10)
     # and was never added here, so it passed on the author's machine and
