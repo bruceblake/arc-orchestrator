@@ -155,7 +155,7 @@ const events = [
   { type: "driver.stalled", model: "Kimi-K3", task: "t1", idle_s: 130 },
   { type: "driver.timeout", model: "Kimi-K3", task: "t1" },
   { type: "driver.cancelled", model: "Kimi-K3", task: "t1" },
-  { type: "driver.cap_wait", model: "GLM-5.3", in_use: 3, cap: 4 },
+  { type: "driver.cap_wait", model: "GLM-5.3", in_use: 2, cap: 2 },
   { type: "worktree.alloc", branch: "task/t1" },
   { type: "worktree.free", branch: "task/t1" },
   { type: "task.start", task: "t1" },

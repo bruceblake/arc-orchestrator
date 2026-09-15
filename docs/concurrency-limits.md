@@ -29,7 +29,7 @@ own in-flight usage:
 | --- | --- | --- | --- |
 | gpt-oss-120b | **5** | 10 account / 8 drivers | over-subscribed by 3 |
 | DeepSeek-V4-Flash | **5** | 10 account / 8 drivers | over-subscribed by 3 |
-| GLM-5.3 | **4** | 4 account / 3 drivers | one slot wasted |
+| GLM-5.3 | **4** | 4 account / 3 drivers (then-configured) | one slot wasted |
 | Kimi-K3 | **3** | 3 account / 2 drivers | one slot wasted |
 
 Over-subscription is not harmless: the fleet generated its own
