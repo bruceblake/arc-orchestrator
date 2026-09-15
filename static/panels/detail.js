@@ -103,7 +103,8 @@ function renderDag(d) {
     return {id: t.id, title: t.title || t.id, model: t.model, reviewer: t.reviewer,
             status: row.status || "pending", live: row.status === "running",
             attempts: row.attempts || 0, escalations: row.escalations || 0,
-            last_verdict: row.last_verdict || null, verify_cmd: t.verify_cmd || ""};
+            last_verdict: row.last_verdict || null, last_bounce: row.last_bounce || null,
+            verify_cmd: t.verify_cmd || ""};
   });
   const edges = [];
   for (const t of tasks) for (const dep of (t.deps || t.depends || [])) {

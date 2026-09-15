@@ -31,7 +31,7 @@ function taskDag(dag, opts) {
   const cols = {};
   nodes.forEach(n => (cols[colOf[lvl[n.id]]] = cols[colOf[lvl[n.id]]] || []).push(n));
   const ncols = Object.keys(cols).length;
-  let NW = 200, NH = 48, GX = 60, GY = 26, PAD = 14, labFs = 0;
+  let NW = 200, NH = 58, GX = 60, GY = 26, PAD = 14, labFs = 0;
   if (mini) {
     NH = 30; GX = 46; GY = 12; PAD = 6;
     // Labels must survive the scale into the ~336px card: effective px =
@@ -80,10 +80,17 @@ function taskDag(dag, opts) {
     const c = topo ? ((dag.starts || []).includes(n.id) ? "#58a6ff" : n.gather ? "#bc8cff" : "#8b949e") : (STATUSC[n.status] || STATUSC.pending);
     const run = !topo && (n.status === "running" || n.live);
     const att = n.attempts || 0, escn = n.escalations || 0;
+    const bnc = n.last_bounce || null;
+    const bounced = !!(bnc && bnc.passed === false && n.status !== "merged" && n.status !== "failed");
+    const bncText = bnc ? `last ${bnc.kind} ${bnc.passed ? "passed" : "FAILED"}` +
+      (bnc.kind === "review" && bnc.n_issues != null ? ` (${bnc.n_issues} issues)` : "") +
+      (bnc.reason ? `: "${String(bnc.reason).replace(/\s+/g, " ").slice(-120)}"` : "") : "";
     const ttip = topo ? [n.id, n.gather ? "gather — joins parallel branches" : (dag.starts || []).includes(n.id) ? "start" : ""].filter(Boolean).join("\n")
       : [n.title || n.id,
       `status: ${n.status}${n.live ? " (live)" : ""}`,
       `impl: ${short(n.model)} · review: ${revShort(n.reviewer)}`,
+      att > 1 || escn ? `fix loop: implement attempt ${att}${escn ? `, escalated x${escn}` : ""}` : "",
+      bncText,
       n.verify_cmd ? `verify: ${n.verify_cmd}` : ""].filter(Boolean).join("\n");
     s += topo
       ? `<g class="node topo" data-node="${attr(n.id)}" role="button" tabindex="0" ` +
@@ -92,7 +99,7 @@ function taskDag(dag, opts) {
         `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="7" fill="#0d1117" stroke="${c}" stroke-width="1.6"/>` +
         `<text x="${p.x + 10}" y="${p.y + 20}" font-size="11" fill="#c9d1d9">${esc(n.id.slice(0, 26))}</text>` +
         `<text x="${p.x + 10}" y="${p.y + 35}" font-size="9" fill="#8b949e">${(dag.starts || []).includes(n.id) ? "start" : n.gather ? "gather" : ""}</text>`
-      : `<g class="node" data-t="${attr(n.id)}" data-f="${attr(opts.file || "")}" role="button" tabindex="0" aria-label="${attr(`task ${n.id}: ${n.status}${n.live ? " (live)" : ""}`)}">` +
+      : `<g class="node" data-t="${attr(n.id)}" data-f="${attr(opts.file || "")}" role="button" tabindex="0" aria-label="${attr(`task ${n.id}: ${n.status}${n.live ? " (live)" : ""}${att > 1 ? `, implement attempt ${att}` : ""}${bounced ? ` — last ${bnc.kind} FAILED` : ""}`)}">` +
          `<title>${esc(ttip)}</title>` +
          `<rect x="${p.x}" y="${p.y}" width="${NW}" height="${NH}" rx="${mini ? 5 : 7}" fill="#0d1117" stroke="${c}" stroke-width="1.6" class="${run ? "run" : ""}"/>` +
          (mini && !labFs ? "" :
@@ -100,6 +107,13 @@ function taskDag(dag, opts) {
          `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 24.5 : 33)}" font-size="${mini ? labFs : 9}" fill="#8b949e">${esc(short(n.model))} → ${esc(revShort(n.reviewer))}${att > 1 ? ` · x${att}` : ""}${escn ? ` ⬆${escn}` : ""}</text>`);
     if (!topo && !mini)
       s += `<text x="${p.x + 10}" y="${p.y + 45}" font-size="9" fill="${c}">${esc(n.status)}${n.live ? " · live" : ""}</text>`;
+    if (!topo && !mini && (att > 1 || escn > 0)) {
+      // Third line: the fix loop is VISIBLE — attempt count, escalations, and
+      // what last sent this node back to code (amber while in flight, muted
+      // once the latest gate/review passed again).
+      const why = bounced ? (bnc.kind === "gate" ? "gate failed" : `review rejected (${bnc.n_issues || 0} issues)`) : "";
+      s += `<text x="${p.x + 10}" y="${p.y + 56}" font-size="9" fill="${bounced ? "#d29922" : "#8b949e"}">${esc(`↺ x${att}${escn ? " ⬆" + escn : ""}${why ? " — " + why : ""}`.slice(0, 38))}</text>`;
+    }
     if (!topo && (att > 1 || escn > 0))
       s += `<path d="M${p.x + NW - 4},${p.y} C${p.x + NW - 4},${p.y - 12} ${p.x + 4},${p.y - 12} ${p.x + 4},${p.y}" stroke="#d29922" stroke-dasharray="3 2" fill="none"/>` +
            `<text x="${p.x + NW / 2}" y="${p.y - 4}" font-size="${mini ? 7 : 8.5}" fill="#d29922" text-anchor="middle">x${att}${escn ? " ⬆" + escn : ""}</text>`;
