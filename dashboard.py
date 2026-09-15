@@ -23,6 +23,7 @@ import socket
 import sqlite3
 import subprocess
 import time
+from collections import OrderedDict
 from datetime import date as _date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -2455,9 +2456,12 @@ def _transcript_tail(fname, tail):
 # The transcript drawer polls every 3 s; a reasonix transcript is ~4 MB, so
 # re-reading and re-reducing the whole file per poll would burn the dashboard
 # process. One reducer per file keeps its stream offset, and a poll consumes
-# only the bytes appended since the last one. Like the other module-level
-# caches here (_gh_cache, _launch_registry) it is mutated without a lock.
-_activity_cache = {}
+# only the bytes appended since the last one. Eviction is LRU: every hit moves
+# the entry to the newest end, so a hot multi-MB transcript cannot be dropped
+# by churn and fully re-parsed (~44k records) on its next poll. Like the other
+# module-level caches here (_gh_cache, _launch_registry) it is mutated without
+# a lock.
+_activity_cache = OrderedDict()
 
 
 def _probe_transcript(data):
@@ -2503,6 +2507,7 @@ def _activity_entry(path):
     ent = _activity_cache.get(pkey)
     if ent is not None:
         if ent["key"] == key:
+            _activity_cache.move_to_end(pkey)   # LRU: a fresh poll renews it
             return ent if ent["shape_ok"] else None
         if not ent["shape_ok"] or st.st_size < ent["key"][0]:
             # The first probe saw nothing recognizable yet (or the file was
@@ -2520,12 +2525,12 @@ def _activity_entry(path):
                 # Shape is decided by the first bytes and never flips; remember
                 # it so a finished kimi file isn't re-probed on every poll.
                 if len(_activity_cache) >= 128:
-                    del _activity_cache[next(iter(_activity_cache))]
+                    _activity_cache.popitem(last=False)
                 _activity_cache[pkey] = {"key": key, "off": 0, "parser": None,
                                          "shape_ok": False}
             return None
         if len(_activity_cache) >= 128:
-            del _activity_cache[next(iter(_activity_cache))]
+            _activity_cache.popitem(last=False)
         ent = {"key": key, "off": off, "parser": TranscriptActivity(), "shape_ok": True}
         ent["parser"].feed(chunk)
         _activity_cache[pkey] = ent
@@ -2540,6 +2545,7 @@ def _activity_entry(path):
     if chunk:
         ent["parser"].feed(chunk)
     ent["key"] = key
+    _activity_cache.move_to_end(pkey)           # LRU: an appended-to file is hot
     return ent
 
 
@@ -2555,8 +2561,21 @@ def _transcript_activity_view(fname, tail):
         return None
     tail = min(max(tail, 1), 400)
     blocks = list(ent["parser"].blocks)
+    pending = ent["parser"].pending()
+    if pending:
+        # A pending line out of a file that stopped growing long ago is not
+        # "thinking right now" — it is what a dead harness was in the middle
+        # of. pending() stays time-pure by design; the staleness read happens
+        # here, the one place the file's mtime is known.
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:
+            age = 0
+        if age >= 60:
+            span = f"{int(age // 60)}m" if age >= 120 else f"{int(age)}s"
+            pending += f" — no new output for {span}, stream may be stalled/dead"
     return {"mode": "activity", "file": fname, "blocks": blocks[-tail:],
-            "pending": ent["parser"].pending(), "total_blocks": len(blocks)}, 200
+            "pending": pending, "total_blocks": ent["parser"].produced}, 200
 
 
 def _prune_registry():

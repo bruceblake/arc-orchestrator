@@ -15,8 +15,10 @@ The tests drive dashboard.Handler.do_GET directly on a socket-less request
 so the whole handler path runs without a server.
 """
 import json
+import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -387,6 +389,35 @@ class HttpParamsTranscript(EndpointCase):
         self.assertNotIn("mode", body)
         self.assertEqual(body["total_lines"], 2)
         self.assertIn('"role": "assistant"', body["lines"][0])
+
+    def test_activity_view_marks_a_stalled_pending_line(self):
+        """An open delta group in a file older than 60 s is not "thinking" —
+        the handler annotates it as a possibly stalled/dead stream. A fresh
+        file with the same open group gets no annotation (pending() itself
+        stays time-pure; only the handler knows the mtime)."""
+        harness = self.tmp / "logs" / "harness"
+        path = harness / "stalled.jsonl"
+        path.write_text(
+            json.dumps({"kind": "reasoning", "messageId": "r1", "attemptId": "a1",
+                        "text": "deep in thought"}) + "\n", encoding="utf-8")
+        old = time.time() - 300
+        os.utime(path, (old, old))
+        dashboard._activity_cache.clear()
+        req = self.get("/api/transcript?file=stalled.jsonl&view=activity")
+        self.assertEqual(req.status, 200)
+        pending = req.json()["pending"]
+        self.assertIn("deep in thought", pending)
+        self.assertIn("no new output for 5m", pending)
+        self.assertIn("stream may be stalled/dead", pending)
+        # Same content, but the file is still being written to: no warning.
+        now = time.time()
+        os.utime(path, (now, now))
+        dashboard._activity_cache.clear()
+        req = self.get("/api/transcript?file=stalled.jsonl&view=activity")
+        self.assertEqual(req.status, 200)
+        pending = req.json()["pending"]
+        self.assertIn("deep in thought", pending)
+        self.assertNotIn("no new output", pending)
 
     def test_activity_view_keeps_the_same_guards_as_the_raw_tail(self):
         """The filename guard is the raw path's; view=activity changes nothing."""

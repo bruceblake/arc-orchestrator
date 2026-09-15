@@ -341,6 +341,7 @@ async function showRunLog(fn) {
   $("#drawer-title").textContent = "run log";
   $("#drawer-sub").textContent = d.error ? "" : `logs/${fn} · last ${(d.lines || []).length} lines`;
   drawerFile = null;
+  $("#drawer-mode").style.display = "none";
   $("#drawer-body").textContent = d.error || (d.lines || []).join("\n") || "(empty)";
 }
 $("#btn-stop").onclick = async () => {

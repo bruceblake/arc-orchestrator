@@ -225,5 +225,27 @@ class JunkTolerance(unittest.TestCase):
         self.assertEqual(a.unknown, 4)
 
 
+class ProducedCounter(unittest.TestCase):
+    """blocks is a bounded window; produced — served as total_blocks — is the
+    true monotonic count. A long run must not saturate the UI at 400."""
+
+    def test_total_keeps_counting_past_maxlen(self):
+        a = TranscriptActivity()
+        a.feed("".join(rx({"kind": "notice", "text": f"n{i}"}) + "\n"
+                       for i in range(500)))
+        a.finish()
+        self.assertEqual(a.produced, 500)
+        self.assertEqual(len(a.blocks), 400)
+        self.assertEqual(list(a.blocks)[-2:], ["— n498", "— n499"])
+
+    def test_produced_never_goes_backwards_on_eviction(self):
+        a = TranscriptActivity(maxlen=5)
+        a.feed("".join(rx({"kind": "notice", "text": f"n{i}"}) + "\n"
+                       for i in range(9)))
+        a.finish()
+        self.assertEqual(a.produced, 9)
+        self.assertEqual(list(a.blocks), [f"— n{i}" for i in range(4, 9)])
+
+
 if __name__ == "__main__":
     unittest.main()

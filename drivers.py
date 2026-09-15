@@ -416,6 +416,10 @@ class TranscriptActivity:
 
     def __init__(self, maxlen=400):
         self.blocks = deque(maxlen=maxlen)
+        # Every block ever emitted. The deque evicts history past maxlen, but
+        # this counter never goes backwards — it is the "total_blocks" the
+        # dashboard reports, so a long run does not saturate at 400.
+        self.produced = 0
         self._rest = ""                    # trailing partial line, not yet a record
         self._delta = []                   # open delta-group text parts
         self._delta_kind = None            # "reasoning" | "text"
@@ -425,6 +429,10 @@ class TranscriptActivity:
         # a reasonix `message` record is the FINAL of its text deltas, and
         # rendering both would double every assistant message.
         self._emitted_text = deque(maxlen=8)
+
+    def _push(self, block):
+        self.blocks.append(block)
+        self.produced += 1
 
     def feed(self, chunk):
         """Consume a piece of the stream; complete records become blocks."""
@@ -502,9 +510,9 @@ class TranscriptActivity:
         if not text:
             return
         if kind == "reasoning":
-            self.blocks.append("💭 " + _fold(text))
+            self._push("💭 " + _fold(text))
         else:
-            self.blocks.append("✎ " + _fold(text))
+            self._push("✎ " + _fold(text))
             self._emitted_text.append((mid, text))
 
     # -- reasonix ({kind: ...}) ---------------------------------------------
@@ -514,11 +522,11 @@ class TranscriptActivity:
         if kind == "tool_dispatch":
             if tool.get("partial"):
                 return                     # streaming stub; the final one follows
-            self.blocks.append("🔧 " + self._tool_line(tool))
+            self._push("🔧 " + self._tool_line(tool))
         elif kind == "tool_result":
             state = tool.get("runState")
             mark = "" if state in ("completed", None) else "✗ "
-            self.blocks.append("   ↳ " + mark + _squash(tool.get("output"))[:220])
+            self._push("   ↳ " + mark + _squash(tool.get("output"))[:220])
         elif kind == "message":
             text = _squash(obj.get("text"))
             if not text:
@@ -526,21 +534,21 @@ class TranscriptActivity:
             for mid, emitted in self._emitted_text:
                 if mid == obj.get("messageId") and emitted == text:
                     return                 # already shown as the ✎ text block
-            self.blocks.append("✉ " + _fold(text, head=300, tail=200))
+            self._push("✉ " + _fold(text, head=300, tail=200))
         elif kind == "user_message":
             text = _squash(obj.get("text"))
             if text:
-                self.blocks.append("▸ " + _fold(text, head=250, tail=150))
+                self._push("▸ " + _fold(text, head=250, tail=150))
         elif kind == "usage" and isinstance(obj.get("usage"), dict):
             u = obj["usage"]
-            self.blocks.append(f"— usage {_kn(u.get('totalTokens'))} tok "
+            self._push(f"— usage {_kn(u.get('totalTokens'))} tok "
                                f"(+{_kn(u.get('completionTokens'))} out, "
                                f"{_kn(u.get('cacheHitTokens'))} cached)")
         elif kind == "notice":
             text = _squash(obj.get("text") or obj.get("message"))
             detail = _squash(obj.get("detail"))
             if text:
-                self.blocks.append(f"— {text}" + (f" ({detail})" if detail else ""))
+                self._push(f"— {text}" + (f" ({detail})" if detail else ""))
         # turn_started/turn_phase/stream_attempt/tool_started/tool_progress/
         # read_status/… : bookkeeping, not activity.
 
@@ -568,7 +576,7 @@ class TranscriptActivity:
             text = obj.get("text")
         mark = "✗" if obj.get("is_error") else "✓"
         body = _squash(text)
-        self.blocks.append(f"{mark} result: " + _fold(body, head=300, tail=200)
+        self._push(f"{mark} result: " + _fold(body, head=300, tail=200)
                            if body else f"{mark} result")
 
     # -- opencode ({type: ...}) ----------------------------------------------
@@ -578,7 +586,7 @@ class TranscriptActivity:
         if typ == "text":
             text = _squash(part.get("text"))
             if text:
-                self.blocks.append("✎ " + _fold(text))
+                self._push("✎ " + _fold(text))
         elif typ == "tool_use":
             state = part.get("state") if isinstance(part.get("state"), dict) else {}
             inp = state.get("input") if isinstance(state.get("input"), dict) else {}
@@ -592,10 +600,10 @@ class TranscriptActivity:
             out = _squash(state.get("output"))
             if out:
                 block += "\n   ↳ " + out[:220]
-            self.blocks.append(block)
+            self._push(block)
         elif typ == "step_finish":
             toks = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
-            self.blocks.append(f"— step ({_kn(toks.get('total'))} tok)")
+            self._push(f"— step ({_kn(toks.get('total'))} tok)")
         # step_start: a step's own step_finish reports its cost.
 
 
