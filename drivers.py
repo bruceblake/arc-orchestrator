@@ -42,9 +42,18 @@ HEARTBEAT_INTERVAL = 15
 
 
 class DriverError(RuntimeError):
-    def __init__(self, message, session_id=None):
+    def __init__(self, message, session_id=None, capacity=False):
         super().__init__(message)
         self.session_id = session_id
+        # Set when the harness exited non-zero because ARC refused the request
+        # (queue full / session limit) rather than because it crashed. The
+        # exited-1 paths in _pump/_pump_dual cannot call the caller's ladders,
+        # so they carry the classification on the exception; Driver.run reads
+        # it so a capacity exit is retried on the capacity backoff and is NOT
+        # stored as a defect. Without this every "backend queue is full" exit
+        # landed in the error triage table as a crash (172 occurrences of one
+        # fingerprint, all capacity).
+        self.capacity = capacity
 
 
 @dataclass
@@ -957,9 +966,14 @@ class Driver:
     # against a cap of 3, and every retry came straight back as a 400).
     # "rate_limit"/"quota" cover dsh's `dsh: RATE_LIMIT:` / `dsh: QUOTA:`
     # error codes on stderr (the others are opencode/kimi/HTTP phrasings).
+    # "queue is full" / "backend queue" cover ARC's newer under-load refusal,
+    # `{"detail":"backend queue is full"}` — the same saturation the marker
+    # list exists for, but no longer worded as a session limit (observed live
+    # 2026-09-15: opencode exits 1 carrying it, and without the marker it was
+    # filed as a crash and counted as a defect).
     _CAPACITY_MARKERS = ("provider.api_error: 400", "status code (no body)",
                          "session limit", "concurrent", "rate limit", "429",
-                         "rate_limit", "quota")
+                         "rate_limit", "quota", "queue is full", "backend queue")
 
     @classmethod
     def is_capacity_error(cls, text):
@@ -1030,7 +1044,14 @@ class Driver:
                     await wait_for_arc(task_id)
                     attempt -= 1
                     continue
-                capacity = self.is_capacity_error(str(exc)) or "unanswered for" in str(exc)
+                # A capacity refusal the harness reported AS an exit-1 (ARC
+                # "backend queue is full") arrives carrying the flag set by
+                # _pump; honour it alongside the text sniff so a queue-full
+                # exit is not captured as a defect and is retried on the
+                # capacity backoff, not the crash ladder.
+                capacity = (getattr(exc, "capacity", False)
+                            or self.is_capacity_error(str(exc))
+                            or "unanswered for" in str(exc))
                 # Capacity errors are expected weather and would swamp triage;
                 # everything else is a defect worth a traceback and a group.
                 fp = None if capacity else errors.capture(
@@ -1276,7 +1297,8 @@ class Driver:
             raise DriverError(
                 f"{argv[0]} {kind} after {limit} "
                 f"(total {total}s, idle {idle}s, {written()} bytes{detail})",
-                session_id=psid or session_id)
+                session_id=psid or session_id,
+                capacity=blocked)  # blocked with no CPU = saturated, not a crash
         err = await err_task
         await proc.wait()
         raw = b"".join(chunks).decode(errors="replace")
@@ -1291,8 +1313,13 @@ class Driver:
             detail = err.decode(errors="replace").strip()
             if not detail:
                 detail = (text or raw).strip()[-300:] or "no output on stdout or stderr"
+            # An exit that carried a capacity refusal (ARC "backend queue is
+            # full" / "concurrent session limit") is expected weather, not a
+            # crash: mark it so Driver.run retries it on the capacity ladder
+            # and skips errors.capture.
             raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}",
-                              session_id=sid or session_id)
+                              session_id=sid or session_id,
+                              capacity=self.is_capacity_error(detail))
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             session_id or sid, str(tpath), text,
                             round(time.monotonic() - t0, 1), toks, ptok, ctok)
@@ -1706,7 +1733,8 @@ class DeepseekDriver(Driver):
             detail = "; process blocked with no CPU burn" if blocked else ""
             raise DriverError(
                 f"{argv[0]} {kind} after {limit} "
-                f"(total {total}s, idle {idle}s, {written()} bytes{detail})")
+                f"(total {total}s, idle {idle}s, {written()} bytes{detail})",
+                capacity=blocked)
         for r in readers:
             await r
         await proc.wait()
@@ -1719,7 +1747,8 @@ class DeepseekDriver(Driver):
             detail = err.strip()
             if not detail:
                 detail = out.strip()[-300:] or "no output on stdout or stderr"
-            raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}")
+            raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}",
+                              capacity=self.is_capacity_error(detail))
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             None, str(tpath), out.strip()[-3000:],
                             round(time.monotonic() - t0, 1), 0, 0, 0)
