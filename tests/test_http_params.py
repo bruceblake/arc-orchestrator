@@ -328,6 +328,73 @@ class HttpParamsTranscript(EndpointCase):
         self.assertEqual(body["total_lines"], 3)
         self.assertEqual(body["lines"], self.lines)
 
+    def _activity_body(self, name, lines, query=""):
+        harness = self.tmp / "logs" / "harness"
+        (harness / name).write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+        dashboard._activity_cache.clear()
+        req = self.get(f"/api/transcript?file={name}&view=activity" + query)
+        self.assertEqual(req.status, 200)
+        return req.json()
+
+    def test_activity_view_reduces_a_reasonix_transcript(self):
+        """view=activity answers folded blocks plus the still-open group as
+        `pending` — the raw tail of the same file would be useless scraps."""
+        body = self._activity_body("rx.jsonl", [
+            json.dumps({"kind": "user_message", "messageId": "u1", "text": "do the thing"}),
+            json.dumps({"kind": "reasoning", "messageId": "r1", "attemptId": "a1", "text": "let me "}),
+            json.dumps({"kind": "reasoning", "messageId": "r1", "attemptId": "a1", "text": "think"}),
+            json.dumps({"kind": "tool_dispatch", "tool": {
+                "id": "c1", "name": "bash", "args": json.dumps({"command": "ls"})}}),
+            json.dumps({"kind": "tool_result", "tool": {
+                "runState": "completed", "id": "c1", "name": "bash", "output": "ok"}}),
+            json.dumps({"kind": "reasoning", "messageId": "r2", "attemptId": "a1", "text": "pondering"}),
+        ])
+        self.assertEqual(body["mode"], "activity")
+        self.assertEqual(body["total_blocks"], len(body["blocks"]))
+        self.assertEqual(body["blocks"], ["▸ do the thing", "💭 let me think",
+                                          "🔧 bash ls", "   ↳ ok"])
+        self.assertIn("thinking", body["pending"])   # the r2 group is still open
+        self.assertIn("pondering", body["pending"])
+
+    def test_activity_view_catches_up_incrementally(self):
+        """A second poll after the file grew must see only the new records —
+        not re-render what it already served, and never corrupt on a partial
+        trailing line."""
+        first = self._activity_body("grow.jsonl", [
+            json.dumps({"kind": "reasoning", "messageId": "r1", "attemptId": "a1", "text": "one"}),
+            json.dumps({"kind": "notice", "text": "n1"}),
+        ])
+        self.assertEqual(first["blocks"], ["💭 one", "— n1"])
+        path = self.tmp / "logs" / "harness" / "grow.jsonl"
+        with open(path, "a", encoding="utf-8") as fh:   # the run appends a partial…
+            fh.write(json.dumps({"kind": "notice", "text": "n2"})[:20])
+        req = self.get("/api/transcript?file=grow.jsonl&view=activity")
+        self.assertEqual(req.status, 200)
+        self.assertEqual(req.json()["blocks"], ["💭 one", "— n1"])   # …held, not mangled
+        with open(path, "a", encoding="utf-8") as fh:   # …then completes it
+            fh.write(json.dumps({"kind": "notice", "text": "n2"})[20:] + "\n")
+        req = self.get("/api/transcript?file=grow.jsonl&view=activity")
+        self.assertEqual(req.status, 200)
+        self.assertEqual(req.json()["blocks"], ["💭 one", "— n1", "— n2"])
+
+    def test_activity_view_falls_back_to_raw_for_kimi_shaped_files(self):
+        """A kimi-cli transcript is not reducible: the answer is today's raw
+        tail, so the drawer renders it exactly as before."""
+        body = self._activity_body("kimi.jsonl", [
+            json.dumps({"role": "assistant", "content": "hi", "tool_calls": []}),
+            json.dumps({"role": "tool", "content": "out"}),
+        ])
+        self.assertNotIn("mode", body)
+        self.assertEqual(body["total_lines"], 2)
+        self.assertIn('"role": "assistant"', body["lines"][0])
+
+    def test_activity_view_keeps_the_same_guards_as_the_raw_tail(self):
+        """The filename guard is the raw path's; view=activity changes nothing."""
+        req = self.get("/api/transcript?file=bad:name.jsonl&view=activity")
+        self.assert_error(req, 400)
+        req = self.get("/api/transcript?file=ghost.jsonl&view=activity")
+        self.assert_error(req, 404)
+
     def test_tail_parameter_limits_the_lines_returned(self):
         """The drawer asks for the last N lines; the answer is that suffix."""
         req = self.get("/api/transcript?file=t1-implementer-x1.jsonl&tail=2")

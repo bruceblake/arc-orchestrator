@@ -213,6 +213,7 @@ async function showGateLog(fn) {
   $("#drawer-title").textContent = "verify gate output";
   $("#drawer-sub").textContent = d.error ? "" : `${fn} · ${d.total_lines} lines`;
   drawerFile = null;
+  $("#drawer-mode").style.display = "none";
   $("#drawer-body").textContent = d.error || (d.lines || []).join("\n");
 }
 document.addEventListener("click", ev => {

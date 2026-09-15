@@ -217,6 +217,7 @@ async function loadDeliverable(tid, host) {
     $("#drawer-title").textContent = `${tid} — what changed`;
     $("#drawer-sub").textContent = full.summary || "";
     drawerFile = null;                       // static content, do not poll
+    $("#drawer-mode").style.display = "none";
     $("#drawer-body").textContent =
       (full.patch || "(empty)") + (full.truncated ? "\n\n… diff truncated" : "");
   });

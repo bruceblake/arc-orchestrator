@@ -3,6 +3,7 @@ const $ = s => document.querySelector(s);
 let SHOW_ARCHIVED = false, PHASE_FILT = "", OPEN_PHASES = {};
 let PROJECTS = [], AGENTS = [], RECENT = [], FLEET = null;
 let CUR = null, CUR_DATA = null, CUR_PID = null, detailTimer = null, drawerFile = null;
+let drawerView = "activity";
 let FILT = {r: "", s: "", m: "", q: ""}, EXPANDED = "";
 // Glyph cue that survives greyscale (colour alone must not carry status).
 const STATUSG = {merged: " ✓", done: " ✓", running: " …", failed: " ✗", conflict: " !", pending: " ○", skipped: " ⊘"};

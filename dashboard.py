@@ -2452,6 +2452,113 @@ def _transcript_tail(fname, tail):
     return {"file": fname, "total_lines": len(lines), "lines": lines[-tail:]}, 200
 
 
+# The transcript drawer polls every 3 s; a reasonix transcript is ~4 MB, so
+# re-reading and re-reducing the whole file per poll would burn the dashboard
+# process. One reducer per file keeps its stream offset, and a poll consumes
+# only the bytes appended since the last one. Like the other module-level
+# caches here (_gh_cache, _launch_registry) it is mutated without a lock.
+_activity_cache = {}
+
+
+def _probe_transcript(data):
+    """True when the first ~8 KB look like a reasonix or opencode transcript.
+
+    Anything else (kimi-cli's role/tool_calls records, zero-byte files left by
+    a killed run) gets the raw tail, exactly as before this view existed.
+    """
+    probe = data[:8192]
+    lines = probe.splitlines()
+    if len(probe) == 8192 and lines:
+        lines = lines[:-1]      # the cut may have split this line mid-record
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if isinstance(obj.get("kind"), str):
+            return True
+        if obj.get("type") in ("result", "text", "tool_use", "step_start", "step_finish"):
+            return True
+    return False
+
+
+def _activity_entry(path):
+    """The cache entry for one transcript, caught up to the file's current end.
+
+    None when the file cannot be read or its shape is not one the reducer
+    understands — the caller then serves the raw tail.
+    """
+    from drivers import TranscriptActivity
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    key = (st.st_size, st.st_mtime_ns)
+    pkey = str(path)
+    ent = _activity_cache.get(pkey)
+    if ent is not None:
+        if ent["key"] == key:
+            return ent if ent["shape_ok"] else None
+        if not ent["shape_ok"] or st.st_size < ent["key"][0]:
+            # The first probe saw nothing recognizable yet (or the file was
+            # rewritten — a shrunk file invalidates the saved offset).
+            ent = None
+    if ent is None:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                chunk = fh.read()
+                off = fh.tell()
+        except OSError:
+            return None
+        if not _probe_transcript(chunk):
+            if chunk:
+                # Shape is decided by the first bytes and never flips; remember
+                # it so a finished kimi file isn't re-probed on every poll.
+                if len(_activity_cache) >= 128:
+                    del _activity_cache[next(iter(_activity_cache))]
+                _activity_cache[pkey] = {"key": key, "off": 0, "parser": None,
+                                         "shape_ok": False}
+            return None
+        if len(_activity_cache) >= 128:
+            del _activity_cache[next(iter(_activity_cache))]
+        ent = {"key": key, "off": off, "parser": TranscriptActivity(), "shape_ok": True}
+        ent["parser"].feed(chunk)
+        _activity_cache[pkey] = ent
+        return ent
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(ent["off"])
+            chunk = fh.read()
+            ent["off"] = fh.tell()
+    except OSError:
+        return None
+    if chunk:
+        ent["parser"].feed(chunk)
+    ent["key"] = key
+    return ent
+
+
+def _transcript_activity_view(fname, tail):
+    """A transcript reduced to readable activity blocks, or None for the raw path."""
+    if not _TRANSCRIPT_RE.fullmatch(fname or ""):
+        return None
+    path = Path(config.ROOT) / "logs" / "harness" / fname
+    if not path.is_file():
+        return None
+    ent = _activity_entry(path)
+    if ent is None:
+        return None
+    tail = min(max(tail, 1), 400)
+    blocks = list(ent["parser"].blocks)
+    return {"mode": "activity", "file": fname, "blocks": blocks[-tail:],
+            "pending": ent["parser"].pending(), "total_blocks": len(blocks)}, 200
+
+
 def _prune_registry():
     for key, rec in list(_launch_registry.items()):
         pid = rec.get("pid")
@@ -3677,11 +3784,18 @@ class Handler(BaseHTTPRequestHandler):
                                    "lines": lines[-200:]})
             if u.path == "/api/transcript":
                 q = parse_qs(u.query)
-                tail = q.get("tail", ["200"])[0]
+                activity = q.get("view", [""])[0] == "activity"
+                tail = q.get("tail", ["150" if activity else "200"])[0]
                 try:
                     tail = min(max(int(tail), 1), 1000)
                 except ValueError:
-                    tail = 200
+                    tail = 150 if activity else 200
+                if activity:
+                    out = _transcript_activity_view(q.get("file", [""])[0], tail)
+                    if out is not None:
+                        # kimi-shaped or unknown transcripts resolve to None
+                        # here and fall through to the raw tail below.
+                        return self._json(*out)
                 obj, code = _transcript_tail(q.get("file", [""])[0], tail)
                 return self._json(obj, code)
             if u.path == "/api/summary":
