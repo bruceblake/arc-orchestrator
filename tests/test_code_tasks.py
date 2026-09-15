@@ -992,7 +992,7 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
     def test_a_model_at_its_cap_is_never_preferred_to_an_idle_one(self):
         """THE RULE: an idle model beats one already at its cap, whatever the
         caps are and whichever model holds them. Numbers come from today's
-        roster (DeepSeek driver cap 5, GLM 2 with two models); the assertion
+        roster (DeepSeek driver cap 5, GLM 1 with two models); the assertion
         is on the ordering, not on which model won."""
         caps = {m: config.driver_limit(m) for m in DISTINCT_MODELS}
         if len(caps) < 2:

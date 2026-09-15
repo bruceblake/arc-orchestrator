@@ -242,10 +242,12 @@ GLM-5.3            2   ← hard implementers + planner/reviewers (opencode)
 Two mechanisms keep a driver cap below its account cap.
 
 The first is the sessions-per-process factor: an opencode run holds about two
-ARC sessions at once (parallel tool calls), and dsh is assumed to behave the
-same way (`config._SESSIONS_PER_PROCESS`, unmeasured for dsh as of
-2026-09-12), so both caps are the account cap
-**divided by two** — DeepSeek 10 → 5, GLM 4 → 2. Setting a
+ARC sessions at once (parallel tool calls), and reasonix is assumed to behave
+the same way (`config._SESSIONS_PER_PROCESS` = `{"opencode": 2, "reasonix": 2}`,
+unmeasured for reasonix as of 2026-09-14), so both caps are the account cap
+**divided by two** — DeepSeek 10 → 5, GLM 3 → 1 (GLM's account cap was revised
+4 → 3 on 2026-09-14 per the backend's own rejection text; it was 4 → 2 before).
+Setting a
 cap equal to the session limit asks for twice the budget and the
 fleet generates its own 400s. On top of the division, `ARC_DRIVER_HEADROOM`
 (default 0) subtracts a flat reserve per model.
@@ -257,15 +259,16 @@ interactive sessions, so the orchestrator must leave room for them:
   planner model (GLM-5.3) one slot **fewer** (`INTERACTIVE_RESERVE`, default 1)
   — but **only while it still leaves batch at least two slots**
   (`_apply_reserve`, config.py:767-779; `MIN_BATCH_SLOTS` = 2). GLM-5.3's
-  driver cap is 2, so the reserve is **not** applied and its batch cap stays
-  **2**: an interactive chat queues behind the fleet rather than cutting the
-  planner to a single slot. It is reserved only on the planner model —
+  driver cap is 1, so the reserve is **not** applied and its batch cap stays
+  **1**: at one slot there is nothing left to shave — an interactive chat
+  queues behind the fleet rather than cutting the planner to zero. It is
+  reserved only on the planner model —
   applying it to every model halved GLM and DeepSeek to protect a path neither
   of them serves.
 - With `ARC_DRIVER_HEADROOM=1` every model's cap drops by one, leaving a
-  measured slot for your own `opencode` or `dsh` session during a run.
+  measured slot for your own `opencode` or `reasonix` session during a run.
 
-So on a machine where `opencode` and `dsh` are also used by hand, a run
+So on a machine where `opencode` and `reasonix` are also used by hand, a run
 does not starve the interactive agents.
 
 ## 3. Semaphore queueing — what actually happens
@@ -306,12 +309,13 @@ the DAG in `graph.py` plus the per-model driver semaphores in `drivers.py`.
    no "queue the leftover tasks in a list and run the most important first".
 
 Net effect: with a big task batch, **all** runnable no-dep tasks are dispatched
-and the extra ones park on the DeepSeek semaphore (the tightest cap, 5, on the
-harness that carries the implementation load). That is
+and the extra ones park on the model semaphores — DeepSeek's (5) carries the
+implementation load; GLM's (1, since 2026-09-14) is the tightest in the fleet.
+That is
 why the effective parallelism of a run is governed by the driver caps — in
-practice **DeepSeek-V4.1-Flash-thinking-max (5)** and then **GLM-5.3 (2)**
+practice **DeepSeek-V4.1-Flash-thinking-max (5)** and then **GLM-5.3 (1)**
 bound a batch, and every review of DeepSeek work lands on GLM-5.3 and competes
-with the planner for the two opencode slots.
+with the planner for its single slot.
 
 ## 4. Environment overrides
 
@@ -415,7 +419,7 @@ does nothing.
 
 A task file has 12 tasks: 8 medium (DeepSeek-V4.1-Flash-thinking-max) and 4
 hard (GLM-5.3), all with no `deps` (so all
-are graph start nodes and become runnable at once). Driver caps: GLM-5.3 = 2,
+are graph start nodes and become runnable at once). Driver caps: GLM-5.3 = 1,
 DeepSeek-V4.1-Flash-thinking-max = 5 — and the two harness pools are separate,
 5 wide for opencode (GLM) and 7 wide for reasonix (DeepSeek).
 
@@ -424,25 +428,26 @@ per-model cap bites first:
 
 | Implementer | Need | Cap | Runs? |
 |---|---|---|---|
-| GLM-5.3 | 4 | 2 | 2 run, 2 queue on the model semaphore |
+| GLM-5.3 | 4 | 1 | 1 runs, 3 queue on the model semaphore |
 | DeepSeek-V4.1-Flash-thinking-max | 8 | 5 | 5 run, 3 queue on the model semaphore |
 
-**All 12 implementations do not run concurrently** in the first wave: 7 run
-(2 opencode + 5 reasonix) against the two pools' 5 + 7, and the rest park in FIFO
+**All 12 implementations do not run concurrently** in the first wave: 6 run
+(1 opencode + 5 reasonix) against the two pools' 5 + 7, and the rest park in FIFO
 order on `drivers._gate(model)`.
 
 **What queues next — the reviews.** Cross-review is family-based: the 8
 DeepSeek tasks are all reviewed by `glm` (GLM-5.3), and the 4 GLM tasks are
 reviewed by `deepseek`. That is eight review firings on GLM-5.3 against a
-driver cap of 2, behind the 2 hard implementations already holding those
-slots; the four DeepSeek reviews share DeepSeek's cap of 5 with the medium
+driver cap of 1, behind the 1 hard implementation already holding that
+slot; the four DeepSeek reviews share DeepSeek's cap of 5 with the medium
 implementations still draining.
 
-**Why this is the bottleneck.** GLM-5.3 (cap 2) paces everything routed to it
+**Why this is the bottleneck.** GLM-5.3 (cap 1) paces everything routed to it
 — the hard implementations AND every review of DeepSeek work, including the
 planner's own slot — while DeepSeek's 7-wide reasonix pool drains the medium work.
-The per-process ceiling of 7 is approached only when a batch is heavy on
-medium work and GLM-side reviews at the same time.
+Every GLM-side step of a batch is serialized through a single driver slot:
+plan first, then hard implementations and reviews one at a time, in FIFO
+order.
 
 ## Cross-references
 

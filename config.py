@@ -808,8 +808,9 @@ _MODEL_DRIVER_CAP = {
 # ceiling: every opencode-backed model shares ONE local harness, and that
 # harness serialises through a single ~240MB sqlite db in
 # ~/.local/share/opencode. On the two-model fleet (2026-09-12) only GLM-5.3
-# runs opencode — DeepSeek moved to its own `dsh` harness — so the opencode
-# pool sees GLM's 2 against its cap of 5. The retired three-model fleet put
+# runs opencode — DeepSeek moved to its own `reasonix` harness (2026-09-14,
+# replacing `dsh`) — so the opencode pool sees GLM's 1 driver slot against
+# the harness's cap of 5. The retired three-model fleet put
 # GLM 4 + DeepSeek 5 + gpt-oss 5 = 14 concurrent opencode processes against
 # it, and measured on this machine (identical prompt, warm cache):
 #
