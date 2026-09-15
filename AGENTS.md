@@ -593,7 +593,11 @@ processes and move git refs on the same terms.
   `chain.blocked` (Rule 9).
 - The dashboard Projects DAG view renders the loops: fix-loop attempts as
   dashed amber self-arcs with xN counts, `conflict` nodes in **orange**
-  (distinct from `failed` red), and the last review verdict on each node.
+  (distinct from `failed` red), the last review verdict on each node, and —
+  on any node that has been sent back to code — a third status line
+  `↺ xN (⬆M) — gate failed | review rejected (k issues)` in amber while the
+  latest bounce is unresolved (muted grey once the newest gate/review passed
+  again), with the full reason tail on the tooltip.
 - Harness-level resilience: there is **no total wall-clock budget** by
   default (`config.DRIVER_TIMEOUT` and the per-role `config.ROLE_TIMEOUT`
   map are all 0 = unlimited since 2026-09-14; opt a cap back in via

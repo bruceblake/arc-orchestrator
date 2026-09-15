@@ -1637,9 +1637,12 @@ def _project_phase(statuses, ids, run_pid):
 def _task_loop_stats(store, task_ids):
     """Fix-loop stats per base task id: implement-attempt max (harness_runs is
     authoritative), task.escalated/task.conflict event counts, newest reviewer
-    verdict as {"pass", "n_issues"} (or None)."""
+    verdict as {"pass", "n_issues"} (or None), and the newest gate/review
+    outcome as last_bounce (or None) — what last sent this task back to
+    code."""
     want = [i for i in (task_ids or []) if i]
-    stats = {i: {"attempts": 0, "escalations": 0, "conflicts": 0, "last_verdict": None}
+    stats = {i: {"attempts": 0, "escalations": 0, "conflicts": 0,
+                 "last_verdict": None, "last_bounce": None}
              for i in want}
     if not want:
         return stats
@@ -1668,7 +1671,8 @@ def _task_loop_stats(store, task_ids):
                                      "n_issues": len(v.get("issues") or [])}
                 verdict_seen.add(base)
     for ln in _load_event_lines():
-        if '"task.escalated"' not in ln and '"task.conflict"' not in ln:
+        if ('"task.escalated"' not in ln and '"task.conflict"' not in ln
+                and '"task.gate"' not in ln and '"task.reviewed"' not in ln):
             continue
         try:
             e = json.loads(ln)
@@ -1677,10 +1681,25 @@ def _task_loop_stats(store, task_ids):
         base, _x = _xkey(e.get("task") or e.get("module"))
         if base not in stats:
             continue
-        if e.get("type") == "task.escalated":
+        etype = e.get("type")
+        if etype == "task.escalated":
             stats[base]["escalations"] += 1
-        elif e.get("type") == "task.conflict":
+        elif etype == "task.conflict":
             stats[base]["conflicts"] += 1
+        elif etype == "task.gate":
+            # Oldest-to-newest walk: last write wins, so this lands on the
+            # outcome that most recently passed or bounced the task.
+            tail = (e.get("tail") or "").strip()
+            stats[base]["last_bounce"] = {
+                "kind": "gate", "passed": bool(e.get("passed")),
+                "attempt": e.get("attempt"),
+                "reason": tail[-160:] or None,
+                "n_issues": None, "ts": e.get("ts")}
+        elif etype == "task.reviewed":
+            stats[base]["last_bounce"] = {
+                "kind": "review", "passed": bool(e.get("passed")),
+                "attempt": None, "reason": None,
+                "n_issues": e.get("n_issues"), "ts": e.get("ts")}
     return stats
 
 
@@ -1945,7 +1964,8 @@ def _projects(store):
                     "attempts": ls.get("attempts", 0),
                     "escalations": ls.get("escalations", 0),
                     "conflicts": ls.get("conflicts", 0),
-                    "last_verdict": ls.get("last_verdict")}
+                    "last_verdict": ls.get("last_verdict"),
+                    "last_bounce": ls.get("last_bounce")}
             nodes.append(node)
         edges = []
         for t in tdefs:
