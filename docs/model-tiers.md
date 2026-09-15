@@ -17,15 +17,25 @@ Two models, two harnesses (operator decision 2026-09-12):
 | GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
 
+Context windows and defaults per the official ARC docs
+(https://www.docs.arc.vt.edu/ai/011_llm_api_arc_vt_edu.html, checked
+2026-09-15): **GLM-5.3** 128k context, concurrency 4, default
+`reasoning_effort` max; **DeepSeek-V4.1-Flash** (and all thinking variants)
+512k context, concurrency 10, default `reasoning_effort` high.
+
 **GLM-5.3 is the fleet's strongest model** — hard tier, the planner, the last
 escalation stage. **DeepSeek-V4.1-Flash-thinking-max (DS-max) is the
 medium-tier workhorse**: much faster, carries the implementation load,
 reviews, and **never plans**.
 
-- **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 3,
-  `deepseek` 10). GLM's 3 is the ceiling the backend itself reported on
-  2026-09-14 (`max 3 in flight per user`, seen with zero fleet drivers alive;
-  it revises the historical measured 4); the
+- **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 4,
+  `deepseek` 10). GLM's 4 is the official ARC docs value (docs.arc.vt.edu,
+  adopted 2026-09-15 per operator directive); the backend's rejection text
+  deviated from it twice — `max 3 in flight per user` on 2026-09-14 (seen
+  with zero fleet drivers alive) and `max 5 in flight` on 2026-09-15 — both
+  dated observations of an account cap shared with other consumers of the
+  key, absorbed by the lease + capacity backoff rather than repinned from.
+  The
   deepseek 10 is **provider-published**
   (ARC docs, 2026-09-12), not a ramped measurement like the retired
   fleet's figures — re-measure it if observed rejections disagree.
@@ -36,14 +46,14 @@ reviews, and **never plans**.
   It is the account cap divided by sessions-per-process (both harnesses hold
   about two ARC sessions at once: `config._SESSIONS_PER_PROCESS` is
   `{"opencode": 2, "reasonix": 2}`), so 10 ÷ 2 = 5
-  and 3 ÷ 2 = 1 (GLM's account cap 4 → 3 on 2026-09-14 per the
-  backend's own rejection text, above). `ARC_DRIVER_HEADROOM` subtracts further;
+  and 4 ÷ 2 = 2. `ARC_DRIVER_HEADROOM` subtracts further;
   batch callers on the
   planner model would see one slot fewer (`INTERACTIVE_RESERVE`), but
   `_apply_reserve` skips the reserve while it would leave batch under
-  `MIN_BATCH_SLOTS` = 2 — and GLM-5.3's cap **is** 1, so no reserve is applied
-  there (an interactive chat queues instead; at one slot there is nothing
-  left to cut).
+  `MIN_BATCH_SLOTS` = 2 — and GLM-5.3's cap **is** 2, so no reserve is applied
+  there either (2 − 1 leaves batch under two; an interactive chat queues
+  instead). `ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM if the backend
+  tightens persistently.
 - GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
   **`reasonix`** (`drivers.ReasonixDriver`, binary via `config.reasonix_bin()`).
   The driver caps apply per model; the **harness** pools are separate —

@@ -86,9 +86,16 @@ class Family:
 FAMILIES = {
     "glm": Family(
         "glm",
-        # 3, not the historical 4: the backend's own rejection text of
-        # 2026-09-14 stated "max 3 in flight per user on this backend".
-        3,
+        # 4, the official ARC docs value (docs.arc.vt.edu model table, checked
+        # 2026-09-15: GLM-5.3 = 128k context, concurrency 4), adopted per
+        # operator directive. Live rejections have twice deviated from the
+        # table — "max 3 in flight per user on this backend" on 2026-09-14,
+        # "max 5 in flight" on 2026-09-15 — so other consumers of the key
+        # clearly share it; the lease + capacity backoff absorb those dips
+        # rather than us pinning the config to a transient observation. The
+        # derived driver cap is 4 // 2 = 2; ARC_LIMIT_GLM/ARC_DRIVER_LIMIT_GLM
+        # restore tighter behaviour if the backend tightens again.
+        4,
         {
             "default": "GLM-5.3",
             "high": "GLM-5.3-thinking-high",
@@ -430,15 +437,17 @@ ROSTER = [
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
     # Operator decision (2026-09-12): GLM-5.3 is the fleet's strongest model —
-    # hard tier, the planner, the last escalation stage. The cap was 4 until
-    # 2026-09-14, when the backend's own rejection text said "concurrent
-    # session limit reached for model 'GLM-5.3' (max 3 in flight per user on
-    # this backend)" — repeatedly, including once with ZERO fleet drivers
-    # alive, so other consumers of the key were holding the slots. True
-    # ceiling is 3; the derived driver cap 3 // 2 = 1 serialises GLM
-    # harnesses across processes through the lease table, which is what stops
-    # two of our own runs from 400ing each other against this small cap.
-    ("GLM-5.3",             "glm",      "opencode", "hard",   3,
+    # hard tier, the planner, the last escalation stage. Its cap is 4, the
+    # official ARC docs value (docs.arc.vt.edu, checked 2026-09-15), adopted
+    # per operator directive. Two live deviations from the table have been
+    # observed and are recorded as dated events rather than stated values:
+    # "max 3 in flight per user on this backend" on 2026-09-14 (basis of
+    # PR #59's pin to 3, since reverted) and "max 5 in flight" on 2026-09-15
+    # — other consumers of the key share the account cap. The derived driver
+    # cap 4 // 2 = 2 lets the two in-house runs share GLM; dips below 4 are
+    # absorbed by the lease + capacity backoff. ARC_DRIVER_LIMIT_GLM=1
+    # re-serialises GLM harnesses if the backend tightens persistently.
+    ("GLM-5.3",             "glm",      "opencode", "hard",   4,
      ALL_ROLES,                                            None,         None),
     # Operator decision (2026-09-12): DeepSeek-V4.1-Flash-thinking-max is the
     # medium-tier workhorse — it implements and reviews/PR-reviews, never
@@ -809,7 +818,7 @@ _MODEL_DRIVER_CAP = {
 # harness serialises through a single ~240MB sqlite db in
 # ~/.local/share/opencode. On the two-model fleet (2026-09-12) only GLM-5.3
 # runs opencode — DeepSeek moved to its own `reasonix` harness (2026-09-13,
-# replacing `dsh`) — so the opencode pool sees GLM's 1 driver slot against
+# replacing `dsh`) — so the opencode pool sees GLM's 2 driver slots against
 # the harness's cap of 5. The retired three-model fleet put
 # GLM 4 + DeepSeek 5 + gpt-oss 5 = 14 concurrent opencode processes against
 # it, and measured on this machine (identical prompt, warm cache):
@@ -881,9 +890,12 @@ def harness_limit(harness):
 # twenty minutes for a planner that is working perfectly.
 #
 # Reserved ONLY on the planner model, and only while that leaves batch at least
-# two slots. Applying it to every model took GLM and DeepSeek from 2 to 1 —
-# halving fleet throughput to protect a path neither of them serves. The cost
-# should fall on the one model chat actually uses.
+# two slots. Applying it to every model is wrong: it once took GLM and DeepSeek
+# from 2 to 1 — halving fleet throughput to protect a path batch work never
+# uses. The MIN_BATCH_SLOTS guard also makes the planner's own reserve inert
+# while the planner's driver cap is 2 (2 - 1 < 2 leaves batch too little, so
+# batch and interactive both see the full 2). The cost of a reserve should fall
+# on the one model chat actually uses, and only when it can afford to give.
 INTERACTIVE_RESERVE = int(os.getenv("ARC_INTERACTIVE_RESERVE", "1"))
 MIN_BATCH_SLOTS = 2
 
