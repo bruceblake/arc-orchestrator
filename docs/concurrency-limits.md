@@ -239,16 +239,18 @@ within the TTL. All of this is in addition to — never instead of — the
 semaphore: the semaphore is the fast in-process path, the lease is the
 cross-process truth.
 
-Summing the driver caps: **5 + 2 = 7**. That is the maximum number
+Summing the driver caps a batch run actually sees: **5 + 3 = 8** (GLM's
+pinned cap of 4 minus the `INTERACTIVE_RESERVE` slot held back for chat;
+raw semaphore caps are 5 + 4 = 9). That is the maximum number
 of harness instances one orchestrator run can have in flight at once, and it
 fits inside the two harness pools: DeepSeek's 5 into the 7-wide reasonix pool,
-GLM's 2 into the 5-wide opencode pool.
+GLM's 3 into the 5-wide opencode pool.
 
 ```
 DeepSeek-V4.1-max  5   ← medium implementers + reviewers/PR-reviewers (reasonix)
-GLM-5.3            2   ← hard implementers + planner/reviewers (opencode)
-────────────────
-                   7   per-process ceiling
+GLM-5.3            3   ← hard implementers + planner/reviewers (opencode,
+────────────────       cap 4, one slot reserved for interactive chat)
+                   8   per-process batch ceiling
 ```
 
 ## 2. Why driver caps sit below account caps
