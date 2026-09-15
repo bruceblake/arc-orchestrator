@@ -145,11 +145,28 @@ class RoutingInvariants(unittest.TestCase):
         rejections in four hours, GLM refused with as few as two drivers live.
         """
         for model, sessions in config._MEASURED_CONCURRENCY.items():
+            if model in config._DRIVER_CAP_PIN:
+                continue  # pinned caps are held to the account budget below
             per_proc = config._SESSIONS_PER_PROCESS[config._harness_of_model(model)]
             self.assertLessEqual(
                 config.driver_limit(model) * per_proc, sessions,
                 f"{model}: {config.driver_limit(model)} drivers x {per_proc} "
                 f"sessions each exceeds its {sessions}-session budget")
+
+    def test_a_pinned_driver_cap_never_exceeds_its_account_session_budget(self):
+        """A pin overrides the //2 conservatism, never the account ceiling.
+
+        GLM-5.3 is pinned at its account's full 4 (operator directive
+        2026-09-15: in-flight GLM sessions tracked one per harness, so the
+        derived //2 cap fed half the fleet's GLM work through half the paid
+        slots). What a pin may never do is exceed the sessions the account is
+        granted — that would be the over-subscription bug above, one level up.
+        """
+        for model, pin in config._DRIVER_CAP_PIN.items():
+            self.assertLessEqual(
+                pin, config._MEASURED_CONCURRENCY[model],
+                f"{model}: pinned driver cap {pin} exceeds the account's "
+                f"{config._MEASURED_CONCURRENCY[model]}-session budget")
 
     def test_driver_caps_leave_headroom_under_the_account_cap(self):
         """Driver caps must reserve room for interactive use of the account."""

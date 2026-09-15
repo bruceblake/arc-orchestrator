@@ -85,7 +85,7 @@ Routing is decided at plan time (by GLM-5.3 in
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
 
 **GLM-5.3 is the fleet's strongest model** — operator decision 2026-09-12:
@@ -446,7 +446,7 @@ merged work.
 | Layer | Where | deepseek | glm | Override |
 |---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | `ARC_LIMIT_<FAMILY>` |
-| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once (GLM is pinned at its full account budget, `config._DRIVER_CAP_PIN`) | 5 | 4 | `ARC_DRIVER_LIMIT_<FAMILY>` |
 | **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | reasonix (deepseek): **7** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
@@ -466,11 +466,18 @@ were alive, so other consumers of the key held slots) and "max 5 in flight" on
 stated value: GLM's ceiling is the official docs value 4 (docs.arc.vt.edu,
 adopted per operator directive 2026-09-15).
 Driver caps are
-therefore sessions // sessions-per-process; opencode and reasonix hold two each
-(`config._SESSIONS_PER_PROCESS`), so GLM 4 // 2 = 2 and DeepSeek 10 // 2 = 5.
-GLM's two driver slots are shared across processes through the lease table
+therefore sessions // sessions-per-process for the non-pinned models;
+opencode and reasonix hold two each
+(`config._SESSIONS_PER_PROCESS`), so DeepSeek 10 // 2 = 5. GLM-5.3's driver
+cap is PINNED at the account's full 4 (`config._DRIVER_CAP_PIN`, operator
+directive 2026-09-15): in-flight GLM sessions tracked one per harness, so
+halving threw away half the slots the account grants — an over-cap burst
+surfaces as 400s the capacity backoff retries.
+GLM's four driver slots are shared across processes through the lease table
 (`driver.cap_wait`), so dips below 4 in the account cap surface as waits and
-retried 400s the backoff absorbs rather than self-inflicted failures;
+retried 400s the backoff absorbs rather than self-inflicted failures; batch
+callers see one slot fewer (3) while `INTERACTIVE_RESERVE` holds one back for
+chat, and `ARC_INTERACTIVE_RESERVE=0` hands batch all four.
 `ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM harnesses if the backend tightens
 persistently.
 gpt-oss and DeepSeek were previously configured at 8 against a real
@@ -482,7 +489,7 @@ one.** Each harness now has its OWN pool, because the two models no longer
 share a binary: **opencode (GLM-5.3) is capped at 5 and reasonix (DeepSeek) at 7**
 (`config._HARNESS_CAP`). Every opencode-backed model runs through ONE local
 binary backed by ONE ~240MB sqlite store in `~/.local/share/opencode`, so
-GLM's driver cap of 2 sits well under the opencode pool — the retired
+GLM's driver cap of 4 sits just under the opencode pool — the retired
 three-model fleet's GLM 2 + DeepSeek 5 = 7 opencode processes is history.
 reasonix keeps per-workspace session files under its own home
 (`config.REASONIX_FLEET_HOME`), with no central store, and its load test ran

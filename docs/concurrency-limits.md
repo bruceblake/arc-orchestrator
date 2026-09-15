@@ -75,7 +75,9 @@ Before the per-model layers below, there is a limit that is easy to miss and is
 frequently the binding one: **every opencode-backed model shares ONE local
 binary and ONE ~240MB sqlite store** in `~/.local/share/opencode`. On the
 two-model fleet (2026-09-12) only GLM-5.3 runs opencode — DeepSeek moved to
-its own `reasonix` harness (dsh from 2026-09-12 to 09-13) — so the opencode pool now sees GLM's driver cap of 2
+its own `reasonix` harness (dsh from 2026-09-12 to 09-13) — so the opencode pool now sees GLM's driver cap of 4
+(pinned at the account session budget by `config._DRIVER_CAP_PIN`, operator
+directive 2026-09-15)
 against its ceiling of 5, and DeepSeek's 5 runs against the separate reasonix pool
 of 7 (measured 2026-09-14: 3/3, 6/6 and 7/7 concurrent one-shot runs exited
 0; opencode's equivalent cliff was at 6).
@@ -176,15 +178,16 @@ _MEASURED_CONCURRENCY = {"GLM-5.3": 4,
                          "DeepSeek-V4.1-Flash-thinking-max": 10}
 _SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2}
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
-_MODEL_DRIVER_CAP = {m: max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)]
-                            - DRIVER_HEADROOM)
-                     for m, n in _MEASURED_CONCURRENCY.items()}
+_DRIVER_CAP_PIN = {"GLM-5.3": 4}   # operator directive 2026-09-15, see below
+_MODEL_DRIVER_CAP = {m: _DRIVER_CAP_PIN.get(
+    m, max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)] - DRIVER_HEADROOM))
+    for m, n in _MEASURED_CONCURRENCY.items()}
 ```
 
 | Model | ARC sessions | Harness | Sessions per process | Driver cap |
 |---|---|---|---|---|
 | DeepSeek-V4.1-Flash-thinking-max | 10 | reasonix | 2 | 5 |
-| GLM-5.3 | 4 | opencode | 2 | 2 |
+| GLM-5.3 | 4 | opencode | 2 | **4 (pinned)** |
 
 (`"kimi": 1` remains in `_SESSIONS_PER_PROCESS` only so a historical
 transcript's harness still resolves; no live model maps to it.)
@@ -196,9 +199,13 @@ rejections, GLM-5.3 refused with as few as TWO drivers live against a ceiling
 of four. The backend's rejection text has twice deviated from the official
 table — "max 3 in flight per user" on 2026-09-14 (observed with zero fleet
 drivers alive) and "max 5 in flight" on 2026-09-15 — both dated observations
-of an account cap shared with other key consumers. GLM's driver cap is the
-derived 4 // 2 = 2 (official docs value adopted 2026-09-15); the dips surface
-as waits and retried 400s, and `ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM
+of an account cap shared with other key consumers. GLM's driver cap is PINNED
+at the account's full 4 (operator directive 2026-09-15): in-flight GLM
+sessions tracked one per harness, so the derived 4 // 2 = 2 threw away half
+the slots the account grants; an over-cap burst surfaces as retried 400s the
+backoff absorbs. The pin replaces the whole derived expression for GLM —
+`ARC_DRIVER_HEADROOM` still subtracts from non-pinned models — and
+`ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM
 harnesses across processes if the backend tightens persistently.
 
 Remember the harness pools above sit UNDER these: opencode and reasonix are
@@ -232,16 +239,18 @@ within the TTL. All of this is in addition to — never instead of — the
 semaphore: the semaphore is the fast in-process path, the lease is the
 cross-process truth.
 
-Summing the driver caps: **5 + 2 = 7**. That is the maximum number
+Summing the driver caps a batch run actually sees: **5 + 3 = 8** (GLM's
+pinned cap of 4 minus the `INTERACTIVE_RESERVE` slot held back for chat;
+raw semaphore caps are 5 + 4 = 9). That is the maximum number
 of harness instances one orchestrator run can have in flight at once, and it
 fits inside the two harness pools: DeepSeek's 5 into the 7-wide reasonix pool,
-GLM's 2 into the 5-wide opencode pool.
+GLM's 3 into the 5-wide opencode pool.
 
 ```
 DeepSeek-V4.1-max  5   ← medium implementers + reviewers/PR-reviewers (reasonix)
-GLM-5.3            2   ← hard implementers + planner/reviewers (opencode)
-────────────────
-                   7   per-process ceiling
+GLM-5.3            3   ← hard implementers + planner/reviewers (opencode,
+────────────────       cap 4, one slot reserved for interactive chat)
+                   8   per-process batch ceiling
 ```
 
 ## 2. Why driver caps sit below account caps
@@ -252,14 +261,17 @@ The first is the sessions-per-process factor: an opencode run holds about two
 ARC sessions at once (parallel tool calls), and reasonix is assumed to behave
 the same way (`config._SESSIONS_PER_PROCESS` = `{"opencode": 2, "reasonix": 2}`,
 unmeasured for reasonix as of 2026-09-14), so both caps are the account cap
-**divided by two** — DeepSeek 10 → 5, GLM 4 → 2 (GLM's account cap follows the
-official ARC docs value 4, adopted 2026-09-15 per operator directive; the
+**divided by two** — DeepSeek 10 → 5. GLM 4 stays **4**: its driver cap is
+pinned at the full account budget (`config._DRIVER_CAP_PIN`, operator
+directive 2026-09-15 — in-flight GLM sessions tracked one per harness, so
+halving threw away half the account; the account cap itself follows the
+official ARC docs value 4, and the
 2026-09-14 "max 3 in flight" and 2026-09-15 "max 5 in flight" rejection texts
 are dated observations of a shared account cap, not the stated value).
-Setting a
+For every non-pinned model, setting a
 cap equal to the session limit asks for twice the budget and the
 fleet generates its own 400s. On top of the division, `ARC_DRIVER_HEADROOM`
-(default 0) subtracts a flat reserve per model.
+(default 0) subtracts a flat reserve per non-pinned model.
 
 The second is politeness. The account key is shared with the user's own
 interactive sessions, so the orchestrator must leave room for them:
@@ -267,10 +279,13 @@ interactive sessions, so the orchestrator must leave room for them:
 - `config.driver_limit(model, interactive=False)` gives batch callers on the
   planner model (GLM-5.3) one slot **fewer** (`INTERACTIVE_RESERVE`, default 1)
   — but **only while it still leaves batch at least two slots**
-  (`_apply_reserve`, config.py:903-909; `MIN_BATCH_SLOTS` = 2). GLM-5.3's
-  driver cap is 2, so the reserve is **not** applied: 2 − 1 leaves batch
-  fewer than two slots, the guard declines, and batch sees both slots — an
-  interactive chat queues behind the fleet rather than halving the planner.
+  (`_apply_reserve`, config.py:921-927; `MIN_BATCH_SLOTS` = 2). GLM-5.3's
+  driver cap is pinned at 4, so the reserve **is** applied: batch callers
+  see 4 − 1 = 3 slots and interactive callers all 4 — a chat never queues
+  behind a full fleet, and `ARC_INTERACTIVE_RESERVE=0` hands batch the
+  fourth slot when nobody is chatting. The guard makes the reserve inert
+  again only if the cap ever falls to 2 (2 − 1 leaves batch fewer than two
+  slots).
   It is reserved only on the planner model —
   applying it to every model once halved GLM and DeepSeek to protect a path
   batch work never serves.
@@ -437,26 +452,30 @@ per-model cap bites first:
 
 | Implementer | Need | Cap | Runs? |
 |---|---|---|---|
-| GLM-5.3 | 4 | 2 | 2 run, 2 queue on the model semaphore |
+| GLM-5.3 | 4 | 3* | 3 run, 1 queues on the model semaphore |
 | DeepSeek-V4.1-Flash-thinking-max | 8 | 5 | 5 run, 3 queue on the model semaphore |
 
-**All 12 implementations do not run concurrently** in the first wave: 7 run
-(2 opencode + 5 reasonix) against the two pools' 5 + 7, and the rest park in FIFO
+\* GLM's driver cap is pinned at 4, but batch callers see one fewer while
+`INTERACTIVE_RESERVE` holds a slot back for chat — 3, not 4.
+
+**All 12 implementations do not run concurrently** in the first wave: 8 run
+(3 opencode + 5 reasonix) against the two pools' 5 + 7, and the rest park in FIFO
 order on `drivers._gate(model)`.
 
 **What queues next — the reviews.** Cross-review is family-based: the 8
 DeepSeek tasks are all reviewed by `glm` (GLM-5.3), and the 4 GLM tasks are
 reviewed by `deepseek`. That is eight review firings on GLM-5.3 against a
-driver cap of 2, behind the 2 hard implementations already holding those
+batch driver cap of 3, behind the 3 hard implementations already holding those
 slots; the four DeepSeek reviews share DeepSeek's cap of 5 with the medium
 implementations still draining.
 
-**Why this is the bottleneck.** GLM-5.3 (cap 2) paces everything routed to it
+**Why this is the bottleneck.** GLM-5.3 (batch cap 3) paces everything routed to it
 — the hard implementations AND every review of DeepSeek work, including the
 planner's own slot — while DeepSeek's 7-wide reasonix pool drains the medium work.
-Every GLM-side step of a batch is serialized through two driver slots:
-plan first, then hard implementations and reviews two at a time, in FIFO
-order. If the backend tightens persistently, `ARC_DRIVER_LIMIT_GLM=1`
+Every GLM-side step of a batch is serialized through three driver slots:
+plan first, then hard implementations and reviews three at a time, in FIFO
+order. `ARC_INTERACTIVE_RESERVE=0` hands batch the fourth slot when nobody is
+chatting. If the backend tightens persistently, `ARC_DRIVER_LIMIT_GLM=1`
 re-serialises GLM's steps through a single slot without a code change.
 
 ## Cross-references
