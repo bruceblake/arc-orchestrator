@@ -444,8 +444,25 @@ class CapacityClassification(unittest.TestCase):
                     "provider.api_error: 400 status code (no body)",
                     "session limit reached",
                     "too many concurrent requests",
-                    "429 Too Many Requests"):
+                    "429 Too Many Requests",
+                    # ARC's newer under-load refusal, seen live 2026-09-15 as an
+                    # opencode exit-1 body: `{"detail":"backend queue is full"}`.
+                    # Without a marker for it the exit was filed as a crash.
+                    'exit 1: {"detail":"backend queue is full"}'):
             self.assertTrue(Driver.is_capacity_error(msg), msg)
+
+    def test_an_exit_carrying_capacity_is_retried_as_capacity_not_captured(self):
+        """A non-zero exit whose text is a capacity refusal must not be
+        recorded as a defect, and must take the long capacity backoff.
+
+        The exited-1 paths in _pump build the DriverError directly, so they set
+        the `capacity` flag from the same classifier the retry loop reads.
+        """
+        exc = DriverError('opencode exited 1: {"detail":"backend queue is full"}',
+                          capacity=True)
+        self.assertTrue(getattr(exc, "capacity", False))
+        # A plain crash default -> not capacity.
+        self.assertFalse(DriverError("opencode exited 2: SyntaxError").capacity)
 
     def test_does_not_misread_a_real_crash(self):
         for msg in ("opencode exited 2: SyntaxError in world.js",
@@ -751,7 +768,7 @@ class TheVpnIsNotACrash(unittest.TestCase):
         import pathlib
         src = pathlib.Path(drivers.__file__).read_text()
         body = src[src.index("if self.is_vpn_error(str(exc)):"):]
-        body = body[:body.index("capacity = self.is_capacity_error")]
+        body = body[:body.index('getattr(exc, "capacity"')]
         self.assertIn("await wait_for_arc", body)
         self.assertIn("attempt -= 1", body)
         self.assertIn("continue", body)

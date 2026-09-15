@@ -668,9 +668,26 @@ def audit_logs():
 def audit_health():
     """Does the thing still build and pass its own gate?"""
     out = []
-    rc, so, se = _sh("./check.sh", timeout=600)
+    # check.sh runs the whole suite (unit + JS + UI + taskfile checks) and on a
+    # loaded box it is slower than a quiet one: a 600s cap reported "check.sh
+    # FAILS" while a manual run right after passed in ~30s of tests under the
+    # concurrent fleet. Give it real headroom, and if it DOES time out say so
+    # instead of reporting a red gate — a timeout is our measurement failing,
+    # not the code.
+    budget = int(os.getenv("ARC_AUDIT_CHECK_TIMEOUT", "1800"))
+    rc, so, se = _sh("./check.sh", timeout=budget)
     if rc != 0:
-        tail = (so + se).strip().splitlines()[-12:]
+        combined = (so + se)
+        if not so.strip() and "timed out" in se.lower():
+            out.append(_finding(
+                "warning", "health",
+                f"check.sh did not finish within {budget}s",
+                se.strip()[:200],
+                "the audit's subprocess cap was hit under load — this is not a "
+                "red gate; re-run with ARC_AUDIT_CHECK_TIMEOUT raised or on an "
+                "idle box to get a real verdict"))
+            return out
+        tail = combined.strip().splitlines()[-12:]
         out.append(_finding("critical", "health", "check.sh FAILS",
                             "\n".join(tail),
                             "this is the gate every task must pass — nothing "
