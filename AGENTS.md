@@ -395,10 +395,11 @@ PR** in the life of the repo.
   to `implement`; the next commit updates the same PR and a new round begins.
 - The loop is bounded by `config.PR_MAX_ROUNDS` (default 16); exhausting it
   fails the task rather than looping forever.
-- The pool only holds families other than the implementer's — with the
-  2026-09-14 removal of the same-family override this is unconditional:
-  unanimity, the round budget, and `task.pr_review_thin` always apply on a
-  genuinely independent reading.
+- The pool only holds families other than the implementer's — except while
+  the Rule 2 capacity hatch (`ARC_ALLOW_SAME_FAMILY_REVIEW`) is on, when it
+  deliberately inverts to the implementer's own family. Otherwise unanimity,
+  the round budget, and `task.pr_review_thin` always apply on a genuinely
+  independent reading.
 - **A reviewer that crashed did not review.** If no reviewer objects but one
   never ran — or its session ended without a parseable verdict — the round is
   *inconclusive*, not a rejection: nothing is posted
