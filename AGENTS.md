@@ -194,12 +194,10 @@ on `reasonix`).
   `DeepseekDriver(<model>, "reviewer")` accordingly, sending the full
   diff (`gitstore.diff_full`) with the original spec; the verdict must be
   JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
-- **Cross-family review is unconditional — there is no escape hatch.** The
-  temporary `ARC_*` same-family-review override (operator-authorized
-  2026-09-12 while GLM-5.3's provider backend was unstable) was removed
-  2026-09-14 once GLM-5.3 stabilised: a same-family review is a second pass
-  by the same model, NOT an independent reading, and the loader now always
-  rejects it.
+- **Cross-family review is the default and only relaxed by one documented
+  escape hatch.** A same-family review is a second pass by the same model,
+  NOT an independent reading, so the loader rejects it — except under the
+  capacity hatch below (removed 2026-09-14, re-added 2026-09-15).
 - **`reviewer` and `pr_reviewer` are different roles.** `reviewer` is this
   pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5):
   judging a bounded diff against a spec is a much smaller job than authoring
@@ -237,6 +235,19 @@ on `reasonix`).
   implementer to fix issues that were never delivered.
 
 Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-contract.md).
+
+**Capacity escape hatch (off by default).** When the whole cross-family
+reviewer backend is hard-down *server-side* (not contention — a jammed
+counter nothing local holds), a run may be launched with
+`ARC_ALLOW_SAME_FAMILY_REVIEW=1` (`config.ALLOW_SAME_FAMILY_REVIEW`): the
+loader then accepts a same-family reviewer, `_reviewer_for` keeps it, and
+the PR-review pool inverts to same-family only. First used 2026-09-12..14,
+removed when GLM-5.3 stabilised, re-added 2026-09-15 when GLM-5.3's session
+counter jammed at 5 for 3.5+ hours with no local holder (verified with a
+bare probe). Pair it with `ARC_ESCALATION_PATH=<the surviving model>` so
+exhaustion cannot escalate into the dead family; turn it off when the
+backend recovers — it weakens exactly the independence this rule exists
+for.
 
 ### Rule 3 — Every task runs in its own git worktree off the repo's `main` branch
 
@@ -384,10 +395,11 @@ PR** in the life of the repo.
   to `implement`; the next commit updates the same PR and a new round begins.
 - The loop is bounded by `config.PR_MAX_ROUNDS` (default 16); exhausting it
   fails the task rather than looping forever.
-- The pool only holds families other than the implementer's — with the
-  2026-09-14 removal of the same-family override this is unconditional:
-  unanimity, the round budget, and `task.pr_review_thin` always apply on a
-  genuinely independent reading.
+- The pool only holds families other than the implementer's — except while
+  the Rule 2 capacity hatch (`ARC_ALLOW_SAME_FAMILY_REVIEW`) is on, when it
+  deliberately inverts to the implementer's own family. Otherwise unanimity,
+  the round budget, and `task.pr_review_thin` always apply on a genuinely
+  independent reading.
 - **A reviewer that crashed did not review.** If no reviewer objects but one
   never ran — or its session ended without a parseable verdict — the round is
   *inconclusive*, not a rejection: nothing is posted

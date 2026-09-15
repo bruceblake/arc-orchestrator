@@ -610,6 +610,18 @@ _DEFAULT_PATH = [m for tier in TIER_ORDER for m, _f, _h, t, _c, _r in _LIVE if t
 PR_REVIEWERS = max(1, min(PR_REVIEWERS_WANTED, len(PR_REVIEW_FAMILIES) - 1))
 
 
+# Emergency capacity hatch, re-added 2026-09-15 (it first ran 2026-09-12..14,
+# same trigger, and was removed when GLM-5.3 stabilised): when the strongest
+# review family is hard-down SERVER-side — 2026-09-15: GLM-5.3's backend
+# counted 5 in-flight sessions for 3.5+ hours while no local process held
+# one, verified with a bare max_tokens=4 probe — same-family review beats no
+# review. Off by default; load_taskfile, _reviewer_for and
+# _eligible_pr_reviewers all consult this one flag, and launchers pair it
+# with ARC_ESCALATION_PATH=<the surviving model> so exhaustion cannot
+# escalate INTO the dead family.
+ALLOW_SAME_FAMILY_REVIEW = os.getenv("ARC_ALLOW_SAME_FAMILY_REVIEW", "") == "1"
+
+
 def model_may(model, role):
     """May this model hold this role today? Unknown model -> False."""
     return role in MODEL_ROLES.get(model, set())

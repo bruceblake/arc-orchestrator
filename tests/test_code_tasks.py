@@ -8,6 +8,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from helpers import FakeStore, capture_events
@@ -94,13 +95,45 @@ class LoadTaskfile(unittest.TestCase):
         self.assertIn("must be an implementer", str(cm.exception))
 
     def test_rejects_same_family_review(self):
-        """Cross-family review is UNCONDITIONAL: no env var or config flag
-        may suspend it. (The 2026-09-12..14 operator hatch
-        ARC_ALLOW_SAME_FAMILY_REVIEW was removed once GLM-5.3 stabilised.)"""
+        """Cross-family review is the DEFAULT: with the capacity flag off,
+        same-family review is rejected. (ARC_ALLOW_SAME_FAMILY_REVIEW is the
+        emergency hatch for a hard-down reviewer backend — 2026-09-12..14
+        and re-added 2026-09-15 — so pin it off here, whatever the operator's
+        shell happens to export.)"""
         bad = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
-        with self.assertRaises(ValueError) as cm:
-            code_tasks.load_taskfile(taskfile([bad]))
+        saved = config.ALLOW_SAME_FAMILY_REVIEW
+        config.ALLOW_SAME_FAMILY_REVIEW = False
+        try:
+            with self.assertRaises(ValueError) as cm:
+                code_tasks.load_taskfile(taskfile([bad]))
+        finally:
+            config.ALLOW_SAME_FAMILY_REVIEW = saved
         self.assertIn("must not be the harness", str(cm.exception))
+
+    def test_same_family_capacity_flag(self):
+        """ARC_ALLOW_SAME_FAMILY_REVIEW=1 (the reviewer backend is down):
+        the loader accepts a same-family pairing, escalation keeps it, and
+        the PR pool inverts to ONLY the implementer's own family."""
+        same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
+        saved = config.ALLOW_SAME_FAMILY_REVIEW
+        config.ALLOW_SAME_FAMILY_REVIEW = True
+        try:
+            ts = code_tasks.load_taskfile(taskfile([same]))
+            self.assertEqual(ts["tasks"]["t1"]["reviewer"], STRONGEST_FAMILY)
+            task = {"reviewer": STRONGEST_FAMILY}
+            self.assertEqual(code_tasks._reviewer_for(task, STRONGEST),
+                             STRONGEST_FAMILY)
+            pool = code_tasks._eligible_pr_reviewers(STRONGEST_FAMILY, None)
+            self.assertTrue(pool)
+            for m in pool:
+                self.assertEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+            # And the cross-family default is untouched underneath it:
+            config.ALLOW_SAME_FAMILY_REVIEW = False
+            pool = code_tasks._eligible_pr_reviewers(STRONGEST_FAMILY, None)
+            for m in pool:
+                self.assertNotEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+        finally:
+            config.ALLOW_SAME_FAMILY_REVIEW = saved
 
     def test_rejects_duplicate_ids(self):
         with self.assertRaises(ValueError):
@@ -1130,9 +1163,13 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
                     f"{fam} cannot field a cross-family PR reviewer")
 
     def test_it_never_picks_the_implementer_s_own_family(self):
-        for fam in sorted(config.REVIEW_FAMILIES):
-            for m in code_tasks._eligible_pr_reviewers(fam, None):
-                self.assertNotEqual(config.MODEL_FAMILY.get(m), fam)
+        # Pins the DEFAULT pairing; gates run with ARC_ALLOW_SAME_FAMILY_REVIEW=1
+        # exported during a backend outage, and under that flag the pool
+        # deliberately inverts to same-family only (config.py same-family hatch).
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+            for fam in sorted(config.REVIEW_FAMILIES):
+                for m in code_tasks._eligible_pr_reviewers(fam, None):
+                    self.assertNotEqual(config.MODEL_FAMILY.get(m), fam)
 
     def test_every_model_it_offers_can_actually_be_built(self):
         for fam in sorted(config.REVIEW_FAMILIES):
@@ -1894,15 +1931,21 @@ class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
         same = cfg.MODEL_FAMILY[target]
         if same not in cfg.REVIEW_FAMILIES:
             self.skipTest(f"{target}'s family cannot review, nothing to collide with")
-        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
+        # Pins the default flip; the same-family capacity hatch (exported during
+        # gate runs in an outage) makes the loader keep a same-family reviewer.
+        with mock.patch.object(cfg, "ALLOW_SAME_FAMILY_REVIEW", False):
+            ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
         t = ts["tasks"]["t1"]
         self.assertEqual(t["model"], target)
         self.assertNotEqual(cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"]), same)
 
     def test_a_live_model_with_its_own_family_as_reviewer_is_still_rejected(self):
         same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
-        with self.assertRaises(ValueError):
-            code_tasks.load_taskfile(taskfile([same]))
+        # Pins the default rejection; the same-family capacity hatch (exported
+        # during gate runs in an outage) makes the loader accept this pairing.
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+            with self.assertRaises(ValueError):
+                code_tasks.load_taskfile(taskfile([same]))
 
 
 class AnExternallyMergedPullRequestIsNotAConflict(unittest.TestCase):
