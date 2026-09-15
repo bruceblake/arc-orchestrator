@@ -6,7 +6,8 @@ Analysis date: 2026-09-10. Read-only study of recorded history. No source files 
 > was taken on 2026-09-10, when the code fleet was GLM-5.3 + Kimi-K3 +
 > DeepSeek-V4-Flash + gpt-oss-120b. Two days later (2026-09-12, operator
 > decision) gpt-oss-120b and Kimi-K3 left the fleet and DeepSeek moved to
-> DeepSeek-V4.1-Flash-thinking-max on the `dsh` harness. The tables and
+> DeepSeek-V4.1-Flash-thinking-max — first on the `dsh` harness, itself
+> replaced by `reasonix` on 2026-09-13. The tables and
 > numbers below are kept exactly as measured; **none of them describes today's
 > fleet**. For the live numbers see [docs/model-tiers.md](docs/model-tiers.md)
 > and [docs/concurrency-limits.md](docs/concurrency-limits.md).

@@ -22,8 +22,10 @@ escalation stage. **DeepSeek-V4.1-Flash-thinking-max (DS-max) is the
 medium-tier workhorse**: much faster, carries the implementation load,
 reviews, and **never plans**.
 
-- **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 4,
-  `deepseek` 10). GLM's 4 is the measured session ceiling on this fleet; the
+- **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 3,
+  `deepseek` 10). GLM's 3 is the ceiling the backend itself reported on
+  2026-09-14 (`max 3 in flight per user`, seen with zero fleet drivers alive;
+  it revises the historical measured 4); the
   deepseek 10 is **provider-published**
   (ARC docs, 2026-09-12), not a ramped measurement like the retired
   fleet's figures — re-measure it if observed rejections disagree.
@@ -34,11 +36,14 @@ reviews, and **never plans**.
   It is the account cap divided by sessions-per-process (both harnesses hold
   about two ARC sessions at once: `config._SESSIONS_PER_PROCESS` is
   `{"opencode": 2, "reasonix": 2}`), so 10 ÷ 2 = 5
-  and 4 ÷ 2 = 2. `ARC_DRIVER_HEADROOM` subtracts further; batch callers on the
+  and 3 ÷ 2 = 1 (GLM's account cap 4 → 3 on 2026-09-14 per the
+  backend's own rejection text, above). `ARC_DRIVER_HEADROOM` subtracts further;
+  batch callers on the
   planner model would see one slot fewer (`INTERACTIVE_RESERVE`), but
   `_apply_reserve` skips the reserve while it would leave batch under
-  `MIN_BATCH_SLOTS` = 2 — and GLM-5.3's cap **is** 2, so no reserve is applied
-  there (an interactive chat queues instead of cutting the planner to one).
+  `MIN_BATCH_SLOTS` = 2 — and GLM-5.3's cap **is** 1, so no reserve is applied
+  there (an interactive chat queues instead; at one slot there is nothing
+  left to cut).
 - GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
   **`reasonix`** (`drivers.ReasonixDriver`, binary via `config.reasonix_bin()`).
   The driver caps apply per model; the **harness** pools are separate —

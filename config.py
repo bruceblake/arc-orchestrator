@@ -86,7 +86,9 @@ class Family:
 FAMILIES = {
     "glm": Family(
         "glm",
-        4,
+        # 3, not the historical 4: the backend's own rejection text of
+        # 2026-09-14 stated "max 3 in flight per user on this backend".
+        3,
         {
             "default": "GLM-5.3",
             "high": "GLM-5.3-thinking-high",
@@ -228,7 +230,7 @@ DRIVER_IDLE_TIMEOUT = float(os.getenv("ARC_DRIVER_IDLE_TIMEOUT", "840"))
 # quiet for several minutes means something is wrong. A PLANNER does the opposite:
 # one long agentic read of the repo, then a single 4KB JSON plan — it is
 # legitimately silent while the model generates, and when the fleet is at
-# GLM-5.3's cap of 4 its request waits behind the others with the connection
+# GLM-5.3's account cap its request waits behind the others with the connection
 # held open (the pattern was first measured on the retired Kimi-K3, whose cap
 # of 3 stalled every planner run on 09-11/12). Killing it there is killing a
 # healthy process for being queued.
@@ -428,8 +430,15 @@ ROSTER = [
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
     # Operator decision (2026-09-12): GLM-5.3 is the fleet's strongest model —
-    # hard tier, the planner, the last escalation stage.
-    ("GLM-5.3",             "glm",      "opencode", "hard",   4,
+    # hard tier, the planner, the last escalation stage. The cap was 4 until
+    # 2026-09-14, when the backend's own rejection text said "concurrent
+    # session limit reached for model 'GLM-5.3' (max 3 in flight per user on
+    # this backend)" — repeatedly, including once with ZERO fleet drivers
+    # alive, so other consumers of the key were holding the slots. True
+    # ceiling is 3; the derived driver cap 3 // 2 = 1 serialises GLM
+    # harnesses across processes through the lease table, which is what stops
+    # two of our own runs from 400ing each other against this small cap.
+    ("GLM-5.3",             "glm",      "opencode", "hard",   3,
      ALL_ROLES,                                            None,         None),
     # Operator decision (2026-09-12): DeepSeek-V4.1-Flash-thinking-max is the
     # medium-tier workhorse — it implements and reviews/PR-reviews, never
@@ -764,10 +773,13 @@ def kimi_plan_mode_on():
 # Measured from the event log over four hours (23 capacity rejections):
 # GLM-5.3 was refused with as few as TWO of our drivers live, against an ARC
 # ceiling of four in flight. Two processes reaching four sessions is two
-# sessions per process, so a cap of 4 was really asking for ~8.
+# sessions per process, so a cap of 4 was really asking for ~8. On 2026-09-14
+# the backend's own rejection text stated "max 3 in flight per user on this
+# backend" — once while ZERO fleet drivers were alive — so the roster ceiling
+# is now 3 (driver cap 1) and the historical 4 survives only in this comment.
 #
 # GLM was the only model to show it because it is the most-used opencode model
-# and the only one whose account limit (4) is small enough for the doubling to
+# and the only one whose account limit is small enough for the doubling to
 # bite before the harness pool (5) binds first. The factor is a property of the
 # HARNESS, not of the model, so it applies to every model on that harness.
 # dsh's factor is ASSUMED 2 until measured: its shipped base profile includes
@@ -796,8 +808,9 @@ _MODEL_DRIVER_CAP = {
 # ceiling: every opencode-backed model shares ONE local harness, and that
 # harness serialises through a single ~240MB sqlite db in
 # ~/.local/share/opencode. On the two-model fleet (2026-09-12) only GLM-5.3
-# runs opencode — DeepSeek moved to its own `dsh` harness — so the opencode
-# pool sees GLM's 2 against its cap of 5. The retired three-model fleet put
+# runs opencode — DeepSeek moved to its own `reasonix` harness (2026-09-13,
+# replacing `dsh`) — so the opencode pool sees GLM's 1 driver slot against
+# the harness's cap of 5. The retired three-model fleet put
 # GLM 4 + DeepSeek 5 + gpt-oss 5 = 14 concurrent opencode processes against
 # it, and measured on this machine (identical prompt, warm cache):
 #

@@ -129,8 +129,9 @@ consumes next round — the system generates its own work forever.
 
 ### Concurrency
 
-Per-family semaphores follow the ARC ceilings on the two-model fleet of
-2026-09-12 (14 requests in flight max): deepseek 10, glm 4 — see
+Per-family semaphores follow the ARC ceilings on the two-model fleet (13
+requests in flight max since the GLM account cap was revised 4 → 3 on
+2026-09-14): deepseek 10, glm 3 — see
 [docs/concurrency-limits.md](docs/concurrency-limits.md). Web research uses the
 `-legacy-tool-calling` variants with `tool_ids: ["server:websearch"]`. All
 requests stream (the API caps non-streaming at 8,000 tokens). Roles rotate
@@ -429,9 +430,9 @@ override (2026-09-12..14, while GLM-5.3's backend was unstable) was removed
 once it stabilised.
 
 Per-model governor caps keep concurrent harness instances under the measured
-or provider-published ARC ceilings (deepseek 10, glm 4 on the two-model fleet of
-2026-09-12) minus an interactive reserve, and a **per-harness cap of 5 each**
-keeps opencode and reasonix under their own pools — the effective numbers come from
+or provider-published ARC ceilings (deepseek 10, glm 3 — deepseek's published
+2026-09-12, glm's revised to the backend's own rejection text of 2026-09-14) minus an interactive reserve, and **per-harness caps (opencode 5, reasonix 7)**
+keep opencode and reasonix under their own pools — the effective numbers come from
 `config.driver_limit(model)` and `config.harness_limit(harness)`, computed
 from `_MODEL_DRIVER_CAP` / `_HARNESS_CAP`. Override
 with `ARC_DRIVER_LIMIT_<FAMILY>`

@@ -708,7 +708,7 @@ def cmd_doctor(args):
            "llm.arc.vt.edu to the .env file")
 
     # Every harness a LIVE roster model runs must be on PATH: opencode for
-    # GLM-5.3, dsh for DeepSeek-V4.1-Flash-thinking-max (2026-09-12 fleet).
+    # GLM-5.3, reasonix for DeepSeek-V4.1-Flash-thinking-max (2026-09-12 fleet).
     # Derived, not a literal list — the doctor once kept demanding the retired
     # kimi binary and never checked dsh.
     # Resolved the way the drivers resolve it (config.harness_bin): dsh and

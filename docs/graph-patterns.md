@@ -152,9 +152,9 @@ same shape with dynamic width.
 ```
 
 - **Fan-out width:** 2–4 is the sweet spot (planner rule: 2–8 tasks total).
-  Spread the width across families and tiers — 2 GLM + 4 DeepSeek truly run
-  at once; 5 DeepSeek tasks still fit under its driver cap of 5, while 5 GLM
-  tasks run 2-2-1.
+  Spread the width across families and tiers — 1 GLM + 5 DeepSeek truly run
+  at once; 5 DeepSeek tasks still fit under its driver cap of 5, while GLM
+  (driver cap 1) serialises across processes on the lease.
 - **Pitfalls:** the fan-in task owns integration honesty — its `verify_cmd`
   must run the *whole* suite against the merged base, not grep for the slice
   files. Respect the `deps[-1]` wait-edge rule: list the slowest/hardest
@@ -364,7 +364,7 @@ exactly ONE cross-family reviewer in the two-family fleet, recorded as
 ```
 
 - **Width:** N=2 candidates is usually enough; N=3 max, and mind the driver
-  caps — DeepSeek 5, GLM-5.3 2. Cost is N+1 full gauntlets.
+  caps — DeepSeek 5, GLM-5.3 1. Cost is N+1 full gauntlets.
 - **Pitfalls:** two candidate PRs touching the same file cannot both merge —
   either both write proposals and the judge implements, or expect one PR to
   be closed by hand (the orchestrator does not auto-close losers). Juries
