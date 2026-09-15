@@ -431,8 +431,8 @@ once it stabilised.
 
 Per-model governor caps keep concurrent harness instances under the measured
 or provider-published ARC ceilings (deepseek 10, glm 3 — deepseek's published
-2026-09-12, glm's revised to the backend's own rejection text of 2026-09-14) minus an interactive reserve, and a **per-harness cap of 5 each**
-keeps opencode and reasonix under their own pools — the effective numbers come from
+2026-09-12, glm's revised to the backend's own rejection text of 2026-09-14) minus an interactive reserve, and **per-harness caps (opencode 5, reasonix 7)**
+keep opencode and reasonix under their own pools — the effective numbers come from
 `config.driver_limit(model)` and `config.harness_limit(harness)`, computed
 from `_MODEL_DRIVER_CAP` / `_HARNESS_CAP`. Override
 with `ARC_DRIVER_LIMIT_<FAMILY>`

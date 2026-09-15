@@ -225,16 +225,16 @@ within the TTL. All of this is in addition to — never instead of — the
 semaphore: the semaphore is the fast in-process path, the lease is the
 cross-process truth.
 
-Summing the driver caps: **5 + 2 = 7**. That is the maximum number
+Summing the driver caps: **5 + 1 = 6**. That is the maximum number
 of harness instances one orchestrator run can have in flight at once, and it
 fits inside the two harness pools: DeepSeek's 5 into the 7-wide reasonix pool,
-GLM's 2 into the 5-wide opencode pool.
+GLM's 1 into the 5-wide opencode pool.
 
 ```
 DeepSeek-V4.1-max  5   ← medium implementers + reviewers/PR-reviewers (reasonix)
-GLM-5.3            2   ← hard implementers + planner/reviewers (opencode)
+GLM-5.3            1   ← hard implementers + planner/reviewers (opencode)
 ────────────────
-                   7   per-process ceiling
+                   6   per-process ceiling
 ```
 
 ## 2. Why driver caps sit below account caps

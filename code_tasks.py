@@ -1,7 +1,7 @@
 """Multi-harness code workload: JSON task files -> task graph -> worktrees.
 
 Per task: alloc worktree -> implement (the model's roster harness; since the
-2026-09-12 two-model fleet: DeepSeek-V4.1-Flash-thinking-max on dsh, GLM-5.3 on
+2026-09-12 two-model fleet: DeepSeek-V4.1-Flash-thinking-max on reasonix, GLM-5.3 on
 opencode) -> deterministic verify gate (verify_cmd) -> cross-family review
 (the other family's reviewer) -> bounded fix loop -> publish commit ->
 merge to main (serialized) -> cleanup. Reviews are mandatory and cross-family
