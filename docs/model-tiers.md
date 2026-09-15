@@ -22,8 +22,10 @@ escalation stage. **DeepSeek-V4.1-Flash-thinking-max (DS-max) is the
 medium-tier workhorse**: much faster, carries the implementation load,
 reviews, and **never plans**.
 
-- **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 4,
-  `deepseek` 10). GLM's 4 is the measured session ceiling on this fleet; the
+- **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 3,
+  `deepseek` 10). GLM's 3 is the ceiling the backend itself reported on
+  2026-09-14 (`max 3 in flight per user`, seen with zero fleet drivers alive;
+  it revises the historical measured 4); the
   deepseek 10 is **provider-published**
   (ARC docs, 2026-09-12), not a ramped measurement like the retired
   fleet's figures — re-measure it if observed rejections disagree.

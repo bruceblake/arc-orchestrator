@@ -1167,7 +1167,11 @@ class ReviewerContention(unittest.TestCase):
         # a saturated harness inherits that pool's pressure, so a model on a
         # different, free harness must sort first however the roster is
         # ordered. Harnesses are read from the roster — with one harness in
-        # use there is nothing to compare, and the rule is vacuous.
+        # use there is nothing to compare, and the rule is vacuous. Model
+        # usage stays 0 so the harness layer is the ONLY differentiator: a
+        # pool can be full cross-process while this process holds no lease
+        # for the model, and with a driver cap of 1 a model-usage of 1 would
+        # saturate the model layer and mask the harness signal.
         by_harness = {}
         for m in DISTINCT_MODELS:
             by_harness.setdefault(config.MODEL_HARNESS.get(m), []).append(m)
@@ -1175,7 +1179,7 @@ class ReviewerContention(unittest.TestCase):
             self.skipTest("every live model shares one harness today")
         (busy_h, busy), (free_h, free) = sorted(
             by_harness.items(), key=lambda kv: -len(kv[1]))[:2]
-        usage = {m: 1 for m in DISTINCT_MODELS}
+        usage = {m: 0 for m in DISTINCT_MODELS}
         usage[f"harness:{busy_h}"] = config.harness_limit(busy_h)
         usage[f"harness:{free_h}"] = 0
         order = sorted(DISTINCT_MODELS,

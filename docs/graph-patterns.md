@@ -152,9 +152,9 @@ same shape with dynamic width.
 ```
 
 - **Fan-out width:** 2–4 is the sweet spot (planner rule: 2–8 tasks total).
-  Spread the width across families and tiers — 2 GLM + 4 DeepSeek truly run
-  at once; 5 DeepSeek tasks still fit under its driver cap of 5, while 5 GLM
-  tasks run 2-2-1.
+  Spread the width across families and tiers — 1 GLM + 5 DeepSeek truly run
+  at once; 5 DeepSeek tasks still fit under its driver cap of 5, while GLM
+  (driver cap 1) serialises across processes on the lease.
 - **Pitfalls:** the fan-in task owns integration honesty — its `verify_cmd`
   must run the *whole* suite against the merged base, not grep for the slice
   files. Respect the `deps[-1]` wait-edge rule: list the slowest/hardest

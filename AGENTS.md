@@ -85,12 +85,14 @@ Routing is decided at plan time (by GLM-5.3 in
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 3 | 1 |
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
 
 **GLM-5.3 is the fleet's strongest model** — operator decision 2026-09-12:
-hard tier, the planner, and the last escalation stage. Its cap of 4 is the
-measured session ceiling on this fleet. **DeepSeek-V4.1-Flash-thinking-max
+hard tier, the planner, and the last escalation stage. Its cap of 3 is the
+session ceiling the backend itself reported on 2026-09-14 ("max 3 in flight
+per user on this backend", seen with zero fleet drivers alive — other
+consumers of the key hold slots), revising the historical measured 4. **DeepSeek-V4.1-Flash-thinking-max
 (DS-max below) is the medium-tier workhorse**: much faster than GLM-5.3, it
 carries the implementation load and reviews, and it **NEVER plans**. Its cap
 of 10 is the provider-published figure for V4.1 (provider docs updated
@@ -439,8 +441,8 @@ merged work.
 
 | Layer | Where | deepseek | glm | Override |
 |---|---|---|---|---|
-| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | `ARC_LIMIT_<FAMILY>` |
-| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 2 | `ARC_DRIVER_LIMIT_<FAMILY>` |
+| Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 3 | `ARC_LIMIT_<FAMILY>` |
+| Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once | 5 | 1 | `ARC_DRIVER_LIMIT_<FAMILY>` |
 | **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | reasonix (deepseek): **7** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
@@ -452,9 +454,16 @@ docs updated 2026-09-12), not a measurement of ours. A harness run
 issues parallel tool calls and holds about TWO sessions at once, so a driver
 cap set equal to the session limit over-subscribes by that factor. Measured
 from the event log: 23 capacity rejections in four hours, GLM-5.3 refused with
-as few as TWO of our drivers live against a ceiling of four. Driver caps are
+as few as TWO of our drivers live against a ceiling of four — and on
+2026-09-14 the backend's rejection text itself stated "max 3 in flight per
+user on this backend", once while ZERO fleet drivers were alive (other
+consumers of the key held the slots), so GLM's ceiling was corrected to 3.
+Driver caps are
 therefore sessions // sessions-per-process; opencode and reasonix hold two each
-(`config._SESSIONS_PER_PROCESS`), so GLM 4 // 2 = 2 and DeepSeek 10 // 2 = 5.
+(`config._SESSIONS_PER_PROCESS`), so GLM 3 // 2 = 1 and DeepSeek 10 // 2 = 5.
+A GLM driver cap of 1 serialises GLM harnesses across ALL processes through
+the lease table (`driver.cap_wait`), which is what stops two of our own runs
+from 400ing each other against this small shared cap.
 gpt-oss and DeepSeek were previously configured at 8 against a real
 ceiling of 5, so the fleet generated its own 400s under load and blamed the
 provider.
@@ -464,7 +473,7 @@ one.** Each harness now has its OWN pool, because the two models no longer
 share a binary: **opencode (GLM-5.3) is capped at 5 and reasonix (DeepSeek) at 7**
 (`config._HARNESS_CAP`). Every opencode-backed model runs through ONE local
 binary backed by ONE ~240MB sqlite store in `~/.local/share/opencode`, so
-GLM's driver cap of 2 sits well under the opencode pool — the retired
+GLM's driver cap of 1 sits well under the opencode pool — the retired
 three-model fleet's GLM 2 + DeepSeek 5 = 7 opencode processes is history.
 reasonix keeps per-workspace session files under its own home
 (`config.REASONIX_FLEET_HOME`), with no central store, and its load test ran

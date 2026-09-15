@@ -509,7 +509,7 @@ new one:
   - An **infrastructure failure** — the run process was killed, the graph was
     cancelled, the harness crashed — retries at the **same tier**. Being
     interrupted says nothing about the model. Escalating on it used to send
-    every interrupted task to GLM-5.3, the scarcest tier (driver cap 2): one
+    every interrupted task to GLM-5.3, the scarcest tier (driver cap 1): one
     killed queue put four tasks there at once, exceeded the account cap, and
     every request came back as an instant `provider.api_error: 400`.
 

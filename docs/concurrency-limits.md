@@ -9,8 +9,8 @@ things:
 
 | Layer | Where it is enforced | Ceiling | Applies to |
 |---|---|---|---|
-| Per-account API caps | The ARC API itself (server-side, per API key) | 14 across both live models (deepseek 10 + glm 4) | **All** processes sharing the key |
-| Per-process driver semaphores | `drivers.py` in this process | 7 across both live models (deepseek 5 + glm 2) | One orchestrator run |
+| Per-account API caps | The ARC API itself (server-side, per API key) | 13 across both live models (deepseek 10 + glm 3) | **All** processes sharing the key |
+| Per-process driver semaphores | `drivers.py` in this process | 6 across both live models (deepseek 5 + glm 1) | One orchestrator run |
 | Per-harness pool | `drivers._harness_gate` + `harness:<name>` leases | opencode **5** + reasonix **7** | Every model on that binary |
 
 The layers are not the same number on purpose. The account caps are the hard
@@ -47,7 +47,11 @@ the ones above, so re-measure it if observed rejections disagree. Every row
 above is now history: gpt-oss-120b left the fleet on 2026-09-11,
 DeepSeek-V4-Flash was retired on 2026-09-12 when the provider removed the
 model from the API, and Kimi-K3 was retired the same day by operator decision.
-Of those numbers only **GLM-5.3's 4** is still a live cap; DeepSeek's live cap
+Of those numbers none is still a live cap: even **GLM-5.3's 4** has since been
+corrected DOWN to **3** — on 2026-09-14 the backend's own rejection text
+stated `max 3 in flight per user on this backend`, seen repeatedly including
+once with zero fleet drivers alive (other consumers of the key held the
+slots). DeepSeek's live cap
 is the published 10, and its cap of 10 is the one `_MEASURED_CONCURRENCY`
 carries.
 
@@ -67,7 +71,7 @@ Before the per-model layers below, there is a limit that is easy to miss and is
 frequently the binding one: **every opencode-backed model shares ONE local
 binary and ONE ~240MB sqlite store** in `~/.local/share/opencode`. On the
 two-model fleet (2026-09-12) only GLM-5.3 runs opencode — DeepSeek moved to
-its own `reasonix` harness (dsh from 2026-09-12 to 09-13) — so the opencode pool now sees GLM's driver cap of 2
+its own `reasonix` harness (dsh from 2026-09-12 to 09-13) — so the opencode pool now sees GLM's driver cap of 1
 against its ceiling of 5, and DeepSeek's 5 runs against the separate reasonix pool
 of 7 (measured 2026-09-14: 3/3, 6/6 and 7/7 concurrent one-shot runs exited
 0; opencode's equivalent cliff was at 6).
@@ -136,7 +140,7 @@ really server-side):
 | Model (family) | Account cap |
 |---|---|
 | DeepSeek-V4.1-Flash-thinking-max (`deepseek`) | 10 |
-| GLM-5.3 (`glm`) | 4 |
+| GLM-5.3 (`glm`) | 3 |
 
 Kimi-K3's `kimi` row is gone: the family was removed from `config.FAMILIES`
 on 2026-09-12 with the model's retirement, so its family knobs are no longer
@@ -162,8 +166,9 @@ semaphore, not a per-family one:
 ```python
 # config.py
 # Derived from the live ROSTER rows — DeepSeek-V4.1-Flash-thinking-max's 10
-# is the provider-published figure (2026-09-12), the rest are measured.
-_MEASURED_CONCURRENCY = {"GLM-5.3": 4,
+# is the provider-published figure (2026-09-12); GLM's 3 is the backend's own
+# rejection text of 2026-09-14 ("max 3 in flight per user on this backend").
+_MEASURED_CONCURRENCY = {"GLM-5.3": 3,
                          "DeepSeek-V4.1-Flash-thinking-max": 10}
 _SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2}
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
@@ -175,7 +180,7 @@ _MODEL_DRIVER_CAP = {m: max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)]
 | Model | ARC sessions | Harness | Sessions per process | Driver cap |
 |---|---|---|---|---|
 | DeepSeek-V4.1-Flash-thinking-max | 10 | reasonix | 2 | 5 |
-| GLM-5.3 | 4 | opencode | 2 | 2 |
+| GLM-5.3 | 3 | opencode | 2 | 1 |
 
 (`"kimi": 1` remains in `_SESSIONS_PER_PROCESS` only so a historical
 transcript's harness still resolves; no live model maps to it.)
@@ -184,7 +189,10 @@ A harness PROCESS is not an ARC SESSION. An opencode run issues parallel tool
 calls and holds about two sessions at once, so a driver cap equal to the
 session limit asks for twice the budget. Measured over four hours: 23 capacity
 rejections, GLM-5.3 refused with as few as TWO drivers live against a ceiling
-of four.
+of four. On 2026-09-14 the ceiling became three by the backend's own rejection
+text ("max 3 in flight per user", observed with zero fleet drivers alive), so
+GLM's driver cap is now 1 — one GLM harness at a time across ALL processes,
+serialised by the lease table.
 
 Remember the harness pools above sit UNDER these: opencode and reasonix are
 separate binaries with their own pools (5 opencode, 7 reasonix), so a model's
@@ -355,7 +363,7 @@ retired with the family on 2026-09-12 and is no longer minted or read.)
 
 | Situation | What to do |
 |---|---|
-| **Dedicated box** — no interactive `opencode`/`dsh` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=4`; DeepSeek is already at 5 = 10 ÷ 2) to run the fleet flat-out. Raise `ARC_HARNESS_LIMIT_OPENCODE` too if GLM's cap rises above 5. |
+| **Dedicated box** — no interactive `opencode`/`dsh` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=3`; DeepSeek is already at 5 = 10 ÷ 2) to run the fleet flat-out. Raise `ARC_HARNESS_LIMIT_OPENCODE` too if GLM's cap rises above 5. |
 | You have a **higher account tier** | Raise `ARC_LIMIT_<FAMILY>` *and* the matching `ARC_DRIVER_LIMIT_<FAMILY>`. The account cap is server-side, so raising only the driver cap can hit the API's 400 "session limit" rejection. |
 | **Shared box** (you also use `opencode` / `dsh` by hand) | Keep defaults. The whole point of the driver caps is to leave headroom for your own sessions. |
 
