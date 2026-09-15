@@ -8,6 +8,7 @@ import json
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from helpers import FakeStore, capture_events
@@ -1162,9 +1163,13 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
                     f"{fam} cannot field a cross-family PR reviewer")
 
     def test_it_never_picks_the_implementer_s_own_family(self):
-        for fam in sorted(config.REVIEW_FAMILIES):
-            for m in code_tasks._eligible_pr_reviewers(fam, None):
-                self.assertNotEqual(config.MODEL_FAMILY.get(m), fam)
+        # Pins the DEFAULT pairing; gates run with ARC_ALLOW_SAME_FAMILY_REVIEW=1
+        # exported during a backend outage, and under that flag the pool
+        # deliberately inverts to same-family only (config.py same-family hatch).
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+            for fam in sorted(config.REVIEW_FAMILIES):
+                for m in code_tasks._eligible_pr_reviewers(fam, None):
+                    self.assertNotEqual(config.MODEL_FAMILY.get(m), fam)
 
     def test_every_model_it_offers_can_actually_be_built(self):
         for fam in sorted(config.REVIEW_FAMILIES):
@@ -1926,15 +1931,21 @@ class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
         same = cfg.MODEL_FAMILY[target]
         if same not in cfg.REVIEW_FAMILIES:
             self.skipTest(f"{target}'s family cannot review, nothing to collide with")
-        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
+        # Pins the default flip; the same-family capacity hatch (exported during
+        # gate runs in an outage) makes the loader keep a same-family reviewer.
+        with mock.patch.object(cfg, "ALLOW_SAME_FAMILY_REVIEW", False):
+            ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
         t = ts["tasks"]["t1"]
         self.assertEqual(t["model"], target)
         self.assertNotEqual(cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"]), same)
 
     def test_a_live_model_with_its_own_family_as_reviewer_is_still_rejected(self):
         same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
-        with self.assertRaises(ValueError):
-            code_tasks.load_taskfile(taskfile([same]))
+        # Pins the default rejection; the same-family capacity hatch (exported
+        # during gate runs in an outage) makes the loader accept this pairing.
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+            with self.assertRaises(ValueError):
+                code_tasks.load_taskfile(taskfile([same]))
 
 
 class AnExternallyMergedPullRequestIsNotAConflict(unittest.TestCase):

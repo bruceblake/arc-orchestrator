@@ -214,8 +214,12 @@ class TestOrchChatHappy(TestOrchChat):
 class TestOrchChatRejections(TestOrchChat):
     def test_same_harness_review_pairing_rejected(self):
         repo = self._make_repo()
-        plan = self._plan(repo=str(repo), model=STRONGEST, reviewer=STRONGEST_FAMILY)
-        code, state, spath = self._run(reply=self._reply(plan), repo=repo)
+        # Pins the default rejection; gates run with the same-family capacity
+        # hatch exported during an outage, and the hatch makes the loader
+        # accept this pairing (config.ALLOW_SAME_FAMILY_REVIEW).
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+            plan = self._plan(repo=str(repo), model=STRONGEST, reviewer=STRONGEST_FAMILY)
+            code, state, spath = self._run(reply=self._reply(plan), repo=repo)
         self.assertEqual(code, 0)
         self.assertEqual(self._taskfiles(), [])
         last = self._read_turns(spath)[-1]

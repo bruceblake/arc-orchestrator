@@ -194,12 +194,10 @@ on `reasonix`).
   `DeepseekDriver(<model>, "reviewer")` accordingly, sending the full
   diff (`gitstore.diff_full`) with the original spec; the verdict must be
   JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
-- **Cross-family review is unconditional — there is no escape hatch.** The
-  temporary `ARC_*` same-family-review override (operator-authorized
-  2026-09-12 while GLM-5.3's provider backend was unstable) was removed
-  2026-09-14 once GLM-5.3 stabilised: a same-family review is a second pass
-  by the same model, NOT an independent reading, and the loader now always
-  rejects it.
+- **Cross-family review is the default and only relaxed by one documented
+  escape hatch.** A same-family review is a second pass by the same model,
+  NOT an independent reading, so the loader rejects it — except under the
+  capacity hatch below (removed 2026-09-14, re-added 2026-09-15).
 - **`reviewer` and `pr_reviewer` are different roles.** `reviewer` is this
   pre-merge gate. `pr_reviewer` reviews an already-open pull request (Rule 5):
   judging a bounded diff against a spec is a much smaller job than authoring
