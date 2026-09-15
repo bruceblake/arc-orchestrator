@@ -94,13 +94,45 @@ class LoadTaskfile(unittest.TestCase):
         self.assertIn("must be an implementer", str(cm.exception))
 
     def test_rejects_same_family_review(self):
-        """Cross-family review is UNCONDITIONAL: no env var or config flag
-        may suspend it. (The 2026-09-12..14 operator hatch
-        ARC_ALLOW_SAME_FAMILY_REVIEW was removed once GLM-5.3 stabilised.)"""
+        """Cross-family review is the DEFAULT: with the capacity flag off,
+        same-family review is rejected. (ARC_ALLOW_SAME_FAMILY_REVIEW is the
+        emergency hatch for a hard-down reviewer backend — 2026-09-12..14
+        and re-added 2026-09-15 — so pin it off here, whatever the operator's
+        shell happens to export.)"""
         bad = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
-        with self.assertRaises(ValueError) as cm:
-            code_tasks.load_taskfile(taskfile([bad]))
+        saved = config.ALLOW_SAME_FAMILY_REVIEW
+        config.ALLOW_SAME_FAMILY_REVIEW = False
+        try:
+            with self.assertRaises(ValueError) as cm:
+                code_tasks.load_taskfile(taskfile([bad]))
+        finally:
+            config.ALLOW_SAME_FAMILY_REVIEW = saved
         self.assertIn("must not be the harness", str(cm.exception))
+
+    def test_same_family_capacity_flag(self):
+        """ARC_ALLOW_SAME_FAMILY_REVIEW=1 (the reviewer backend is down):
+        the loader accepts a same-family pairing, escalation keeps it, and
+        the PR pool inverts to ONLY the implementer's own family."""
+        same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
+        saved = config.ALLOW_SAME_FAMILY_REVIEW
+        config.ALLOW_SAME_FAMILY_REVIEW = True
+        try:
+            ts = code_tasks.load_taskfile(taskfile([same]))
+            self.assertEqual(ts["tasks"]["t1"]["reviewer"], STRONGEST_FAMILY)
+            task = {"reviewer": STRONGEST_FAMILY}
+            self.assertEqual(code_tasks._reviewer_for(task, STRONGEST),
+                             STRONGEST_FAMILY)
+            pool = code_tasks._eligible_pr_reviewers(STRONGEST_FAMILY, None)
+            self.assertTrue(pool)
+            for m in pool:
+                self.assertEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+            # And the cross-family default is untouched underneath it:
+            config.ALLOW_SAME_FAMILY_REVIEW = False
+            pool = code_tasks._eligible_pr_reviewers(STRONGEST_FAMILY, None)
+            for m in pool:
+                self.assertNotEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+        finally:
+            config.ALLOW_SAME_FAMILY_REVIEW = saved
 
     def test_rejects_duplicate_ids(self):
         with self.assertRaises(ValueError):

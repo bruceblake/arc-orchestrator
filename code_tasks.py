@@ -63,11 +63,15 @@ def load_taskfile(path, policy=None):
     # rather than rejected — the plan is still good.
     reviewers = tuple(pol.get("reviewers", tuple(config.REVIEW_FAMILIES)))
     review_on = pol.get("review", True)
-    # Self-review is a bench-variant knob only. The fleet-wide escape hatch
-    # (config.ALLOW_SAME_FAMILY_REVIEW, ARC_ALLOW_SAME_FAMILY_REVIEW) existed
-    # 2026-09-12..14 while GLM-5.3's backend was unstable, and was removed
-    # once it stabilised: cross-review is unconditional again.
-    allow_self = bool(pol.get("allow_self_review"))
+    # Self-review is a bench-variant knob only (policy["allow_self_review"]),
+    # plus ONE fleet-wide escape hatch: config.ALLOW_SAME_FAMILY_REVIEW
+    # (ARC_ALLOW_SAME_FAMILY_REVIEW), for when the cross-family reviewer is
+    # hard-down server-side — see config.py. It ran 2026-09-12..14, was
+    # removed when GLM-5.3 stabilised, and was re-added 2026-09-15 when
+    # GLM-5.3's session counter jammed for hours with nothing local holding
+    # it.
+    allow_self = bool(pol.get("allow_self_review")) or \
+        config.ALLOW_SAME_FAMILY_REVIEW
     tasks = {}
     for t in data["project"]["tasks"]:
         tid = t["id"]
@@ -585,7 +589,11 @@ def _eligible_pr_reviewers(impl_fam, pol):
     """
     out = []
     for m in config.ESCALATION_PATH[::-1]:  # strongest first, from the roster
-        if config.MODEL_FAMILY.get(m) == impl_fam:
+        # Default: cross-family only. Under ARC_ALLOW_SAME_FAMILY_REVIEW the
+        # cross-family reviewer is the thing that is down, so the pool
+        # INVERTS to only the implementer's own family.
+        same = config.MODEL_FAMILY.get(m) == impl_fam
+        if same != config.ALLOW_SAME_FAMILY_REVIEW:
             continue
         try:
             _driver(m, "pr_reviewer", pol)
@@ -671,10 +679,12 @@ def _reviewer_for(t, model):
     different family from the implementer; otherwise take the strongest other
     review-capable family. Module-level so the dashboard's manual escalation
     applies the same rule the graph does — the reviewer must follow the
-    implementer, and it must never be the implementer's own family."""
+    implementer, and it must never be the implementer's own family — unless
+    ARC_ALLOW_SAME_FAMILY_REVIEW is on (the cross-family reviewer is down)."""
     current = t.get("reviewer")
     fam = config.MODEL_FAMILY.get(model)
-    if current in config.REVIEW_FAMILIES and current != fam:
+    if current in config.REVIEW_FAMILIES and (
+            current != fam or config.ALLOW_SAME_FAMILY_REVIEW):
         return current
     return config.cross_family_reviewer(model) or current
 

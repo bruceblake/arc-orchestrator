@@ -238,6 +238,19 @@ on `reasonix`).
 
 Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-contract.md).
 
+**Capacity escape hatch (off by default).** When the whole cross-family
+reviewer backend is hard-down *server-side* (not contention — a jammed
+counter nothing local holds), a run may be launched with
+`ARC_ALLOW_SAME_FAMILY_REVIEW=1` (`config.ALLOW_SAME_FAMILY_REVIEW`): the
+loader then accepts a same-family reviewer, `_reviewer_for` keeps it, and
+the PR-review pool inverts to same-family only. First used 2026-09-12..14,
+removed when GLM-5.3 stabilised, re-added 2026-09-15 when GLM-5.3's session
+counter jammed at 5 for 3.5+ hours with no local holder (verified with a
+bare probe). Pair it with `ARC_ESCALATION_PATH=<the surviving model>` so
+exhaustion cannot escalate into the dead family; turn it off when the
+backend recovers — it weakens exactly the independence this rule exists
+for.
+
 ### Rule 3 — Every task runs in its own git worktree off the repo's `main` branch
 
 - `gitstore.alloc` (gitstore.py:47) creates `~/worktrees/<project>/<task-id>`
