@@ -217,6 +217,7 @@ async function loadDeliverable(tid, host) {
     $("#drawer-title").textContent = `${tid} — what changed`;
     $("#drawer-sub").textContent = full.summary || "";
     drawerFile = null;                       // static content, do not poll
+    $("#drawer-mode").style.display = "none";
     $("#drawer-body").textContent =
       (full.patch || "(empty)") + (full.truncated ? "\n\n… diff truncated" : "");
   });
@@ -340,6 +341,7 @@ async function showRunLog(fn) {
   $("#drawer-title").textContent = "run log";
   $("#drawer-sub").textContent = d.error ? "" : `logs/${fn} · last ${(d.lines || []).length} lines`;
   drawerFile = null;
+  $("#drawer-mode").style.display = "none";
   $("#drawer-body").textContent = d.error || (d.lines || []).join("\n") || "(empty)";
 }
 $("#btn-stop").onclick = async () => {

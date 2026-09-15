@@ -1,11 +1,29 @@
 "use strict";
 // ---- transcript drawer ----
+// The drawer defaults to the server's ACTIVITY view: the transcript stream
+// reduced to one folded block per step (reasoning paragraph, tool call,
+// result), which is the only way a reasonix transcript is readable — its raw
+// tail is ~95% sub-word reasoning deltas. "view: raw" is the old JSONL tail
+// (also what the server itself falls back to for kimi-cli-shaped files, in
+// which case the response simply has no `mode` field and renders as raw).
 function openTranscript(file, title, sub) {
   $("#drawer").classList.add("open");
   $("#drawer-title").textContent = title;
   $("#drawer-sub").textContent = sub;
   $("#drawer-body").textContent = "loading…";
+  $("#drawer-mode").style.display = "";
+  syncTranscriptViewButton();
   drawerFile = file;
+  pollTranscript();
+}
+function syncTranscriptViewButton() {
+  const b = $("#drawer-mode");
+  b.textContent = "view: " + drawerView;
+  if (drawerView === "activity") b.classList.add("on"); else b.classList.remove("on");
+}
+function toggleTranscriptView() {
+  drawerView = drawerView === "activity" ? "raw" : "activity";
+  syncTranscriptViewButton();
   pollTranscript();
 }
 async function openTaskTranscript(file, taskId, cachedRuns) {
@@ -15,6 +33,7 @@ async function openTaskTranscript(file, taskId, cachedRuns) {
     $("#drawer-title").textContent = taskId;
     $("#drawer-sub").textContent = "looking up runs…";
     $("#drawer-body").textContent = "loading…";
+    $("#drawer-mode").style.display = "none";
     drawerFile = null;
     try { const d = await jget("/api/project?file=" + encodeURIComponent(file)); runs = d.runs || []; }
     catch (e) { runs = []; }
@@ -29,6 +48,7 @@ async function openTaskTranscript(file, taskId, cachedRuns) {
     $("#drawer-title").textContent = taskId;
     $("#drawer-sub").textContent = "no transcript";
     $("#drawer-body").textContent = `No harness transcript recorded yet for ${taskId}.`;
+    $("#drawer-mode").style.display = "none";
     drawerFile = null;
   }
 }
@@ -37,11 +57,25 @@ async function pollTranscript() {
   const pre = $("#drawer-body");
   const atBottom = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 40;
   let d;
-  try { d = await jget("/api/transcript?file=" + encodeURIComponent(drawerFile) + "&tail=200"); }
+  const url = "/api/transcript?file=" + encodeURIComponent(drawerFile) +
+    (drawerView === "activity" ? "&view=activity&tail=150" : "&tail=200");
+  try { d = await jget(url); }
   catch (e) { return; } // keep last good content; next tick retries
   if (d.error) { pre.textContent = d.error; return; }
-  $("#drawer-sub").textContent = $("#drawer-sub").textContent.split(" · ")[0] + ` · ${d.total_lines} lines`;
-  pre.textContent = d.lines.map(renderTranscriptLine).filter(x => x !== null).join("\n");
+  if (d.mode === "activity") {
+    $("#drawer-sub").textContent = $("#drawer-sub").textContent.split(" · ")[0] + ` · ${d.total_blocks} blocks`;
+    pre.textContent = (d.blocks || []).join("\n");
+    if (d.pending) {  // "what is it doing right now": the still-open thinking/writing group
+      const span = document.createElement("span");
+      span.className = "hint";
+      span.style.fontStyle = "italic";
+      span.textContent = "\n" + d.pending;
+      pre.appendChild(span);
+    }
+  } else {
+    $("#drawer-sub").textContent = $("#drawer-sub").textContent.split(" · ")[0] + ` · ${d.total_lines} lines`;
+    pre.textContent = d.lines.map(renderTranscriptLine).filter(x => x !== null).join("\n");
+  }
   if (atBottom) pre.scrollTop = pre.scrollHeight;
 }
 // The harnesses log completely different shapes and only one was ever handled:
@@ -123,6 +157,7 @@ function renderTranscriptLine(l) {
 
 function closeDrawer() { $("#drawer").classList.remove("open"); drawerFile = null; }
 $("#drawer-close").onclick = closeDrawer;
+$("#drawer-mode").onclick = toggleTranscriptView;
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") { closeDrawer(); $("#modal").classList.remove("open"); }
 });

@@ -23,6 +23,7 @@ import re
 import signal
 import subprocess
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -378,6 +379,232 @@ def activity_tail(raw, n=6):
             if len(out) >= n:
                 break
     return list(reversed(out))
+
+
+def _kn(n):
+    """23_804 -> "23.8k"; small numbers stay plain; junk becomes "?"."""
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return "?"
+    return f"{n / 1000:.1f}k" if n >= 1000 else str(n)
+
+
+def _squash(text):
+    """Whitespace-collapse a paragraph fragment to single spaces."""
+    return " ".join(str(text or "").split())
+
+
+def _fold(text, head=700, tail=500):
+    """Keep the head and tail of a long paragraph, counting the folded middle."""
+    if len(text) <= head + tail:
+        return text
+    omitted = len(text) - head - tail
+    return f"{text[:head]}\n ⋯ [+{omitted} chars folded] ⋯\n{text[len(text) - tail:]}"
+
+
+class TranscriptActivity:
+    """Incremental JSONL -> readable-blocks reducer for harness transcripts.
+
+    A raw tail of a reasonix transcript is ~95% 2-4 char reasoning delta
+    fragments (44k fragments against ~350 actionable records in a 4 MB file),
+    so the drawer showed disconnected scraps and NO thinking. This reducer
+    folds the stream into one block per THING — a folded reasoning paragraph,
+    a tool call, its result — and tracks how far it consumed, so a follower
+    can feed it only the bytes appended since the last poll.
+    """
+
+    def __init__(self, maxlen=400):
+        self.blocks = deque(maxlen=maxlen)
+        # Every block ever emitted. The deque evicts history past maxlen, but
+        # this counter never goes backwards — it is the "total_blocks" the
+        # dashboard reports, so a long run does not saturate at 400.
+        self.produced = 0
+        self._rest = ""                    # trailing partial line, not yet a record
+        self._delta = []                   # open delta-group text parts
+        self._delta_kind = None            # "reasoning" | "text"
+        self._delta_id = None              # (messageId, attemptId)
+        self.unknown = 0                   # complete lines we could not place
+        # (messageId, squashed) of the text groups already rendered as ✎:
+        # a reasonix `message` record is the FINAL of its text deltas, and
+        # rendering both would double every assistant message.
+        self._emitted_text = deque(maxlen=8)
+
+    def _push(self, block):
+        self.blocks.append(block)
+        self.produced += 1
+
+    def feed(self, chunk):
+        """Consume a piece of the stream; complete records become blocks."""
+        parts = (self._rest + chunk).split("\n")
+        self._rest = parts.pop()           # last segment may not be complete yet
+        for line in parts:
+            self._line(line)
+
+    def finish(self):
+        """Flush the trailing partial line and any still-open delta group."""
+        rest, self._rest = self._rest, ""
+        if rest.strip():
+            self._line(rest)
+        self._flush_delta()
+
+    def pending(self):
+        """What the agent is doing RIGHT NOW, or None between records."""
+        if not self._delta_kind:
+            return None
+        text = _squash("".join(self._delta))
+        if not text:
+            return None
+        if self._delta_kind == "reasoning":
+            return f"💭 … thinking ({_kn(len(text))} chars so far): {text[-260:]}"
+        return f"✎ writing ({_kn(len(text))} chars so far): {text[-260:]}"
+
+    def _line(self, line):
+        line = line.strip()
+        if not line:
+            return
+        if not line.startswith("{"):
+            self.unknown += 1
+            return
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            self.unknown += 1
+            return
+        if not isinstance(obj, dict):
+            self.unknown += 1
+            return
+        kind = obj.get("kind")
+        if isinstance(kind, str):
+            if kind in ("reasoning", "text"):
+                self._delta_part(kind, obj)
+                return
+            self._flush_delta()
+            self._reasonix(kind, obj)
+            return
+        typ = obj.get("type")
+        self._flush_delta()
+        if typ == "result":                # reasonix run summary — before opencode
+            self._result(obj)
+        elif isinstance(typ, str):
+            self._opencode(typ, obj)
+        else:
+            self.unknown += 1
+
+    # -- delta groups -------------------------------------------------------
+
+    def _delta_part(self, kind, obj):
+        did = (obj.get("messageId"), obj.get("attemptId"))
+        if self._delta_kind and (kind != self._delta_kind or did != self._delta_id):
+            self._flush_delta()
+        self._delta_kind = kind
+        self._delta_id = did
+        self._delta.append(obj.get("text") or "")
+
+    def _flush_delta(self):
+        if not self._delta_kind:
+            return
+        kind, mid = self._delta_kind, (self._delta_id or (None, None))[0]
+        text = _squash("".join(self._delta))
+        self._delta, self._delta_kind, self._delta_id = [], None, None
+        if not text:
+            return
+        if kind == "reasoning":
+            self._push("💭 " + _fold(text))
+        else:
+            self._push("✎ " + _fold(text))
+            self._emitted_text.append((mid, text))
+
+    # -- reasonix ({kind: ...}) ---------------------------------------------
+
+    def _reasonix(self, kind, obj):
+        tool = obj.get("tool") if isinstance(obj.get("tool"), dict) else {}
+        if kind == "tool_dispatch":
+            if tool.get("partial"):
+                return                     # streaming stub; the final one follows
+            self._push("🔧 " + self._tool_line(tool))
+        elif kind == "tool_result":
+            state = tool.get("runState")
+            mark = "" if state in ("completed", None) else "✗ "
+            self._push("   ↳ " + mark + _squash(tool.get("output"))[:220])
+        elif kind == "message":
+            text = _squash(obj.get("text"))
+            if not text:
+                return
+            for mid, emitted in self._emitted_text:
+                if mid == obj.get("messageId") and emitted == text:
+                    return                 # already shown as the ✎ text block
+            self._push("✉ " + _fold(text, head=300, tail=200))
+        elif kind == "user_message":
+            text = _squash(obj.get("text"))
+            if text:
+                self._push("▸ " + _fold(text, head=250, tail=150))
+        elif kind == "usage" and isinstance(obj.get("usage"), dict):
+            u = obj["usage"]
+            self._push(f"— usage {_kn(u.get('totalTokens'))} tok "
+                               f"(+{_kn(u.get('completionTokens'))} out, "
+                               f"{_kn(u.get('cacheHitTokens'))} cached)")
+        elif kind == "notice":
+            text = _squash(obj.get("text") or obj.get("message"))
+            detail = _squash(obj.get("detail"))
+            if text:
+                self._push(f"— {text}" + (f" ({detail})" if detail else ""))
+        # turn_started/turn_phase/stream_attempt/tool_started/tool_progress/
+        # read_status/… : bookkeeping, not activity.
+
+    @staticmethod
+    def _tool_line(tool):
+        name = tool.get("name") or "tool"
+        arg = ""
+        raw = tool.get("args")
+        if isinstance(raw, str):
+            try:
+                args = json.loads(raw)
+            except ValueError:
+                args = None
+            if isinstance(args, dict):
+                for key in ("path", "file_path", "filePath", "pattern",
+                            "command", "query", "url", "description"):
+                    if args.get(key):
+                        arg = _squash(args[key])[:90]
+                        break
+        return f"{name} {arg}" if arg else name
+
+    def _result(self, obj):
+        text = obj.get("result")
+        if not isinstance(text, str):
+            text = obj.get("text")
+        mark = "✗" if obj.get("is_error") else "✓"
+        body = _squash(text)
+        self._push(f"{mark} result: " + _fold(body, head=300, tail=200)
+                           if body else f"{mark} result")
+
+    # -- opencode ({type: ...}) ----------------------------------------------
+
+    def _opencode(self, typ, obj):
+        part = obj.get("part") if isinstance(obj.get("part"), dict) else {}
+        if typ == "text":
+            text = _squash(part.get("text"))
+            if text:
+                self._push("✎ " + _fold(text))
+        elif typ == "tool_use":
+            state = part.get("state") if isinstance(part.get("state"), dict) else {}
+            inp = state.get("input") if isinstance(state.get("input"), dict) else {}
+            arg = ""
+            for key in ("filePath", "file_path", "path", "command",
+                        "pattern", "query", "url", "description"):
+                if inp.get(key):
+                    arg = _squash(inp[key])[:90]
+                    break
+            block = f"🔧 {part.get('tool') or 'tool'}" + (f" {arg}" if arg else "")
+            out = _squash(state.get("output"))
+            if out:
+                block += "\n   ↳ " + out[:220]
+            self._push(block)
+        elif typ == "step_finish":
+            toks = part.get("tokens") if isinstance(part.get("tokens"), dict) else {}
+            self._push(f"— step ({_kn(toks.get('total'))} tok)")
+        # step_start: a step's own step_finish reports its cost.
 
 
 def _wire_stall_evidence(task_id):
