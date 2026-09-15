@@ -55,7 +55,7 @@ The roster is dated and API-validated (`config.ROSTER`); this is the
 | Model | Harness | Tier | Roles | Account cap | Driver slots |
 |---|---|---|---|---|---|
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` | medium | implement/review/PR-review (never plans) | 10 | 5 |
-| GLM-5.3 | `opencode` | hard | implement/plan/review/PR-review; the planner | 4 | 2 |
+| GLM-5.3 | `opencode` | hard | implement/plan/review/PR-review; the planner | 4 | 4 |
 
 - Reviewer is always cross-family: `reviewer` names a family in
   `config.REVIEW_FAMILIES` (`glm`, `deepseek`) other than the

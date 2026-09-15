@@ -808,8 +808,22 @@ def _harness_of_model(model):
 
 
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
+
+# Pinned driver caps, overriding the sessions // sessions-per-process
+# derivation. GLM-5.3 is pinned at its FULL account session budget (4) by
+# operator directive 2026-09-15: the //2 conservatism assumes one opencode
+# harness holds ~2 ARC sessions at once, but live in-flight GLM sessions
+# tracked one per harness — and at a derived cap of 2 the whole fleet side
+# of GLM (hard implementations, every DeepSeek review, the planner) was
+# serialised through half the slots the account grants. An over-cap burst
+# surfaces as ARC 400s, which the capacity backoff retries; if the backend
+# tightens persistently, ARC_DRIVER_LIMIT_GLM (see driver_limit) still wins
+# over this pin. A pin may never EXCEED the account's own session budget —
+# that is the over-subscription bug one level up (test_config.py asserts it).
+_DRIVER_CAP_PIN = {"GLM-5.3": 4}
 _MODEL_DRIVER_CAP = {
-    m: max(1, n // _SESSIONS_PER_PROCESS[_harness_of_model(m)] - DRIVER_HEADROOM)
+    m: _DRIVER_CAP_PIN.get(
+        m, max(1, n // _SESSIONS_PER_PROCESS[_harness_of_model(m)] - DRIVER_HEADROOM))
     for m, n in _MEASURED_CONCURRENCY.items()}
 
 
@@ -818,7 +832,8 @@ _MODEL_DRIVER_CAP = {
 # harness serialises through a single ~240MB sqlite db in
 # ~/.local/share/opencode. On the two-model fleet (2026-09-12) only GLM-5.3
 # runs opencode — DeepSeek moved to its own `reasonix` harness (2026-09-13,
-# replacing `dsh`) — so the opencode pool sees GLM's 2 driver slots against
+# replacing `dsh`) — so the opencode pool sees GLM's 4 driver slots (pinned at
+# the account budget by `_DRIVER_CAP_PIN` above) against
 # the harness's cap of 5. The retired three-model fleet put
 # GLM 4 + DeepSeek 5 + gpt-oss 5 = 14 concurrent opencode processes against
 # it, and measured on this machine (identical prompt, warm cache):
@@ -892,10 +907,13 @@ def harness_limit(harness):
 # Reserved ONLY on the planner model, and only while that leaves batch at least
 # two slots. Applying it to every model is wrong: it once took GLM and DeepSeek
 # from 2 to 1 — halving fleet throughput to protect a path batch work never
-# uses. The MIN_BATCH_SLOTS guard also makes the planner's own reserve inert
-# while the planner's driver cap is 2 (2 - 1 < 2 leaves batch too little, so
-# batch and interactive both see the full 2). The cost of a reserve should fall
-# on the one model chat actually uses, and only when it can afford to give.
+# uses. With GLM's cap pinned at 4 (`_DRIVER_CAP_PIN`, operator directive
+# 2026-09-15), batch callers see 4 - 1 = 3 and interactive callers the full 4;
+# the MIN_BATCH_SLOTS guard only makes the reserve inert again if the cap ever
+# falls to 2 (2 - 1 < 2 leaves batch too little). ARC_INTERACTIVE_RESERVE=0
+# hands batch the fourth slot too when nobody is chatting. The cost of a
+# reserve should fall on the one model chat actually uses, and only when it
+# can afford to give.
 INTERACTIVE_RESERVE = int(os.getenv("ARC_INTERACTIVE_RESERVE", "1"))
 MIN_BATCH_SLOTS = 2
 

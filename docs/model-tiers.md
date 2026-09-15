@@ -14,7 +14,7 @@ Two models, two harnesses (operator decision 2026-09-12):
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 2 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
 
 Context windows and defaults per the official ARC docs
@@ -45,15 +45,18 @@ reviews, and **never plans**.
   harness instances per model via `drivers._gate` → `config.driver_limit`.
   It is the account cap divided by sessions-per-process (both harnesses hold
   about two ARC sessions at once: `config._SESSIONS_PER_PROCESS` is
-  `{"opencode": 2, "reasonix": 2}`), so 10 ÷ 2 = 5
-  and 4 ÷ 2 = 2. `ARC_DRIVER_HEADROOM` subtracts further;
+  `{"opencode": 2, "reasonix": 2}`), so DeepSeek is 10 ÷ 2 = 5.
+  GLM-5.3 is the exception: its driver cap is **pinned at the account's full
+  4** (`config._DRIVER_CAP_PIN`, operator directive 2026-09-15 — in-flight
+  GLM sessions tracked one per harness, so the halving under-sold the
+  account). `ARC_DRIVER_HEADROOM` subtracts further;
   batch callers on the
-  planner model would see one slot fewer (`INTERACTIVE_RESERVE`), but
-  `_apply_reserve` skips the reserve while it would leave batch under
-  `MIN_BATCH_SLOTS` = 2 — and GLM-5.3's cap **is** 2, so no reserve is applied
-  there either (2 − 1 leaves batch under two; an interactive chat queues
-  instead). `ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM if the backend
-  tightens persistently.
+  planner model see one slot fewer while the reserve can afford to give
+  (`INTERACTIVE_RESERVE`, reduced by `_apply_reserve` while it would leave
+  batch under `MIN_BATCH_SLOTS` = 2), so with GLM at 4 batch sees 3 and
+  interactive the full 4 — `ARC_INTERACTIVE_RESERVE=0` hands batch the
+  fourth slot when nobody is chatting. `ARC_DRIVER_LIMIT_GLM=1` re-serialises
+  GLM if the backend tightens persistently.
 - GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
   **`reasonix`** (`drivers.ReasonixDriver`, binary via `config.reasonix_bin()`).
   The driver caps apply per model; the **harness** pools are separate —
