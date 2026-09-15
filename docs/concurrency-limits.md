@@ -367,9 +367,9 @@ retired with the family on 2026-09-12 and is no longer minted or read.)
 
 | Situation | What to do |
 |---|---|
-| **Dedicated box** — no interactive `opencode`/`dsh` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=3`; DeepSeek is already at 5 = 10 ÷ 2) to run the fleet flat-out. Raise `ARC_HARNESS_LIMIT_OPENCODE` too if GLM's cap rises above 5. |
+| **Dedicated box** — no interactive `opencode`/`reasonix` sessions share the key | Raise the driver caps toward the account caps (e.g. `ARC_DRIVER_LIMIT_GLM=3`; DeepSeek is already at 5 = 10 ÷ 2) to run the fleet flat-out. Raise `ARC_HARNESS_LIMIT_OPENCODE` too if GLM's cap rises above 5. |
 | You have a **higher account tier** | Raise `ARC_LIMIT_<FAMILY>` *and* the matching `ARC_DRIVER_LIMIT_<FAMILY>`. The account cap is server-side, so raising only the driver cap can hit the API's 400 "session limit" rejection. |
-| **Shared box** (you also use `opencode` / `dsh` by hand) | Keep defaults. The whole point of the driver caps is to leave headroom for your own sessions. |
+| **Shared box** (you also use `opencode` / `reasonix` by hand) | Keep defaults. The whole point of the driver caps is to leave headroom for your own sessions. |
 
 Never set a driver cap above the account cap for a family — you would only
 trade "polite headroom" for hard API rejections and retry churn.

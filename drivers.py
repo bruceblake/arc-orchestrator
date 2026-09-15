@@ -1,7 +1,7 @@
-"""Headless CLI drivers for the coding harnesses (opencode, dsh; kimi retired).
+"""Headless CLI drivers for the coding harnesses (opencode, reasonix; dsh bench-only, kimi retired).
 
 Role map (hard rule): the fleet is TWO models since 2026-09-12 —
-DeepSeek-V4.1-Flash-thinking-max (the `dsh` harness) implements and
+DeepSeek-V4.1-Flash-thinking-max (the `reasonix` harness) implements and
 reviews/PR-reviews the medium tier, and GLM-5.3 (opencode) plans, implements
 the hard tier, and reviews. A task is always reviewed by a *different model
 family* than the one that implemented it (Rule 2). ARC rejects over-limit

@@ -261,8 +261,8 @@ Full pipeline contract: [docs/orchestration-contract.md](docs/orchestration-cont
   direct edits on `main` (or any shared branch) by harnesses. A task that
   edits documentation is planned, routed, gated, reviewed and merged exactly
   like one that edits code — the pipeline is path-agnostic, and every
-  implementer harness runs with cwd = its worktree (drivers.py:775 for
-  opencode, drivers.py:1201 for dsh), so
+  implementer harness runs with cwd = its worktree (the shared
+  `Driver._once`, drivers.py:920, for opencode and reasonix alike), so
   there is no "too small for a worktree" path, not even for a one-line doc
   fix.
 
