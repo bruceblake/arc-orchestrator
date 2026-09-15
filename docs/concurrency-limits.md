@@ -178,15 +178,16 @@ _MEASURED_CONCURRENCY = {"GLM-5.3": 4,
                          "DeepSeek-V4.1-Flash-thinking-max": 10}
 _SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2}
 DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
-_MODEL_DRIVER_CAP = {m: max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)]
-                            - DRIVER_HEADROOM)
-                     for m, n in _MEASURED_CONCURRENCY.items()}
+_DRIVER_CAP_PIN = {"GLM-5.3": 4}   # operator directive 2026-09-15, see below
+_MODEL_DRIVER_CAP = {m: _DRIVER_CAP_PIN.get(
+    m, max(1, n // _SESSIONS_PER_PROCESS[harness_of(m)] - DRIVER_HEADROOM))
+    for m, n in _MEASURED_CONCURRENCY.items()}
 ```
 
 | Model | ARC sessions | Harness | Sessions per process | Driver cap |
 |---|---|---|---|---|
 | DeepSeek-V4.1-Flash-thinking-max | 10 | reasonix | 2 | 5 |
-| GLM-5.3 | 4 | opencode | 2 | 2 |
+| GLM-5.3 | 4 | opencode | 2 | **4 (pinned)** |
 
 (`"kimi": 1` remains in `_SESSIONS_PER_PROCESS` only so a historical
 transcript's harness still resolves; no live model maps to it.)
@@ -198,9 +199,13 @@ rejections, GLM-5.3 refused with as few as TWO drivers live against a ceiling
 of four. The backend's rejection text has twice deviated from the official
 table — "max 3 in flight per user" on 2026-09-14 (observed with zero fleet
 drivers alive) and "max 5 in flight" on 2026-09-15 — both dated observations
-of an account cap shared with other key consumers. GLM's driver cap is the
-derived 4 // 2 = 2 (official docs value adopted 2026-09-15); the dips surface
-as waits and retried 400s, and `ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM
+of an account cap shared with other key consumers. GLM's driver cap is PINNED
+at the account's full 4 (operator directive 2026-09-15): in-flight GLM
+sessions tracked one per harness, so the derived 4 // 2 = 2 threw away half
+the slots the account grants; an over-cap burst surfaces as retried 400s the
+backoff absorbs. The pin replaces the whole derived expression for GLM —
+`ARC_DRIVER_HEADROOM` still subtracts from non-pinned models — and
+`ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM
 harnesses across processes if the backend tightens persistently.
 
 Remember the harness pools above sit UNDER these: opencode and reasonix are
@@ -264,7 +269,7 @@ are dated observations of a shared account cap, not the stated value).
 For every non-pinned model, setting a
 cap equal to the session limit asks for twice the budget and the
 fleet generates its own 400s. On top of the division, `ARC_DRIVER_HEADROOM`
-(default 0) subtracts a flat reserve per model.
+(default 0) subtracts a flat reserve per non-pinned model.
 
 The second is politeness. The account key is shared with the user's own
 interactive sessions, so the orchestrator must leave room for them:

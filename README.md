@@ -129,9 +129,10 @@ consumes next round — the system generates its own work forever.
 
 ### Concurrency
 
-Per-family semaphores follow the ARC ceilings on the two-model fleet (13
-requests in flight max since the GLM account cap was revised 4 → 3 on
-2026-09-14): deepseek 10, glm 3 — see
+Per-family semaphores follow the ARC ceilings on the two-model fleet (14
+requests in flight max): deepseek 10, glm 4 (the official ARC docs value,
+adopted 2026-09-15 — the intervening 4 → 3 was a one-day pin against a
+backend rejection text that turned out to describe a shared account key) — see
 [docs/concurrency-limits.md](docs/concurrency-limits.md). Web research uses the
 `-legacy-tool-calling` variants with `tool_ids: ["server:websearch"]`. All
 requests stream (the API caps non-streaming at 8,000 tokens). Roles rotate

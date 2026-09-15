@@ -49,7 +49,7 @@ reviews, and **never plans**.
   GLM-5.3 is the exception: its driver cap is **pinned at the account's full
   4** (`config._DRIVER_CAP_PIN`, operator directive 2026-09-15 — in-flight
   GLM sessions tracked one per harness, so the halving under-sold the
-  account). `ARC_DRIVER_HEADROOM` subtracts further;
+  account). `ARC_DRIVER_HEADROOM` subtracts further from non-pinned models;
   batch callers on the
   planner model see one slot fewer while the reserve can afford to give
   (`INTERACTIVE_RESERVE`, reduced by `_apply_reserve` while it would leave
