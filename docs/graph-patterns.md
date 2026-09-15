@@ -364,7 +364,7 @@ exactly ONE cross-family reviewer in the two-family fleet, recorded as
 ```
 
 - **Width:** N=2 candidates is usually enough; N=3 max, and mind the driver
-  caps — DeepSeek 5, GLM-5.3 1. Cost is N+1 full gauntlets.
+  caps — DeepSeek 5, GLM-5.3 2. Cost is N+1 full gauntlets.
 - **Pitfalls:** two candidate PRs touching the same file cannot both merge —
   either both write proposals and the judge implements, or expect one PR to
   be closed by hand (the orchestrator does not auto-close losers). Juries
