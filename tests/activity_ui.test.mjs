@@ -52,7 +52,11 @@ const STUBS = "\nfunction openDetail(file) { globalThis.__opened.push(file); }\n
 globalThis.__opened = OPENED;
 const EXTERNALS = STUBS + ["common.js", "panels/state.js", "panels/fleet.js"].map(read).join("\n");
 const mod = new Function(EXTERNALS +
-  "\nreturn {renderActivity, pollActivity, activityRow, ACTIVITY_KIND, ACTIVITY_COLOR};");
+  "\nreturn {renderActivity, pollActivity, activityRow, activityTarget,"
+  + " ACTIVITY_KIND, ACTIVITY_COLOR,"
+  // PROJECTS is a `let` in state.js, i.e. in this Function's scope: the page
+  // fills it from /api/projects, and the tests need the same lever.
+  + " setProjects: ps => { PROJECTS = ps; }};");
 const api = mod();
 
 let good = 0;
@@ -75,7 +79,10 @@ const EV = [
   { ts: NOW - 2000, type: "task.review_degraded", task: "t-deg", file: "panel.json",
     run_id: "r1", context: {workload: "code"}, got: 1, wanted: 2,
     note: "thin review: 1 of 2 reviewer(s) the roster wanted" },
-  { ts: NOW - 2500, type: "driver.stalled", task: "t-stall", file: "panel.json",
+  // Real shape: drivers.py emits the task id it was HANDED, which code_tasks
+  // passes as `<tid>-xN`/`<tid>-prN`, and `file` is whatever the server could
+  // resolve for that id.
+  { ts: NOW - 2500, type: "driver.stalled", task: "t-stall-x2", file: null,
     run_id: "r1", context: {workload: "code"}, model: "GLM-5.3", idle_s: 900 },
   { ts: NOW - 3000, type: "chain.wait", run_id: "r1", context: {workload: "code"},
     taskfile: "/home/x/tasks/panel.json" },
@@ -90,6 +97,9 @@ let FETCHED = [];
 globalThis.fetch = async u => { FETCHED.push(String(u)); return { status: 200,
   json: async () => ({events: EV, limit: 50, total: EV.length}) }; };
 const feed = () => document.querySelector("#activity").innerHTML;
+// The loaded project list, as /api/projects returns it: BASE task ids only.
+api.setProjects([{file: "panel.json", tasks: [{id: "t-rev"}, {id: "t-stall"},
+                                              {id: "t-merge"}]}]);
 
 await api.pollActivity();
 ok("feed fetched from /api/activity", FETCHED.some(u => u.startsWith("/api/activity")));
@@ -190,6 +200,29 @@ ok("the server-resolved taskfile rides on the row",
    feed().includes('data-file="panel.json"'));
 ok("rows without a task id are not clickable",
    !/data-task=""|data-task="undefined"/.test(feed()));
+
+// ---- a driver event's id is not a project id ----------------------------
+// drivers.py:1332 emits `driver.stalled` with the task id code_tasks handed it
+// — `<tid>-xN` for an attempt, `<tid>-prN` for a PR reviewer — while the page
+// matches projects on BASE ids. Resolving only exact ids left `file` null and
+// still rendered role="button", so a stalled harness (the row an operator most
+// wants to open) was a focusable control that opened nothing.
+ok("a suffixed driver id still resolves to its project",
+   api.activityTarget({task: "t-stall-x2", file: null}) === "panel.json"
+   && api.activityTarget({task: "t-rev-pr3", file: null}) === "panel.json");
+// An id that IS a row key must not be rewritten: a project can legitimately
+// be called `release-pr2`, and stripping first would open a different one.
+ok("an exact task id wins over the suffix-stripped fallback",
+   api.activityTarget({task: "t-stall-x2", file: null}) === "panel.json"
+   && api.activityTarget({task: "t-merge", file: null}) === "panel.json");
+ok("an unresolvable task id is not rendered as a button",
+   !/role="button"/.test(api.activityRow({ts: NOW, type: "chain.wait",
+     task: "nobody-knows-this-one-x7", file: null}))
+   && !/has-task/.test(api.activityRow({ts: NOW, type: "chain.wait",
+     task: "nobody-knows-this-one-x7", file: null}))
+   // ...but its task id is still shown: the row is readable, just not a link.
+   && api.activityRow({ts: NOW, type: "chain.wait", task: "gone-x7", file: null})
+        .includes("gone-x7"));
 // The click handler is the page's: it must route the event's own task/file
 // into openDetail (which the harness stubs and records).
 OPENED.length = 0;

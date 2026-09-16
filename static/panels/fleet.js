@@ -295,22 +295,44 @@ function activityDetail(e) {
   return bits.length ? esc(bits.join("\n").slice(0, 400)) : "";
 }
 
+// Which project a row opens, or "" when it opens nothing.
+//
+// Driver events carry the HARNESS's task id, not a project id: an attempt is
+// `<tid>-xN` and a PR reviewer is `<tid>-prN` (code_tasks.py hands both to
+// driver.run), while the page matches on base ids. The server already strips
+// those before it ships `file`; the PROJECTS fallback below has to strip them
+// too, or a stalled harness resolves on one path and not the other.
+const activityBase = t => String(t || "").replace(/-x\d+$/, "").replace(/-pr\d+$/, "");
+function activityTarget(e) {
+  if (e.file) return e.file;
+  if (!e.task) return "";
+  // Exact id first, so a task whose real id ends in a driver-ish suffix still
+  // opens its own project; the base id is the fallback that makes a stalled
+  // harness resolvable at all.
+  const owner = findProject(e.task) || findProject(activityBase(e.task));
+  return (owner && owner.file) || "";
+}
+function findProject(id) {
+  return (PROJECTS || []).find(p => (p.tasks || []).some(t => t.id === id));
+}
 function activityRow(e) {
   const kind = ACTIVITY_KIND[e.type] || {k: "", w: e.type};
-  const hasTask = !!e.task;
   const detail = activityDetail(e);
   const hot = ACTIVITY_BAD.has(e.type) ? " bad" : "";
   const color = activityColor(kind.k);
-  // A click is a shortcut into the project's detail panel; the row is only
-  // marked interactive when it actually HAS a task to open, so the affordance
-  // never lies (and a11y does not announce a dead button).
-  return `<div class="arow${hasTask ? " has-task" : ""}${hot}"` +
-    (hasTask ? ` role="button" tabindex="0" data-task="${attr(e.task)}"` +
-      ` data-file="${attr(e.file || "")}"` +
+  // A click is a shortcut into the project's detail panel, and the row is
+  // marked interactive ONLY when it has a project to open: a task id the page
+  // cannot resolve to a name is not a clickable row. Rendering role="button"
+  // off `e.task` alone promised an action that no-oped (a stalled harness is
+  // exactly such a row), so the affordance and the click decide together.
+  const target = activityTarget(e);
+  return `<div class="arow${target ? " has-task" : ""}${hot}"` +
+    (target ? ` role="button" tabindex="0" data-task="${attr(e.task)}"` +
+      ` data-file="${attr(target)}"` +
       ` aria-label="open task ${attr(e.task)} in its project"` : "") + `>
     <span class="when">${esc(AGO(e.ts))} ago</span>
     <span class="abadge" style="color:${color}" title="${attr(e.type)}">${esc(kind.w)}</span>
-    ${hasTask ? `<span class="atask">${esc(e.task)}</span>` : ""}
+    ${e.task ? `<span class="atask">${esc(e.task)}</span>` : ""}
     <span class="awhat">${esc(activityWhat(e))}</span>
     ${detail ? `<span class="adetail">${detail}</span>` : ""}
   </div>`;
@@ -347,9 +369,8 @@ for (const b of document.querySelectorAll("[data-ac]")) {
 // code_tasks rows and ships it as `file` on the event, so a click works for
 // history the page's current filter (or an archive) has hidden.
 function activityOpen(taskId, file) {
-  if (file) return openDetail(file);
-  const hit = (PROJECTS || []).find(p => (p.tasks || []).some(t => t.id === taskId));
-  if (hit) return openDetail(hit.file);
+  const target = activityTarget({task: taskId, file: file});
+  if (target) openDetail(target);
 }
 function activityKey(ev) {
   const row = ev.target && ev.target.closest && ev.target.closest("[data-task]");

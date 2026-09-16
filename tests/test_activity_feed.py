@@ -157,6 +157,49 @@ class ActivityFeed(unittest.TestCase):
         _, body = self._get()
         self.assertEqual(body["events"][0]["file"], "panel.json")
 
+    def test_a_driver_event_id_resolves_to_its_project(self):
+        """Driver events carry the HARNESS id, not a code_tasks row key.
+
+        code_tasks hands driver.run `<tid>-xN` (an attempt) and `<tid>-prN` (a
+        PR reviewer), and drivers.py emits whatever it was given. The rows are
+        keyed by the base id, so an exact-match lookup dropped `file` for every
+        driver event — and the panel then offered a button that opened nothing.
+        A stalled harness is precisely the row an operator wants to open.
+        """
+        st = dashboard.Handler.store
+        st.upsert_code_task("/home/x/tasks/panel.json", "t1", "one", "GLM-5.3",
+                            "deepseek", "merged")
+        self._write(
+            self._ev("driver.stalled", 1.0, task="t1-x2", model="GLM-5.3",
+                     idle_s=900),
+            self._ev("driver.stalled", 2.0, task="t1-pr3", model="GLM-5.3",
+                     idle_s=900),
+            self._ev("task.merged", 3.0, task="t1"),
+        )
+        _, body = self._get()
+        files = {e["task"]: e["file"] for e in body["events"]}
+        self.assertEqual(files["t1-x2"], "panel.json")
+        self.assertEqual(files["t1-pr3"], "panel.json")
+        self.assertEqual(files["t1"], "panel.json")
+        # The id the panel SHOWS is the one the event carried, unstripped.
+        self.assertEqual([e["task"] for e in body["events"]],
+                         ["t1", "t1-pr3", "t1-x2"])
+
+    def test_an_exact_id_wins_over_the_suffix_stripped_fallback(self):
+        """A task really called `release-pr2` must open ITS project.
+
+        Stripping the suffix first would resolve such an id to a different
+        taskfile (or none), so the exact row key is tried before the fallback.
+        """
+        st = dashboard.Handler.store
+        st.upsert_code_task("/home/x/tasks/real.json", "release-pr2", "the real one",
+                            "GLM-5.3", "deepseek", "merged")
+        st.upsert_code_task("/home/x/tasks/other.json", "release", "the fallback",
+                            "GLM-5.3", "deepseek", "merged")
+        self._write(self._ev("task.merged", 1.0, task="release-pr2"))
+        _, body = self._get()
+        self.assertEqual(body["events"][0]["file"], "real.json")
+
     def test_an_unknown_task_resolves_to_no_file_but_still_renders(self):
         """History outlives the row it came from — that must not drop the event."""
         self._write(self._ev("task.merged", 1.0, task="long-gone"))

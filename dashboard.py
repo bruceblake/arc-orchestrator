@@ -455,6 +455,25 @@ def _xkey(task):
     return (m.group(1), int(m.group(2))) if m else (task, None)
 
 
+def _activity_file(taskfile_of, tid):
+    """The taskfile an activity event's task id belongs to, or None.
+
+    Driver events carry the HARNESS's id, never a code_tasks row key: an
+    implement/review attempt is `<tid>-xN` and a PR reviewer is `<tid>-prN`
+    (code_tasks.py passes both straight to driver.run), while the rows are
+    keyed by the BASE id alone (`_xkey`: "DB ids carry no -xN suffix"). An
+    exact-match lookup therefore missed every driver event - and a stalled
+    harness is exactly the row an operator wants to open, so it rendered as a
+    button that opened nothing.
+    """
+    if not tid:
+        return None
+    if tid in taskfile_of:
+        return taskfile_of[tid]      # a task id that IS the row key
+    base, _x = _xkey(tid)            # '<tid>-xN' -> '<tid>'
+    return taskfile_of.get(re.sub(r"-pr\d+$", "", base))    # '<tid>-prN'
+
+
 def _transcript_toks(tpath):
     """(tokens, prompt, completion) for one transcript file, cached by size+mtime."""
     if not tpath:
@@ -3976,6 +3995,7 @@ class Handler(BaseHTTPRequestHandler):
                     # click works even for a task whose project is not in the
                     # page's current filter or has since been archived.
                     tid = e.get("task")
+                    file_of = _activity_file(taskfile_of, tid)
                     # Contract keys LAST: the five keys the panel is promised
                     # ({ts,type,task,run_id,context}) are the normalised ones,
                     # so a raw field of the same name cannot shadow them. Every
@@ -3984,7 +4004,7 @@ class Handler(BaseHTTPRequestHandler):
                     # and reviewer model reach the feed.
                     out.append({**e, "ts": e.get("ts"), "type": e.get("type"),
                                 "task": tid, "run_id": e.get("run_id"),
-                                "file": taskfile_of.get(tid),
+                                "file": file_of,
                                 "context": ctx})
                 return self._json({"events": out, "limit": limit,
                                    "total": len([1 for ln in lines
