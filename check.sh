@@ -61,10 +61,25 @@ for m in config store graph events drivers gitstore code_tasks reconcile dashboa
 done
 
 step "unit tests"
-if ! "$PY" -m unittest discover -s tests -t tests 2>&1 | tail -20; then
+# Unset ARC_ESCALATION_PATH for the suite: it is live fleet-run state, not test
+# state. A run launched during a capacity outage exports
+# ARC_ESCALATION_PATH=<the surviving model> (AGENTS.md Rule 2's documented
+# pairing with ARC_ALLOW_SAME_FAMILY_REVIEW), and config.py reads it at import,
+# collapsing the two-tier default to one model. The tests below assert the
+# DEFAULT routing invariants ("every model below the top has a successor",
+# "resume escalates one tier up"), so the suite passed or failed with the
+# operator's shell rather than with the diff — measured 2026-09-15 on a PRISTINE
+# tree: 15 failures with the var set, 0 without. The tests are right; the gate
+# must run them with the defaults in effect.
+#
+# ARC_ALLOW_SAME_FAMILY_REVIEW is deliberately left set: the "taskfile validity"
+# step validates the operator's real ~/tasks files, authored for whichever
+# review mode the fleet is running.
+TESTENV=(env -u ARC_ESCALATION_PATH)
+if ! "${TESTENV[@]}" "$PY" -m unittest discover -s tests -t tests 2>&1 | tail -20; then
     echo "FAIL: unit tests"; rc=1
 fi
-"$PY" -m unittest discover -s tests -t tests >/dev/null 2>&1 || rc=1
+"${TESTENV[@]}" "$PY" -m unittest discover -s tests -t tests >/dev/null 2>&1 || rc=1
 
 step "dashboard javascript"
 if command -v node >/dev/null 2>&1; then

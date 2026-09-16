@@ -727,6 +727,40 @@ def _gate_failures(output, limit=12):
     return hits
 
 
+_GATE_FAIL_LINE = re.compile(r"^(FAIL|ERROR):")
+_GATE_FULL_LIST_HEADER = "--- failing checks (full list) ---"
+
+
+def _gate_fail_lines(output, limit=40):
+    """EVERY `FAIL:`/`ERROR:` line in the output, not just the ones near the cut.
+
+    Rule 4 keeps only the last 2000 characters of gate output, and a check.sh
+    run puts the unittest summary and the shell's echo under that cut: on
+    2026-09-15 a gate kept 1 of 15 failing test names, and three worktrees
+    spent a fix round hunting for the other fourteen. _gate_failures() covers
+    more formats but stops at 12 names; this is the narrower, longer list that
+    goes beside the tail in the log file (`logs/gates/<tid>-x<attempt>.log`)
+    and in the `task.gate` event, so the names survive outside the cut.
+    """
+    hits, seen = [], set()
+    for raw in output.splitlines():
+        line = raw.strip()
+        if not line or line in seen or not _GATE_FAIL_LINE.match(line):
+            continue
+        seen.add(line)
+        hits.append(line[:200])
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _gate_full_list_block(lines):
+    """Header plus lines, or "" — shared by the log file and the event."""
+    if not lines:
+        return ""
+    return _GATE_FULL_LIST_HEADER + "\n" + "\n".join(lines)
+
+
 def _resume_session(results, tid, model):
     """The harness session to continue for this fix round, or None.
 
@@ -1505,12 +1539,21 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 block = "failing checks:\n" + "\n".join(f"  {n}" for n in names)
                 output = (block + "\n...\n" + full[-1400:])[:2400]
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0)
+            # The FULL `FAIL:`/`ERROR:` list, not just the window the 2000-char
+            # cut keeps: on 2026-09-15 a gate kept 1 of 15 failing test names
+            # and three worktrees spent a fix round hunting the other
+            # fourteen. Failure-only, the same discipline as the names block
+            # above — on a pass a FAIL:-shaped line is a caught exception
+            # printed by an expected-error test, and a "failing checks"
+            # header over it would be a lie.
+            fail_block = "" if passed else _gate_full_list_block(_gate_fail_lines(full))
             log_path = None
             try:
                 log_dir = Path(config.ROOT) / "logs" / "gates"
                 log_dir.mkdir(parents=True, exist_ok=True)
                 log_path = str(log_dir / f"{tid}-x{attempt}.log")
-                Path(log_path).write_text(full)
+                Path(log_path).write_text(
+                    full + ("\n\n" + fail_block if fail_block else ""))
             except OSError:
                 log_path = None
             # Attribution and a reason, not just a boolean: a bare
@@ -1522,6 +1565,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 tail = ("failing: " + "; ".join(names))[-400:]
             else:
                 tail = output.strip()[-400:]
+            if fail_block:
+                # The log-tail field carries the names too: the tail alone is
+                # a 400-char window of the output that just hid them, so the
+                # list rides beside it (bounded — 40 names, 200 chars each).
+                tail = ((tail or "") + "\n" + fail_block)[:9000]
             events.emit("task.gate", task=tid, attempt=attempt, passed=passed,
                         log=log_path, cmd=cmd[:120], tail=tail)
             verdict = None
