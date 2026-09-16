@@ -113,6 +113,47 @@ class InflightAttribution(unittest.TestCase):
         rows, _ = dashboard._collect_inflight(now, None)
         self.assertEqual(rows, [], "a killed run's start event must not count forever")
 
+    def test_a_dead_pid_is_pruned_without_waiting_for_the_lease_ttl(self):
+        """A driver.start names the pid that owns the run, so that pid being
+        gone is proof the run is over NOW. Without this rule the row waited out
+        DRIVER_STALE_S (DRIVER_LEASE_TTL + 240 = ~24h under the default
+        unlimited budgets), so a killed run rendered as a live agent for a day.
+        The start here is FRESH, so only the liveness rule can prune it."""
+        now = time.time()
+        dead_pid = 2 ** 31 - 1     # never allocated, so never alive
+        self.assertFalse(dashboard._pid_alive(dead_pid),
+                         "test premise: this pid must not be alive")
+        self.write_events({"ts": now - 30, "type": "driver.start",
+                           "harness": config.MODEL_HARNESS[STRONGEST],
+                           "model": STRONGEST, "role": "implementer",
+                           "task": "t1", "attempt": 1, "pid": dead_pid})
+        rows, _ = dashboard._collect_inflight(now, None)
+        self.assertEqual(rows, [], "a dead owning process is not a live agent")
+
+    def test_a_fresh_cpu_sample_is_kept_but_a_stale_one_is_dropped(self):
+        """cpu_delta_s/state are a NOW reading, not history. A sample older
+        than 2x the sample interval was taken by a run that stopped sampling,
+        so carrying it forward made a frozen 0.0 CPU render as "no CPU"
+        (agents.js guards that suffix on != null, so None renders nothing)."""
+        now = time.time()
+        base = {"harness": config.MODEL_HARNESS[STRONGEST], "model": STRONGEST,
+                "role": "implementer", "attempt": 1}
+        stale_s = 2 * config.DRIVER_PROGRESS_INTERVAL + 60
+        self.write_events(
+            {"ts": now - 90, "type": "driver.start", "task": "fresh", **base},
+            {"ts": now - 5, "type": "driver.progress", "task": "fresh",
+             "cpu_delta_s": 0.0, "state": "S", **base},
+            {"ts": now - 90 - stale_s, "type": "driver.start", "task": "stale", **base},
+            {"ts": now - stale_s, "type": "driver.progress", "task": "stale",
+             "cpu_delta_s": 0.0, "state": "S", **base})
+        rows, _ = dashboard._collect_inflight(now, None)
+        by_task = {r["task"]: r for r in rows}
+        self.assertEqual(sorted(by_task), ["fresh", "stale"])
+        self.assertEqual(by_task["fresh"]["cpu_delta_s"], 0.0)
+        self.assertEqual(by_task["fresh"]["state"], "S")
+        self.assertIsNone(by_task["stale"]["cpu_delta_s"])
+        self.assertIsNone(by_task["stale"]["state"])
+
     def test_last_event_age_and_stall_flag_come_from_the_newest_ping(self):
         """last_event_s must read the newest liveness event, not the start —
         a live agent shows a fresh heartbeat age, not its total runtime."""
