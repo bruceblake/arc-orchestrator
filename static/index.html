@@ -186,6 +186,20 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .errtb summary { cursor: pointer; color: var(--dim); font-size: 11px; }
 .errtb pre { background: #0d1117; border: 1px solid var(--border); border-radius: 5px;
              padding: 7px; overflow-x: auto; font-size: 11px; margin: 4px 0 0; }
+/* Fleet activity feed: one compact row per lifecycle event, newest first. */
+.arow { display: flex; align-items: baseline; gap: 8px; padding: 3px 7px;
+        border-left: 2px solid var(--border); margin-bottom: 3px; font-size: 12px;
+        flex-wrap: wrap; }
+.arow.has-task { cursor: pointer; }
+.arow.has-task:hover { background: #0d1117; border-left-color: var(--accent); }
+.arow .when { color: var(--dim); font-size: 11px; min-width: 44px; text-align: right; }
+.arow .abadge { font-size: 10px; padding: 0 6px; border: 1px solid currentColor;
+                border-radius: 9px; white-space: nowrap; }
+.arow .atask { color: var(--accent); }
+.arow .awhat { color: var(--dim); font-size: 11px; }
+.arow .adetail { color: var(--dim); font-size: 11px; flex-basis: 100%;
+                 padding-left: 52px; white-space: pre-wrap; word-break: break-word; }
+.arow.bad .adetail { color: var(--err); }
 /* --- the pipeline explainer: click a stage, read what it does --- */
 .node.topo { cursor: pointer; }
 .node.topo:hover rect { stroke-width: 2.4; }
@@ -353,6 +367,16 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <button class="act seg" id="er-all" data-er="all">all</button>
       </h2>
       <div id="errs"></div>
+    </div>
+    <div class="panel" id="activity-panel">
+      <h2>Fleet activity <span class="hint" id="activity-meta"></span>
+        <span style="flex:1"></span>
+        <button class="act seg on" id="ac-50" data-ac="50">50</button>
+        <button class="act seg" id="ac-100" data-ac="100">100</button>
+        <button class="act seg" id="ac-500" data-ac="500">500</button>
+      </h2>
+      <div id="activity"></div>
+      <div class="empty" id="activity-empty" style="display:none">No fleet activity in the log yet.</div>
     </div>
     <div class="panel" id="slots-panel">
       <h2>Model slots <span class="hint" id="slots-meta">idle</span>
@@ -527,6 +551,7 @@ initEvents();
 setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
 setTimeout(() => { pollSlots(); setInterval(pollSlots, 3000); }, 400);
 setTimeout(() => { pollErrors(); setInterval(pollErrors, 15000); }, 2000);
+setTimeout(() => { pollActivity(); setInterval(pollActivity, 10000); }, 2200);
 setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
 setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
 setTimeout(() => setInterval(pollEvents, 8000), 1200);

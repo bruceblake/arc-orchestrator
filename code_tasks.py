@@ -1645,6 +1645,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         "issues": ["reviewer session ended without a verdict"]}
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
                         reviewer=rev_tok,
+                        # The reviewer's MODEL, not just its family token: the
+                        # activity feed names who read the diff, and the token
+                        # ("glm") is not a model name.
+                        model=driver.model,
+                        harness=driver.harness,
+                        # The fix-loop round this verdict belongs to, so the
+                        # feed can say "round 3" instead of a bare timestamp.
+                        round=attempt,
                         n_issues=len(verdict.get("issues") or []),
                         # Pre-existing findings a reviewer filed while reading
                         # the full diff: recorded so they are not lost, and
@@ -1842,6 +1850,18 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.pr_review_thin", task=tid, pr=number,
                             wanted=config.PR_REVIEWERS_WANTED, got=len(chosen),
                             reviewers=chosen, implementer=cur_model(ctx))
+                # The same fact in the activity feed's own vocabulary. A thin
+                # review is the one thing an operator must not have to go
+                # digging for: `task.pr_review_thin` is the documented record,
+                # and this is what the feed badges as DEGRADED so a weakened
+                # gate is visible on the console instead of only in the log.
+                events.emit("task.review_degraded", task=tid, pr=number,
+                            wanted=config.PR_REVIEWERS_WANTED, got=len(chosen),
+                            reviewers=chosen, models=[],
+                            implementer=cur_model(ctx),
+                            note=(f"thin review: {len(chosen)} of "
+                                  f"{config.PR_REVIEWERS_WANTED} reviewer(s) "
+                                  f"the roster wanted"))
             items = [{"model": m, "pr": number, "round": round_n, "diff": diff,
                       "n_reviewers": len(chosen),
                       "prior_issues": prior_r.get("issues") or []} for m in chosen]
@@ -1906,6 +1926,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
                         reviewers=chosen, n_issues=len(issues),
+                        # Who actually read the diff. `reviewers` holds the
+                        # FAMILY TOKENS the pool chose ("glm"); the feed names
+                        # models, so the resolved ones ride beside them.
+                        models=[m for m, _ in outcomes],
+                        models_ran=[m for m, v in outcomes
+                                    if not v.get("crashed")],
                         issues=[i[:400] for i in issues[:10]],
                         # Pre-existing findings, recorded and never blocking:
                         # they do not reach the implementer and cost no round.
@@ -2062,8 +2088,29 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.upsert_code_task(taskfile, tid, t["title"], last,
                                    reviewer_for(t, last), "failed",
                                    error=why[:400], finished=True)
+            # `reason` says WHY the task died; `detail` says WHAT was wrong
+            # with it. Without it the activity feed could only repeat "verify
+            # gate still failing", and the operator had to open the project to
+            # learn which assertion, or which reviewer objection, killed the
+            # work. Gate output tail first (it names the failing tests), then
+            # the blocking review issues, then the escalation wording.
+            detail = ""
+            if not gate_res.get("passed", True):
+                # gate() returns {"passed", "output", "log_path", "verdict"} —
+                # `output` is the tail it kept (last 2000 chars), and on a
+                # check.sh run that is the unittest summary naming the tests.
+                detail = (gate_res.get("output") or "")[-800:]
+            elif rev_res and not rev_res.get("pass", True):
+                detail = "; ".join(str(i) for i in
+                                   (rev_res.get("issues") or [])[:5])[:800]
+            elif pr_res and not pr_res.get("approved"):
+                detail = "; ".join(str(i) for i in
+                                   (pr_res.get("issues") or [])[:5])[:800]
+            if not detail:
+                detail = why
             events.emit("task.failed", task=tid, reason=why[:400],
-                        model=last, escalations=escalations,
+                        detail=detail[:800], model=last,
+                        escalations=escalations,
                         implement_attempts=attempts)
             emit_budget(ctx)
             return {"failed": True, "gate": gate_res, "reason": why}
