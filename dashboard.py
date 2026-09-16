@@ -578,13 +578,29 @@ def _collect_inflight(now, store=None):
                             note="request_start with no end for >2h — dead client, pruned from in-flight")
     for key, e in list(driver_starts.items()):
         started = _ts(e.get("ts")) or now
-        if started < now - DRIVER_STALE_S:
+        # Two independent prune rules:
+        #  1. the owner process is gone — `driver.start` carries the pid, and a
+        #     dead pid is proof the run cannot still be working, so the row is
+        #     dropped NOW instead of waiting out DRIVER_STALE_S below. That
+        #     ceiling is DRIVER_LEASE_TTL + 240 (~24h) under the default
+        #     unlimited budgets, so a killed run used to render as a live
+        #     agent for a full day (measured 2026-09-15: a dead driver shown
+        #     for ~18h). A start with NO pid is silent evidence and is NOT
+        #     treated as dead — only a present pid that `_pid_alive` rejects.
+        #  2. age: a start with no pid, or with a pid that is somehow still
+        #     alive, still ages out at DRIVER_STALE_S.
+        pid = e.get("pid")
+        dead_owner = pid is not None and not _pid_alive(pid)
+        if dead_owner or started < now - DRIVER_STALE_S:
             del driver_starts[key]
             if key not in _stale_emitted:
                 _stale_emitted.add(key)
                 _emit_event("driver.stale", harness=key[0], model=key[1], role=key[2],
                             task=key[3], attempt=key[4], age_s=round(now - started),
-                            note="driver.start older than DRIVER_TIMEOUT+buffer with no done/error — run was killed, pruned from in-flight")
+                            **({"pid": pid} if dead_owner else {}),
+                            note=("driver.start names a pid that is gone — owning process is dead, pruned from in-flight"
+                                  if dead_owner else
+                                  "driver.start older than DRIVER_TIMEOUT+buffer with no done/error — run was killed, pruned from in-flight"))
     for rid, e in starts.items():
         started = _ts(e.get("ts")) or now
         rows.append({"req_id": rid, "family": e.get("family"), "model": e.get("model"),
@@ -603,6 +619,17 @@ def _collect_inflight(now, store=None):
                 transcript = hits[-1].name
         prog = driver_progress.get((harness, model, role, task, attempt)) or {}
         prog_ts = _ts(prog.get("ts"))
+        # A progress sample is only current while it keeps arriving: the driver
+        # samples every config.DRIVER_PROGRESS_INTERVAL, so a newest sample
+        # older than twice that was taken by a run that has stopped sampling
+        # (killed, or wedged). Its cpu_delta_s/state are then FROZEN historical
+        # values — a 0.0 CPU reading from hours ago rendered as "no CPU right
+        # now" — so they are dropped to None rather than carried forward as if
+        # current. `bytes` stays: it is a cumulative total, truthful either way.
+        # No JS change is needed: static/panels/agents.js:57 already guards the
+        # "· no CPU" suffix on `a.cpu_delta_s != null`, so None renders nothing.
+        fresh_sample = (prog_ts is not None
+                        and (now - prog_ts) <= config.DRIVER_PROGRESS_INTERVAL * 2)
         # Idle time from the newest heartbeat, carried forward to now.
         idle_s = None
         if prog_ts is not None and isinstance(prog.get("idle_s"), (int, float)):
@@ -620,8 +647,8 @@ def _collect_inflight(now, store=None):
                      "role": role, "task": task, "websearch": False,
                      "started": started, "elapsed_s": round(max(0.0, now - started), 1),
                      "idle_s": idle_s, "bytes": prog.get("bytes"),
-                     "state": prog.get("state"),
-                     "cpu_delta_s": prog.get("cpu_delta_s"),
+                     "state": prog.get("state") if fresh_sample else None,
+                     "cpu_delta_s": prog.get("cpu_delta_s") if fresh_sample else None,
                      "stuck": bool(idle_s is not None
                                    and idle_s > config.DRIVER_IDLE_TIMEOUT * 0.5),
                      "last_event_s": round(max(0.0, now - last_ts), 1),
