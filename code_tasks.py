@@ -966,6 +966,20 @@ def _parse_verdict(text):
             continue
         if isinstance(obj, dict) and "pass" in obj:
             return _verdict_dict(obj, "pass")
+    # Last-ditch salvage for a verdict whose JSON never loads — reasonix
+    # renders review prose into `.result` and an unbalanced quote in it
+    # truncates the payload (measured 2026-09-15: json error "Expecting ','
+    # delimiter" around char 837 of two real reviews). Fail-safe polarity:
+    # a salvaged `false` is honoured as a rejection, because the reviewer did
+    # say no; a salvaged `true` is NOT trusted, because the unreadable span
+    # may have carried blocking issues the reviewer wrote down — so the
+    # truncated/crash fallback stays exactly as it was.
+    last = None
+    for m in re.finditer(r'"pass"\s*:\s*(true|false)', text):
+        last = m
+    if last is not None and last.group(1) == "false":
+        return {"pass": False, "salvaged": True,
+                "issues": ["verdict JSON malformed; reviewer indicated failure"]}
     return {"pass": False, "truncated": True,
             "issues": ["reviewer returned no parseable verdict"]}
 
@@ -1654,6 +1668,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         # feed can say "round 3" instead of a bare timestamp.
                         round=attempt,
                         n_issues=len(verdict.get("issues") or []),
+                        # A verdict SALVAGED from malformed JSON (a bare
+                        # `"pass": false` whose object never loads) is a real
+                        # rejection with no readable issue list — surfaced so
+                        # a thin rejection is visible rather than mysterious.
+                        salvaged=verdict.get("salvaged", False),
                         # Pre-existing findings a reviewer filed while reading
                         # the full diff: recorded so they are not lost, and
                         # deliberately NOT in `issues` — they must never block
