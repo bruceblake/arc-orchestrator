@@ -317,6 +317,41 @@ def audit_gates(store=None, tasks_dir=None, repo=None):
 DB_BACKUP_KEEP_DAYS = 14
 
 
+def _usable_backups_today(dest_dir, today=None):
+    """Paths of the backups in dest_dir that were written TODAY and are usable.
+
+    A file whose name looks like a backup is not one. A copy that died
+    mid-write — a full disk, a killed process — leaves a stub behind, and a
+    zero-byte stub satisfies sqlite's own `PRAGMA integrity_check` (there is
+    nothing in it to be corrupt), so size and integrity are both checked, the
+    same check the snapshot path applies before it counts a copy.
+
+    The once-a-day guard must read THIS, never a raw glob: counting a stub as
+    "already backed up today" would silently skip the day's real copy and
+    leave the fleet with a file it can never restore from — precisely the
+    silently-corrupt backup this function exists to prevent.
+
+    Only today's files are opened: an audit must not re-read a directory of
+    old backups to answer a question that is only about today.
+    """
+    import sqlite3
+    day = today or time.strftime("%Y-%m-%d")
+    out = []
+    for p in sorted(dest_dir.glob("orchestrator-*.db")):
+        try:
+            if time.strftime("%Y-%m-%d", time.localtime(p.stat().st_mtime)) != day:
+                continue
+            if p.stat().st_size <= 0:
+                continue
+            with sqlite3.connect(f"file:{p}?mode=ro", uri=True) as con:
+                if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
+                    continue
+        except (OSError, sqlite3.Error):
+            continue  # vanished between glob and stat, or not a database
+        out.append(p)
+    return out
+
+
 def audit_db_backup(db_path=None, snapshot=False, keep_days=DB_BACKUP_KEEP_DAYS):
     """The database is the fleet's memory, and nothing copied it.
 
@@ -346,6 +381,26 @@ def audit_db_backup(db_path=None, snapshot=False, keep_days=DB_BACKUP_KEEP_DAYS)
         dest_dir.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         dest = dest_dir / f"orchestrator-{stamp}.db"
+        # One backup per DAY, however many times --fix runs. `main.py audit
+        # --fix` passes snapshot=True (main.py:544), so anything that loops the
+        # audit — a wrapper script, a retry, an operator re-running it — wrote
+        # a fresh copy every invocation. Observed live 2026-09-15: thousands of
+        # files at the same second, all younger than the retention window, so
+        # age-based pruning could never catch up.
+        #
+        # Only a VERIFIED copy counts as today's (`_usable_backups_today`): a
+        # copy that died mid-write leaves a stub whose mtime is still today,
+        # and treating that stub as the day's backup would skip the real copy
+        # and leave nothing restorable behind.
+        today = time.strftime("%Y-%m-%d")
+        fresh_today = _usable_backups_today(dest_dir, today)
+        if fresh_today:
+            out.append(_finding("info", "backup",
+                                "database already backed up today",
+                                str(sorted(fresh_today)[-1]),
+                                "skipped a second copy (one per day)"))
+            newest_age_h = 0.0
+            return out
         try:
             with sqlite3.connect(str(src)) as a, sqlite3.connect(str(dest)) as b:
                 a.backup(b)
@@ -365,6 +420,14 @@ def audit_db_backup(db_path=None, snapshot=False, keep_days=DB_BACKUP_KEEP_DAYS)
                                     str(dest), ""))
                 newest_age_h = 0.0
         except sqlite3.Error as exc:
+            # A copy that failed partway leaves a stub behind, and its mtime is
+            # today — the next run's once-a-day guard would read it as the day's
+            # backup and never take a real one. Drop it (best effort: the disk
+            # may be full or the directory read-only, which is why this failed).
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError:
+                pass
             out.append(_finding("critical", "backup", "database backup failed",
                                 str(exc)[:200], "check disk space and permissions"))
         # retention: keep the last N days, never fewer than 3 files
@@ -650,7 +713,10 @@ def audit_logs():
     try:
         size = p.stat().st_size
     except OSError:
-        return [_finding("warning", "logs", "the event log is missing", str(p), "")]
+        return [_finding("warning", "logs", "the event log is missing", str(p),
+                         "no events will be recorded and the dashboard shows nothing; "
+                         "start a run to recreate it, or check config.EVENTS_LOG points "
+                         "at a writable path")]
     mb = size / 1e6
     if mb > 80:
         out.append(_finding("warning", "logs", f"event log is {mb:.0f} MB",

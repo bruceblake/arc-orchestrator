@@ -924,14 +924,48 @@ class TheDatabaseIsBackedUp(unittest.TestCase):
         f = audit.audit_db_backup(db_path=self.db, snapshot=False)
         self.assertTrue(any("old" in x["what"] for x in f))
 
+    def test_a_second_snapshot_the_same_day_is_skipped(self):
+        import audit
+        audit.audit_db_backup(db_path=self.db, snapshot=True)
+        f = audit.audit_db_backup(db_path=self.db, snapshot=True)
+        self.assertEqual(len(self._backups()), 1, self._backups())
+        self.assertTrue(any("already backed up today" in x["what"] for x in f), f)
+
+    def test_a_broken_copy_does_not_count_as_todays_backup(self):
+        """A stub with today's mtime is not a backup. Counting one as 'already
+        backed up today' skips the day's real copy and leaves the fleet with a
+        file it can never restore from."""
+        import audit, pathlib, time as _time
+        dest_dir = pathlib.Path(self.dir, "logs", "db-backups")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        stamp = _time.strftime("%Y%m%d-%H%M%S")
+        (dest_dir / f"orchestrator-{stamp}.db").write_bytes(b"")  # killed mid-copy
+        f = audit.audit_db_backup(db_path=self.db, snapshot=True)
+        self.assertTrue(any("integrity ok" in x["what"] for x in f), f)
+        usable = [b for b in self._backups() if b.stat().st_size > 0]
+        self.assertEqual(len(usable), 1, self._backups())
+
+    def test_a_failed_copy_leaves_no_stub_behind(self):
+        import audit
+        bad = os.path.join(self.dir, "garbage.db")
+        with open(bad, "wb") as fh:
+            fh.write(b"this is not a sqlite database" * 100)
+        f = audit.audit_db_backup(db_path=bad, snapshot=True)
+        self.assertTrue(any("backup failed" in x["what"] for x in f), f)
+        self.assertEqual(self._backups(), [], self._backups())
+        # and the same day's real backup is still taken afterwards
+        f2 = audit.audit_db_backup(db_path=self.db, snapshot=True)
+        self.assertTrue(any("integrity ok" in x["what"] for x in f2), f2)
+
     def test_retention_keeps_recent_and_never_fewer_than_three(self):
-        import audit, os as _os, time as _time
-        for _ in range(5):
-            audit.audit_db_backup(db_path=self.db, snapshot=True, keep_days=1)
-            _time.sleep(1.05)  # distinct timestamps in the filename
-        # age everything past retention
-        for b in self._backups():
-            _os.utime(b, (_time.time() - 5 * 86400,) * 2)
+        import audit, os as _os, pathlib, time as _time
+        dest_dir = pathlib.Path(self.dir, "logs", "db-backups")
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        old = _time.time() - 5 * 86400
+        for i in range(5):
+            p = dest_dir / f"orchestrator-2020010{i}-000000.db"
+            p.write_bytes(b"")
+            _os.utime(p, (old, old))
         audit.audit_db_backup(db_path=self.db, snapshot=True, keep_days=1)
         self.assertGreaterEqual(len(self._backups()), 3)
 
