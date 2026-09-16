@@ -5,6 +5,7 @@ stub script, and the client tests talk to tests/fake_ocserve.py over loopback.
 The real `opencode` binary is never spawned here.
 """
 import asyncio
+import gc
 import os
 import stat
 import sys
@@ -277,15 +278,26 @@ class ClientAgainstFake(unittest.TestCase):
                     if t.name == "ocserve-sse" and t.is_alive()]
 
         def open_fds():
+            # Force collection first: a deferred finalizer closing a socket on
+            # the NEXT return would otherwise be counted, and the process-wide
+            # count moves for reasons unrelated to prompt() (measured in CI:
+            # +2 over five prompts with no leak). The leak this guards against
+            # is ONE fd PER PROMPT, so the assertion below is on the slope, not
+            # on a hand-tuned absolute tolerance that a busy host can trip.
+            gc.collect()
             return len(os.listdir("/proc/self/fd"))
 
         asyncio.run(client.prompt("hi"))          # warm any first-use handles
         before_threads, before_fds = len(sse_threads()), open_fds()
-        for _ in range(5):
+        n = 5
+        for _ in range(n):
             asyncio.run(client.prompt("hi"))
         self.assertEqual(sse_threads(), [])
         self.assertEqual(len(sse_threads()), before_threads)
-        self.assertLessEqual(open_fds(), before_fds + 1)
+        # No per-prompt leak: growth must stay well below the prompt count.
+        # The rejected attempt grew by exactly n (11 prompts, 11 fds); allow
+        # half that for incidental process-wide churn.
+        self.assertLess(open_fds() - before_fds, n // 2 + 1)
 
     def test_tokens_fold_when_total_is_absent(self):
         self.assertEqual(ocserve._token_total(
