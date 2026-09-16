@@ -1,6 +1,7 @@
 """Shared test scaffolding: import path, event capture, fake store."""
 import atexit
 import logging
+import os
 import pathlib
 import shutil
 import sys
@@ -10,6 +11,21 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+# The same reasoning as the EVENTS_LOG/DB_PATH redirects below, one level up:
+# the suite must not inherit the OPERATOR'S routing env. A run launched under
+# the Rule 2 capacity hatch exports ARC_ESCALATION_PATH=<the surviving model>,
+# which collapses config.ESCALATION_PATH to a SINGLE model — and roughly a
+# dozen tests assert a two-tier fleet (ENTRY != STRONGEST, "escalates one tier
+# up", every implementer has a reviewer it can use). Measured 2026-09-15: with
+# the hatch's env inherited, ./check.sh reports 10 failures + 5 errors on a
+# tree with NO work applied, so every plan-generated gate that begins with
+# ./check.sh was unpassable — the fleet's own safety hatch made the safety
+# check fail. Dropped before `import config` binds the value at import time.
+# ARC_ALLOW_SAME_FAMILY_REVIEW is deliberately NOT dropped: the loader tests
+# set it explicitly where they mean it, and check.sh's taskfile-validity step
+# reads os.environ directly to honour the hatch.
+os.environ.pop("ARC_ESCALATION_PATH", None)
 
 import config  # noqa: E402
 import events  # noqa: E402
