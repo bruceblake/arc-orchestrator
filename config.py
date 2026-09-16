@@ -410,6 +410,28 @@ OPENCODE_SERVE_BIN = os.getenv("ARC_OPENCODE_SERVE_BIN", "opencode")
 # prompt (Rule 7: total caps killed healthy work).
 OPENCODE_SERVE_STARTUP_TIMEOUT = float(
     os.getenv("ARC_OPENCODE_SERVE_STARTUP_TIMEOUT", "180"))
+# Which OpencodeDriver path a run uses. 'oneshot' (default) spawns a fresh
+# `opencode run` per attempt — the shipped behaviour. 'serve' talks to the
+# persistent `opencode serve` server via ocserve.py instead, so the process (and
+# its warm cache) is reused across attempts and tasks. Opt-in: the default does
+# not change until the serve path has earned it.
+OPENCODE_MODE_DEFAULT = "oneshot"
+
+
+def opencode_mode():
+    """Which OpencodeDriver path to use: 'oneshot' or 'serve'.
+
+    Read at call time (not import) so a test can flip it with an env var
+    without reimporting config. Any value other than the two is a
+    misconfiguration, not a silent fallback to one-shot — a typo that quietly
+    kept spawning processes would hide the very bug an operator was switching
+    away from.
+    """
+    mode = os.getenv("ARC_OPENCODE_MODE", OPENCODE_MODE_DEFAULT)
+    if mode not in ("oneshot", "serve"):
+        raise ValueError(
+            f"ARC_OPENCODE_MODE must be 'oneshot' or 'serve', not {mode!r}")
+    return mode
 
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
