@@ -2287,10 +2287,22 @@ def _routing_tiers_prose():
     tiers = config.IMPLEMENT_TIERS
     lines = ["ROUTING TIERS (enforced — a task file that violates these is rejected):\n"]
     if tiers.get("medium"):
-        lines.append(f"- {' or '.join(tiers['medium'])}: medium tasks (a self-contained "
+        medium = tiers["medium"]
+        lines.append(f"- {' or '.join(medium)}: medium tasks (a self-contained "
                      "feature, a new endpoint, moderate refactor of one file) AND the "
                      "mechanical ones (rename, small HTML/CSS, wiring, config) — there is "
                      "no lower tier.\n")
+        if len(medium) > 1:
+            # The tier has more than one implementer, so say so: without this the
+            # planner may route EVERY medium task to one of them and leave the
+            # other idle. The operator asked for a MIX (2026-09-16), and the
+            # medium models run on different harnesses (deepseek on reasonix,
+            # union on opencode), so spreading them also spreads the local
+            # harness load instead of stacking every medium task on one pool.
+            lines.append(f"- Spread medium tasks across {' and '.join(medium)} — "
+                         "give independent tasks DIFFERENT models so they run in "
+                         "parallel and neither sits idle; do NOT send every medium "
+                         "task to the same one.\n")
     if tiers.get("hard"):
         lines.append(f"- {' or '.join(tiers['hard'])}: hard tasks that need deep "
                      "understanding, multi-file reasoning, delicate architecture, or "
