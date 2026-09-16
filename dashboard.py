@@ -151,6 +151,22 @@ def _pretty(model):
     return re.sub(r"-(thinking|legacy)[\w-]*$", "", model or "unknown").replace("-", " ")
 
 
+# GET /api/activity — the curated set the fleet activity feed shows.
+# Deliberately NOT the whole log: `driver.heartbeat` fires several times a
+# second per harness and would swamp a feed a human reads, and node_start /
+# driver.done are per-step noise. These are the moments that mean something
+# happened to a task, or to the fleet's capacity to run one.
+ACTIVITY_TYPES = frozenset((
+    "task.reviewed", "task.failed", "task.escalated", "task.merged",
+    "task.pr_opened", "task.pr_reviewed", "task.resynced",
+    "task.review_degraded", "driver.stalled",
+    "chain.wait", "chain.ready", "chain.blocked",
+))
+# A feed is a window, not a log download: the page asks for 50, and a
+# hand-typed ?limit= must not turn this endpoint into "read the whole history".
+ACTIVITY_MAX_LIMIT = 500
+
+
 def _load_event_lines():
     path = Path(config.EVENTS_LOG)
     try:
@@ -437,6 +453,25 @@ def _xkey(task):
     """('world-persistence', 2) from 'world-persistence-x2' — DB ids carry no -xN suffix."""
     m = re.match(r"^(.*?)-x(\d+)$", task or "")
     return (m.group(1), int(m.group(2))) if m else (task, None)
+
+
+def _activity_file(taskfile_of, tid):
+    """The taskfile an activity event's task id belongs to, or None.
+
+    Driver events carry the HARNESS's id, never a code_tasks row key: an
+    implement/review attempt is `<tid>-xN` and a PR reviewer is `<tid>-prN`
+    (code_tasks.py passes both straight to driver.run), while the rows are
+    keyed by the BASE id alone (`_xkey`: "DB ids carry no -xN suffix"). An
+    exact-match lookup therefore missed every driver event - and a stalled
+    harness is exactly the row an operator wants to open, so it rendered as a
+    button that opened nothing.
+    """
+    if not tid:
+        return None
+    if tid in taskfile_of:
+        return taskfile_of[tid]      # a task id that IS the row key
+    base, _x = _xkey(tid)            # '<tid>-xN' -> '<tid>'
+    return taskfile_of.get(re.sub(r"-pr\d+$", "", base))    # '<tid>-prN'
 
 
 def _transcript_toks(tpath):
@@ -3899,6 +3934,81 @@ class Handler(BaseHTTPRequestHandler):
                         pass
                 return self._json({"events": events, "next": start + len(chunk),
                                    "reset": reset, "total": len(lines)})
+            if u.path == "/api/activity":
+                # The fleet activity feed: the last N curated lifecycle
+                # events, newest first, each in the panel's own contract
+                # ({ts, type, task, run_id, context} plus the event's own
+                # fields). Read through the tolerant `_load_event_lines`
+                # reader, so a truncated or garbage line (a killed writer
+                # mid-append) is skipped instead of 500ing the panel.
+                q = parse_qs(u.query, keep_blank_values=True)
+                try:
+                    limit = int(q.get("limit", ["50"])[0])
+                except (TypeError, ValueError):
+                    limit = 50
+                if limit <= 0:
+                    limit = 50
+                limit = min(limit, ACTIVITY_MAX_LIMIT)
+                lines = _load_event_lines()
+                # id -> taskfile, for the click-through. Built from the
+                # code_tasks table rather than from the page's loaded list:
+                # the feed shows history, and a task that has since been
+                # archived or filtered out must still open its project.
+                taskfile_of = {}
+                try:
+                    for row in self.store.code_tasks_all(1000):
+                        tid = row.get("id")
+                        if tid and tid not in taskfile_of:
+                            tf = row.get("taskfile")
+                            taskfile_of[tid] = (str(Path(tf).name)
+                                                if tf else None)
+                except Exception:
+                    taskfile_of = {}      # a feed must never 500 on a lookup
+                out = []
+                # Walk BACKWARDS: the log is append-ordered, so the newest
+                # events are the last lines and there is no need to parse the
+                # whole 100MB history to answer "the last 50".
+                for line in reversed(lines):
+                    if len(out) >= limit:
+                        break
+                    try:
+                        e = json.loads(line)
+                    except Exception:
+                        continue          # corrupt line: skip, never 500
+                    if not isinstance(e, dict):
+                        continue          # valid JSON, but not an event object
+                    if e.get("type") not in ACTIVITY_TYPES:
+                        continue          # heartbeat and friends would swamp it
+                    # Tolerant like the json.loads above: a line can be valid
+                    # JSON and still hold a field of the wrong SHAPE (an older
+                    # or hand-edited writer). A feed must degrade, never 500.
+                    ctx = e.get("context")
+                    ctx = dict(ctx) if isinstance(ctx, dict) else {}
+                    for k in ("workload", "round", "iteration", "module",
+                              "run_id"):
+                        if e.get(k) is not None:
+                            ctx.setdefault(k, e[k])
+                    # `file` is what makes the row clickable: a task id alone
+                    # does not name a taskfile, and the page cannot open a
+                    # project it cannot name. Resolved from the code_tasks
+                    # rows (the authoritative id -> taskfile mapping), so a
+                    # click works even for a task whose project is not in the
+                    # page's current filter or has since been archived.
+                    tid = e.get("task")
+                    file_of = _activity_file(taskfile_of, tid)
+                    # Contract keys LAST: the five keys the panel is promised
+                    # ({ts,type,task,run_id,context}) are the normalised ones,
+                    # so a raw field of the same name cannot shadow them. Every
+                    # other field of the event rides through untouched beside
+                    # them — that is how the review round, issue count, reason
+                    # and reviewer model reach the feed.
+                    out.append({**e, "ts": e.get("ts"), "type": e.get("type"),
+                                "task": tid, "run_id": e.get("run_id"),
+                                "file": file_of,
+                                "context": ctx})
+                return self._json({"events": out, "limit": limit,
+                                   "total": len([1 for ln in lines
+                                                 if ln.strip()])})
             if u.path == "/api/graph-shapes":
                 # The graph BETWEEN tasks: the pattern catalogue the planner
                 # chooses from, every taskfile classified by the shape its deps
