@@ -1490,6 +1490,125 @@ class OpencodeDriver(Driver):
             a.append("-c")
         return a + [prompt]
 
+    def model_arg(self):
+        """The `provider/model` string the serve path names this model with.
+
+        Same source as argv()'s `-m`, so the two paths cannot route a model
+        differently. ocserve splits it into {providerID, model} per route.
+        """
+        return (config.harness_model(self.model, "opencode")
+                or config.provider_model_alias(self.model)
+                or f"ARC/{self.model}")
+
+    async def _once(self, prompt, worktree, session_id, task_id, attempt):
+        """One attempt on whichever path ARC_OPENCODE_MODE selects.
+
+        The one-shot path is the shipped default; the serve path reuses the
+        persistent server. Both return the SAME DriverResult contract and leave
+        the SAME transcript, so nothing downstream can tell them apart.
+        """
+        if config.opencode_mode() == "serve":
+            return await self._once_serve(prompt, worktree, session_id,
+                                          task_id, attempt)
+        return await super()._once(prompt, worktree, session_id, task_id, attempt)
+
+    async def _once_serve(self, prompt, worktree, session_id, task_id, attempt):
+        """One attempt against the shared `opencode serve` server.
+
+        The guarded plumbing around this call (model gate, harness gate, DB
+        leases, driver.start/done/error) is Driver.run/_guarded_once — shared,
+        untouched. What differs is the transport: a session bound to the
+        worktree over x-opencode-directory instead of a spawned process.
+        """
+        import ocserve
+        t0 = time.monotonic()
+        TRANSCRIPT_DIR.mkdir(parents=True, exist_ok=True)
+        tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
+        stall = config.idle_timeout_for(self.role)
+        total = config.total_timeout_for(self.role) or None
+        handle = ocserve.get_shared_server()
+        client = await ocserve.OcserveClient.create(
+            handle, worktree=worktree, model=self.model_arg())
+        # The transcript gets the SAME {type: text|tool_use|step_finish, ...}
+        # line dicts the one-shot stream writes, so parse_transcript,
+        # transcript_tokens and the dashboard tails keep working unchanged.
+        fh = open(tpath, "ab")
+
+        def on_event(frame):
+            for line in _serve_transcript_lines(frame):
+                try:
+                    fh.write((json.dumps(line) + "\n").encode())
+                    fh.flush()
+                except (OSError, TypeError, ValueError):
+                    pass
+
+        try:
+            result = await client.prompt(
+                prompt, model=self.model_arg(),
+                timeout=total, stall_timeout=stall, on_event=on_event)
+        except ocserve.CapacityFull as exc:
+            # Same contract as the one-shot capacity exit: flag it so Driver.run
+            # retries on the capacity backoff rather than the crash ladder.
+            raise DriverError(str(exc), session_id=client.session_id,
+                              capacity=True) from exc
+        except ocserve.StreamStalled as exc:
+            # The idle-kill analogue: dispose and let Driver.run retry. Blocked
+            # with no progress is the capacity signature here too (mirrors the
+            # one-shot stall path's `capacity=blocked`).
+            await _serve_dispose(client)
+            raise DriverError(str(exc), session_id=client.session_id,
+                              capacity=True) from exc
+        except ocserve.OcserveError as exc:
+            await _serve_dispose(client)
+            raise DriverError(str(exc), session_id=client.session_id) from exc
+        finally:
+            fh.close()
+        await _serve_dispose(client)
+        text = result.text or ""
+        tok = result.tokens or {}
+        cache = tok.get("cache") or {}
+        tokens = tok.get("total") or 0
+        prompt_tokens = ((tok.get("input") or 0) + (cache.get("read") or 0)
+                         + (cache.get("write") or 0))
+        completion_tokens = (tok.get("output") or 0) + (tok.get("reasoning") or 0)
+        return DriverResult(self.harness, self.model, self.role, 0,
+                            client.session_id or session_id, str(tpath), text,
+                            round(time.monotonic() - t0, 1),
+                            tokens, prompt_tokens, completion_tokens)
+
+
+async def _serve_dispose(client):
+    """Best-effort dispose; a failed dispose must not mask the real error."""
+    try:
+        await client.dispose()
+    except Exception as exc:                      # noqa: BLE001 - teardown
+        log.warning("ocserve: dispose failed: %s", exc)
+
+
+def _serve_transcript_lines(frame):
+    """Render one serve SSE frame as zero or more one-shot-shaped lines.
+
+    The one-shot transcript is the watch surface (Rule 7): the dashboard tails
+    logs/harness/*.jsonl and reads {type: text|tool_use|step_finish, part:{...}}
+    records. The server's /event frames carry the same opencode shapes under
+    `properties.part`, so they are re-wrapped into the one-shot spelling rather
+    than inventing a third format. Anything the one-shot stream does not put on
+    stdout (server.connected, session.idle, message.updated) is dropped.
+    """
+    if not isinstance(frame, dict):
+        return []
+    etype = frame.get("type")
+    props = frame.get("properties") if isinstance(frame.get("properties"), dict) else {}
+    part = props.get("part") if isinstance(props.get("part"), dict) else None
+    if etype == "message.part.updated" and part is not None:
+        if part.get("type") == "text":
+            return [{"type": "text", "part": part}]
+        if part.get("type") in ("tool", "tool_use"):
+            return [{"type": "tool_use", "part": part}]
+        if part.get("type") == "step-finish":
+            return [{"type": "step_finish", "part": part}]
+    return []
+
 
 def _dsh_log_line(e):
     """Render one dsh session-log event as one transcript line (None: skip).

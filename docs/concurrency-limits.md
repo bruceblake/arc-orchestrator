@@ -447,6 +447,18 @@ The server is a single process per orchestrator (`ocserve.get_shared_server`,
 no idle TTL in v1) and adds no ARC session: it is reached over loopback HTTP,
 where each prompt is one session.
 
+### `ARC_OPENCODE_MODE` — which `OpencodeDriver` path runs
+
+`ARC_OPENCODE_MODE` accepts exactly `oneshot` (the default) or `serve`; any
+other value raises `ValueError` rather than silently falling back to one-shot.
+`oneshot` spawns a fresh `opencode run` per attempt — the shipped behaviour.
+`serve` routes the driver through `ocserve.py` against the one persistent
+`opencode serve` process instead, so the process and its warm cache are reused
+across attempts and tasks. The two paths deliberately share one model alias
+(`drivers.OpencodeDriver.model_arg`), so flipping the mode cannot change which
+model a run routes to. The default stays `oneshot` until the serve path has
+earned the switch.
+
 ### `ARC_DSH_BIN` — where the dsh CLI lives (historical, 2026-09-12..13)
 
 `config.dsh_bin()` resolves the DeepSeek harness binary: `$ARC_DSH_BIN` when

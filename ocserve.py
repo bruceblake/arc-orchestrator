@@ -89,6 +89,16 @@ class StartupError(OcserveError):
     """`opencode serve` never became ready; its process has been cleaned up."""
 
 
+class StreamStalled(OcserveError):
+    """No event arrived for the caller's stall window.
+
+    Distinct from the client's own `timeout` (a total cap on one prompt): a
+    stall is SILENCE, the server-side analogue of the one-shot path's idle
+    kill, and the caller answers it the same way — dispose the session and
+    retry rather than treating it as a completed failure.
+    """
+
+
 # --------------------------------------------------------------------------
 # server lifecycle
 # --------------------------------------------------------------------------
@@ -634,12 +644,18 @@ class OcserveClient:
         return h
 
     # -- prompting ---------------------------------------------------------
-    async def prompt(self, text, model=None, timeout=None):
+    async def prompt(self, text, model=None, timeout=None, stall_timeout=None,
+                     on_event=None):
         """Send `text` and consume the stream until this prompt finishes.
 
         Returns a ServeResult. Raises CapacityFull when the provider refused on
-        concurrency, OcserveError for any other reported error or a stream that
-        ended without an answer.
+        concurrency, StreamStalled when no event arrived for `stall_timeout`
+        seconds (the idle-kill analogue — the caller disposes and retries),
+        OcserveError for any other reported error or a stream that ended
+        without an answer.
+
+        `on_event(obj)` is called for every stream frame, for the live
+        transcript; it must not raise.
         """
         if not self.session_id:
             raise OcserveError("no session: call OcserveClient.create() first")
@@ -659,28 +675,49 @@ class OcserveClient:
                 headers=self._headers(json_body=True))
             if status != 204:
                 raise OcserveError(f"prompt_async failed: HTTP {status}: {_brief(raw)}")
-            return await self._consume(stream, timeout=timeout)
+            return await self._consume(stream, timeout=timeout,
+                                       stall_timeout=stall_timeout,
+                                       on_event=on_event)
         finally:
             stream.close()
 
-    async def _consume(self, stream, timeout=None):
+    async def _consume(self, stream, timeout=None, stall_timeout=None,
+                       on_event=None):
         texts, tokens, roles = [], _empty_tokens(), {}
         deadline = None if not timeout else time.monotonic() + timeout
         while True:
             remaining = None if deadline is None else max(0.01, deadline - time.monotonic())
+            # The wait window is the tighter of the total budget and the stall
+            # window. A stall is SILENCE, so the idle clock restarts on every
+            # frame — which is exactly what re-entering this loop does.
+            wait_for_s = remaining
+            if stall_timeout:
+                wait_for_s = (stall_timeout if wait_for_s is None
+                              else min(wait_for_s, stall_timeout))
             try:
-                if remaining is None:
+                if wait_for_s is None:
                     event = await stream.next_event()
                 else:
-                    event = await asyncio.wait_for(stream.next_event(), remaining)
+                    event = await asyncio.wait_for(stream.next_event(), wait_for_s)
             except asyncio.TimeoutError:
-                raise OcserveError(f"timed out after {timeout:g}s waiting for the stream")
+                # The total budget expiring is a timeout; silence before it is a
+                # stall the caller retries. Tell them apart by which bound fired.
+                if remaining is not None and remaining <= (wait_for_s or 0):
+                    raise OcserveError(
+                        f"timed out after {timeout:g}s waiting for the stream")
+                raise StreamStalled(
+                    f"no event for {stall_timeout:g}s (stream stalled)")
             except OcserveError:
                 raise
             except Exception as exc:
                 raise OcserveError(f"event stream failed: {exc}") from exc
             if event is None:
                 raise OcserveError("event stream ended before the prompt finished")
+            if on_event is not None:
+                try:
+                    on_event(event)
+                except Exception:
+                    pass
             if not isinstance(event, dict):
                 continue
             props = event.get("properties")
