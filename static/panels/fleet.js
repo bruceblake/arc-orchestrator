@@ -177,6 +177,214 @@ async function initEvents() {
   } catch (e) { markFail("events", true); }
   renderToday();
 }
+// ---- fleet activity: the lifecycle moments, newest first ----
+// The event log records everything, but "what is the fleet doing" was only
+// answerable by grepping logs/events.jsonl. This reads the server's curated
+// window (/api/activity) — deliberately NOT the raw log, which is mostly
+// driver.heartbeat and would swamp the panel.
+//
+// One badge family per colour, and the colour is the ONLY thing that must not
+// be learned twice: review / merge / fail / escalate / degraded / stall.
+const ACTIVITY_KIND = {
+  "task.reviewed": {k: "review",   w: "review"},
+  "task.pr_reviewed": {k: "review", w: "PR review"},
+  "task.pr_opened": {k: "review",  w: "PR opened"},
+  "task.merged": {k: "merge",      w: "merged"},
+  "task.failed": {k: "fail",       w: "failed"},
+  "task.escalated": {k: "escalate", w: "escalated"},
+  "task.review_degraded": {k: "degraded", w: "degraded"},
+  "task.resynced": {k: "degraded", w: "resynced"},
+  "driver.stalled": {k: "stall",   w: "stalled"},
+  "chain.wait": {k: "stall",       w: "chain wait"},
+  "chain.ready": {k: "merge",      w: "chain ready"},
+  "chain.blocked": {k: "fail",     w: "chain blocked"},
+};
+// Events whose DETAIL line is the alarming part, so it is tinted red. Keyed by
+// event type and not by badge kind: chain.wait shares the "stall" colour —
+// waiting on an upstream project is routine and should be visible, not an
+// alarm — while a driver that stopped producing output is the anomaly worth
+// flagging.
+const ACTIVITY_BAD = new Set(["task.failed", "chain.blocked", "driver.stalled"]);
+// Badge kind -> colour. One entry per badge family, keyed by the KIND (not
+// the event type) so every event in a family is the same colour and the six
+// families are distinguishable at a glance.
+const ACTIVITY_COLOR = {
+  review: "#58a6ff", merge: "#3fb950", fail: "#f85149",
+  escalate: "#bc8cff", degraded: "#d29922", stall: "#f0883e",
+};
+const activityColor = k => ACTIVITY_COLOR[k] || "#8b949e";
+let ACTIVITY_LIMIT = 50;
+
+// One human sentence per event: what happened, to whom, and — for failures —
+// WHY. The detail line is where the enriched fields the server now attaches
+// (n_issues, round, reason, detail, models) actually reach the operator.
+function activityWhat(e) {
+  const kind = ACTIVITY_KIND[e.type] || {w: e.type};
+  const bits = [];
+  switch (e.type) {
+    case "task.reviewed":
+      // `model` is a resolved model name; `reviewer` is the FAMILY TOKEN the
+      // taskfile carries ("glm"), which short() would pass through verbatim.
+      // revShort() maps both, so an older event reads "GLM 5.3" not "glm".
+      bits.push(`${e.passed ? "passed" : "rejected"} by ` +
+                revShort(e.model || e.reviewer));
+      if (e.round) bits.push(`round ${e.round}`);
+      if (e.n_issues) bits.push(`${e.n_issues} issue${e.n_issues === 1 ? "" : "s"}`);
+      break;
+    case "task.pr_reviewed": {
+      // A historical event predates the `models` field (the pool used to
+      // record only family tokens), so fall back to `reviewers` rather than
+      // rendering an empty "by " — real logs are full of these.
+      const who = (e.models || []).map(short).join(", ")
+        || (e.reviewers || []).map(revShort).join(", ") || "no reviewer";
+      // `approved` is false for BOTH a rejection and an inconclusive round —
+      // a reviewer crashed, nobody read the diff, the round is retried. Folding
+      // the two together reports a rejection of code nobody reviewed.
+      if (e.inconclusive) {
+        bits.push(`no verdict (reviewer crashed), retrying`);
+      } else {
+        bits.push(`${e.approved ? "approved" : "changes requested"} by ${who}`);
+      }
+      bits.push(`PR #${e.pr}`);
+      if (e.round) bits.push(`round ${e.round}`);
+      if (e.n_issues) bits.push(`${e.n_issues} issue${e.n_issues === 1 ? "" : "s"}`);
+      break;
+    }
+    case "task.pr_opened":
+      bits.push(`PR #${e.number}`); break;
+    case "task.merged":
+      bits.push(e.pr ? `PR #${e.pr}` : "no PR"); break;
+    case "task.failed":
+      bits.push(`on ${short(e.model)}`);
+      if (e.escalations) bits.push(`${e.escalations} escalation${e.escalations === 1 ? "" : "s"}`);
+      break;
+    case "task.escalated":
+      bits.push(`${short(e.from_model)} → ${short(e.to_model)}`); break;
+    case "task.review_degraded":
+      bits.push(`${e.got} of ${e.wanted} reviewers`); break;
+    case "task.resynced":
+      // Only the pr_merge resync path carries a PR number; the publish-path
+      // resync (the common one — 51 of 51 in the live log) has base/note only,
+      // so a bare `PR #${e.pr}` would print "PR #undefined".
+      bits.push(e.pr ? `PR #${e.pr} merged with ${e.base}`
+                     : `merged ${e.base} into the branch`); break;
+    case "driver.stalled":
+      bits.push(short(e.model));
+      if (e.idle_s) bits.push(`no output for ${tick(e.idle_s)}`);
+      break;
+    case "chain.wait": case "chain.ready": case "chain.blocked":
+      bits.push((e.taskfile || "").split("/").pop());
+      if (e.waited_s) bits.push(`waited ${tick(e.waited_s)}`);
+      break;
+  }
+  return `${kind.w}${bits.length ? " · " + bits.join(" · ") : ""}`;
+}
+
+function activityDetail(e) {
+  // WHY the task died and WHAT was wrong with it are two different facts and
+  // a failed task carries both: `reason` is the verdict ("exhausted
+  // escalation: 2 escalation(s), ended on GLM-5.3"), `detail` is the evidence
+  // (the gate tail naming the failing test, or the blocking review issues).
+  // Showing only the second throws away the sentence that makes the row
+  // readable; showing only the first hides what to fix. Failures show both.
+  const bits = [];
+  if (e.reason) bits.push(String(e.reason));
+  if (e.detail && e.detail !== e.reason) bits.push(String(e.detail));
+  if (!bits.length && e.note) bits.push(String(e.note));
+  if (!bits.length && e.last_activity) bits.push(String(e.last_activity).slice(-200));
+  return bits.length ? esc(bits.join("\n").slice(0, 400)) : "";
+}
+
+// Which project a row opens, or "" when it opens nothing.
+//
+// Driver events carry the HARNESS's task id, not a project id: an attempt is
+// `<tid>-xN` and a PR reviewer is `<tid>-prN` (code_tasks.py hands both to
+// driver.run), while the page matches on base ids. The server already strips
+// those before it ships `file`; the PROJECTS fallback below has to strip them
+// too, or a stalled harness resolves on one path and not the other.
+const activityBase = t => String(t || "").replace(/-x\d+$/, "").replace(/-pr\d+$/, "");
+function activityTarget(e) {
+  if (e.file) return e.file;
+  if (!e.task) return "";
+  // Exact id first, so a task whose real id ends in a driver-ish suffix still
+  // opens its own project; the base id is the fallback that makes a stalled
+  // harness resolvable at all.
+  const owner = findProject(e.task) || findProject(activityBase(e.task));
+  return (owner && owner.file) || "";
+}
+function findProject(id) {
+  return (PROJECTS || []).find(p => (p.tasks || []).some(t => t.id === id));
+}
+function activityRow(e) {
+  const kind = ACTIVITY_KIND[e.type] || {k: "", w: e.type};
+  const detail = activityDetail(e);
+  const hot = ACTIVITY_BAD.has(e.type) ? " bad" : "";
+  const color = activityColor(kind.k);
+  // A click is a shortcut into the project's detail panel, and the row is
+  // marked interactive ONLY when it has a project to open: a task id the page
+  // cannot resolve to a name is not a clickable row. Rendering role="button"
+  // off `e.task` alone promised an action that no-oped (a stalled harness is
+  // exactly such a row), so the affordance and the click decide together.
+  const target = activityTarget(e);
+  return `<div class="arow${target ? " has-task" : ""}${hot}"` +
+    (target ? ` role="button" tabindex="0" data-task="${attr(e.task)}"` +
+      ` data-file="${attr(target)}"` +
+      ` aria-label="open task ${attr(e.task)} in its project"` : "") + `>
+    <span class="when">${esc(AGO(e.ts))} ago</span>
+    <span class="abadge" style="color:${color}" title="${attr(e.type)}">${esc(kind.w)}</span>
+    ${e.task ? `<span class="atask">${esc(e.task)}</span>` : ""}
+    <span class="awhat">${esc(activityWhat(e))}</span>
+    ${detail ? `<span class="adetail">${detail}</span>` : ""}
+  </div>`;
+}
+
+function renderActivity(d) {
+  const evs = (d && d.events) || [];
+  // The empty state is #activity-empty's sentence, not an inline copy of it:
+  // rendering both printed the same line twice.
+  $("#activity").innerHTML = evs.length ? evs.map(activityRow).join("") : "";
+  $("#activity-empty").style.display = evs.length ? "none" : "";
+  $("#activity-meta").innerHTML = evs.length
+    ? `last ${evs.length}${d && d.total ? ` of ${fmtK(d.total)} log line${d.total === 1 ? "" : "s"}` : ""}`
+    : "nothing yet";
+}
+
+async function pollActivity() {
+  try {
+    renderActivity(await jget("/api/activity?limit=" + ACTIVITY_LIMIT));
+    markFail("activity", false);
+  } catch (e) { markFail("activity", true); }
+}
+
+for (const b of document.querySelectorAll("[data-ac]")) {
+  b.onclick = () => {
+    ACTIVITY_LIMIT = +b.dataset.ac;
+    for (const o of document.querySelectorAll("[data-ac]")) o.classList.toggle("on", o === b);
+    pollActivity();
+  };
+}
+
+// Click (or Enter/Space on) an event with a task id → open its project. The
+// task id alone does not name a taskfile: the server resolves it from the
+// code_tasks rows and ships it as `file` on the event, so a click works for
+// history the page's current filter (or an archive) has hidden.
+function activityOpen(taskId, file) {
+  const target = activityTarget({task: taskId, file: file});
+  if (target) openDetail(target);
+}
+function activityKey(ev) {
+  const row = ev.target && ev.target.closest && ev.target.closest("[data-task]");
+  if (!row) return;
+  activityOpen(row.dataset.task, row.dataset.file);
+}
+const activityEl = $("#activity");
+if (activityEl) {
+  activityEl.onclick = activityKey;
+  activityEl.onkeydown = ev => {
+    if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); activityKey(ev); }
+  };
+}
+
 async function pollEvents() {
   try {
     const today = dayStart();
