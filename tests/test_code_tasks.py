@@ -426,6 +426,48 @@ class GateFeedbackNamesTheFailures(unittest.TestCase):
         self.assertIn("_gate_failures(full)", body)
         self.assertIn('"failing checks:\\n"', body)
 
+    def test_the_full_fail_list_survives_the_log_tail_cut(self):
+        """Measured 2026-09-15: a gate kept 1 of 15 failing test names.
+
+        The FAIL: lines sat at the START of a >2000-char check.sh run, the
+        kept window was the unittest summary and the shell's echo, and three
+        worktrees spent a fix round hunting the rest. The full `FAIL:`/
+        `ERROR:` list now rides beside the tail in the log file and in the
+        event, so it is readable without opening a 20k-line log.
+        """
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="arc-qa-gate-log-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        head = ("FAIL: test_alpha_fails (tests.test_x.X)\n"
+                "FAIL: test_beta_fails (tests.test_x.X)\n")
+        filler = "".join(f"pad line {i}\n" for i in range(400))
+        (tmp / "gate-output.txt").write_text(head + filler
+                                             + "FAILED (failures=2)\n")
+        task = dict(BASIC, verify_cmd=f"cat {tmp / 'gate-output.txt'}; exit 1")
+        ts = code_tasks.load_taskfile(taskfile([task]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore(), ts, taskfile="tf.json")
+        ctx = {"results": {"alloc_t1": {"worktree": str(tmp)},
+                           "implement_t1": {"harness": "x"}}, "runs": {}}
+        # config.ROOT decides where the gate log lands: point it at the temp
+        # worktree so the run does not write into the repo's own logs/gates.
+        with mock.patch.object(config, "ROOT", str(tmp)):
+            with capture_events() as ev:
+                res = asyncio.run(g.nodes["gate_t1"].fn(ctx))
+        self.assertFalse(res["passed"])
+        # The cut, precisely: the raw output's own last 2000 characters —
+        # which is ALL the log file used to hold — reach neither FAIL: line.
+        raw_tail = (head + filler + "FAILED (failures=2)\n")[-2000:]
+        self.assertNotIn("FAIL: test_alpha_fails", raw_tail)
+        self.assertNotIn("FAIL: test_beta_fails", raw_tail)
+        log = pathlib.Path(res["log_path"]).read_text()
+        self.assertIn(code_tasks._GATE_FULL_LIST_HEADER, log)
+        # Both names survive in the log's own kept window.
+        self.assertIn("FAIL: test_alpha_fails", log[-2000:])
+        self.assertIn("FAIL: test_beta_fails", log[-2000:])
+        gate_ev = ev.of("task.gate")[-1]
+        self.assertIn(code_tasks._GATE_FULL_LIST_HEADER, gate_ev["tail"])
+        self.assertIn("FAIL: test_beta_fails", gate_ev["tail"])
+
 
 class AFixRoundContinuesTheHarnessSession(unittest.TestCase):
     """A rework is the same model mending the same worktree: reuse its session.
