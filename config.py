@@ -394,6 +394,23 @@ MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "16"))
 # than sit on the dashboard forever.
 CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(12 * 3600)))
 
+# --- opencode serve (ocserve.py) ---------------------------------------------
+# The persistent `opencode serve` server ocserve.OcserveClient talks to. It is
+# the same binary the driver already spawns (drivers.OpencodeDriver), named by
+# its OWN knob so a switch onto the serve path cannot change what the one-shot
+# `opencode run` path uses — and so tests can point it at a stub script
+# instead of the real binary.
+OPENCODE_SERVE_BIN = os.getenv("ARC_OPENCODE_SERVE_BIN", "opencode")
+# How long start_server() waits for the server to answer before it kills the
+# process and reports a startup failure. Measured 2026-09-16 (opencode
+# 1.18.29): a cold start prints its listening line and answers GET
+# /global/health within a couple of seconds on an idle box, so the budget only
+# has to absorb a loaded machine — the server starts no model, it just listens.
+# There is no total run budget here: a running server must outlive any single
+# prompt (Rule 7: total caps killed healthy work).
+OPENCODE_SERVE_STARTUP_TIMEOUT = float(
+    os.getenv("ARC_OPENCODE_SERVE_STARTUP_TIMEOUT", "180"))
+
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
 # governed code pipeline: no worktree, no gate, no publish. A model trusted
