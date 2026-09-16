@@ -13,7 +13,9 @@ commitment to a date or an effort estimate.
 ## Now — in flight
 
 Reconciled against `~/tasks/*.json` and the `code_tasks` table on 2026-09-15.
-Per-task status is from `orchestrator.db` (`main.py code status`).
+Per-task status is from `orchestrator.db` (`main.py code status`) — a snapshot,
+since the fleet keeps merging while this file sits still. Re-read the table
+before trusting a row.
 
 | Task file | What it is | State |
 |---|---|---|
@@ -21,7 +23,7 @@ Per-task status is from `orchestrator.db` (`main.py code status`).
 | `migrate-the-arc-orchestrator-s-opencode.json` | "Migrate OpencodeDriver to persistent opencode serve sessions" (chain) | `ocserve-client` running — the first slice of the serve migration |
 | `audit-backup-generator-fix.json` | "Audit: one DB backup per day + a real action on the missing-log finding" (single) | `audit-backup-generator-fix` running |
 | `dynamic-dag-structural-plan-amendments.json` | "Dynamic DAG: finish the structural plan-amendment channel (cancel_task, bounds, mutation ledger, DAG rendering)" (hierarchical) | no `code_tasks` rows yet — **chain-gated on `migrate-the-arc-orchestrator-s-opencode.json`** (`project.after`), so it allocates no worktree until that whole chain has merged |
-| `agents-tab-phantom-rows.json` | "Agents tab: stop showing dead runs as stalled live agents" (single) | `agents-tab-phantom-rows` running |
+| `agents-tab-phantom-rows.json` | "Agents tab: stop showing dead runs as stalled live agents" (single) | merged (PR #68) — but a single-task file is done at merge, so this row is history |
 | `orchestration-roadmap.json` | "Docs: write the orchestration roadmap capturing the operator's queued directions" (single) | `orchestration-roadmap-doc` running — this file |
 
 Two notes on the reconcile:
@@ -331,8 +333,10 @@ that happen to share a page.
 
 **Why.** Chat is how the operator turns intent into a plan, and today the two
 halves do not compose: the chat path and `code plan` are separate entry points
-into the same outcome (a task file), and there is no way back to a clean slate
-without leaving the UI.
+into the same outcome (a task file). Starting over is possible since PR #54
+(the panel's "＋ new chat" opens a fresh session), but getting *from* that
+session *to* a plan is still not one flow — the chat turn and the planner are
+still two systems.
 
 **Reconcile `orchestrator-chat.json`** (titled "Orchestrator chat: plan
 projects with Kimi-K3 from dashboard and phone (text + speech)"). Its tasks
@@ -340,18 +344,24 @@ have since merged — `orch-chat-backend` (chat engine: `main.py chat` +
 `orchchat.py` session/plan finalizer), `orch-chat-api` (`/api/repos`,
 `/api/repos/create`, `/api/chat/start`, `/api/chat/poll`), `orch-chat-panel`
 (desktop panel) and `orch-chat-phone` — and `chat-sessions` (merged, PR #54)
-added list/create/switch beyond the single fixed session. So this item is
-**not** greenfield: what remains is the *new-chat-from-the-UI* action and
-unifying chat and planning into one flow. Note that the task file's own title
+added list/create/switch beyond the single fixed session, **including the
+new-chat action itself**: the desktop panel's `＋ new chat`
+(`static/index.html`, wired by `chatNewSession` in `static/panels/chat.js`)
+and the phone's `New chat` (`static/phone.html`) already open a fresh session
+with an empty transcript, and `tests/chat_ui.test.mjs` covers it. So this item
+is **not** greenfield: what remains is unifying chat and planning into one
+flow. Note that the task file's own title
 still names Kimi-K3, a retired model — it is history and must not be re-run
 as-is.
 
-**Acceptance shape.** A UI action that creates a fresh session, asserted at the
-API level (a new session id, listed by the session list, with its own
-transcript file), and a flow test that a chat turn can produce a task file
+**Acceptance shape.** A flow test that a chat turn can produce a task file
 through the same validation path as `code plan` (`load_taskfile` plus the
-`describe` summary) rather than through a second, parallel code path. Plus
-`./check.sh`.
+`describe` summary) rather than through a second, parallel code path, and that
+`code plan`'s output and the chat's land in the same place — a chat turn whose
+plan is listed by `main.py code status` (or the taskfile directory) exactly as
+a planned one is. The already-shipped new-chat action is covered by
+`tests/chat_ui.test.mjs`, so that test is a regression guard, not the gate.
+Plus `./check.sh`.
 
 ### 9. Harness concurrency topology
 
