@@ -1041,8 +1041,20 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         return pool[:n]
 
     def test_the_idle_model_is_preferred_over_saturated_ones(self):
-        picked = self._pick({STRONGEST: 3, "GLM-5.3": 4, ENTRY: 0})
-        self.assertEqual(picked[0], ENTRY)
+        # Saturate every candidate EXCEPT one and assert the idle one wins.
+        # The old form named the two saturants positionally ({STRONGEST: 3,
+        # "GLM-5.3": 4, ENTRY: 0}) and asserted picked[0] == ENTRY — which
+        # silently required EXACTLY ONE idle model. On a three-family roster
+        # (Union-Alpha joined 2026-09-16) a second model is idle and sorts
+        # first, so the assertion tested the roster size, not the rule.
+        idle = ENTRY
+        usage = {m: config.driver_limit(m)
+                 for m in DISTINCT_MODELS if m != idle}
+        self.assertTrue(usage, "needs at least one model to saturate")
+        picked = self._pick(usage)
+        self.assertEqual(picked[0], idle,
+                         f"{idle} is idle and must outrank the saturated "
+                         f"{sorted(usage)}")
 
     def test_saturation_is_relative_to_each_cap_not_absolute(self):
         """The same absolute count means different things at different caps.
@@ -1050,12 +1062,16 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         Written against the real caps rather than hard-coded numbers: those
         moved when driver caps became sessions-divided-by-sessions-per-process,
         and a test that only passes for one particular set of caps is testing
-        the constants, not the rule.
+        the constants, not the rule. Derives the caps over EVERY live family
+        (`DISTINCT_MODELS`): the old form listed three positional aliases that
+        collapsed to two distinct models once Union-Alpha joined, so the pool
+        could return a model the `caps` dict never held (KeyError).
         """
-        caps = {m: config.driver_limit(m)
-                for m in ("GLM-5.3", ENTRY, STRONGEST)}
+        caps = {m: config.driver_limit(m) for m in DISTINCT_MODELS}
+        if len(caps) < 2:
+            self.skipTest("needs two live models to compare contention")
         roomiest = max(caps.values())
-        if len({*caps.values()}) == 1:
+        if len(set(caps.values())) == 1:
             self.skipTest("all caps equal today — there is no relative saturation "
                           "to observe; the rule is exercised by the cap test below")
         # Everything at ONE in use: the model with the largest cap is the least

@@ -855,3 +855,44 @@ class TheIdleClockIsRoleAware(unittest.TestCase):
         with self.assertRaises(ValueError) as ctx:
             drivers.KimiDriver("planner")
         self.assertIn("roster", str(ctx.exception))
+
+
+class HarnessErrorDetail(unittest.TestCase):
+    """A non-zero exit must report the pipe that actually carries the reason.
+
+    Both live harnesses put the reason on stdout and exit with stderr empty or
+    noisy: opencode names failures on stdout (the useless "opencode exited
+    1: "), and reasonix ships the provider's text in the `is_error: true`
+    stdout result object. So stdout is preferred over stderr chatter; stderr is
+    only the fallback.
+    """
+
+    def test_the_stdout_object_wins_over_stderr_chatter(self):
+        reasonix_result = ('{"type":"result","is_error":true,"result":"concurrent '
+                           'session limit reached for model \'GLM-5.3\'"}')
+        self.assertEqual(
+            drivers.harness_error_detail(reasonix_result,
+                                         "some progress chatter on stderr\n"),
+            reasonix_result)
+
+    def test_an_empty_stdout_falls_back_to_stderr(self):
+        self.assertEqual(
+            drivers.harness_error_detail("", "harness: RATE_LIMIT: slow down"),
+            "harness: RATE_LIMIT: slow down")
+        self.assertEqual(
+            drivers.harness_error_detail("   \n", "  harness: RATE_LIMIT: slow down  "),
+            "harness: RATE_LIMIT: slow down")
+
+    def test_a_silent_exit_says_so_rather_than_trailing_off(self):
+        self.assertEqual(drivers.harness_error_detail("", ""),
+                         "no output on stdout or stderr")
+        self.assertEqual(drivers.harness_error_detail(None, "  "),
+                         "no output on stdout or stderr")
+
+    def test_the_live_pump_routes_the_exit_through_the_helper(self):
+        # Only the base Driver._pump is the live path (opencode + reasonix);
+        # the historical dsh _pump_dual keeps its own stderr-first ladder.
+        import pathlib
+        src = pathlib.Path(drivers.__file__).read_text()
+        self.assertIn("harness_error_detail(text or raw,", src)
+        self.assertNotIn('detail = err.decode(errors="replace").strip()', src)

@@ -697,6 +697,25 @@ def opencode_fleet_config():
         doc = json.loads(src.read_text(encoding="utf-8"))
         for m in (doc.get("provider", {}).get("ARC", {}).get("models") or {}).values():
             m.setdefault("limit", {})["context"] = config.OPENCODE_CONTEXT
+        # EXTERNAL models (served by a provider other than ARC) get the same
+        # fleet context budget, so the harness compacts in time there too. The
+        # provider id and model id come from config's alias, so this cannot
+        # drift from the roster the way a hardcoded provider name would.
+        for _ext in config.EXTERNAL_MODELS:
+            _alias = config.MODEL_HARNESS_ALIAS.get(_ext, "")
+            _prov, _, _mid = _alias.partition("/")
+            _pmodels = ((doc.get("provider", {}).get(_prov) or {})
+                        .get("models") or {})
+            if _mid in _pmodels:
+                _pmodels[_mid].setdefault("limit", {})["context"] = config.OPENCODE_CONTEXT
+        # Lowering context can leave `output` above it (an external model may
+        # declare a large native output window), which asks the API for more
+        # completion tokens than the budget allows. Clamp output under context.
+        for _p in (doc.get("provider") or {}).values():
+            for _m in (_p.get("models") or {}).values():
+                _lim = _m.get("limit")
+                if _lim and _lim.get("output", 0) > _lim.get("context", 0):
+                    _lim["output"] = _lim["context"]
         doc.setdefault("compaction", {})["auto"] = True
         doc["compaction"].setdefault("threshold", 0.75)
         config.OPENCODE_FLEET_CONFIG.write_text(
@@ -949,6 +968,27 @@ def parse_transcript(raw):
             return sid or sid_holder[0], (head + "\n" + tail) if head else tail
         return sid or sid_holder[0], tail
     return sid_holder[0], ("".join(texts) or raw)[-3000:]
+
+
+def harness_error_detail(out, err):
+    """The most informative text for a non-zero harness exit.
+
+    Both live harnesses put the reason on STDOUT and exit with stderr empty or
+    noisy: opencode names its failures on stdout (which produced the useless
+    "opencode exited 1: "), and reasonix ends its stdout stream with the
+    terminal result object carrying `is_error: true` and the provider's text in
+    `.result` — ARC's "concurrent session limit reached for model 'X'" lands
+    there verbatim (verified 2026-09-13). stderr is progress chatter. So the
+    STDOUT object is preferred over stderr chatter; stderr is the fallback for
+    a harness that names its failure there. Never returns "" — a genuinely
+    silent exit says so rather than printing "exited 1: " with nothing after
+    it.
+    """
+    for candidate in (out, err):
+        text = (candidate or "").strip()
+        if text:
+            return text
+    return "no output on stdout or stderr"
 
 
 def transcript_tokens(raw):
@@ -1354,14 +1394,14 @@ class Driver:
         sid, text = parse_transcript(raw)
         toks, ptok, ctok = transcript_tokens(raw)
         if proc.returncode != 0:
-            # opencode reports plenty of its failures on STDOUT and exits with
-            # an empty stderr, which produced the useless "opencode exited 1: "
-            # — a message that says a run died and nothing about why, and that
-            # the retry ladder then repeated four times per task. Fall back to
-            # the tail of stdout, and say so when there is genuinely nothing.
-            detail = err.decode(errors="replace").strip()
-            if not detail:
-                detail = (text or raw).strip()[-300:] or "no output on stdout or stderr"
+            # Both live harnesses name their failures on STDOUT: opencode
+            # reports there and exits with an empty stderr (which produced the
+            # useless "opencode exited 1: ", repeated four times per task by
+            # the retry ladder), and reasonix ends its stream with the
+            # `is_error: true` result object carrying the provider's text. The
+            # stdout object is preferred over stderr chatter, and a genuinely
+            # silent exit says so instead of trailing off after the colon.
+            detail = harness_error_detail(text or raw, err.decode(errors="replace"))
             # An exit that carried a capacity refusal (ARC "backend queue is
             # full" / "concurrent session limit") is expected weather, not a
             # crash: mark it so Driver.run retries it on the capacity ladder
@@ -1438,7 +1478,13 @@ class OpencodeDriver(Driver):
         self.interactive = interactive
 
     def argv(self, prompt, session_id):
-        alias = config.harness_model(self.model, "opencode") or f"ARC/{self.model}"
+        # An EXTERNAL model (served by a provider other than ARC) is named by
+        # its full provider/model string; an ARC model keeps the ARC/ prefix
+        # its provider block declares. config owns both the external set and
+        # the alias so routing cannot drift from the roster.
+        alias = (config.harness_model(self.model, "opencode")
+                 or config.provider_model_alias(self.model)
+                 or f"ARC/{self.model}")
         a = ["opencode", "run", "-m", alias, "--auto", "--format", "json"]
         if session_id:
             a.append("-c")

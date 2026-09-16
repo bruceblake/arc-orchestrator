@@ -154,13 +154,18 @@ needs_kimi_harness = _ut.skipUnless(
 
 
 def _differently_priced_pair():
-    """Two live models whose per-token rates differ, or None.
+    """Two live models whose per-token rates differ AND are both non-zero, or None.
 
     Cost-attribution tests must charge two models at two rates; picking them by
     position broke when the roster reordered and both positions landed on the
-    same model.
+    same model. A free model (Union-Alpha is priced 0.0 for its OpenRouter
+    preview, 2026-09-16) breaks the arithmetic differently: every partial cost
+    involving it rounds to 0.0, so "priced at its own rate" and "priced at the
+    other's rate" become indistinguishable and the assertion can no longer fail.
+    Excluded here so the pair always exercises a real rate difference.
     """
-    live = [m for m in config.IMPLEMENTER_MODELS if config._price_for(m)]
+    live = [m for m in config.IMPLEMENTER_MODELS
+            if config._price_for(m) and any(config._price_for(m))]
     for a in live:
         for b in live:
             if a != b and config._price_for(a) != config._price_for(b):

@@ -114,6 +114,25 @@ FAMILIES = {
         },
         websearch_model="DeepSeek-V4.1-Flash-thinking-max-legacy-tool-calling",
     ),
+    # Operator decision (2026-09-16): Union Alpha, a FREE stealth preview on
+    # OpenRouter (stealth/union-alpha), is admitted as a THIRD family for its
+    # one-week free window. It is NOT an ARC-served model — see EXTERNAL_MODELS
+    # and MODEL_HARNESS_ALIAS — and it expires from the roster on 2026-09-23
+    # (the ROSTER end date), after which live_roster drops it automatically.
+    # The cap of 4 is a PLACEHOLDER, not a measurement: OpenRouter free-tier
+    # capacity for an anonymous endpoint is unknown, and the binding ceiling
+    # in practice is the shared opencode harness pool (5). 4 keeps the derived
+    # driver cap at 2 while leaving the harness headroom; tighten via
+    # ARC_LIMIT_UNION / ARC_DRIVER_LIMIT_UNION if the endpoint rate-limits.
+    # A fourth family here also enrols it in the 24/7 RESEARCH round-robin
+    # (pool.py + work.py iterate FAMILY_ORDER) — accepted by operator decision.
+    "union": Family(
+        "union",
+        4,
+        {
+            "default": "Union-Alpha",
+        },
+    ),
 }
 
 # Derived, never hand-written: a literal list here kept naming gpt-oss after it
@@ -428,6 +447,20 @@ import datetime as _dt
 # medium-tier workhorse — it implements and reviews/PR-reviews, NEVER plans.
 ALL_ROLES = ("implementer", "reviewer", "pr_reviewer", "planner")
 ROSTER = [
+    # Operator decision (2026-09-16): Union Alpha, a free stealth preview on
+    # OpenRouter, admitted as a full third review-capable family (implement /
+    # review / PR-review; it does NOT plan). Medium tier: it is fast and its
+    # quality is unbenchmarked, so it is not trusted with the hard tier. It is
+    # an EXTERNAL model (EXTERNAL_MODELS) served by OpenRouter, not ARC, so the
+    # ARC availability snapshot must not judge it; the end date retires it when
+    # the free window closes. Placed FIRST in its tier on PURPOSE: the roster is
+    # ordered weakest->strongest and _STRONGEST_FIRST reverses WITHIN a tier, so
+    # first here means LAST review preference — DeepSeek stays the reviewer of
+    # GLM-5.3's critical hard work (the proven pairing), and the unbenchmarked
+    # model is the one drawn INTO review, not the one whose verdict becomes the
+    # fleet's first line of defence.
+    ("Union-Alpha", "union", "opencode", "medium", 4,
+     ("implementer", "reviewer", "pr_reviewer"),           "2026-09-16", "2026-09-23"),
     # Kimi-K3's row was DELETED here on 2026-09-12 by operator decision (its
     # scheduled 2026-09-19 withdrawal was not waited for). A row is the only
     # thing that keeps a model routable, so deletion is the retirement: no
@@ -468,6 +501,16 @@ ROSTER = [
      ("implementer", "reviewer", "pr_reviewer"),           "2026-09-12", None),
 ]
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
+
+# Roster models the ARC availability snapshot must NOT judge, because they are
+# served by a DIFFERENT provider (OpenRouter), not by ARC's /models endpoint.
+# live_roster() would otherwise mark them "deferred" and silently drop them —
+# the 2026-09-12 bug, inverted: there a date promised a model the API did not
+# serve; here the model is served, just not by the API we snapshot.
+# An external model is trusted on its ROSTER dates alone, and is retired by its
+# end date exactly like any other row. Operator decision 2026-09-16 for
+# Union-Alpha; keep this set in lockstep with MODEL_HARNESS_ALIAS.
+EXTERNAL_MODELS = {"Union-Alpha"}
 
 
 def roster_date():
@@ -529,11 +572,13 @@ def live_roster(day=None, check_api=True):
             # has ACTUALLY stopped serving it: on 2026-09-12 the roster retired
             # DeepSeek-V4-Flash for a 4.1 the API had never heard of, which
             # would have left the fleet with no medium tier at all. An incumbent
-            # stays until its replacement is real.
-            if served is None or m not in served:
+            # stays until its replacement is real. An EXTERNAL model is always
+            # retired on its date: its provider is not the one we snapshot, so
+            # "still served" is unknowable here — the date is the whole plan.
+            if m in EXTERNAL_MODELS or served is None or m not in served:
                 continue
             overstayed.append(m)
-        if served is not None and m not in served:
+        if m not in EXTERNAL_MODELS and served is not None and m not in served:
             deferred.append(m)
             continue
         out.append((m, fam, harness, tier, cap, roles))
@@ -741,6 +786,30 @@ def harness_model(model, harness):
     except OSError:
         return None
     return alias
+
+
+# opencode provider/model aliases for models that live OUTSIDE ARC. The fleet's
+# OpencodeDriver.argv builds `ARC/<model>` by default, which points at the ARC
+# endpoint — wrong for an external model. Unlike the kimi alias above, opencode
+# DOES accept a provider-qualified model string here (the provider is declared
+# in OPENCODE_CONFIG), so an external model is named as `<provider>/<model-id>`.
+# Keyed by roster model name; an entry exists only for EXTERNAL_MODELS.
+MODEL_HARNESS_ALIAS = {
+    "Union-Alpha": "openrouter/stealth/union-alpha",
+}
+
+
+def provider_model_alias(model):
+    """The provider-qualified model string for an external roster model, or None.
+
+    None means "not external" — the caller keeps its ARC/<model> default. Gated
+    on EXTERNAL_MODELS so an alias can never outlive the roster row it names:
+    when Union-Alpha's end date passes and live_roster drops it, no lookup here
+    can resurrect it.
+    """
+    if model not in EXTERNAL_MODELS:
+        return None
+    return MODEL_HARNESS_ALIAS.get(model)
 
 
 def kimi_plan_mode_on():
@@ -1003,6 +1072,12 @@ MODEL_PRICING = {
     "DeepSeek-V4.1-Flash-thinking-max": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
     "GLM-5.3": {"prompt_per_mtok": 1.00, "completion_per_mtok": 2.00},
     "Kimi-K3": {"prompt_per_mtok": 0.50, "completion_per_mtok": 2.00},
+    # Operator decision (2026-09-16): Union Alpha is free on OpenRouter for its
+    # preview window. Priced at 0.0 (not omitted) so telemetry reports $0.00
+    # honestly — an omitted model is "unpriced" (also $0.00), but a 0.0 entry
+    # records the reason. When a real price lands on reveal, override with
+    # ARC_PRICE_UNION_ALPHA_PROMPT and ARC_PRICE_UNION_ALPHA_COMPLETION.
+    "Union-Alpha": {"prompt_per_mtok": 0.0, "completion_per_mtok": 0.0},
 }
 
 

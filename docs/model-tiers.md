@@ -184,6 +184,11 @@ roster. A
 partial override replaces only the half it names, falling back to the table
 for the other; a junk override value is ignored rather than crashing.
 
+Union Alpha (`Union-Alpha`, the free OpenRouter stealth preview admitted for
+2026-09-16..2026-09-23) is priced at $0.00 in the table — the preview costs
+nothing. Override it via `ARC_PRICE_UNION_ALPHA_PROMPT` and
+`ARC_PRICE_UNION_ALPHA_COMPLETION` once a real price lands on reveal.
+
 ## Cross-references
 
 - [../AGENTS.md](../AGENTS.md)
