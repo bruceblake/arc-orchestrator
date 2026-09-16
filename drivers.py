@@ -872,6 +872,38 @@ def _dig(obj, texts, sid_holder):
             _dig(item, texts, sid_holder)
 
 
+def _result_head(payload, limit=20000):
+    """payload up to the end of its FIRST balanced {...}, else "".
+
+    The verdict of a review is the first object in reasonix's `.result`, and
+    the analysis that follows can push the payload past the 3000-char tail
+    window — the object itself straddles the cut, so slicing the head at a
+    fixed width would hand `_parse_verdict` a half object (measured: the real
+    3303/3477/4308-char payloads end their verdict object exactly at the end
+    of the payload, past char 3000). Cut at the object boundary instead.
+    """
+    depth, in_str, esc, start = 0, False, False, -1
+    for i, c in enumerate(payload[:limit]):
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+        elif c == '"':
+            in_str = True
+        elif c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0 and start >= 0:
+                return payload[:i + 1]
+    return ""
+
+
 def parse_transcript(raw):
     """(session_id, assistant-text tail) from captured stdout, defensive.
 
@@ -898,7 +930,24 @@ def parse_transcript(raw):
         _dig(obj, texts, sid_holder)
     if final is not None:
         sid = final.get("session_id") if isinstance(final.get("session_id"), str) else None
-        return sid or sid_holder[0], (final["result"] or raw)[-3000:]
+        payload = final["result"] or raw
+        tail = payload[-3000:]
+        if len(payload) > len(tail):
+            # A payload longer than the window lost its HEAD — and reasonix
+            # puts a review's verdict JSON at the very START of `.result`
+            # ({"pass": false, "issues": [...]}). Measured 2026-09-15: eleven
+            # completed reviews were thrown away as "review ended without a
+            # parseable verdict" while their verdict sat in the dropped head
+            # of a multi-KB payload — five of them outright pass/0-issues
+            # approvals; the sub-3000-char payloads survived, which is why
+            # some verdicts did come through. Keep the tail AND the head: a
+            # duplicated verdict span is harmless (_parse_verdict takes the
+            # LAST carrying span), a dropped one is a discarded review.
+            # Untruncated payloads return byte-identical to before, so this
+            # cannot double-count them.
+            head = _result_head(payload)
+            return sid or sid_holder[0], (head + "\n" + tail) if head else tail
+        return sid or sid_holder[0], tail
     return sid_holder[0], ("".join(texts) or raw)[-3000:]
 
 
