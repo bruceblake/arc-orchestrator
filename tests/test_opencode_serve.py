@@ -1,11 +1,10 @@
-"""OpencodeDriver on the serve path (ARC_OPENCODE_MODE=serve).
+"""OpencodeDriver on the serve path — now the ONLY path.
 
 Hermetic: every test drives the driver against tests/fake_ocserve.py over
 loopback and never spawns the real opencode binary. The point of the suite is
-that the serve branch is indistinguishable from the one-shot branch to
+that the serve path is indistinguishable from the retired one-shot path to
 everything downstream — same DriverResult fields, same transcript lines, same
-capacity/escalation semantics — and that flipping the mode back to 'oneshot'
-starts no server at all.
+capacity/escalation semantics — and that no `opencode run` process is spawned.
 """
 import asyncio
 import json
@@ -48,13 +47,11 @@ class ServeDriverTestBase(unittest.TestCase):
         self._orig_tdir = drivers.TRANSCRIPT_DIR
         drivers.TRANSCRIPT_DIR = Path(self.tdir)
         self.addCleanup(lambda: setattr(drivers, "TRANSCRIPT_DIR", self._orig_tdir))
-        # Serve mode + a shared-server stub pointing at the fake.
-        self._env = mock.patch.dict(os.environ, {"ARC_OPENCODE_MODE": "serve"})
-        self._env.start()
-        self.addCleanup(self._env.stop)
+        # Serve is the ONLY path now (task opencode-serve-only): a shared-server
+        # stub pointing at the fake receives every prompt.
         self._shared = mock.patch.object(
             ocserve, "get_shared_server",
-            return_value=_FakeSharedServer(self.fake.base_url))
+            side_effect=lambda **kw: _FakeSharedServer(self.fake.base_url))
         self._shared.start()
         self.addCleanup(self._shared.stop)
         # No real backoff sleeps on the retry ladder.
@@ -217,36 +214,28 @@ class ServeFailureSemantics(ServeDriverTestBase):
         self.assertIn(str(self.worktree), self.fake.disposed)
 
 
-class DefaultModeStartsNoServer(unittest.TestCase):
-    """The default must stay one-shot: no server, no session, no ocserve."""
+class ServeIsTheOnlyPath(unittest.TestCase):
+    """Serve is unconditional now: no mode knob, no one-shot spawn."""
 
-    def test_default_mode_is_oneshot(self):
-        self.assertEqual(config.OPENCODE_MODE_DEFAULT, "oneshot")
-        with mock.patch.dict(os.environ, {}, clear=False):
-            os.environ.pop("ARC_OPENCODE_MODE", None)
-            self.assertEqual(config.opencode_mode(), "oneshot")
+    def test_config_exposes_no_mode_knob(self):
+        self.assertFalse(hasattr(config, "opencode_mode"))
+        self.assertFalse(hasattr(config, "OPENCODE_MODE_DEFAULT"))
 
-    def test_a_bad_mode_value_is_rejected(self):
-        with mock.patch.dict(os.environ, {"ARC_OPENCODE_MODE": "srve"}):
-            with self.assertRaises(ValueError):
-                config.opencode_mode()
+    def test_the_driver_never_spawns_a_process(self):
+        """_once must go to the server, never to spawn(). Reaching spawn — the
+        boundary the retired one-shot path used — is the failure."""
+        d = drivers.OpencodeDriver("GLM-5.3", "implementer")
 
-    def test_oneshot_mode_never_touches_ocserve(self):
-        with mock.patch.dict(os.environ, {"ARC_OPENCODE_MODE": "oneshot"}):
-            d = drivers.OpencodeDriver("GLM-5.3", "implementer")
+        def no_server(*a, **kw):
+            raise AssertionError("get_shared_server: serve path not taken")
 
-            async def boom(*a, **kw):
-                raise AssertionError("oneshot path must not start a server")
+        async def no_spawn(*a, **kw):
+            raise AssertionError("reached spawn: _once took a one-shot path")
 
-            with mock.patch.object(ocserve, "get_shared_server", boom):
-                # The one-shot _once would spawn a real binary, so stop it at
-                # the spawn boundary: reaching spawn means it did NOT take the
-                # serve branch, which is the assertion.
-                with mock.patch.object(drivers, "spawn",
-                                       side_effect=AssertionError("spawned one-shot")):
-                    with self.assertRaises(AssertionError) as ctx:
-                        asyncio.run(d._once("hi", Path("."), None, "t", 1))
-            self.assertIn("one-shot", str(ctx.exception))
+        with mock.patch.object(drivers, "spawn", no_spawn):
+            with mock.patch.object(ocserve, "get_shared_server", no_server):
+                with self.assertRaises(AssertionError):
+                    asyncio.run(d._once("hi", Path("."), None, "t", 1))
 
 
 if __name__ == "__main__":

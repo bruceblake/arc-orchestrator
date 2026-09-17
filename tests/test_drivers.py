@@ -562,10 +562,11 @@ class FleetContextConfig(unittest.TestCase):
             config.OPENCODE_CONFIG = orig
             drivers._fleet_cfg.update(key=None, path=None)
 
-    def test_opencode_argv_keeps_the_real_model_key(self):
-        argv = drivers.OpencodeDriver("GLM-5.3", "reviewer").argv("p", None)
-        self.assertIn("ARC/GLM-5.3", argv,
-                      "a renamed key is rejected by ARC as 'Model not found'")
+    def test_opencode_model_arg_keeps_the_real_model_key(self):
+        # The serve path names the model with this string; a renamed key is
+        # rejected by ARC as "Model not found".
+        arg = drivers.OpencodeDriver("GLM-5.3", "reviewer").model_arg()
+        self.assertIn("ARC/GLM-5.3", arg)
 
 
 class LeaseWaitIsBounded(unittest.TestCase):

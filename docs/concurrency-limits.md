@@ -434,30 +434,23 @@ only from `<home>/.env`, never the shell. See
 
 ### `ARC_OPENCODE_SERVE_BIN` / `ARC_OPENCODE_SERVE_STARTUP_TIMEOUT` — the `opencode serve` path
 
-`ocserve.py` talks to the persistent server mode of the same binary the
-one-shot driver spawns. `ARC_OPENCODE_SERVE_BIN` (default `opencode`) names
-that binary; it is deliberately a SEPARATE knob from the one-shot path, so a
-switch onto the serve path cannot change what `opencode run` resolves, and so
-tests can point it at a stub script. `ARC_OPENCODE_SERVE_STARTUP_TIMEOUT`
+`ocserve.py` talks to the persistent server mode of the opencode binary.
+`ARC_OPENCODE_SERVE_BIN` (default `opencode`) names that binary, so tests can
+point it at a stub script. `ARC_OPENCODE_SERVE_STARTUP_TIMEOUT`
 (default 180 s) bounds `ocserve.start_server`'s readiness poll against
 `GET /global/health`; on expiry the server process is killed and its group
 reaped before `StartupError` is raised. Neither knob bounds a running prompt —
 the server starts no model, so the only budget that matters is the startup one.
 The server is a single process per orchestrator (`ocserve.get_shared_server`,
-no idle TTL in v1) and adds no ARC session: it is reached over loopback HTTP,
-where each prompt is one session.
+started once, no idle TTL in v1) and adds no ARC session: it is reached over
+loopback HTTP, where each run is one session.
 
-### `ARC_OPENCODE_MODE` — which `OpencodeDriver` path runs
-
-`ARC_OPENCODE_MODE` accepts exactly `oneshot` (the default) or `serve`; any
-other value raises `ValueError` rather than silently falling back to one-shot.
-`oneshot` spawns a fresh `opencode run` per attempt — the shipped behaviour.
-`serve` routes the driver through `ocserve.py` against the one persistent
-`opencode serve` process instead, so the process and its warm cache are reused
-across attempts and tasks. The two paths deliberately share one model alias
-(`drivers.OpencodeDriver.model_arg`), so flipping the mode cannot change which
-model a run routes to. The default stays `oneshot` until the serve path has
-earned the switch.
+**Serve is now the ONLY path.** The one-shot `opencode run` spawn was deleted on
+2026-09-16 (task `opencode-serve-only`): `OpencodeDriver._once` always talks to
+the shared server, so the process and its warm cache are reused across attempts
+and tasks. There is no mode switch — the rollback story is `git revert`. The
+fleet opencode config (`OPENCODE_CONFIG`, the lowered context budget) is passed
+to the server once at startup, so compaction behaves as it did per-spawn.
 
 ### `ARC_DSH_BIN` — where the dsh CLI lives (historical, 2026-09-12..13)
 
