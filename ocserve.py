@@ -240,24 +240,32 @@ def _drain_brief(path, limit=400):
     return " ".join(text.split())[-limit:]
 
 
-def start_server(binary=None, port=None, startup_timeout=None, cwd=None):
+def start_server(binary=None, port=None, startup_timeout=None, cwd=None,
+                 env=None):
     """Start `opencode serve` on loopback and wait until it answers.
 
     Returns a ServeHandle. On timeout or startup failure the process is killed
     and StartupError raised — a failed start never leaves a server behind.
+
+    `env` is MERGED over the orchestrator's environment for the server
+    process. It carries the fleet opencode config (OPENCODE_CONFIG — the
+    lowered context budget), which the deleted one-shot path set per spawn;
+    without it the server would run at opencode's default window and never
+    compact in time.
     """
     binary = binary or config.OPENCODE_SERVE_BIN
     if startup_timeout is None:
         startup_timeout = config.OPENCODE_SERVE_STARTUP_TIMEOUT
     port = port or _free_port()
     argv = [binary, "serve", "--port", str(port)]
+    child_env = dict(os.environ, **(env or {}))
     log.info("ocserve: starting %s", " ".join(argv))
     log_fh = tempfile.NamedTemporaryFile(
         prefix="ocserve-server-", suffix=".log", delete=False)
     log_path = log_fh.name
     try:
         proc = subprocess.Popen(
-            argv, cwd=cwd or None,
+            argv, cwd=cwd or None, env=child_env,
             stdin=subprocess.DEVNULL,
             stdout=log_fh, stderr=subprocess.STDOUT,
             start_new_session=True,       # own process group: stop() reaps it
@@ -303,19 +311,23 @@ _shared_lock = threading.Lock()
 _shared = None
 
 
-def get_shared_server():
+def get_shared_server(env=None):
     """The one server this orchestrator process uses, started on first use.
 
-    No idle TTL in v1: the server starts no model and is cheap when idle, so
-    tearing it down between tasks would only pay the startup cost per task.
-    Callers that need a private server (tests) call start_server() directly.
+    `env` (merged over the orchestrator environment) is applied ONLY when the
+    server is actually started — it carries the fleet opencode config
+    (OPENCODE_CONFIG), so a later caller's env cannot half-apply to a running
+    server. No idle TTL in v1: the server starts no model and is cheap when
+    idle, so tearing it down between tasks would only pay the startup cost per
+    task. Callers that need a private server (tests) call start_server()
+    directly.
     """
     global _shared
     with _shared_lock:
         if (_shared is not None and not _shared.stopped
                 and _shared.proc.poll() is None):
             return _shared
-        _shared = start_server()
+        _shared = start_server(env=env)
         return _shared
 
 

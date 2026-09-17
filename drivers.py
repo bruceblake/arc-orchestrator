@@ -1477,48 +1477,28 @@ class OpencodeDriver(Driver):
         self.role = role
         self.interactive = interactive
 
-    def argv(self, prompt, session_id):
-        # An EXTERNAL model (served by a provider other than ARC) is named by
-        # its full provider/model string; an ARC model keeps the ARC/ prefix
-        # its provider block declares. config owns both the external set and
-        # the alias so routing cannot drift from the roster.
-        alias = (config.harness_model(self.model, "opencode")
-                 or config.provider_model_alias(self.model)
-                 or f"ARC/{self.model}")
-        a = ["opencode", "run", "-m", alias, "--auto", "--format", "json"]
-        if session_id:
-            a.append("-c")
-        return a + [prompt]
-
     def model_arg(self):
-        """The `provider/model` string the serve path names this model with.
+        """The `provider/model` string this driver names its model with.
 
-        Same source as argv()'s `-m`, so the two paths cannot route a model
-        differently. ocserve splits it into {providerID, model} per route.
+        An EXTERNAL model (served by a provider other than ARC) uses its full
+        provider/model string; an ARC model keeps the ARC/ prefix its provider
+        block declares. config owns both the external set and the alias so
+        routing cannot drift from the roster. ocserve splits it into
+        {providerID, model} per route.
         """
         return (config.harness_model(self.model, "opencode")
                 or config.provider_model_alias(self.model)
                 or f"ARC/{self.model}")
 
     async def _once(self, prompt, worktree, session_id, task_id, attempt):
-        """One attempt on whichever path ARC_OPENCODE_MODE selects.
-
-        The one-shot path is the shipped default; the serve path reuses the
-        persistent server. Both return the SAME DriverResult contract and leave
-        the SAME transcript, so nothing downstream can tell them apart.
-        """
-        if config.opencode_mode() == "serve":
-            return await self._once_serve(prompt, worktree, session_id,
-                                          task_id, attempt)
-        return await super()._once(prompt, worktree, session_id, task_id, attempt)
-
-    async def _once_serve(self, prompt, worktree, session_id, task_id, attempt):
         """One attempt against the shared `opencode serve` server.
 
-        The guarded plumbing around this call (model gate, harness gate, DB
-        leases, driver.start/done/error) is Driver.run/_guarded_once — shared,
-        untouched. What differs is the transport: a session bound to the
-        worktree over x-opencode-directory instead of a spawned process.
+        The one-shot `opencode run` spawn is gone (task opencode-serve-only):
+        this is the ONLY path. The guarded plumbing around it (model gate,
+        harness gate, DB leases, driver.start/done/error) is
+        Driver.run/_guarded_once — shared, untouched. What differs from the
+        base Driver._once is the transport: a session bound to the worktree
+        over x-opencode-directory instead of a spawned process.
         """
         import ocserve
         t0 = time.monotonic()
@@ -1526,7 +1506,14 @@ class OpencodeDriver(Driver):
         tpath = TRANSCRIPT_DIR / f"{task_id or 'adhoc'}-{self.role}-{attempt}.jsonl"
         stall = config.idle_timeout_for(self.role)
         total = config.total_timeout_for(self.role) or None
-        handle = ocserve.get_shared_server()
+        # The fleet opencode config (lowered context budget) was set per-spawn
+        # on the deleted one-shot path; the shared server gets it once, at
+        # start, so it compacts in time exactly as the spawned process did.
+        server_env = {}
+        cfg = opencode_fleet_config()
+        if cfg:
+            server_env["OPENCODE_CONFIG"] = cfg
+        handle = ocserve.get_shared_server(env=server_env)
         client = await ocserve.OcserveClient.create(
             handle, worktree=worktree, model=self.model_arg())
         # The transcript gets the SAME {type: text|tool_use|step_finish, ...}

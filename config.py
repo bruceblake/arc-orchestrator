@@ -395,11 +395,13 @@ MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "16"))
 CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(12 * 3600)))
 
 # --- opencode serve (ocserve.py) ---------------------------------------------
-# The persistent `opencode serve` server ocserve.OcserveClient talks to. It is
-# the same binary the driver already spawns (drivers.OpencodeDriver), named by
-# its OWN knob so a switch onto the serve path cannot change what the one-shot
-# `opencode run` path uses — and so tests can point it at a stub script
-# instead of the real binary.
+# OpencodeDriver's ONLY path is the persistent `opencode serve` server
+# (ocserve.OcserveClient): ONE server process per orchestrator, one session per
+# run, reached over loopback HTTP. It replaced the one-shot `opencode run`
+# spawn on 2026-09-16 (task opencode-serve-only) — the process and its warm
+# cache are now reused across attempts and tasks instead of paying a cold start
+# per attempt. ARC_OPENCODE_SERVE_BIN names the binary so tests can point it at
+# a stub script.
 OPENCODE_SERVE_BIN = os.getenv("ARC_OPENCODE_SERVE_BIN", "opencode")
 # How long start_server() waits for the server to answer before it kills the
 # process and reports a startup failure. Measured 2026-09-16 (opencode
@@ -410,28 +412,6 @@ OPENCODE_SERVE_BIN = os.getenv("ARC_OPENCODE_SERVE_BIN", "opencode")
 # prompt (Rule 7: total caps killed healthy work).
 OPENCODE_SERVE_STARTUP_TIMEOUT = float(
     os.getenv("ARC_OPENCODE_SERVE_STARTUP_TIMEOUT", "180"))
-# Which OpencodeDriver path a run uses. 'oneshot' (default) spawns a fresh
-# `opencode run` per attempt — the shipped behaviour. 'serve' talks to the
-# persistent `opencode serve` server via ocserve.py instead, so the process (and
-# its warm cache) is reused across attempts and tasks. Opt-in: the default does
-# not change until the serve path has earned it.
-OPENCODE_MODE_DEFAULT = "oneshot"
-
-
-def opencode_mode():
-    """Which OpencodeDriver path to use: 'oneshot' or 'serve'.
-
-    Read at call time (not import) so a test can flip it with an env var
-    without reimporting config. Any value other than the two is a
-    misconfiguration, not a silent fallback to one-shot — a typo that quietly
-    kept spawning processes would hide the very bug an operator was switching
-    away from.
-    """
-    mode = os.getenv("ARC_OPENCODE_MODE", OPENCODE_MODE_DEFAULT)
-    if mode not in ("oneshot", "serve"):
-        raise ValueError(
-            f"ARC_OPENCODE_MODE must be 'oneshot' or 'serve', not {mode!r}")
-    return mode
 
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
@@ -828,11 +808,12 @@ def harness_model(model, harness):
 
 
 # opencode provider/model aliases for models that live OUTSIDE ARC. The fleet's
-# OpencodeDriver.argv builds `ARC/<model>` by default, which points at the ARC
-# endpoint — wrong for an external model. Unlike the kimi alias above, opencode
-# DOES accept a provider-qualified model string here (the provider is declared
-# in OPENCODE_CONFIG), so an external model is named as `<provider>/<model-id>`.
-# Keyed by roster model name; an entry exists only for EXTERNAL_MODELS.
+# OpencodeDriver names an ARC model `ARC/<model>` by default, which points at
+# the ARC endpoint — wrong for an external model. Unlike the kimi alias above,
+# opencode DOES accept a provider-qualified model string here (the provider is
+# declared in OPENCODE_CONFIG), so an external model is named as
+# `<provider>/<model-id>`. Keyed by roster model name; an entry exists only for
+# EXTERNAL_MODELS.
 MODEL_HARNESS_ALIAS = {
     "Union-Alpha": "openrouter/stealth/union-alpha",
 }
@@ -950,7 +931,14 @@ _MODEL_DRIVER_CAP = {
 # The per-MODEL caps above are the ARC API's ceiling. They are not the only
 # ceiling: every opencode-backed model shares ONE local harness, and that
 # harness serialises through a single ~240MB sqlite db in
-# ~/.local/share/opencode. On the two-model fleet (2026-09-12) only GLM-5.3
+# ~/.local/share/opencode. Since 2026-09-16 (task opencode-serve-only) the
+# opencode harness is a PERSISTENT `opencode serve` server — ONE process per
+# orchestrator reaching that store, with one session per run — rather than a
+# fresh `opencode run` spawn per attempt. The cap VALUES below do not change in
+# that switch (it is a transport change, not a capacity one); what changes is
+# that the pool now bounds how many CONCURRENT SESSIONS the one server serves,
+# and the cliff below was measured on the retired per-attempt spawn. On the
+# two-model fleet (2026-09-12) only GLM-5.3
 # runs opencode — DeepSeek moved to its own `reasonix` harness (2026-09-13,
 # replacing `dsh`) — so the opencode pool sees GLM's 4 driver slots (pinned at
 # the account budget by `_DRIVER_CAP_PIN` above) against
