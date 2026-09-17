@@ -1211,14 +1211,23 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
         """The RULE: every live implementer family must have at least one
         eligible PR reviewer. PR_REVIEWERS itself is capped at
         families-1 (two families -> one reviewer on the 2026-09-12 roster),
-        so the count that must be satisfiable is min(wanted, families-1)."""
-        wanted = min(config.PR_REVIEWERS, len(config.REVIEW_FAMILIES) - 1)
-        for fam in sorted(config.REVIEW_FAMILIES):
-            with self.subTest(family=fam):
-                self.assertGreaterEqual(
-                    len(code_tasks._eligible_pr_reviewers(fam, None)),
-                    max(1, wanted),
-                    f"{fam} cannot field a cross-family PR reviewer")
+        so the count that must be satisfiable is min(wanted, families-1).
+
+        Pins the DEFAULT mode: the rule is about CROSS-family reviewers, and
+        under ARC_ALLOW_SAME_FAMILY_REVIEW=1 the pool deliberately inverts to
+        same-family only (one model per family), so the cross-family count is
+        1 by design and this assertion would be measuring the hatch, not the
+        rule. Gates export that flag during a backend outage — the test must
+        not depend on the operator's shell (see test_roster_stability).
+        """
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+            wanted = min(config.PR_REVIEWERS, len(config.REVIEW_FAMILIES) - 1)
+            for fam in sorted(config.REVIEW_FAMILIES):
+                with self.subTest(family=fam):
+                    self.assertGreaterEqual(
+                        len(code_tasks._eligible_pr_reviewers(fam, None)),
+                        max(1, wanted),
+                        f"{fam} cannot field a cross-family PR reviewer")
 
     def test_it_never_picks_the_implementer_s_own_family(self):
         # Pins the DEFAULT pairing; gates run with ARC_ALLOW_SAME_FAMILY_REVIEW=1
@@ -1875,7 +1884,11 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
         orig = code_tasks.gitstore.pr_diff
         code_tasks.gitstore.pr_diff = lambda repo, n: aio.sleep(0, result="diff --git a b")
         try:
-            out = aio.run(fan({"results": {"publish_t1": {"pr": 42}}, "runs": {}}))
+            # Pin the DEFAULT mode: under ARC_ALLOW_SAME_FAMILY_REVIEW=1 the
+            # reviewer pool inverts to same-family only, so PR_REVIEWERS
+            # cross-family readers are not what this node is asked to fan out.
+            with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+                out = aio.run(fan({"results": {"publish_t1": {"pr": 42}}, "runs": {}}))
         finally:
             code_tasks.gitstore.pr_diff = orig
         self.assertIsInstance(out, Spawn)
