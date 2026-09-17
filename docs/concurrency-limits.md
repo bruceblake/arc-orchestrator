@@ -72,17 +72,38 @@ To re-measure after a plan change, ramp concurrency per model and find where
 ## 0. The THIRD layer: the harness pool
 
 Before the per-model layers below, there is a limit that is easy to miss and is
-frequently the binding one: **every opencode-backed model shares ONE local
-binary and ONE ~240MB sqlite store** in `~/.local/share/opencode`. On the
-two-model fleet (2026-09-12) only GLM-5.3 runs opencode — DeepSeek moved to
-its own `reasonix` harness (dsh from 2026-09-12 to 09-13) — so the opencode pool now sees GLM's driver cap of 4
-(pinned at the account session budget by `config._DRIVER_CAP_PIN`, operator
-directive 2026-09-15)
-against its ceiling of 5, and DeepSeek's 5 runs against the separate reasonix pool
-of 7 (measured 2026-09-14: 3/3, 6/6 and 7/7 concurrent one-shot runs exited
-0; opencode's equivalent cliff was at 6).
+frequently the binding one: **every opencode-backed model runs through ONE
+persistent `opencode serve` server**, and that server serialises through a
+single ~240MB sqlite store in `~/.local/share/opencode`. On the two-model fleet
+(2026-09-12) only GLM-5.3 runs opencode — DeepSeek moved to its own `reasonix`
+harness (dsh from 2026-09-12 to 09-13) — so the opencode pool now sees GLM's
+driver cap of 4 (pinned at the account session budget by
+`config._DRIVER_CAP_PIN`, operator directive 2026-09-15) against its ceiling of
+5, and DeepSeek's 5 runs against the separate reasonix pool of 7 (measured
+2026-09-14: 3/3, 6/6 and 7/7 concurrent one-shot runs exited 0; opencode's
+equivalent cliff was at 6).
 
-Measured 2026-09-10, identical prompt, warm cache:
+**How a run reaches the server** (since 2026-09-16, task `opencode-serve-only`).
+The server is one process per orchestrator, started lazily on first use and
+bound to `127.0.0.1` on a free port (`ocserve.start_server`). Each harness run
+is a SESSION bound to its worktree via the **`x-opencode-directory`** header;
+the prompt goes through the async prompt route and the result streams back over
+SSE; the session ends instantly through the **`instance/dispose`** route. A
+provider concurrency refusal arrives as a structured `session.error` event with
+`isRetryable: false`, which `ocserve.CapacityFull` maps onto the existing
+capacity backoff ladder — the same retry path a one-shot capacity exit used.
+
+**The caps are unchanged by that switch.** They are: GLM-5.3 account 4, driver 4
+(batch callers see 3 while `INTERACTIVE_RESERVE` holds one back for chat),
+opencode harness pool 5. The reason the switch does not retune them is that the
+account cap sits UPSTREAM of the mechanism: substituting one persistent server
+for a per-attempt spawn changes how many local processes back the store, not how
+many concurrent sessions ARC will serve, so the ceiling that mattered before
+still binds. Retuning is future work, and the measured table below was taken on
+the retired per-attempt spawn.
+
+Measured 2026-09-10, identical prompt, warm cache (per-attempt spawn; the
+per-session equivalent under serve is not yet measured):
 
 | concurrent | 3 | 4 | 5 | 6 | 10 |
 |---|---|---|---|---|---|
