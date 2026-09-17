@@ -114,25 +114,12 @@ FAMILIES = {
         },
         websearch_model="DeepSeek-V4.1-Flash-thinking-max-legacy-tool-calling",
     ),
-    # Operator decision (2026-09-16): Union Alpha, a FREE stealth preview on
-    # OpenRouter (stealth/union-alpha), is admitted as a THIRD family for its
-    # one-week free window. It is NOT an ARC-served model — see EXTERNAL_MODELS
-    # and MODEL_HARNESS_ALIAS — and it expires from the roster on 2026-09-23
-    # (the ROSTER end date), after which live_roster drops it automatically.
-    # The cap of 4 is a PLACEHOLDER, not a measurement: OpenRouter free-tier
-    # capacity for an anonymous endpoint is unknown, and the binding ceiling
-    # in practice is the shared opencode harness pool (5). 4 keeps the derived
-    # driver cap at 2 while leaving the harness headroom; tighten via
-    # ARC_LIMIT_UNION / ARC_DRIVER_LIMIT_UNION if the endpoint rate-limits.
-    # A fourth family here also enrols it in the 24/7 RESEARCH round-robin
-    # (pool.py + work.py iterate FAMILY_ORDER) — accepted by operator decision.
-    "union": Family(
-        "union",
-        4,
-        {
-            "default": "Union-Alpha",
-        },
-    ),
+    # Union-Alpha's "union" family was REMOVED here on 2026-09-17 with its ROSTER
+    # row: the free OpenRouter preview ended early and the operator retired the
+    # model. A family with no live roster row is exactly the failure config.py
+    # warns about below — every consumer (pool semaphores, the dashboard
+    # capacity row, work.py's round-robin) would query family_limit("union")
+    # and raise KeyError on import — so the family goes with the model.
 }
 
 # Derived, never hand-written: a literal list here kept naming gpt-oss after it
@@ -466,20 +453,18 @@ import datetime as _dt
 # medium-tier workhorse — it implements and reviews/PR-reviews, NEVER plans.
 ALL_ROLES = ("implementer", "reviewer", "pr_reviewer", "planner")
 ROSTER = [
-    # Operator decision (2026-09-16): Union Alpha, a free stealth preview on
-    # OpenRouter, admitted as a full third review-capable family (implement /
-    # review / PR-review; it does NOT plan). Medium tier: it is fast and its
-    # quality is unbenchmarked, so it is not trusted with the hard tier. It is
-    # an EXTERNAL model (EXTERNAL_MODELS) served by OpenRouter, not ARC, so the
-    # ARC availability snapshot must not judge it; the end date retires it when
-    # the free window closes. Placed FIRST in its tier on PURPOSE: the roster is
-    # ordered weakest->strongest and _STRONGEST_FIRST reverses WITHIN a tier, so
-    # first here means LAST review preference — DeepSeek stays the reviewer of
-    # GLM-5.3's critical hard work (the proven pairing), and the unbenchmarked
-    # model is the one drawn INTO review, not the one whose verdict becomes the
-    # fleet's first line of defence.
-    ("Union-Alpha", "union", "opencode", "medium", 4,
-     ("implementer", "reviewer", "pr_reviewer"),           "2026-09-16", "2026-09-23"),
+    # Union-Alpha's row was DELETED here on 2026-09-17 by operator decision.
+    # It was a free stealth preview on OpenRouter (stealth/union-alpha) admitted
+    # 2026-09-16 as a third review-capable family for a one-week window, with a
+    # ROSTER end date of 2026-09-23. The free window ended EARLY: every call now
+    # returns `concurrency refusal: Thank you for participating in the Stealth
+    # Union Alpha testing period. This model was Unbiased's Pareto...`, so the
+    # model is dead for its purpose and the operator retired it before the date.
+    # A retirable row's end date is not enough here — the row's presence keeps it
+    # ROUTABLE, and live_roster's "an EXTERNAL model is always retired on its
+    # date" rule would not fire until 09-23, so deletion is the retirement, the
+    # same mechanism used for Kimi-K3 below. Old taskfiles naming it are remapped
+    # onto the medium tier by code_tasks.RETIRED_MODELS.
     # Kimi-K3's row was DELETED here on 2026-09-12 by operator decision (its
     # scheduled 2026-09-19 withdrawal was not waited for). A row is the only
     # thing that keeps a model routable, so deletion is the retirement: no
@@ -527,9 +512,12 @@ TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
 # the 2026-09-12 bug, inverted: there a date promised a model the API did not
 # serve; here the model is served, just not by the API we snapshot.
 # An external model is trusted on its ROSTER dates alone, and is retired by its
-# end date exactly like any other row. Operator decision 2026-09-16 for
-# Union-Alpha; keep this set in lockstep with MODEL_HARNESS_ALIAS.
-EXTERNAL_MODELS = {"Union-Alpha"}
+# end date exactly like any other row. EMPTY since 2026-09-17: Union-Alpha (the
+# only entry, added 2026-09-16) was retired when its free preview ended, so no
+# live roster row is external any more. Kept as a set — not deleted — because
+# live_roster, provider_model_alias and drivers.opencode_fleet_config all read
+# it; keep it in lockstep with MODEL_HARNESS_ALIAS if a second provider returns.
+EXTERNAL_MODELS = set()
 
 
 def roster_date():
@@ -815,7 +803,10 @@ def harness_model(model, harness):
 # `<provider>/<model-id>`. Keyed by roster model name; an entry exists only for
 # EXTERNAL_MODELS.
 MODEL_HARNESS_ALIAS = {
-    "Union-Alpha": "openrouter/stealth/union-alpha",
+    # Empty since 2026-09-17: Union-Alpha, the only external model, was retired
+    # when its free OpenRouter preview ended. provider_model_alias is gated on
+    # EXTERNAL_MODELS, so a stale entry here could not be looked up anyway, but
+    # the map stays in lockstep with that set — no entry for a non-external.
 }
 
 
@@ -824,7 +815,7 @@ def provider_model_alias(model):
 
     None means "not external" — the caller keeps its ARC/<model> default. Gated
     on EXTERNAL_MODELS so an alias can never outlive the roster row it names:
-    when Union-Alpha's end date passes and live_roster drops it, no lookup here
+    it returns None for Union-Alpha now that its row is gone, so no lookup here
     can resurrect it.
     """
     if model not in EXTERNAL_MODELS:
@@ -1099,11 +1090,10 @@ MODEL_PRICING = {
     "DeepSeek-V4.1-Flash-thinking-max": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
     "GLM-5.3": {"prompt_per_mtok": 1.00, "completion_per_mtok": 2.00},
     "Kimi-K3": {"prompt_per_mtok": 0.50, "completion_per_mtok": 2.00},
-    # Operator decision (2026-09-16): Union Alpha is free on OpenRouter for its
-    # preview window. Priced at 0.0 (not omitted) so telemetry reports $0.00
-    # honestly — an omitted model is "unpriced" (also $0.00), but a 0.0 entry
-    # records the reason. When a real price lands on reveal, override with
-    # ARC_PRICE_UNION_ALPHA_PROMPT and ARC_PRICE_UNION_ALPHA_COMPLETION.
+    # Union-Alpha was free on OpenRouter during its preview window, so it is
+    # priced at 0.0 (not omitted) so telemetry reports $0.00 honestly. Kept
+    # after its 2026-09-17 retirement for the same reason Kimi-K3 is kept:
+    # historical harness_runs rows still price through MODEL_PRICING.
     "Union-Alpha": {"prompt_per_mtok": 0.0, "completion_per_mtok": 0.0},
 }
 

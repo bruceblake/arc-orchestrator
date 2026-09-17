@@ -185,9 +185,12 @@ partial override replaces only the half it names, falling back to the table
 for the other; a junk override value is ignored rather than crashing.
 
 Union Alpha (`Union-Alpha`, the free OpenRouter stealth preview admitted for
-2026-09-16..2026-09-23) is priced at $0.00 in the table — the preview costs
-nothing. Override it via `ARC_PRICE_UNION_ALPHA_PROMPT` and
-`ARC_PRICE_UNION_ALPHA_COMPLETION` once a real price lands on reveal.
+2026-09-16) was priced at $0.00 in the table — the preview cost nothing — and
+it RETIRED 2026-09-17 when that preview ended early (every call began
+returning "Thank you for participating in the Stealth Union Alpha testing
+period"). Its price entry stays, like Kimi-K3's, so historical `harness_runs`
+rows still price through the table; that model's price override was removed
+with it, so a stale override for a retired model is simply not read.
 
 ## Cross-references
 
