@@ -2556,12 +2556,19 @@ def _probe_transcript(data):
     far larger than any fixed window: a captain/planner prompt is one record of
     13 KB+, and a byte window that cut it mid-record made every such file look
     unrecognizable — the whole transcript then fell back to raw JSON with no
-    folded thinking. Line count, not byte count, bounds the work here.
+    folded thinking. Bounding by LINE COUNT (not bytes) inspects the opening
+    records without materializing a multi-MB tail, and a record larger than any
+    prompt is still fine because no byte cap is applied.
     """
-    lines = data.splitlines()
-    if data and not data.endswith("\n") and lines:
-        lines = lines[:-1]      # the last line may be a partial record
-    for line in lines[:50]:
+    lines = []
+    start = 0
+    for _ in range(50):
+        nl = data.find("\n", start)
+        if nl == -1:
+            break
+        lines.append(data[start:nl])       # only COMPLETE lines; the tail is
+        start = nl + 1                     # never sliced, so a multi-MB file
+    for line in lines:                     # is not materialized to inspect 50
         line = line.strip()
         if not line.startswith("{"):
             continue
