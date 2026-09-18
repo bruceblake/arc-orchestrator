@@ -237,6 +237,30 @@ def _run_in_taskfile_window(run_ts: Optional[datetime],
     return False
 
 
+def _closed_windows(task_rows: list[dict]) -> dict[str, list[tuple]]:
+    """Same-id taskfile windows with an open end bounded by the NEXT start.
+
+    A task whose row has ``finished_at IS NULL`` (still running/abandoned; 2
+    such rows exist in the real store) would otherwise have an OPEN-ENDED
+    window that absorbs a later taskfile's runs for a reused id. Two rows for
+    one id are sequential, so an open window ends where the next one begins.
+    """
+    raw: dict[str, list[tuple]] = {}
+    for t in task_rows:
+        raw.setdefault(t["id"], []).append(
+            (_ts(t.get("created_at")), _ts(t.get("finished_at"))))
+    out: dict[str, list[tuple]] = {}
+    for tid, wins in raw.items():
+        wins = sorted(wins, key=lambda w: (w[0] is None, w[0]))
+        fixed = []
+        for i, (start, finish) in enumerate(wins):
+            if finish is None and i + 1 < len(wins):
+                finish = wins[i + 1][0]        # next taskfile's start bounds it
+            fixed.append((start, finish))
+        out[tid] = fixed
+    return out
+
+
 def _as_verdict(verdict):
     """A recorded verdict as a dict, or None.
 
@@ -360,11 +384,9 @@ def build_tree(name: str, task_rows: list[dict], run_rows: list[dict],
     by_task: dict[str, list[dict]] = {}
     known_tasks = {t["id"] for t in task_rows}
     # Two taskfiles can reuse a task id; their rows are sequential, so a run is
-    # assigned to the id-window whose [created_at, finished_at] brackets it.
-    windows: dict[str, list[tuple]] = {}
-    for t in task_rows:
-        windows.setdefault(t["id"], []).append(
-            (_ts(t.get("created_at")), _ts(t.get("finished_at"))))
+    # assigned to the id-window whose [created_at, finished_at] brackets it. An
+    # open (finished_at NULL) window is bounded by the next same-id start.
+    windows = _closed_windows(task_rows)
     for r in run_rows:
         raw = r.get("task_id", "")
         owner = _task_of(raw)
@@ -860,7 +882,9 @@ _POLICY_FORBIDDEN_NAMES = frozenset({
 # inside a string CONSTANT, so the AST never sees an ``ast.Attribute`` — yet
 # ``str.format`` resolves it at runtime and reads the real module globals
 # (verified: it exfiltrated config.API_KEY). These accessors are refused.
-_POLICY_FORBIDDEN_ATTRS = frozenset({"format", "format_map"})
+_POLICY_FORBIDDEN_ATTRS = frozenset({"format", "format_map", "mro",
+                                     "gi_frame", "f_back", "f_builtins",
+                                     "f_globals", "f_locals"})
 
 
 def _policy_source_is_safe(source: str) -> Optional[str]:

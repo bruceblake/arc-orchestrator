@@ -501,6 +501,32 @@ class SandboxHardening(unittest.TestCase):
                 "        return [f]\n"):
             self.assertIsNone(d.compile_policy(src), src)
 
+    def test_non_dunder_introspection_accessors_are_blocked(self):
+        # `.mro()` is NOT a dunder, so the dunder check misses it — yet it
+        # returns the REAL `object` class (verified: ExplorationPolicy.mro()
+        # leaked `<class 'object'>`). The frame accessors are the same class of
+        # hole. All are refused by name.
+        for label, src in (
+                ("mro", "class Policy(ExplorationPolicy):\n"
+                        "    name = 'e'\n"
+                        "    def choose(self, tree, eligible, W):\n"
+                        "        return [str(c) for c in ExplorationPolicy.mro()]\n"),
+                ("int.mro", "class Policy(ExplorationPolicy):\n"
+                            "    name = 'e'\n"
+                            "    def choose(self, tree, eligible, W):\n"
+                            "        return [str(c) for c in int.mro()]\n"),
+                ("gi_frame", "class Policy(ExplorationPolicy):\n"
+                             "    name = 'e'\n"
+                             "    def choose(self, tree, eligible, W):\n"
+                             "        def g():\n"
+                             "            yield 1\n"
+                             "        return [str(g().gi_frame)]\n"),
+                ("f_builtins", "class Policy(ExplorationPolicy):\n"
+                               "    name = 'e'\n"
+                               "    def choose(self, tree, eligible, W):\n"
+                               "        return [str(tree.f_builtins)]\n")):
+            self.assertIsNone(d.compile_policy(src), label)
+
     def test_format_call_is_blocked_even_for_plain_substitution(self):
         # `.format`/`.format_map` are refused wholesale: their FIELD NAMES are
         # data the AST cannot see, so the accessor itself is the hole. A plain
@@ -581,6 +607,34 @@ class Isolation(unittest.TestCase):
                                [dict(runs[0],
                                      created_at="2026-09-09T05:00:00+00:00")])
         self.assertEqual(outside.nodes["api-x1"].outcome, "unrun")  # ran elsewhere
+
+    def test_an_open_window_is_bounded_by_the_next_same_id_start(self):
+        # A row with finished_at IS NULL (2 exist in the real store) gave an
+        # OPEN-ENDED window that absorbed a later taskfile's run for a reused
+        # id. Two same-id rows are sequential, so the open window must end at
+        # the next row's start.
+        open_a = [{"id": "api", "status": "running", "model": "D",
+                   "created_at": "2026-09-09T00:00:00+00:00",
+                   "finished_at": None}]
+        later = [{"task_id": "api", "role": "implementer", "attempt": 1,
+                  "exit_code": 1, "seconds": 5, "verdict": None,
+                  "created_at": "2026-09-09T13:10:00+00:00"}]
+        # A lone open window cannot be bounded -> the run still lands (control).
+        self.assertNotEqual(
+            d.build_tree("solo", open_a, later).nodes["api-x1"].outcome,
+            "unrun")
+        # With a later same-id row, A's window is [00:00, 13:00] and the 13:10
+        # run belongs to the later taskfile, NOT to A.
+        rows = open_a + [{"id": "api", "status": "merged", "model": "D",
+                          "created_at": "2026-09-09T13:00:00+00:00",
+                          "finished_at": "2026-09-09T13:30:00+00:00"}]
+        w = d._closed_windows(rows)["api"]
+        self.assertEqual(len(w), 2)
+        self.assertEqual(w[0][1], d._ts("2026-09-09T13:00:00+00:00"))
+        self.assertFalse(d._run_in_taskfile_window(
+            d._ts("2026-09-09T13:10:00+00:00"), [w[0]]))
+        self.assertTrue(d._run_in_taskfile_window(
+            d._ts("2026-09-09T13:10:00+00:00"), [w[1]]))
 
     def test_window_helper_brackets_and_accepts_unparseable(self):
         from datetime import datetime
