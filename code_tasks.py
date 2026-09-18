@@ -46,6 +46,15 @@ RETIRED_MODELS = {
     # RETIRED EARLY by operator decision 2026-09-12 (the provider had scheduled
     # its withdrawal for 2026-09-19; the operator moved first). Old taskfiles
     # naming it still run, remapped onto the strongest live tier.
+    # Union-Alpha RETIRED EARLY 2026-09-17 by operator decision: its free
+    # OpenRouter preview ended (every call returns "Thank you for participating
+    # in the Stealth Union Alpha testing period"), before its scheduled
+    # 2026-09-23 end date. It was a MEDIUM-tier implementer/reviewer, so its
+    # work lands on the medium tier's live model — never the tier-0 default,
+    # which would silently promote it to the hard tier.
+    "Union-Alpha":       lambda: next((m for m in config.ESCALATION_PATH
+                                       if m in config.IMPLEMENT_TIERS.get("medium", ())),
+                                      config.ESCALATION_PATH[0]),
 }
 
 

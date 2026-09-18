@@ -131,6 +131,32 @@ class FakeOcserve:
         for client in list(self._sse_clients):
             self.release_stream(client)
 
+    def emit_sibling_frame(self, obj, session_id="ses_sibling0001"):
+        """Write one frame tagged with ANOTHER session's id.
+
+        The real `/event` stream is shared by every session on the serve
+        process (a frame carries `properties.sessionID` and the client filters
+        on its own — ocserve.py module docstring), so a client waiting on its
+        own prompt also sees a sibling's traffic. This is how a test proves a
+        sibling's frames do NOT advance this session's idle clock.
+        """
+        obj = dict(obj)
+        props = dict(obj.get("properties") or {})
+        props["sessionID"] = session_id
+        obj["properties"] = props
+        _send_frame(self, obj)
+
+    def emit_server_heartbeat(self):
+        """The session-less keepalive the real server sends every ~60s.
+
+        Measured live on opencode 1.18.29: the `/event` stream carries
+        `{"type": "server.heartbeat", "properties": {}}` — no sessionID — for
+        as long as the subscriber is connected, whether or not any session is
+        making progress. Counting it as progress is why a wedged session never
+        tripped its idle kill, so a test must be able to emit one.
+        """
+        _send_frame(self, {"type": "server.heartbeat", "properties": {}})
+
     # -- scripting ---------------------------------------------------------
     def new_session_id(self):
         with self._lock:
@@ -181,6 +207,24 @@ class FakeOcserve:
                 "tokens": tokens}}},
             {"type": "session.idle", "properties": {}},
         ]
+
+
+def _send_frame(fake, obj):
+    """Encode and write one SSE frame to every subscriber (module-level so both
+    the handler and FakeOcserve.emit_sibling_frame use one encoder)."""
+    with fake._lock:
+        sockets = list(fake._sse_clients)
+    if not sockets:
+        return
+    if fake.delay:
+        import time
+        time.sleep(fake.delay)
+    payload = f"data: {json.dumps(obj)}\n\n".encode()
+    for sock in sockets:
+        try:
+            sock.sendall(payload)
+        except OSError:
+            pass
 
 
 def _handler_for(fake):
@@ -320,18 +364,6 @@ def _handler_for(fake):
                 self._write_frame({"type": frame.get("type"), "properties": props})
 
         def _write_frame(self, obj):
-            with fake._lock:
-                sockets = list(fake._sse_clients)
-            if not sockets:
-                return
-            if fake.delay:
-                import time
-                time.sleep(fake.delay)
-            payload = f"data: {json.dumps(obj)}\n\n".encode()
-            for sock in sockets:
-                try:
-                    sock.sendall(payload)
-                except OSError:
-                    pass
+            _send_frame(fake, obj)
 
     return Handler
