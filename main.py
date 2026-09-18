@@ -188,6 +188,9 @@ def cmd_code(args):
         out["chains"] = pending_chains(store)
         print(json.dumps(out, indent=2, default=str))
         return
+    if args.code_cmd == "dream":
+        cmd_code_dream(args)
+        return
     if args.code_cmd == "bench":
         cmd_code_bench(args)
         return
@@ -400,6 +403,70 @@ def cmd_code(args):
         asyncio.run(run())
     except KeyboardInterrupt:
         pass
+
+
+def cmd_code_dream(args):
+    """`code dream` — Dream-RSI offline policy improvement (arXiv:2609.14858).
+
+    Replays recorded history (store.code_tasks + harness_runs) against the
+    built-in exploration policies, plus any candidate a `--policy <file>` or a
+    policy-development agent supplies, and reports the argmax. NO models, NO
+    git: replay reads recorded outcomes only (the paper's "dreaming").
+    """
+    import json
+
+    from store import Store
+
+    import dream_rsi
+    import events
+
+    store = Store(args.db or config.DB_PATH)
+    trees = dream_rsi.load_trees(store, taskfile=args.taskfile)
+    if not trees:
+        print("no recorded history to replay "
+              "(nothing in code_tasks/harness_runs for that selection)")
+        return
+
+    extra = []
+    if args.policy:
+        try:
+            src = Path(args.policy).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"could not read policy file {args.policy}: {exc}")
+            src = ""
+        pol = dream_rsi.compile_policy(src) if src else None
+        if pol is None:
+            print(f"policy file {args.policy} did not compile to an "
+                  "ExplorationPolicy subclass; ignoring it")
+        else:
+            extra.append(pol)
+
+    result = dream_rsi.improve(trees, extra_policies=extra,
+                               W=args.workers, max_rounds=args.rounds)
+    path = dream_rsi.save_run(result)
+    events.emit("dream.completed", history_size=len(trees),
+                selected=result.selected, means=result.mean_by_policy,
+                report=path)
+
+    if args.json:
+        print(json.dumps({"selected": result.selected,
+                          "means": result.mean_by_policy,
+                          "per_tree": result.per_tree,
+                          "report": path}, indent=2, default=str))
+        return
+
+    print(f"dreamed over {len(trees)} recorded run(s); "
+          f"W={dream_rsi.workers() if args.workers is None else args.workers}, "
+          f"K2={args.rounds or config.DREAM_MAX_ROUNDS}")
+    print(f"  beta1={dream_rsi.beta1()} (attempt cost) "
+          f"beta2={dream_rsi.beta2()} (parallelism bonus)")
+    print("  mean replay score by policy (higher is better):")
+    for name, score in sorted(result.mean_by_policy.items(),
+                              key=lambda kv: -kv[1]):
+        mark = "  <- selected" if name == result.selected else ""
+        print(f"    {name:18s} {score:8.4f}{mark}")
+    print(f"  selected policy: {result.selected}")
+    print(f"  report: {path}")
 
 
 def cmd_code_list(args):
@@ -842,6 +909,18 @@ def main():
                       help="emit the same data as JSON instead of a table")
     cl_p.add_argument("--db", default=None, help="sqlite database path")
     cl_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    cd_p = code_sub.add_parser(
+        "dream", help="Dream-RSI: score exploration policies against recorded history (no models)")
+    cd_p.add_argument("--taskfile", default=None,
+                      help="a specific taskfile's recorded run to replay (default: every recorded run)")
+    cd_p.add_argument("--workers", type=int, default=None,
+                      help="batch width W a policy may open per decision (default: the graph cap)")
+    cd_p.add_argument("--rounds", type=int, default=None, help="replay round limit K2")
+    cd_p.add_argument("--policy", default=None,
+                      help="a Python file defining `class Policy(ExplorationPolicy)` to add as a candidate")
+    cd_p.add_argument("--json", action="store_true", help="emit the replay result as JSON")
+    cd_p.add_argument("--db", default=None, help="sqlite database path")
+    cd_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cb_p = code_sub.add_parser("bench", help="orchestration benchmark: full governed DAG per policy variant")
     cb_sub = cb_p.add_subparsers(dest="orch_bench_cmd", required=True)
     cbr = cb_sub.add_parser("run", help="run the variant matrix (orchbench.VARIANTS)")

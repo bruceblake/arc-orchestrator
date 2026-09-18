@@ -327,6 +327,10 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_PR_REVIEWERS` | 2 | PR reviewers *wanted* before merge; the two-family fleet can field only one cross-family reviewer, and `task.pr_review_thin` records the shortfall |
 | `ARC_PR_MAX_ROUNDS` | 16 | PR review rounds before a task fails |
 | `ARC_REQUIRE_TESTS` | 1 | require changes to ship tests that fail without them |
+| `ARC_DREAM_BETA1` | 0.06 | Dream-RSI replay objective: cost per revealed attempt (β1 in Eq.1) |
+| `ARC_DREAM_BETA2` | 0.5 | Dream-RSI replay objective: parallelism bonus weight (β2 in Eq.1) |
+| `ARC_DREAM_WORKERS` | 0 | Dream-RSI replay batch width W; 0 derives it from the live in-flight cap |
+| `ARC_DREAM_MAX_ROUNDS` | 24 | Dream-RSI replay round limit (the `--rounds` default) |
 | `ARC_GRAFT` | 1 | code-graph hints for harness runs (needs the `graft` binary; `0` = off, for an A/B) |
 | `ARC_GRAFT_BIN` | (unset) | path to the `graft` binary; unset = `graft` on PATH, then `~/.local/opt/node/bin` |
 | `ARC_GRAFT_HINTS` | 3 | `file:line` spans from the code graph handed to an implementer |

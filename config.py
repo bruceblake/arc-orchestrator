@@ -373,6 +373,21 @@ REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false"
 
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "360"))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "16"))
+
+# Dream-RSI (arXiv:2609.14858): improve HOW the fleet explores by replaying
+# recorded runs — no model calls. See dream_rsi.py. The objective mirrors the
+# paper's Eq. 1, V = max(revealed score) − β1·N + β2·N/max(1,k):
+#   DREAM_BETA1  weight on the number of attempts a policy's trajectory
+#                represents (execution cost);
+#   DREAM_BETA2  weight on the PARALLELISM bonus (attempts per decision round);
+#   DREAM_WORKERS   W — the batch width a policy may open per decision (the
+#                paper's parallel-worker count). Defaults to the fleet's graph
+#                admission cap so a replayed batch is one a real run could hold.
+#   DREAM_MAX_ROUNDS  K2 — the replay round limit, mirroring the online K1.
+DREAM_BETA1 = float(os.getenv("ARC_DREAM_BETA1", "0.06"))
+DREAM_BETA2 = float(os.getenv("ARC_DREAM_BETA2", "0.5"))
+DREAM_WORKERS = int(os.getenv("ARC_DREAM_WORKERS", "0"))
+DREAM_MAX_ROUNDS = int(os.getenv("ARC_DREAM_MAX_ROUNDS", "24"))
 # Project chaining (code workload): a taskfile that declares `after` waits for
 # every task in those upstream taskfiles to reach 'merged' before any of its
 # worktrees allocate. Upstream projects can legitimately take hours (fix
