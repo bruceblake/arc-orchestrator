@@ -2547,16 +2547,21 @@ _activity_cache = OrderedDict()
 
 
 def _probe_transcript(data):
-    """True when the first ~8 KB look like a reasonix or opencode transcript.
+    """True when the first records look like a reasonix or opencode transcript.
 
     Anything else (kimi-cli's role/tool_calls records, zero-byte files left by
     a killed run) gets the raw tail, exactly as before this view existed.
+
+    The scan walks COMPLETE lines from the start, because the first line can be
+    far larger than any fixed window: a captain/planner prompt is one record of
+    13 KB+, and a byte window that cut it mid-record made every such file look
+    unrecognizable — the whole transcript then fell back to raw JSON with no
+    folded thinking. Line count, not byte count, bounds the work here.
     """
-    probe = data[:8192]
-    lines = probe.splitlines()
-    if len(probe) == 8192 and lines:
-        lines = lines[:-1]      # the cut may have split this line mid-record
-    for line in lines:
+    lines = data.splitlines()
+    if data and not data.endswith("\n") and lines:
+        lines = lines[:-1]      # the last line may be a partial record
+    for line in lines[:50]:
         line = line.strip()
         if not line.startswith("{"):
             continue
@@ -3217,6 +3222,65 @@ def _captain_start(body):
     return {"pid": proc.pid}, 200
 
 
+def _captain_running_transcript(session):
+    """The live transcript of the captain turn running for `session`, or None.
+
+    A captain turn runs `drivers.Driver._once` with task_id
+    ``captain-<session>`` and role ``planner`` (captain.run_turn), so its live
+    output streams to the deterministic name
+    ``captain-<session>-planner-<attempt>.jsonl`` under logs/harness. The newest
+    such file is what the operator wants to see while the turn is in flight.
+    """
+    d = Path(config.ROOT) / "logs" / "harness"
+    prefix = f"captain-{session}-planner-"
+    best = None
+    try:
+        for p in d.glob(prefix + "*.jsonl"):
+            if not _TRANSCRIPT_RE.fullmatch(p.name):
+                continue
+            m = p.stat().st_mtime
+            if best is None or m > best[1]:
+                best = (p.name, m)
+    except OSError:
+        return None
+    return best[0] if best else None
+
+
+def _captain_thinking(session, tail=12):
+    """The running turn's live thinking: {pending, blocks} or None.
+
+    Reuses the transcript activity reducer, the SAME reader the transcript
+    drawer uses, so the captain panel shows one folded "thought" line plus the
+    last few readable blocks (tool calls, results) as they stream — no second
+    parser to drift from the drawer's.
+    """
+    fname = _captain_running_transcript(session)
+    if fname is None:
+        return None
+    out = _transcript_activity_view(fname, tail)
+    if out is None:
+        # Non-reducer shape (kimi-like) or unreadable: fall back to the raw tail
+        # so the operator still sees SOMETHING live rather than a spinner.
+        obj, _code = _transcript_tail(fname, tail)
+        if isinstance(obj, dict) and obj.get("lines"):
+            return {"pending": "", "blocks": obj["lines"]}
+        return None
+    obj, _code = out
+    blocks = [b for b in (obj.get("blocks") or []) if not _captain_prompt_echo(b)]
+    return {"pending": obj.get("pending") or "", "blocks": blocks}
+
+
+# The captain's own prompt is echoed back by the harness as its first `text`
+# record, so the reduced blocks would open with a wall of persona prose. It is
+# recognizable by a phrase that appears ONLY in the injected prompt.
+_CAPTAIN_ECHO_MARK = "You are the CAPTAIN of the ARC multi-model coding fleet"
+
+
+def _captain_prompt_echo(block):
+    """True when a reduced block is the echoed captain persona prompt."""
+    return isinstance(block, str) and _CAPTAIN_ECHO_MARK in block
+
+
 def _captain_poll(session, since):
     path = _captain_dir() / f"{session}.jsonl"
     turns = []
@@ -3227,7 +3291,13 @@ def _captain_poll(session, since):
                 turns.append(json.loads(line))
     except (OSError, ValueError):
         turns = []
-    return {"turns": turns[since:], "running": _captain_running(session)}
+    running = _captain_running(session)
+    resp = {"turns": turns[since:], "running": running}
+    if running:
+        thinking = _captain_thinking(session)
+        if thinking is not None:
+            resp["thinking"] = thinking
+    return resp
 
 
 def _captain_queue():

@@ -19,6 +19,7 @@ let CAP_LAST = 0;
 let CAP_RUNNING = false;
 let CAP_POLL = null;
 let CAP_STATE = null;
+let CAP_THINKING = null;   // {pending, blocks} from the running turn's transcript
 
 // Captain sessions are `captain-<repo slug>` so they share the chat panel's
 // session id rules (^[a-z0-9][a-z0-9-]{0,39}$) but never collide with a
@@ -147,7 +148,33 @@ function capTurnHTML(turn) {
 }
 
 function capThinkingHTML() {
-  return `<div class="chat-turn assistant"><div class="chat-bubble dim chat-thinking"><span class="chat-spin"></span> captain is reviewing the fleet…</div></div>`;
+  // While a turn runs, show WHAT IT IS DOING: the transcript reducer's live
+  // "thinking" line plus the last few readable blocks (tool calls/results), so
+  // a 2-4 minute GLM turn is legible from the first seconds instead of a
+  // static spinner. Falls back to the spinner when the transcript is not yet
+  // readable (first moment after send).
+  const t = CAP_THINKING;
+  const pending = (t && t.pending) || "";
+  const blocks = (t && t.blocks) || [];
+  const head = `<div class="chat-thinking-head"><span class="chat-spin"></span> captain is working…</div>`;
+  const pend = pending
+    ? `<div class="cap-think-pending">${esc(pending)}</div>`
+    : "";
+  const body = blocks.length
+    ? `<div class="cap-think-blocks">` + blocks.slice(-6).map(b =>
+        `<div class="cap-think-block">${esc(capBlockText(b))}</div>`).join("") + `</div>`
+    : (pending ? "" : `<div class="cap-think-idle">captain is reviewing the fleet…</div>`);
+  return `<div class="chat-turn assistant"><div class="chat-bubble dim chat-thinking">`
+    + head + pend + body + `</div></div>`;
+}
+
+// A reducer block is either a string or an object; render one line of it.
+function capBlockText(b) {
+  if (typeof b === "string") return b;
+  if (b && typeof b === "object") {
+    return b.text || b.label || b.summary || (b.kind ? "[" + b.kind + "]" : JSON.stringify(b));
+  }
+  return String(b);
 }
 
 function capRender() {
@@ -169,6 +196,7 @@ async function capPoll() {
     data = await jget("/api/captain/poll?session=" + encodeURIComponent(CAP_SESSION) + "&since=" + CAP_LAST);
   } catch (e) {
     CAP_RUNNING = false;
+    CAP_THINKING = null;
     capSetSend(false);
     capRender();
     return;
@@ -179,6 +207,7 @@ async function capPoll() {
     CAP_LAST += turns.length;
   }
   CAP_RUNNING = !!(data && data.running);
+  CAP_THINKING = CAP_RUNNING ? ((data && data.thinking) || CAP_THINKING) : null;
   capSetSend(CAP_RUNNING);
   capRender();
 }

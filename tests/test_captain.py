@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -363,6 +364,103 @@ class CaptainRoutes(unittest.TestCase):
                                   {"session": "captain-x", "repo": "/etc",
                                    "message": ""})
         self.assertEqual(status, 400)
+
+
+class CaptainLiveThinking(unittest.TestCase):
+    """The panel must show WHAT a running turn is doing, not a bare spinner.
+
+    `_captain_poll` returns a `thinking` block (the transcript reducer's folded
+    blocks + the live `pending` line) while the turn runs, and the reducer must
+    accept a transcript whose FIRST record is larger than any fixed byte window
+    (a captain prompt is one 13 KB+ record — the original 8 KB probe rejected
+    such files wholesale, so the whole captain stream fell back to raw JSON).
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.old_env = {k: os.environ.get(k)
+                        for k in ("ARC_CAPTAIN_DIR",)}
+        os.environ["ARC_CAPTAIN_DIR"] = str(self.dir / "captain")
+        # A config.ROOT that holds the harness transcript we write.
+        self.root = self.dir / "root"
+        (self.root / "logs" / "harness").mkdir(parents=True)
+        self._root_patch = mock.patch.object(config, "ROOT", self.root)
+        self._root_patch.start()
+
+    def tearDown(self):
+        self._root_patch.stop()
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def _write_transcript(self, session, records):
+        d = self.root / "logs" / "harness"
+        p = d / f"captain-{session}-planner-1.jsonl"
+        p.write_text("\n".join(json.dumps(r) for r in records) + "\n",
+                     encoding="utf-8")
+        return p
+
+    def test_probe_accepts_a_first_record_larger_than_the_window(self):
+        # One 20 KB text record, then a normal one — must still be recognized.
+        big = {"type": "text", "part": {"type": "text", "text": "x" * 20000}}
+        nxt = {"type": "step_finish", "part": {"reason": "stop"}}
+        data = json.dumps(big) + "\n" + json.dumps(nxt) + "\n"
+        self.assertTrue(dashboard._probe_transcript(data))
+
+    def test_poll_includes_thinking_while_running(self):
+        self._write_transcript("captain-x", [
+            {"type": "text", "part": {"type": "text", "text": "status: all good"}}])
+        (self.dir / "captain").mkdir(parents=True, exist_ok=True)
+        (self.dir / "captain" / "captain-x.jsonl").write_text(
+            json.dumps({"role": "user", "ts": 1, "text": "hi"}) + "\n",
+            encoding="utf-8")
+        with mock.patch.object(dashboard, "_captain_running", return_value=True):
+            resp = dashboard._captain_poll("captain-x", 0)
+        self.assertTrue(resp["running"])
+        self.assertIn("thinking", resp)
+        self.assertIn("blocks", resp["thinking"])
+        self.assertTrue(any("all good" in str(b) for b in resp["thinking"]["blocks"]))
+
+    def test_poll_omits_thinking_when_not_running(self):
+        with mock.patch.object(dashboard, "_captain_running", return_value=False):
+            resp = dashboard._captain_poll("captain-x", 0)
+        self.assertFalse(resp["running"])
+        self.assertNotIn("thinking", resp)
+
+    def test_poll_never_500s_with_no_transcript(self):
+        with mock.patch.object(dashboard, "_captain_running", return_value=True):
+            resp = dashboard._captain_poll("captain-none", 0)
+        self.assertTrue(resp["running"])
+        self.assertNotIn("thinking", resp)      # no file -> no thinking, still 200
+
+    def test_echoed_persona_prompt_is_not_shown_as_thinking(self):
+        # The harness echoes the captain's own prompt as the first text record;
+        # it must be filtered so the panel shows real progress, not persona prose.
+        d = self.root / "logs" / "harness"
+        p = d / "captain-captain-x-planner-1.jsonl"
+        p.write_text(
+            json.dumps({"type": "text", "part": {
+                "type": "text",
+                "text": "You are the CAPTAIN of the ARC multi-model coding fleet. " + "z" * 5000}}) + "\n"
+            + json.dumps({"type": "text", "part": {
+                "type": "text", "text": "Status: 3 tasks failed"}}) + "\n",
+            encoding="utf-8")
+        t = dashboard._captain_thinking("captain-x")
+        joined = " ".join(str(b) for b in t["blocks"])
+        self.assertIn("3 tasks failed", joined)
+        self.assertNotIn("You are the CAPTAIN", joined)
+
+    def test_thinking_resolves_the_newest_attempt(self):
+        self._write_transcript("captain-x", [{"type": "text", "part": {"type": "text", "text": "old"}}])
+        p2 = self.root / "logs" / "harness" / "captain-captain-x-planner-2.jsonl"
+        p2.write_text(json.dumps({"type": "text", "part": {"type": "text", "text": "new"}}) + "\n")
+        os.utime(p2, (time.time() + 10, time.time() + 10))
+        self.assertEqual(dashboard._captain_running_transcript("captain-x"),
+                         "captain-captain-x-planner-2.jsonl")
 
 
 if __name__ == "__main__":

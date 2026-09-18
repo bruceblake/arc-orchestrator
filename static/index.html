@@ -105,6 +105,7 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .chat-input input { flex: 1; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
 #c-mic.listening { border-color: var(--accent); color: var(--accent); animation: pulse 1.4s infinite; }
 .chat-thinking { display: inline-flex; align-items: center; gap: 6px; font-style: italic; }
+.chat-thinking:has(.cap-think-blocks), .chat-thinking:has(.cap-think-pending) { display: flex; flex-direction: column; align-items: flex-start; }
 .chat-spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 .chat-interim { font-style: italic; color: var(--dim); font-size: 11px; margin-top: 4px; }
 /* ---- captain panel ---- */
@@ -136,6 +137,12 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .cap-act.bad { border-left-color: #f85149; }
 .cap-act-kind { font-size: 11px; font-weight: 600; color: var(--text); }
 .cap-act-note { font-size: 11px; color: var(--dim); }
+/* live thinking while a captain turn runs (capThinkingHTML in captain.js) */
+.chat-thinking-head { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-style: normal; }
+.cap-think-pending { color: var(--accent); font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 8em; overflow: hidden; }
+.cap-think-idle { color: var(--dim); font-size: 11px; }
+.cap-think-blocks { display: flex; flex-direction: column; gap: 2px; max-height: 16em; overflow-y: auto; width: 100%; }
+.cap-think-block { font-size: 11px; color: var(--dim); white-space: pre-wrap; word-break: break-word; border-left: 2px solid var(--border); padding-left: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .drawer { position: fixed; top: 0; right: 0; width: min(640px, 95vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform .15s ease; display: flex; flex-direction: column; }
 .drawer.open { transform: none; }
