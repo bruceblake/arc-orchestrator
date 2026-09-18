@@ -381,18 +381,13 @@ override = os.getenv(f"ARC_LIMIT_{name.upper().replace('-', '_')}")
 |---|---|
 | deepseek | `ARC_LIMIT_DEEPSEEK` |
 | glm | `ARC_LIMIT_GLM` |
-| union | `ARC_LIMIT_UNION` |
 
 Example: `ARC_LIMIT_DEEPSEEK=6`. This raises/lowers the **account-cap** layer
 (used by `pool.py`'s families and reported as `capacity`). It does **not**
 change the driver semaphores. The kimi family's limit knob retired with the
-family itself on 2026-09-12; config no longer reads it.
-
-The `union` family is Union Alpha (`stealth/union-alpha`), a free OpenRouter
-stealth preview admitted 2026-09-16 and retired 2026-09-23. Its account cap of
-4 is a **placeholder** — an anonymous endpoint publishes no concurrency figure —
-and the binding ceiling is the shared opencode harness pool, so
-`ARC_LIMIT_UNION` is the first knob to turn if the endpoint rate-limits.
+family itself on 2026-09-12; the `union` family's did the same on 2026-09-17,
+when Union-Alpha retired and its free OpenRouter preview ended before its
+scheduled date. config reads neither.
 
 ### `ARC_DRIVER_LIMIT_<FAMILY>` — override the driver semaphore layer
 
@@ -411,10 +406,10 @@ two-model fleet (2026-09-12), so:
 |---|---|
 | DeepSeek-V4.1-Flash-thinking-max (`deepseek`) | `ARC_DRIVER_LIMIT_DEEPSEEK` |
 | GLM-5.3 (`glm`) | `ARC_DRIVER_LIMIT_GLM` |
-| Union-Alpha (`union`) | `ARC_DRIVER_LIMIT_UNION` |
 
 Example: `ARC_DRIVER_LIMIT_DEEPSEEK=3`. (The kimi family's driver-limit knob
-retired with the family on 2026-09-12 and is no longer minted or read.)
+retired with the family on 2026-09-12 and is no longer minted or read; so did
+the `union` family's on 2026-09-17 with Union-Alpha's retirement.)
 
 ### When to raise them
 

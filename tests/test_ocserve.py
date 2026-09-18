@@ -356,6 +356,114 @@ class ClientAgainstFake(unittest.TestCase):
             asyncio.run(client.prompt("hi", timeout=1.0))
         self.assertIn("timed out", str(ctx.exception))
 
+    def test_a_siblings_traffic_does_not_reset_the_stall_clock(self):
+        """`/event` is one stream shared by every session (ocserve.py:28-31).
+
+        A silent session must stall even while a sibling keeps emitting frames
+        on the SAME stream — otherwise a wedged reviewer never trips its idle
+        budget (the live Union-Alpha hang: 20+ min past 840 s, no
+        driver.stalled event, because the sibling's traffic kept the clock
+        alive).
+        """
+        client = self._create()
+        # This session sends only its prompt echo, then goes silent: no
+        # session.idle for OUR session.
+        self.fake.frames_for = lambda text: [
+            {"type": "message.part.updated",
+             "properties": {"part": {"type": "text", "text": "thinking..."}}}]
+        sibling_frame = {"type": "message.part.updated",
+                         "properties": {"part": {"type": "text", "text": "sib"}}}
+        stop = asyncio.Event()
+
+        async def chatty_sibling():
+            # A frame every 0.2s — well inside the 0.5s stall window, so before
+            # the fix every one of them re-armed OUR idle clock and the prompt
+            # never stalled (it would instead sit until the 10s total budget).
+            while not stop.is_set():
+                self.fake.emit_sibling_frame(sibling_frame)
+                try:
+                    await asyncio.wait_for(stop.wait(), 0.2)
+                except asyncio.TimeoutError:
+                    pass
+
+        async def run():
+            sib = asyncio.ensure_future(chatty_sibling())
+            try:
+                return await client.prompt("stallme", timeout=10.0,
+                                           stall_timeout=0.5)
+            finally:
+                stop.set()
+                await sib
+
+        with self.assertRaises(ocserve.StreamStalled) as ctx:
+            asyncio.run(run())
+        self.assertIn("stalled", str(ctx.exception))
+
+    def test_our_own_frames_still_reset_the_stall_clock(self):
+        """The complement: frames for OUR session are progress, so a stream
+        that trickles its own parts must NOT spuriously stall."""
+        client = self._create()
+        self.fake.frames_for = lambda text: [
+            {"type": "message.part.updated",
+             "properties": {"part": {"type": "text", "text": "part1"}}}]
+
+        async def run():
+            task = asyncio.ensure_future(
+                client.prompt("hi", timeout=10.0, stall_timeout=0.5))
+            for _ in range(4):
+                await asyncio.sleep(0.2)
+                self.fake.emit_sibling_frame(
+                    {"type": "message.part.updated",
+                     "properties": {"part": {"type": "text", "text": "ours"}}},
+                    session_id=client.session_id)
+            self.fake.emit_sibling_frame(
+                {"type": "session.idle", "properties": {}},
+                session_id=client.session_id)
+            return await task
+
+        result = asyncio.run(run())
+        self.assertIn("ours", result.text)
+
+    def test_server_heartbeats_do_not_reset_the_stall_clock(self):
+        """The session-less keepalive must not count as progress.
+
+        Live on opencode 1.18.29 the `/event` stream carries
+        `server.heartbeat` frames every ~60s with `properties: {}` (no
+        sessionID). Counting them as progress is exactly how a wedged session
+        (the live textkit-tokens GLM reviewer: silent from 15:38, no
+        driver.stalled for 50+ min) escaped its 840s idle kill — so the clock
+        must rest ONLY on frames whose sessionID is OUR session.
+        """
+        client = self._create()
+        self.fake.frames_for = lambda text: [
+            {"type": "message.part.updated",
+             "properties": {"part": {"type": "text", "text": "thinking..."}}}]
+        stop = asyncio.Event()
+
+        async def heartbeats():
+            while not stop.is_set():
+                self.fake.emit_server_heartbeat()
+                try:
+                    await asyncio.wait_for(stop.wait(), 0.2)   # < 0.5s stall
+                except asyncio.TimeoutError:
+                    pass
+
+        async def run():
+            hb = asyncio.ensure_future(heartbeats())
+            try:
+                return await client.prompt("stallme", timeout=10.0,
+                                           stall_timeout=0.5)
+            finally:
+                stop.set()
+                await hb
+
+        # The heartbeats arrive well inside the stall window; before the fix
+        # each one re-armed the clock and the prompt never stalled (it sat to
+        # the 10s total budget). Now it must raise StreamStalled.
+        with self.assertRaises(ocserve.StreamStalled) as ctx:
+            asyncio.run(run())
+        self.assertIn("stalled", str(ctx.exception))
+
     def test_stream_closed_before_idle_is_an_error(self):
         client = self._create()
 

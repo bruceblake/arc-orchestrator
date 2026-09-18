@@ -697,15 +697,22 @@ class OcserveClient:
                        on_event=None):
         texts, tokens, roles = [], _empty_tokens(), {}
         deadline = None if not timeout else time.monotonic() + timeout
+        # `/event` is ONE stream shared by every session on the serve process;
+        # only THIS session's frames may advance the idle clock. Counting a
+        # sibling's traffic as progress is why a silent reviewer never stalled.
+        stall_deadline = (None if not stall_timeout
+                          else time.monotonic() + stall_timeout)
         while True:
-            remaining = None if deadline is None else max(0.01, deadline - time.monotonic())
+            now = time.monotonic()
+            remaining = None if deadline is None else max(0.01, deadline - now)
             # The wait window is the tighter of the total budget and the stall
-            # window. A stall is SILENCE, so the idle clock restarts on every
-            # frame — which is exactly what re-entering this loop does.
+            # window. A stall is SILENCE, so the idle clock rests only on frames
+            # whose sessionID is ours (re-armed below, after the filter).
             wait_for_s = remaining
-            if stall_timeout:
-                wait_for_s = (stall_timeout if wait_for_s is None
-                              else min(wait_for_s, stall_timeout))
+            if stall_deadline is not None:
+                idle_left = max(0.01, stall_deadline - now)
+                wait_for_s = (idle_left if wait_for_s is None
+                              else min(wait_for_s, idle_left))
             try:
                 if wait_for_s is None:
                     event = await stream.next_event()
@@ -736,6 +743,15 @@ class OcserveClient:
             props = props if isinstance(props, dict) else {}
             if props.get("sessionID") not in (None, self.session_id):
                 continue                          # another session's traffic
+            # ONLY a frame FOR THIS session is progress. `server.heartbeat`
+            # arrives every ~60s with `properties: {}` (no sessionID) and would
+            # otherwise re-arm the clock forever, so a wedged session never
+            # stalls — the exact failure this fix exists for. (A frame with no
+            # sessionID still passes the filter above for session.error and the
+            # initial server.connected; it just must not count as progress.)
+            if (stall_deadline is not None
+                    and props.get("sessionID") == self.session_id):
+                stall_deadline = time.monotonic() + stall_timeout
             etype = event.get("type")
             if etype == "session.error":
                 self._raise_for_error(props.get("error"))
