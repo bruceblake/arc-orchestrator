@@ -3125,6 +3125,134 @@ def _chat_sessions():
         return {"sessions": []}
 
 
+def _captain_dir():
+    """$ARC_CAPTAIN_DIR, default logs/captain — resolved at call time, same
+    rule as captain.captain_dir, so both processes agree on the sessions."""
+    return Path(os.getenv("ARC_CAPTAIN_DIR")
+                or Path.cwd() / "logs" / "captain")
+
+
+def _captain_key(session):
+    return f"captain:{session}"
+
+
+def _captain_running(session):
+    _prune_registry()
+    return _captain_key(session) in _launch_registry
+
+
+def _captain_state():
+    """GET /api/captain/state — the live snapshot the panel renders.
+
+    Read-only. Never fails: a broken db or a missing log is empty state, not a
+    500, because the panel polls it continuously.
+    """
+    try:
+        import captain
+        state = captain.fleet_state()
+    except Exception:
+        state = {}
+    try:
+        sessions = _captain_sessions()["sessions"]
+    except Exception:
+        sessions = []
+    return {"state": state, "sessions": sessions}
+
+
+def _captain_sessions():
+    """Captain sessions, newest first — same tolerant listing as chat, but
+    over captain.captain_dir(). Never raises."""
+    try:
+        import captain as _cap
+        d = _cap.captain_dir()
+        out = []
+        for path in sorted(d.iterdir()):
+            name = path.name
+            if not name.endswith(".jsonl") or name == "queue.jsonl":
+                continue
+            name = name[: -len(".jsonl")]
+            if not _SESSION_RE.fullmatch(name) or not path.is_file():
+                continue
+            turns = orchchat._read_turns(path)
+            if not turns:
+                continue
+            out.append({"name": name, "turns": len(turns),
+                        "mtime": path.stat().st_mtime})
+        out.sort(key=lambda s: (s["mtime"], s["name"]), reverse=True)
+        return {"sessions": out}
+    except Exception:
+        return {"sessions": []}
+
+
+def _captain_start(body):
+    """POST /api/captain/start — append the operator turn and spawn one
+    captain turn. Same allowlist discipline as /api/chat/start (Rule 6b):
+    the repo must be a byte-identical member of /api/repos and the spawned
+    argv is fixed."""
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    session = body.get("session")
+    if not isinstance(session, str) or not _SESSION_RE.fullmatch(session):
+        return {"error": "bad session id (expected ^[a-z0-9][a-z0-9-]{0,39}$)"}, 400
+    message = body.get("message")
+    if not isinstance(message, str) or not 1 <= len(message) <= 8000:
+        return {"error": "message must be a string of 1..8000 characters"}, 400
+    repo = body.get("repo")
+    allowed = {r["path"] for r in _list_repos()}
+    if not isinstance(repo, str) or repo not in allowed:
+        return {"error": "repo is not one of the /api/repos entries"}, 400
+    if _captain_running(session):
+        return {"error": "a captain turn is already running for this session"}, 409
+    path = _captain_dir() / f"{session}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"role": "user", "ts": time.time(),
+                            "text": message}) + "\n")
+    argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py",
+            "captain", "--session", session, "--repo", repo]
+    proc, log_name = _spawn_logged(argv, f"captain-{session}.log")
+    _launch_registry[_captain_key(session)] = {
+        "pid": proc.pid, "log": log_name, "started": time.time(),
+        "kind": "captain"}
+    return {"pid": proc.pid}, 200
+
+
+def _captain_poll(session, since):
+    path = _captain_dir() / f"{session}.jsonl"
+    turns = []
+    try:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line:
+                turns.append(json.loads(line))
+    except (OSError, ValueError):
+        turns = []
+    return {"turns": turns[since:], "running": _captain_running(session)}
+
+
+def _captain_queue():
+    """GET /api/captain/queue — entries the captain queued for capacity.
+
+    Read-only view of logs/captain/queue.jsonl; the last 100 entries, newest
+    first. Never raises.
+    """
+    try:
+        lines = (_captain_dir() / "queue.jsonl").read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return {"queued": []}
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return {"queued": list(reversed(out[-100:]))}
+
+
 _HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
                     "driver.cap_wait", "inflight.over_cap", "task.failed",
                     "task.conflict", "graph.draining", "run.interrupted")
@@ -3808,6 +3936,22 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_chat_poll(session, since))
             if u.path == "/api/chat/sessions":
                 return self._json(_chat_sessions())
+            if u.path == "/api/captain/state":
+                return self._json(_captain_state())
+            if u.path == "/api/captain/sessions":
+                return self._json(_captain_sessions())
+            if u.path == "/api/captain/queue":
+                return self._json(_captain_queue())
+            if u.path == "/api/captain/poll":
+                q = parse_qs(u.query)
+                session = q.get("session", [""])[0]
+                if not _SESSION_RE.fullmatch(session):
+                    return self._json({"error": "bad session id"}, 400)
+                try:
+                    since = max(int(q.get("since", ["0"])[0]), 0)
+                except ValueError:
+                    since = 0
+                return self._json(_captain_poll(session, since))
             if u.path == "/api/project":
                 q = parse_qs(u.query)
                 obj, code = _project_detail(Handler.store, q.get("file", [""])[0])
@@ -4108,6 +4252,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/chat/start":
                 obj, code = _chat_start(body)
+                return self._json(obj, code)
+            if u.path == "/api/captain/start":
+                obj, code = _captain_start(body)
                 return self._json(obj, code)
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)
