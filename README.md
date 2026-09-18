@@ -339,6 +339,7 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_HARNESS_LIMIT_REASONIX` | 7 | max concurrent reasonix processes (the DeepSeek harness pool); 7/7 measured clean 2026-09-14 |
 | `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
 | `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
+| `ARC_CAPTAIN_DIR` | logs/captain | captain session files + the capacity queue (`main.py captain`, the dashboard Captain panel); resolved at call time so tests can redirect it |
 
 A round makes roughly `13 x questions` model calls. Defaults are polite; the
 per-model semaphores are the hard guarantee that you never exceed ARC's
@@ -464,6 +465,29 @@ alloc worktree (~/worktrees/<repo>/<id>, branch task/<id>, from main)
 Tasks claiming dependencies (`deps`) are ordered by graph edges
 (`publish_<dep> → alloc_<task>`); every worktree branches from `main`, which
 already contains each dep's merge.
+
+### The captain (conversational supervision)
+
+The dashboard's **🧭 Captain** button (or `main.py captain --session S --repo R`)
+opens a supervisor you talk to in prose. Unlike the planning-only Chat panel,
+the captain is *state-aware*: every turn opens with a live snapshot of the
+fleet — task counts by status, the three concurrency layers (account cap,
+driver leases in use, harness pool), the tasks that need attention (failed /
+conflict / in review), and the recent event tail — and can act on it. It
+issues a **closed** action set (`plan`, `run`, `resume`, `status`, `amend`),
+each a fixed `main.py` argv the backend spawns detached; it never edits code
+and never touches git. All governance (worktrees, verify gates, cross-family
+review, the PR gate) is exactly the pipeline's.
+
+The captain is **capacity-aware**, which is the thing that bites a 36-hour
+run: `run`/`resume` is admitted only when every implementer model the taskfile
+names has a free driver slot. When they do not, the work is QUEUED
+(`logs/captain/queue.jsonl` with the reason) instead of launched into a wall
+of `concurrent session limit reached` 400s. Sessions live under
+`logs/captain/` (`ARC_CAPTAIN_DIR`), separate from planning chats. Routes:
+`GET /api/captain/state`, `GET /api/captain/poll`, `GET /api/captain/queue`,
+`POST /api/captain/start` — all under the same `/api/repos` allowlist and
+`ARC_DASHBOARD_TOKEN` discipline as the rest of the dashboard (Rule 6b).
 
 ### Code-graph context (Graft)
 
