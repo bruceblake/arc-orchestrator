@@ -179,6 +179,38 @@ def run_scene(project, scene, *, user_args=(), timeout=600, display=None,
     return rc, out
 
 
+MEASURER = "tools/measure.gd"
+METRICS_FILE = "studio_metrics.json"
+
+
+def measure(project, timeout=600):
+    """Run the project's raycast measurer; returns the metrics it wrote.
+
+    The phase gate compares Bucket A against studio_metrics.json, and that
+    file is gitignored in the game repo (it is evidence ABOUT a build, not
+    part of it). So on the repo's main — where the gate looks — nothing ever
+    wrote it, and the gate reported every dimension "not measured" forever.
+    The gate command runs this first, so it judges what is actually merged.
+
+    Returns None when the project has no measurer. Raises GodotError when the
+    measurer exists but fails, because a broken measurer is a finding.
+    """
+    project = Path(project)
+    if not (project / MEASURER).exists():
+        return None
+    import_assets(project, timeout=timeout)
+    out_file = project / METRICS_FILE
+    before = out_file.stat().st_mtime if out_file.exists() else 0
+    rc, out = _run(["--headless", "--script", f"res://{MEASURER}"],
+                   project=project, timeout=timeout)
+    errs = output_errors(out)
+    if errs or "STUDIO_METRICS_OK" not in out:
+        raise GodotError("the measurer failed:\n" + "\n".join(errs[:20] or [out[-2000:]]))
+    if not out_file.exists() or out_file.stat().st_mtime <= before:
+        raise GodotError(f"the measurer reported success but did not write {METRICS_FILE}")
+    return json.loads(out_file.read_text(encoding="utf-8"))
+
+
 def export_release(project, preset, out_path, timeout=1800):
     """Export a build. Checks the artifact exists rather than trusting rc."""
     out_path = Path(out_path)

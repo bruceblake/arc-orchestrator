@@ -335,11 +335,15 @@ GATES = {
 }
 
 
-def check(project, project_dir, phase=None):
+def check(project, project_dir, phase=None, *, emit=True):
     """Run the gate for `phase` (default: the current one).
 
     Returns {"phase", "passed", "failures", "detail"}. Never raises for a
     failing gate — a failure is the answer, not an error.
+
+    `emit=False` is for READERS (the dashboard polls this every few seconds):
+    a gate check someone merely looked at is not an event, and emitting one
+    per poll would bury the real gate runs in the event log.
     """
     phase = phase or current_phase(project)
     gate = GATES.get(phase)
@@ -352,8 +356,9 @@ def check(project, project_dir, phase=None):
     result = {"phase": phase, "passed": not failures,
               "failures": failures, "detail": detail,
               "intent": PHASE_INTENT.get(phase, "")}
-    events.emit("studio.gate", project=str(project), phase=phase,
-                passed=result["passed"], failures=len(failures))
+    if emit:
+        events.emit("studio.gate", project=str(project), phase=phase,
+                    passed=result["passed"], failures=len(failures))
     return result
 
 
