@@ -690,7 +690,8 @@ def opencode_fleet_config():
         st = src.stat()
     except OSError:
         return None
-    key = (st.st_size, st.st_mtime_ns, config.OPENCODE_CONTEXT)
+    key = (st.st_size, st.st_mtime_ns, config.OPENCODE_CONTEXT,
+           config.EXTERNAL_CONTEXT, config.FLEET)
     if _fleet_cfg["key"] == key and _fleet_cfg["path"]:
         return _fleet_cfg["path"]
     try:
@@ -707,7 +708,12 @@ def opencode_fleet_config():
             _pmodels = ((doc.get("provider", {}).get(_prov) or {})
                         .get("models") or {})
             if _mid in _pmodels:
-                _pmodels[_mid].setdefault("limit", {})["context"] = config.OPENCODE_CONTEXT
+                # Not OPENCODE_CONTEXT: that budget exists for an ARC
+                # pathology (requests stop returning near 55-60k input), which
+                # an OpenRouter-served model does not share. See
+                # config.opencode_context_for.
+                _pmodels[_mid].setdefault("limit", {})["context"] = (
+                    config.opencode_context_for(_ext))
         # Lowering context can leave `output` above it (an external model may
         # declare a large native output window), which asks the API for more
         # completion tokens than the budget allows. Clamp output under context.
@@ -1004,6 +1010,35 @@ def transcript_tokens(raw):
     """
     tokens = prompt = completion = 0
     for line in raw.splitlines():
+        # Claude Code / Codex / Gemini headless: the TERMINAL result object
+        # carries the whole run's usage, so it is summed once rather than per
+        # step. Without this the subscription harnesses reported (0, 0, 0) and
+        # the usage page showed a run that cost nothing — Rule 7 evidence that
+        # quietly says "no tokens" is worse than none, because it looks like a
+        # measurement. Cache reads and writes are prompt tokens (they are
+        # charged as such), matching the opencode branch below.
+        if '"type":"result"' in line or '"type": "result"' in line:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            u = e.get("usage")
+            if isinstance(u, dict) and ("input_tokens" in u or "output_tokens" in u):
+                p_ = ((u.get("input_tokens") or 0)
+                      + (u.get("cache_read_input_tokens") or 0)
+                      + (u.get("cache_creation_input_tokens") or 0))
+                c_ = (u.get("output_tokens") or 0)
+                prompt += p_
+                completion += c_
+                tokens += (u.get("total_tokens") or (p_ + c_))
+                continue
+            if isinstance(u, dict) and ("prompt_tokens" in u or "completion_tokens" in u):
+                p_ = u.get("prompt_tokens") or 0
+                c_ = u.get("completion_tokens") or 0
+                prompt += p_
+                completion += c_
+                tokens += (u.get("total_tokens") or (p_ + c_))
+                continue
         if '"kind":"usage"' in line or '"kind": "usage"' in line:
             try:
                 u = (json.loads(line).get("usage") or {})
@@ -2021,6 +2056,181 @@ class ReasonixDriver(Driver):
                 "REASONIX_WORKSPACE_ROOT": str(worktree)}
 
 
+# --- subscription-CLI harnesses ----------------------------------------------
+# Claude Code, the Codex CLI and the Gemini CLI run on the OPERATOR'S OWN
+# PLANS rather than on per-token API billing. That is the whole reason they
+# exist here: the studio roster's frontier models are otherwise a metered
+# expense, and a plan the operator already pays for is not.
+#
+# All three fit the base Driver unmodified, because all three stream JSON
+# events on stdout in headless mode:
+#
+#   claude -p --output-format stream-json    ends with {"type":"result",...}
+#   codex exec --json                        JSONL events
+#   gemini -p -o stream-json                 JSONL events
+#
+# so the stdout pump, the stall clock, the live transcript the dashboard
+# tails, and parse_transcript all work as they do for reasonix.
+#
+# WHAT IS DIFFERENT, and it is not technical: a consumer plan is metered for
+# one human at one terminal, on rolling windows. config._HARNESS_CAP holds
+# these to 1-2 concurrent sessions for that reason, and `claude` is 1 because
+# the operator's own interactive session shares the same plan. Parallel fleet
+# work belongs on ARC, which is free and genuinely concurrent; these slots
+# carry the roles that need frontier quality.
+
+
+def _check_roster(model, role, bench):
+    """The roster/role gate every driver applies (Rules 1 and 2).
+
+    Factored out rather than copied a fourth time: the duplicated version of
+    this check is exactly the shape of the drift AGENTS.md Rule 2 warns about,
+    where a hand-kept opinion about who may do what diverges from the roster.
+    """
+    if bench:
+        return
+    _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
+    if model not in config.MODEL_ROLES:
+        raise ValueError(f"{model!r} is not on today's roster "
+                         f"({sorted(config.MODEL_ROLES)})")
+    need = "planner" if role in _GH_OPS else role
+    if not config.model_may(model, need):
+        raise ValueError(f"{model} may hold {sorted(config.MODEL_ROLES[model])}, "
+                         f"not {role!r}")
+
+
+class ClaudeCodeDriver(Driver):
+    """Claude Code (`claude -p`) on the operator's Claude subscription.
+
+    Headless Claude Code streams the same event objects the interactive TUI
+    renders and ends with `{"type": "result", "result": ..., "session_id":
+    ...}` — the shape parse_transcript already treats as THE answer, so a
+    review verdict comes back intact without a new parser.
+
+    `--verbose` is REQUIRED alongside `--output-format stream-json` in print
+    mode; without it the CLI refuses the combination, and a driver that
+    silently fell back to text would lose the per-event stream the stall clock
+    depends on.
+    """
+
+    harness = "claude"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    # Renders the visual judge attaches. Claude Code has no image FLAG: its
+    # Read tool opens image files, so the paths are named in the prompt and
+    # the agent reads them. Set by studio.evaluation.judge_loop.
+    images = ()
+
+    def argv(self, prompt, session_id):
+        if self.images:
+            prompt = (prompt + "\n\nRead these image files before answering "
+                      "(use your Read tool on each):\n"
+                      + "\n".join(f"  {i}" for i in self.images))
+        a = [config.claude_bin(), "-p", "--output-format", "stream-json",
+             "--verbose", "--permission-mode", "bypassPermissions"]
+        if config.CLAUDE_CLI_MODEL:
+            a += ["--model", config.CLAUDE_CLI_MODEL]
+        if session_id:
+            a += ["--resume", session_id]
+        return a + [prompt]
+
+    def extra_env(self, worktree):
+        # Never let an API key hijack a subscription run: with
+        # ANTHROPIC_API_KEY set, Claude Code bills the API account instead of
+        # the plan, which is the opposite of why this harness exists.
+        return {"ANTHROPIC_API_KEY": "", "CLAUDE_CODE_DISABLE_TELEMETRY": "1"}
+
+
+class CodexDriver(Driver):
+    """The Codex CLI (`codex exec`) on the operator's ChatGPT plan.
+
+    `--json` prints events as JSONL, `-C` sets the workspace root to the task
+    worktree, and `--skip-git-repo-check` keeps it from refusing a worktree it
+    does not recognise as a repository root.
+
+    Sandbox posture is `config.CODEX_SANDBOX` (default `workspace-write`): the
+    agent may edit its own worktree and nothing outside it. `codex exec` is
+    non-interactive, so there is no approval prompt to deadlock on — which is
+    why the far blunter `--dangerously-bypass-approvals-and-sandbox` is not
+    the default here.
+    """
+
+    harness = "codex"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    images = ()          # attached with -i, which codex exec supports natively
+
+    def argv(self, prompt, session_id):
+        a = [config.codex_bin(), "exec", "--json", "--skip-git-repo-check",
+             "-s", config.CODEX_SANDBOX]
+        for img in self.images:
+            a += ["-i", str(img)]
+        if config.CODEX_CLI_MODEL:
+            a += ["-m", config.CODEX_CLI_MODEL]
+        if session_id:
+            # `resume` is a subcommand of exec, not a flag, so it has to sit
+            # immediately after `exec`.
+            a = ([config.codex_bin(), "exec", "resume", session_id, "--json",
+                  "--skip-git-repo-check", "-s", config.CODEX_SANDBOX]
+                 + (["-m", config.CODEX_CLI_MODEL] if config.CODEX_CLI_MODEL else []))
+        return a + [prompt]
+
+    def extra_env(self, worktree):
+        return {"OPENAI_API_KEY": "", "CODEX_QUIET_MODE": "1"}
+
+
+class GeminiDriver(Driver):
+    """The Gemini CLI (`gemini -p`) on the operator's Google AI plan.
+
+    This is the studio's VISUAL JUDGE as well as a reviewer: the CLI resolves
+    `@path` references in a prompt by reading that file, images included, so a
+    judge prompt can attach real renders without a multimodal API call.
+
+    `--approval-mode yolo` is what makes it non-interactive; without it the
+    CLI waits for approval on its first tool use and the stall clock kills a
+    session that was only ever waiting for a human.
+    """
+
+    harness = "gemini"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    # The Gemini CLI resolves `@path` inside a prompt by reading that file,
+    # images included — which is what makes it the visual judge without a
+    # single multimodal API call.
+    images = ()
+
+    def argv(self, prompt, session_id):
+        if self.images:
+            prompt = ("\n".join(f"@{i}" for i in self.images)
+                      + "\n\n" + prompt)
+        a = [config.gemini_bin(), "--output-format", "stream-json",
+             "--approval-mode", "yolo"]
+        if config.GEMINI_CLI_MODEL:
+            a += ["-m", config.GEMINI_CLI_MODEL]
+        if session_id:
+            a += ["--session-id", session_id]
+        return a + ["-p", prompt]
+
+    def extra_env(self, worktree):
+        return {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": "",
+                "GEMINI_CLI_DISABLE_TELEMETRY": "1"}
+
+
 def driver_for(model, role, bench=False, interactive=False):
     """The driver for `model` on the harness its ROSTER row names.
 
@@ -2034,6 +2244,12 @@ def driver_for(model, role, bench=False, interactive=False):
     if harness is None:
         raise ValueError(f"{model!r} is not on today's roster "
                          f"({sorted(config.MODEL_HARNESS)})")
+    if harness == "claude":
+        return ClaudeCodeDriver(model, role, bench=bench, interactive=interactive)
+    if harness == "codex":
+        return CodexDriver(model, role, bench=bench, interactive=interactive)
+    if harness == "gemini":
+        return GeminiDriver(model, role, bench=bench, interactive=interactive)
     if harness == "kimi":
         return KimiDriver(role, bench=bench, interactive=interactive)
     if harness == "dsh":

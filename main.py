@@ -1001,6 +1001,80 @@ def main():
                         help=f"agent model (default {config.GH_MODEL})")
         gp.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
+    # --- studio: the 3D multiplayer game workload (ARC_FLEET=studio) -------
+    st_studio = sub.add_parser(
+        "studio",
+        help="3D game workload: phases, visual judge, 3D operator, fuzz swarm")
+    ss = st_studio.add_subparsers(dest="studio_cmd", required=True)
+
+    sd = ss.add_parser("doctor", help="what the studio can and cannot do here")
+    sd.add_argument("--json", action="store_true")
+    sd.add_argument("--no-probe", action="store_true",
+                    help="skip the OpenRouter model probe (works offline)")
+
+    sp = ss.add_parser("provision",
+                       help="add the studio models to the opencode config")
+    sp.add_argument("--write", action="store_true",
+                    help="apply the change (the config is backed up first)")
+
+    sc = ss.add_parser("scaffold", help="write a Godot graybox starter project")
+    sc.add_argument("repo")
+    sc.add_argument("--project", default="prison-escape")
+    sc.add_argument("--force", action="store_true",
+                    help="overwrite files that already exist")
+
+    spl = ss.add_parser("plan", help="plan one phase's tasks into a taskfile")
+    spl.add_argument("goal")
+    spl.add_argument("repo")
+    spl.add_argument("--project", default="prison-escape")
+    spl.add_argument("--phase", default="",
+                     help="default: the project's current phase")
+    spl.add_argument("--out", default="")
+
+    for name, helptext in (("status", "phase, gate and round summary"),
+                           ("gate", "run the current phase gate"),
+                           ("budget", "studio spend so far")):
+        q = ss.add_parser(name, help=helptext)
+        if name != "budget":
+            q.add_argument("project")
+            q.add_argument("repo")
+        if name == "gate":
+            q.add_argument("--phase", default="")
+
+    spr = ss.add_parser("promote", help="advance to the next phase if the gate passes")
+    spr.add_argument("project")
+    spr.add_argument("repo")
+    spr.add_argument("--force", action="store_true",
+                     help="promote over a FAILING gate; recorded forever")
+    spr.add_argument("--reason", default="")
+
+    sr = ss.add_parser("render", help="render a round's cameras (needs a display)")
+    sr.add_argument("project")
+    sr.add_argument("repo")
+    sr.add_argument("--round", type=int, default=0)
+    sr.add_argument("--phase", default="")
+    sr.add_argument("--scene", default="", help="scene to render (default: main)")
+    sr.add_argument("--resolution", default="1600x900")
+
+    sj = ss.add_parser("judge", help="score the latest rendered round (blind)")
+    sj.add_argument("project")
+    sj.add_argument("repo")
+    sj.add_argument("--round", type=int, default=0)
+    sj.add_argument("--phase", default="")
+    sj.add_argument("--model", default="",
+                    help="override the round's rotation pick")
+
+    sf = ss.add_parser("fuzz", help="run the headless multiplayer fuzz swarm")
+    sf.add_argument("project")
+    sf.add_argument("repo")
+    sf.add_argument("--bots", type=int, default=None)
+    sf.add_argument("--seconds", type=float, default=None)
+
+    sa = ss.add_parser("astra", help="run the 3D/animation operator on a goal")
+    sa.add_argument("goal")
+    sa.add_argument("--project", default="prison-escape")
+    sa.add_argument("--max-steps", type=int, default=24, dest="max_steps")
+
     chat_p = sub.add_parser(
         "chat", help="conversational planning with the fleet's planner")
     chat_p.add_argument("--session", required=True,
@@ -1036,6 +1110,9 @@ def main():
         cmd_doctor(args)
     elif args.cmd == "bench":
         cmd_bench(args)
+    elif args.cmd == "studio":
+        from studio import cli as studio_cli
+        sys.exit(studio_cli.run(args))
     elif args.cmd == "chat":
         import orchchat
         sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))

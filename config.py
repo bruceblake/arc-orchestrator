@@ -35,12 +35,53 @@ def reasonix_bin():
     return found or str(Path.home() / ".local" / "opt" / "node" / "bin" / "reasonix")
 
 
+def _npm_bin(name, env_var):
+    """A CLI installed by npm -g, found the way dsh_bin/reasonix_bin are.
+
+    npm's global bin is not on every shell's PATH — the service or shell that
+    spawns a harness is not a login shell — so a bare name would fail to exec
+    with FileNotFoundError. Prefer PATH, fall back to the npm prefix.
+    """
+    found = shutil.which(os.getenv(env_var, name))
+    return found or str(Path.home() / ".local" / "opt" / "node" / "bin" / name)
+
+
+def claude_bin():
+    """The Claude Code CLI, which runs on the operator's Claude subscription."""
+    found = shutil.which(os.getenv("ARC_CLAUDE_BIN", "claude"))
+    return found or str(Path.home() / ".local" / "bin" / "claude")
+
+
+def codex_bin():
+    """The Codex CLI (npm @openai/codex), on the operator's ChatGPT plan."""
+    return _npm_bin("codex", "ARC_CODEX_BIN")
+
+
+def gemini_bin():
+    """The Gemini CLI (npm @google/gemini-cli), on the operator's Google plan."""
+    return _npm_bin("gemini", "ARC_GEMINI_BIN")
+
+
+# Codex sandbox policy for fleet runs. `workspace-write` lets the agent edit
+# the task's git worktree and nothing outside it, and `codex exec` is
+# non-interactive so there is no approval prompt to block on. The looser
+# `danger-full-access` exists for operators who need it; it is not the default
+# here, because a disposable worktree is a boundary worth keeping.
+CODEX_SANDBOX = os.getenv("ARC_CODEX_SANDBOX", "workspace-write")
+
+
 def harness_bin(harness):
     """The executable a harness runs as, for doctor checks and argv[0]."""
     if harness == "dsh":
         return dsh_bin()
     if harness == "reasonix":
         return reasonix_bin()
+    if harness == "claude":
+        return claude_bin()
+    if harness == "codex":
+        return codex_bin()
+    if harness == "gemini":
+        return gemini_bin()
     return shutil.which(harness) or harness
 
 
@@ -61,6 +102,52 @@ REASONIX_FLEET_HOME = Path(os.getenv("ARC_REASONIX_HOME") or ROOT / "logs" / "re
 GRAFT_ENABLED = os.getenv("ARC_GRAFT", "1").lower() not in ("0", "false", "no", "")
 GRAFT_BIN = os.getenv("ARC_GRAFT_BIN", "")           # empty: `graft` on PATH, then the node prefix
 GRAFT_HINTS = int(os.getenv("ARC_GRAFT_HINTS", "3"))  # file:line spans handed to an implementer
+
+
+# --- fleet profiles ---------------------------------------------------------
+# ARC_FLEET selects WHICH FLEET this process runs. It is the only switch in
+# this repo that changes the roster wholesale, and it defaults to the fleet
+# this orchestrator was built for.
+#
+#   local  (default)  GLM-5.3 + DeepSeek-V4.1-Flash-thinking-max, served by
+#                     ARC on campus. Two families. What every existing run,
+#                     taskfile and test assumes.
+#   studio            Those two PLUS four external models reached through
+#                     OpenRouter, for the 3D multiplayer game workload:
+#                     Claude-Opus-5.5 (architect / netcode / planner),
+#                     GPT-6-Astra (3D, rigging, animation, computer use),
+#                     Grok-4.7 (in-engine feature driver),
+#                     Gemini-3.8-Flash (multimodal visual judge).
+#
+# NOTHING downstream branches on the profile. The studio entries are ordinary
+# Family entries and ordinary ROSTER rows, so every derived structure — tiers,
+# roles, review pairings, driver caps, escalation path, the planner prompt —
+# follows from them exactly as it does for the local fleet. That is the whole
+# design: a profile that needed special-casing downstream would be a second
+# orchestrator to keep in sync, which is the bug this repo has paid for twice
+# (the hand-kept PR-reviewer pool, the literal FAMILY_ORDER list).
+#
+# It COSTS MONEY. Every local model is ARC-served and effectively free; every
+# studio model is billed to OPENROUTER_API_KEY at the rates in MODEL_PRICING
+# (Astra at $10/$50 per Mtok is ~50x GLM-5.3). Hence the default is `local`
+# and the profile is explicit, per-process, and never inferred.
+FLEET_PROFILES = ("local", "studio", "studio-api")
+FLEET = (os.getenv("ARC_FLEET") or "local").strip().lower()
+if FLEET not in FLEET_PROFILES:
+    # Deliberately fatal, unlike the tuning knobs in this file that fall back
+    # to a default on a bad value. A typo here would silently run the LOCAL
+    # fleet while the operator believed paid frontier models were building
+    # their game — a wrong roster is not a wrong tuning parameter.
+    raise ValueError(
+        f"ARC_FLEET={FLEET!r} is not a fleet profile; "
+        f"choose one of {', '.join(FLEET_PROFILES)}")
+# `studio` runs the game fleet on SUBSCRIPTION CLIs (Claude Code, Codex,
+# Gemini CLI) — the operator's own plans, no per-token billing. `studio-api`
+# runs the same roster through OpenRouter, which bills per token but gives
+# real parallelism and no plan rate limits. Both are "the studio"; STUDIO is
+# true for either, and STUDIO_API distinguishes them where it matters.
+STUDIO = FLEET in ("studio", "studio-api")
+STUDIO_API = FLEET == "studio-api"
 
 
 @dataclass(frozen=True)
@@ -121,6 +208,66 @@ FAMILIES = {
     # capacity row, work.py's round-robin) would query family_limit("union")
     # and raise KeyError on import — so the family goes with the model.
 }
+
+# WHICH OpenAI model the API profile runs. The GPT-6 line is tiered, and the
+# tiers are 100x apart at the extremes for the same 1.05M context, the same
+# image input and the same tool support (OpenRouter rates, read 2026-09-22):
+#
+#   gpt-6-luna   $0.10 / $0.50   per Mtok
+#   gpt-6-sol    $2.00 / $10.00
+#   gpt-6-astra  $10.00 / $50.00
+#
+# Sol is the DEFAULT, not Astra. Almost all of this workload's "3D" work is
+# writing Blender Python and engine glue — ordinary strong-coding-model work —
+# and paying 5x for it on every fix round is a large bill for a difference
+# that has not been demonstrated on these tasks. Move to Astra deliberately,
+# for the work that actually needs it, and measure whether it converged in
+# fewer rounds; that is the only comparison worth the money.
+_STUDIO_OPENAI_CHOICES = {
+    "GPT-6-Astra": "openrouter/openai/gpt-6-astra",
+    "GPT-6-Sol":   "openrouter/openai/gpt-6-sol",
+    "GPT-6-Luna":  "openrouter/openai/gpt-6-luna",
+}
+STUDIO_OPENAI_MODEL = os.getenv("ARC_STUDIO_OPENAI_MODEL", "GPT-6-Sol")
+if STUDIO_OPENAI_MODEL not in _STUDIO_OPENAI_CHOICES:
+    raise ValueError(
+        f"ARC_STUDIO_OPENAI_MODEL={STUDIO_OPENAI_MODEL!r} is not one of "
+        f"{sorted(_STUDIO_OPENAI_CHOICES)}")
+
+# --- studio fleet families (ARC_FLEET=studio) -------------------------------
+# Four external families, all served by OpenRouter through the `openrouter`
+# provider already declared in the operator's opencode config. They are added
+# to FAMILIES only under the studio profile, because a family with no live
+# ROSTER row raises KeyError in every family_limit consumer — the exact
+# failure that retired Union-Alpha's `union` family on 2026-09-17.
+#
+# The limits are PLACEHOLDERS, not measurements. OpenRouter publishes no
+# per-key concurrent-session ceiling the way ARC does; it rate-limits on
+# credits and requests per minute instead. They are set at the point where
+# the binding ceiling is something we HAVE measured — the shared opencode
+# harness pool (_HARNESS_CAP["opencode"] = 5), which every studio model runs
+# through. Tighten per family with ARC_LIMIT_<FAMILY> the moment OpenRouter
+# starts returning 429s; that is the honest knob, not these numbers.
+_STUDIO_FAMILIES = {
+    "anthropic": Family("anthropic", 4, {"default": "Claude-Opus-5.5"}),
+    "openai":    Family("openai",    4, {"default": STUDIO_OPENAI_MODEL}),
+    "xai":       Family("xai",       4, {"default": "Grok-4.7"}),
+    # Gemini is the judge: it is called far more often than the implementers
+    # (every render, every round) and is the cheapest model on the studio
+    # roster, so it gets the widest lane.
+    "google":    Family("google",    6, {"default": "Gemini-3.8-Flash"}),
+    # (the subscription profile's google model is Gemini-3-Pro; `models` here
+    #  is only consulted by the research workload, which runs on ARC)
+}
+if STUDIO:
+    # Only the families a LIVE roster row names. A family with no row raises
+    # KeyError in every family_limit consumer — the failure that retired
+    # Union-Alpha's `union` family on 2026-09-17 — and the subscription
+    # profile has no xai model, because Grok has no subscription CLI path
+    # worth driving headlessly.
+    _wanted = {"anthropic", "openai", "google"} | (
+        {"xai"} if FLEET == "studio-api" else set())
+    FAMILIES.update({k: v for k, v in _STUDIO_FAMILIES.items() if k in _wanted})
 
 # Derived, never hand-written: a literal list here kept naming gpt-oss after it
 # was removed from FAMILIES, and every consumer (pool semaphores, the dashboard
@@ -519,6 +666,79 @@ ROSTER = [
     ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "reasonix", "medium", 10,
      ("implementer", "reviewer", "pr_reviewer"),           "2026-09-12", None),
 ]
+# --- studio fleet roster -----------------------------------------------------
+# TWO rosters, one per studio profile, because they are genuinely different
+# fleets with different economics:
+#
+#   ARC_FLEET=studio       SUBSCRIPTION CLIs. Claude Code on Claude Pro, the
+#                          Codex CLI on a ChatGPT plan, the Gemini CLI on
+#                          Google AI Pro/Ultra. No per-token billing at all.
+#                          Concurrency is tiny (see _HARNESS_CAP) because a
+#                          consumer plan is metered for one human at one
+#                          terminal.
+#
+#   ARC_FLEET=studio-api   The same roles through OpenRouter, billed per
+#                          token, with real parallelism and no plan windows.
+#                          Use it when the work outgrows the plans.
+#
+# ORDER IS LOAD-BEARING in both. The roster is written weakest -> strongest
+# and _STRONGEST_FIRST reverses WITHIN a tier, so the LAST hard-tier row is
+# the fleet's strongest model: PLANNER_MODEL, the head of REVIEW_FAMILIES, and
+# the last escalation stage. Claude is last in both, on purpose.
+_STUDIO_SUB_ROSTER = [
+    # The visual judge. REVIEWER ROLES ONLY — it never implements. The Gemini
+    # CLI takes images as @path references, which is what lets it score
+    # renders; inside the code pipeline it is the cheap, wide-context reviewer.
+    ("Gemini-3-Pro",     "google",    "gemini", "medium", 2,
+     ("reviewer", "pr_reviewer"),                          None, None),
+    # Codex on the ChatGPT plan: the implementation workhorse of this profile,
+    # and the closest thing a subscription gives to the spec's 3D/asset
+    # operator. `codex exec --json` streams events; `--output-schema` pins a
+    # review verdict's shape.
+    ("GPT-5.2-Codex",    "openai",    "codex",  "hard",   2,
+     ("implementer", "reviewer", "pr_reviewer"),           None, None),
+    # Claude Code on Claude Pro: architect, netcode, and the studio PLANNER.
+    # Capped at ONE concurrent session — the operator's own interactive Claude
+    # Code shares this plan.
+    ("Claude-Opus-5.5",  "anthropic", "claude", "hard",   1,
+     ALL_ROLES,                                            None, None),
+]
+
+# The OpenRouter roster (ARC_FLEET=studio-api). Every row runs the `opencode`
+# harness against the `openrouter` provider — the path Union-Alpha proved on
+# 2026-09-16 — so no new driver exists for them and Rules 1-9 apply unchanged.
+_STUDIO_API_ROSTER = [
+    ("Gemini-3.8-Flash",  "google",    "opencode", "medium", 6,
+     ("reviewer", "pr_reviewer"),                          None, None),
+    ("Grok-4.7",          "xai",       "opencode", "medium", 4,
+     ("implementer", "reviewer", "pr_reviewer"),           None, None),
+    (STUDIO_OPENAI_MODEL, "openai",    "opencode", "hard",   4,
+     ("implementer", "reviewer", "pr_reviewer"),           None, None),
+    ("Claude-Opus-5.5",   "anthropic", "opencode", "hard",   4,
+     ALL_ROLES,                                            None, None),
+]
+_STUDIO_ROSTER = _STUDIO_API_ROSTER if FLEET == "studio-api" else _STUDIO_SUB_ROSTER
+if STUDIO:
+    ROSTER.extend(_STUDIO_ROSTER)
+
+# OpenRouter ids, for the API profile ONLY. Under the subscription profile the
+# models are reached by their own CLIs and have no provider alias at all —
+# which is what keeps EXTERNAL_MODELS empty there, so nothing tries to route a
+# subscription model through the openrouter provider.
+_STUDIO_ALIASES = {
+    "Claude-Opus-5.5":  "openrouter/anthropic/claude-opus-5.5",
+    STUDIO_OPENAI_MODEL: _STUDIO_OPENAI_CHOICES[STUDIO_OPENAI_MODEL],
+    "Grok-4.7":         "openrouter/x-ai/grok-4.7",
+    "Gemini-3.8-Flash": "openrouter/google/gemini-3.8-flash",
+} if FLEET == "studio-api" else {}
+
+# The model argument each subscription CLI is invoked with. Empty means "let
+# the CLI use its own default", which is the safest posture: a plan serves
+# what it serves, and naming a model the plan does not carry fails the run.
+CLAUDE_CLI_MODEL = os.getenv("ARC_CLAUDE_MODEL", "opus")
+CODEX_CLI_MODEL = os.getenv("ARC_CODEX_MODEL", "")
+GEMINI_CLI_MODEL = os.getenv("ARC_GEMINI_MODEL", "")
+
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
 
 # Roster models the ARC availability snapshot must NOT judge, because they are
@@ -532,7 +752,14 @@ TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
 # live roster row is external any more. Kept as a set — not deleted — because
 # live_roster, provider_model_alias and drivers.opencode_fleet_config all read
 # it; keep it in lockstep with MODEL_HARNESS_ALIAS if a second provider returns.
-EXTERNAL_MODELS = set()
+# EXTERNAL_MODELS means "on the roster, but NOT served by the ARC API" — it is
+# what tells live_roster not to defer a row just because ARC's availability
+# snapshot has never heard of it. That is true of BOTH studio profiles: the
+# OpenRouter models and the subscription-CLI models are equally invisible to
+# ARC's /models endpoint. Only the API profile additionally has a provider
+# ALIAS (_STUDIO_ALIASES); a subscription model is reached by its own CLI and
+# has none, which is exactly why the two maps are separate.
+EXTERNAL_MODELS = {row[0] for row in _STUDIO_ROSTER} if STUDIO else set()
 
 
 def roster_date():
@@ -646,7 +873,18 @@ def roster_changes(day=None, horizon_days=14):
 
 _LIVE = live_roster()
 IMPLEMENTER_MODELS = {m for m, _f, _h, _t, _c, roles in _LIVE if "implementer" in roles}
-IMPLEMENT_TIERS = {tier: [m for m, _f, _h, t, _c, _r in _LIVE if t == tier]
+# Filtered on the `implementer` ROLE, not on the tier alone. A tier is what a
+# model is strong enough for; a role is what it is ALLOWED to do, and the two
+# are not the same for a reviewer-only model. Gemini-3.8-Flash (studio) is
+# medium-tier and never implements: without this filter it would be offered to
+# the planner as a medium implementer and land in ESCALATION_PATH, and the
+# driver constructor would then raise ValueError on every attempt to use it —
+# a hand-kept list disagreeing with the drivers' own role rules, which is
+# precisely the drift that cost this repo seven pull requests (AGENTS.md
+# Rule 2, "never keep a second list of who may review"). No effect on the
+# local fleet, where both live models implement.
+IMPLEMENT_TIERS = {tier: [m for m, _f, _h, t, _c, roles in _LIVE
+                          if t == tier and "implementer" in roles]
                    for tier in TIER_ORDER}
 IMPLEMENT_TIERS = {k: v for k, v in IMPLEMENT_TIERS.items() if v}
 MODEL_FAMILY = {m: fam for m, fam, *_ in _LIVE}
@@ -671,7 +909,12 @@ GH_MODEL = os.getenv("ARC_GH_MODEL") or PLANNER_MODEL
 # V4 may judge a bounded diff (pr_reviewer) but not gate or plan (reviewer).
 PR_REVIEW_FAMILIES = {fam for _m, fam, _h, _t, _c, roles in _LIVE if "pr_reviewer" in roles}
 # Weakest live tier first. Within a tier, the order in ROSTER.
-_DEFAULT_PATH = [m for tier in TIER_ORDER for m, _f, _h, t, _c, _r in _LIVE if t == tier]
+# Same role filter as IMPLEMENT_TIERS: escalation routes IMPLEMENTATION to a
+# higher tier, so a reviewer-only model in this list would escalate a task
+# into a model that cannot hold the implementer role at all.
+_DEFAULT_PATH = [m for tier in TIER_ORDER
+                 for m, _f, _h, t, _c, roles in _LIVE
+                 if t == tier and "implementer" in roles]
 
 
 PR_REVIEWERS = max(1, min(PR_REVIEWERS_WANTED, len(PR_REVIEW_FAMILIES) - 1))
@@ -749,6 +992,20 @@ USE_FLEET_ALIASES = os.getenv("ARC_USE_FLEET_ALIASES", "1").lower() not in (
 #             reach that dead end sooner — tried, measured, reverted.
 OPENCODE_CONTEXT = int(os.getenv("ARC_OPENCODE_CONTEXT", "65536"))
 KIMI_CONTEXT = int(os.getenv("ARC_KIMI_CONTEXT", "131072"))
+# EXTERNAL (non-ARC) models get their own, much larger budget. OPENCODE_CONTEXT
+# is 65536 because of a pathology of ARC SPECIFICALLY — measured 2026-09-09,
+# requests stop coming back somewhere around 55-60k input tokens — and that is
+# a property of that backend, not of opencode and not of the model. Clamping a
+# 1M-context model on OpenRouter to 64k would force a compaction every few
+# tool calls in exactly the multi-file architectural work the studio fleet
+# exists to do. 256k is well inside every studio model's real window
+# (Grok-4.7 is the smallest at 500k) while still bounding a runaway session.
+EXTERNAL_CONTEXT = int(os.getenv("ARC_EXTERNAL_CONTEXT", "262144"))
+
+
+def opencode_context_for(model):
+    """The context budget the fleet opencode config declares for `model`."""
+    return EXTERNAL_CONTEXT if model in EXTERNAL_MODELS else OPENCODE_CONTEXT
 # reasonix takes its budget from [[providers]].context_window in its fleet
 # toml and compacts at compact_ratio x that window, so the window must be the
 # model's REAL one — here, not borrowed from opencode. Passing OPENCODE_CONTEXT
@@ -775,7 +1032,14 @@ def reasonix_context(model):
     return REASONIX_CONTEXT
 KIMI_CONFIG = Path.home() / ".kimi-code" / "config.toml"
 OPENCODE_CONFIG = Path.home() / ".config" / "opencode" / "opencode.json"
-OPENCODE_FLEET_CONFIG = OPENCODE_CONFIG.with_name("opencode-fleet.json")
+# Scoped to the fleet PROFILE. Both profiles regenerate this file from the
+# operator's own config at first use, and they write DIFFERENT budgets into it
+# (the studio profile adds the external models and their EXTERNAL_CONTEXT). A
+# local run and a studio run share a machine, so one path would mean each
+# process rewriting the other's config underneath a starting session. The
+# local profile keeps the historical filename.
+OPENCODE_FLEET_CONFIG = OPENCODE_CONFIG.with_name(
+    "opencode-fleet.json" if FLEET == "local" else f"opencode-fleet-{FLEET}.json")
 # Historical: Kimi-K3 is off the roster (2026-09-12) and KimiDriver refuses to
 # construct, so nothing live reaches this alias. It stays so a re-admitted
 # kimi-harness model with a configured alias would be picked up, and so old
@@ -817,12 +1081,12 @@ def harness_model(model, harness):
 # declared in OPENCODE_CONFIG), so an external model is named as
 # `<provider>/<model-id>`. Keyed by roster model name; an entry exists only for
 # EXTERNAL_MODELS.
-MODEL_HARNESS_ALIAS = {
-    # Empty since 2026-09-17: Union-Alpha, the only external model, was retired
-    # when its free OpenRouter preview ended. provider_model_alias is gated on
-    # EXTERNAL_MODELS, so a stale entry here could not be looked up anyway, but
-    # the map stays in lockstep with that set — no entry for a non-external.
-}
+# Union-Alpha, the only entry here until 2026-09-17, was retired when its free
+# OpenRouter preview ended. Under the studio profile the map carries the four
+# OpenRouter models instead; under the local profile it is empty again.
+# provider_model_alias is gated on EXTERNAL_MODELS, so an entry can never
+# outlive the roster row it names.
+MODEL_HARNESS_ALIAS = dict(_STUDIO_ALIASES)
 
 
 def provider_model_alias(model):
@@ -903,7 +1167,11 @@ def kimi_plan_mode_on():
 # higher cap.
 # reasonix also ships subagent profiles, so it inherits dsh's assumed factor
 # of 2 until the event log shows otherwise.
-_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2}
+# The subscription CLIs each hold ONE upstream session per process: they are
+# single-agent terminal tools, not fleets, and none of them fans out into
+# parallel sub-sessions the way opencode does.
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2,
+                         "claude": 1, "codex": 1, "gemini": 1}
 
 
 def _harness_of_model(model):
@@ -984,7 +1252,19 @@ _MODEL_DRIVER_CAP = {
 # ("kimi" stays in _SESSIONS_PER_PROCESS only so a historical transcript's
 # harness still resolves; no live model maps to that harness. "dsh" stays in
 # _HARNESS_CAP for the same reason since reasonix replaced it on 2026-09-13.)
-_HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 7}
+# Subscription harnesses are capped LOW on purpose, and the reason is not
+# technical. A consumer plan is metered for one developer at one terminal —
+# Claude Pro on 5-hour and weekly windows, ChatGPT and Google AI similarly —
+# so a fleet that opens six parallel sessions burns the operator's own
+# allowance in minutes and competes with the human using the same plan. The
+# parallel work in this repo belongs on ARC, which is free and has real
+# concurrency; the subscription slots carry the one or two roles that need
+# frontier quality.
+#
+# claude = 1 deliberately: the operator's interactive Claude Code session
+# shares that plan, and a second concurrent fleet session is felt immediately.
+_HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 7,
+                "claude": 1, "codex": 2, "gemini": 2}
 
 
 def kimi_wire_model():
@@ -1072,6 +1352,91 @@ def max_tasks_in_flight():
             pass
     return sum(harness_limit(h) for h in set(MODEL_HARNESS.values()))
 
+# --- studio workload (ARC_FLEET=studio) -------------------------------------
+# Every knob the game-development workload reads lives HERE, not in the studio
+# package, for the reason this file's docstring gives: one source of truth for
+# ARC_* overrides. tests/test_docs_truth.py enforces it — an override defined
+# anywhere else is undiscoverable, and one mentioned in a doc but read nowhere
+# is a no-op an operator will set and trust.
+
+# Where the studio keeps everything a run produces that is NOT source code:
+# renders, judge verdicts, phase state, fuzz reports. Deliberately outside the
+# game repo — these are evidence about a build, not part of it, and a render
+# archive inside the worktree would land in a pull request (Rule 5 publishes
+# with `git add -A`).
+STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
+
+# The spend ceiling, in USD, for one studio run. The local fleet never needed
+# one: ARC is campus-served and effectively free, so the only cost of a task
+# looping sixteen times was time. The studio roster is billed per token at up
+# to $50/Mtok completion, and the pipeline is DESIGNED to retry — 16 fix
+# rounds x 5 escalation tiers is up to 80 implementation attempts for a single
+# task that never converges. 0 disables the ceiling; studio.budget.guard()
+# reads it before each model call and refuses to start one that would cross
+# it, because a budget discovered after the fact is a bill, not a budget.
+STUDIO_BUDGET_USD = float(os.getenv("ARC_STUDIO_BUDGET_USD", "25"))
+
+# Judge score (0-100) a phase must reach before it may be promoted.
+STUDIO_JUDGE_PASS = float(os.getenv("ARC_STUDIO_JUDGE_PASS", "75"))
+
+# The round at which the camera system stops using only the four fixed anchors
+# and starts adding proc-gen adversarial angles. Rounds 1-2 are fixed so early
+# feedback is comparable round-to-round; from round 3 the model has had two
+# chances to learn what the camera sees, which is exactly when it starts
+# building to the camera instead of to the game.
+STUDIO_ADVERSARIAL_ROUND = int(os.getenv("ARC_STUDIO_ADVERSARIAL_ROUND", "3"))
+STUDIO_ADVERSARIAL_CAMERAS = int(os.getenv("ARC_STUDIO_ADVERSARIAL_CAMERAS", "3"))
+
+# Consecutive rounds of judges contradicting each other before the arbitrator
+# stops the loop and asks for a human. Three is the smallest number that can
+# distinguish oscillation (A, B, A) from a change of mind (A, B).
+STUDIO_OSCILLATION_ROUNDS = int(os.getenv("ARC_STUDIO_OSCILLATION_ROUNDS", "3"))
+
+# How many rendered rounds the compactor keeps in CONTEXT. Everything is kept
+# on disk; this bounds only what is fed back to a model.
+STUDIO_KEEP_ROUNDS = int(os.getenv("ARC_STUDIO_KEEP_ROUNDS", "1"))
+
+# A raw OpenRouter model id used INSTEAD of the roster judge, so the visual
+# loop can be exercised for $0 while an account has no credits. OpenRouter
+# serves ~11 vision-capable `:free` models capped at 50 requests/day, which is
+# plenty to prove the plumbing (renders -> images -> verdict -> archive).
+#
+# It is a VALIDATION hatch, not a roster admission. A free model has not been
+# benchmarked, is not on any tier, holds no role, and its verdicts are marked
+# `validation: true` and IGNORED by the phase gates — a phase promoted on an
+# unvetted judge is exactly the kind of evidence this repo refuses elsewhere.
+# Empty (the default) means the rotation in studio/evaluation/judge_loop.py.
+STUDIO_FREE_JUDGE_MODEL = os.getenv("ARC_STUDIO_FREE_JUDGE_MODEL", "")
+
+# Headless bot swarm size and run length for Module E.
+STUDIO_FUZZ_BOTS = int(os.getenv("ARC_STUDIO_FUZZ_BOTS", "16"))
+STUDIO_FUZZ_SECONDS = float(os.getenv("ARC_STUDIO_FUZZ_SECONDS", "60"))
+
+# External toolchain. Empty means "look it up on PATH"; a value pins a binary.
+GODOT_BIN = os.getenv("ARC_GODOT_BIN", "")
+BLENDER_BIN = os.getenv("ARC_BLENDER_BIN", "")
+# The X display the Astra operator draws into. On this machine WSLg already
+# provides one at :0 with GPU passthrough (/dev/dxg), which is why Godot can
+# RENDER here at all — `godot --headless` has no renderer and cannot produce
+# the screenshots the judge scores. Point this at an Xvfb display instead for
+# a deterministic software-rendered run.
+STUDIO_DISPLAY = os.getenv("ARC_STUDIO_DISPLAY", "") or os.getenv("DISPLAY", "")
+
+# OpenRouter is where every external model is served. The key is NOT an ARC_*
+# var because it is the provider's own credential, shared with the operator's
+# opencode config (OPENROUTER_API_KEY in .env).
+OPENROUTER_BASE_URL = os.getenv("ARC_OPENROUTER_BASE_URL",
+                                "https://openrouter.ai/api/v1")
+
+
+def studio_run_dir(project, create=False):
+    """Where one studio project's evidence lives: renders, verdicts, state."""
+    d = STUDIO_DIR / re.sub(r"[^A-Za-z0-9._-]", "-", str(project))
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
 # --- token cost attribution -------------------------------------------------
 # OPERATOR-SUPPLIED estimates, USD per MILLION tokens, for attributing a dollar
 # figure to fleet usage. This is not a billing ledger: the numbers are set by
@@ -1110,6 +1475,23 @@ MODEL_PRICING = {
     # after its 2026-09-17 retirement for the same reason Kimi-K3 is kept:
     # historical harness_runs rows still price through MODEL_PRICING.
     "Union-Alpha": {"prompt_per_mtok": 0.0, "completion_per_mtok": 0.0},
+    # Studio fleet (ARC_FLEET=studio). Unlike every rate above, these are NOT
+    # operator estimates: they are OpenRouter's published per-token prices,
+    # read from https://openrouter.ai/api/v1/models on 2026-09-22 and
+    # converted to USD per million tokens. Re-check them when OpenRouter
+    # changes a rate; override either half with
+    # ARC_PRICE_<MODEL>_PROMPT / ARC_PRICE_<MODEL>_COMPLETION.
+    #
+    # These are real charges against a real card, and they are 5-250x the
+    # local fleet. Read the studio roster as a budget, not just a topology:
+    # one Astra implementation attempt that reads 200k tokens of context and
+    # writes 20k costs about $3.00; the same attempt on GLM-5.3 costs $0.24.
+    "Claude-Opus-5.5":  {"prompt_per_mtok":  4.00, "completion_per_mtok": 20.00},
+    "GPT-6-Astra":      {"prompt_per_mtok": 10.00, "completion_per_mtok": 50.00},
+    "GPT-6-Sol":        {"prompt_per_mtok":  2.00, "completion_per_mtok": 10.00},
+    "GPT-6-Luna":       {"prompt_per_mtok":  0.10, "completion_per_mtok":  0.50},
+    "Grok-4.7":         {"prompt_per_mtok":  1.60, "completion_per_mtok":  4.80},
+    "Gemini-3.8-Flash": {"prompt_per_mtok":  0.75, "completion_per_mtok":  3.75},
 }
 
 
