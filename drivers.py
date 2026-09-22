@@ -940,6 +940,7 @@ def parse_transcript(raw):
     """
     texts, sid_holder = [], [None]
     final = None
+    codex_msg, codex_sid = None, None
     for line in raw.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -952,7 +953,23 @@ def parse_transcript(raw):
                 and isinstance(obj.get("result"), str)):
             final = obj
             continue
+        # `codex exec --json` (measured 2026-09-22): a thread.started event
+        # carrying the session id, and the answer as item.completed items of
+        # type agent_message. Its stream ALSO carries reasoning and command
+        # items with "text" fields, which the generic dig would fold into a
+        # reviewer's verdict — so the LAST agent_message is taken as THE
+        # answer, the same way reasonix's result object is.
+        if isinstance(obj, dict) and obj.get("type") == "thread.started":
+            codex_sid = obj.get("thread_id") or codex_sid
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "item.completed":
+            item = obj.get("item") or {}
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                codex_msg = item["text"]
+            continue
         _dig(obj, texts, sid_holder)
+    if codex_msg is not None and final is None:
+        return codex_sid or sid_holder[0], codex_msg[-3000:]
     if final is not None:
         sid = final.get("session_id") if isinstance(final.get("session_id"), str) else None
         payload = final["result"] or raw
@@ -1039,6 +1056,21 @@ def transcript_tokens(raw):
                 completion += c_
                 tokens += (u.get("total_tokens") or (p_ + c_))
                 continue
+        # codex exec --json: one turn.completed per turn with the turn's usage.
+        # input_tokens already INCLUDES cached_input_tokens (OpenAI's usage
+        # convention), so the cached count is not added a second time.
+        if '"turn.completed"' in line:
+            try:
+                u = (json.loads(line).get("usage") or {})
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(u, dict) and "input_tokens" in u:
+                p_ = u.get("input_tokens") or 0
+                c_ = u.get("output_tokens") or 0
+                prompt += p_
+                completion += c_
+                tokens += p_ + c_
+            continue
         if '"kind":"usage"' in line or '"kind": "usage"' in line:
             try:
                 u = (json.loads(line).get("usage") or {})

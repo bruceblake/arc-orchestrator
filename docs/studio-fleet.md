@@ -19,10 +19,10 @@ Rules 1–9, byte for byte.
 
 | | `local` (default) | `studio` | `studio-api` |
 |---|---|---|---|
-| Frontier models | — | Claude Code, Codex CLI, Gemini CLI | Opus 5.5, GPT-6-Astra, Grok-4.7, Gemini-3.8-Flash |
+| Frontier models | — | Claude Code (Opus 5.5), Codex CLI (GPT-6 Astra/Sol/Luna) | Opus 5.5, GPT-6 (Sol default), Grok-4.7, Gemini-3.8-Flash |
 | Reached via | — | **the operator's own subscriptions** | OpenRouter, per token |
 | Always present | GLM-5.3 + DeepSeek on ARC | same | same |
-| Families | 2 | 5 | 6 |
+| Families | 2 | 4 | 6 |
 | Planner | GLM-5.3 | Claude-Opus-5.5 | Claude-Opus-5.5 |
 | PR reviewers | 1 (thin, Rule 5) | 2 | 2 |
 | Concurrency | full | **1–2 per CLI** | full |
@@ -36,12 +36,26 @@ believed something else was building your game.
 ### Why two studio profiles
 
 `studio` runs the frontier roles on **subscription CLIs** — Claude Code on a
-Claude plan, `codex exec` on a ChatGPT plan, `gemini -p` on a Google AI plan.
-No per-token billing at all. All three stream JSON events on stdout in
-headless mode, so the existing `Driver` pump, stall clock, live transcript and
-`parse_transcript` work unmodified; `drivers.ClaudeCodeDriver`,
-`CodexDriver` and `GeminiDriver` are thin argv wrappers, not a new execution
-path.
+Claude plan and `codex exec` on a ChatGPT plan. No per-token billing at all.
+Both stream JSON events on stdout in headless mode, so the existing `Driver`
+pump, stall clock, live transcript and `parse_transcript` work unmodified;
+`drivers.ClaudeCodeDriver` and `CodexDriver` are thin argv wrappers, not a new
+execution path.
+
+Verified live on 2026-09-22, not assumed:
+
+- **Claude Code** on Claude Pro runs `claude-opus-5-5` with
+  `apiKeySource: "none"` — the plan, not an API key.
+- **Codex** on the ChatGPT plan runs **`gpt-6-astra` by default**, and the plan
+  also serves `gpt-6-sol` and `gpt-6-luna`. So the spec's 3D/asset operator is
+  available on the subscription, and the roster names it `GPT-6-Astra` (or
+  whichever tier `ARC_STUDIO_OPENAI_MODEL` picks); `codex exec -m` is derived
+  from that name, so the model the roster names is the model Codex runs.
+- **Gemini is not on this profile.** On the operator's Google plan it is usable
+  only inside the Antigravity IDE, not from a headless CLI. `GeminiDriver`
+  stays in `drivers.py` for an account that can use it, and Gemini remains
+  available per token on `studio-api`. The visual judge here rotates between
+  Claude and GPT-6, both of which read images.
 
 The catch is not technical. **A consumer plan is metered for one human at one
 terminal**, on rolling windows — a live run shows
@@ -239,8 +253,8 @@ certainty ends an argument that should have continued.
 ### The same toolkit as a shell command
 
 `run()` above is the API-profile tool loop. On the **subscription profile**
-the same four capabilities are reached as a shell command, because Codex,
-Claude Code and the Gemini CLI all have shell access and no billed tool loop
+the same four capabilities are reached as a shell command, because Codex
+and Claude Code both have shell access and no billed tool loop
 is involved:
 
 ```bash
@@ -332,10 +346,15 @@ this workload calls "3D work" is writing Blender Python and engine glue —
 ordinary strong-coding-model work — and the pipeline is designed to RETRY, so
 a 5x rate applies to every fix round, not just the successful one.
 
-So `ARC_STUDIO_OPENAI_MODEL` defaults to `GPT-6-Sol`. Move to Astra
-deliberately, for work that has actually stalled, and compare whether it
-converged in fewer rounds. That comparison is what `main.py code bench` exists
-for; paying 5x on an untested assumption is not a measurement.
+So on **`studio-api`** `ARC_STUDIO_OPENAI_MODEL` defaults to `GPT-6-Sol`. Move
+to Astra deliberately, for work that has actually stalled, and compare whether
+it converged in fewer rounds. That comparison is what `main.py code bench`
+exists for; paying 5x on an untested assumption is not a measurement.
+
+On **`studio`** the default is `GPT-6-Astra`: through the ChatGPT plan there is
+no per-token charge, and Astra is what the plan runs by default. It will draw
+down the plan's allowance faster than Sol; set
+`ARC_STUDIO_OPENAI_MODEL=GPT-6-Sol` if the plan's windows start to bind.
 
 ---
 
@@ -346,9 +365,22 @@ Subscription profile (no credits needed):
 ```bash
 # 0. one-time: log the CLIs in to your own plans
 claude          # already logged in if you use Claude Code
-codex login     # sign in with your ChatGPT account
-gemini          # pick "Login with Google", then /quit
+codex login     # sign in with your ChatGPT account (see the WSL note below)
 ```
+
+**On WSL**, `codex login` opens a browser on the Windows side that has to call
+back to `localhost:1455` inside WSL, and that handoff can fail. A failed
+attempt also keeps running and holds the port, so every retry fails too
+(`default login callback port is unavailable` in `~/.codex/log`). If Codex is
+already logged in on Windows, share that login instead:
+
+```bash
+ln -s /mnt/c/Users/<you>/.codex/auth.json ~/.codex/auth.json
+codex login status          # -> Logged in using ChatGPT
+```
+
+Symlink it; don't copy it. Two copies of one OAuth refresh token can log each
+other out when either one refreshes.
 
 ```bash
 # 1. API profile only: register the models with opencode (backs the file up)
@@ -375,9 +407,21 @@ ARC_FLEET=studio .venv/bin/python main.py studio judge  prison-escape ~/repos/pr
 ARC_FLEET=studio .venv/bin/python main.py studio promote prison-escape ~/repos/prison-escape
 ```
 
-External toolchain: `sudo pacman -S blender godot xorg-server-xvfb ffmpeg xdotool`.
+External toolchain:
 
-Subscription CLIs: `npm install -g @openai/codex @google/gemini-cli`.
+```bash
+sudo pacman -Syu blender godot mesa ffmpeg xorg-server-xvfb xdotool
+```
+
+The `-Syu` matters. A plain `pacman -S` against a package database that is
+days old asks the mirrors for package versions they have already deleted, and
+every download fails with a 404 (measured here: a 14-day-old database, and
+`blender-5.2.1-2` returning HTTP 404 on the first mirror). Arch does not
+support partial upgrades, so refresh and upgrade in one step. `mesa` is listed
+explicitly because rendering on WSLg needs its d3d12 driver, and it is not
+installed by default.
+
+Subscription CLI: `npm install -g @openai/codex`.
 
 ---
 
@@ -397,10 +441,10 @@ Subscription CLIs: `npm install -g @openai/codex @google/gemini-cli`.
 | `ARC_STUDIO_FUZZ_BOTS` | 16 | bots in the swarm |
 | `ARC_STUDIO_FUZZ_SECONDS` | 60 | how long the swarm runs |
 | `ARC_STUDIO_DISPLAY` | `$DISPLAY` | X display for rendering and computer use |
-| `ARC_STUDIO_OPENAI_MODEL` | GPT-6-Sol | which GPT-6 tier the API profile runs: `GPT-6-Luna`, `GPT-6-Sol` or `GPT-6-Astra`; fatal on any other value |
+| `ARC_STUDIO_OPENAI_MODEL` | GPT-6-Astra on `studio`, GPT-6-Sol on `studio-api` | which GPT-6 tier the studio runs: `GPT-6-Luna`, `GPT-6-Sol` or `GPT-6-Astra`; fatal on any other value |
 | `ARC_CLAUDE_MODEL` | opus | model argument for the Claude Code harness |
-| `ARC_CODEX_MODEL` | (unset) | model argument for `codex exec`; empty lets the CLI pick what the plan serves |
-| `ARC_GEMINI_MODEL` | (unset) | model argument for `gemini -p`; empty lets the CLI decide |
+| `ARC_CODEX_MODEL` | (unset) | model argument for `codex exec`; empty derives it from the roster (`GPT-6-Astra` -> `gpt-6-astra`) |
+| `ARC_GEMINI_MODEL` | (unset) | model argument for `gemini -p`, for an account whose plan allows the Gemini CLI (not on the default subscription roster) |
 | `ARC_CODEX_SANDBOX` | workspace-write | Codex sandbox policy; the agent may edit its worktree and nothing outside it |
 | `ARC_CLAUDE_BIN` | (unset) | pin the Claude Code binary |
 | `ARC_CODEX_BIN` | (unset) | pin the Codex binary (npm global bins are often off PATH) |

@@ -97,7 +97,7 @@ WORKERS = {
                  "machine, inventory, contraband crafting, clearance levels.",
     },
     "gpt_6_astra_operator": {
-        "models": ("GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna", "GPT-5.2-Codex"),
+        "models": ("GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna"),
         "brief": "3D, rigging and animation operator. Modular asset "
                  "generation and retopology under a triangle budget, "
                  "auto-rigging and weight transfer, synchronised animation "
@@ -106,16 +106,16 @@ WORKERS = {
     },
     "grok_feature_driver": {
         # No subscription CLI worth driving headlessly serves Grok, so on the
-        # subscription profile this worker resolves to Codex instead of
-        # disappearing — the ROLE (fast in-engine feature work) still exists.
-        "models": ("Grok-4.7", "GPT-6-Sol", "GPT-6-Luna", "GPT-5.2-Codex"),
+        # subscription profile this worker resolves to whichever GPT-6 tier
+        # Codex runs — the ROLE (fast in-engine feature work) still exists.
+        "models": ("Grok-4.7", "GPT-6-Sol", "GPT-6-Luna", "GPT-6-Astra"),
         "brief": "In-engine feature driver. Player input controllers "
                  "(sneak/sprint/crawl/crouch, first and third person), HUD and "
                  "UI data-binding: suspicion meter, stamina, noise radius, "
                  "clock.",
     },
     "gemini_visual_judge": {
-        "models": ("Gemini-3.8-Flash", "Gemini-3-Pro"),
+        "models": ("Gemini-3.8-Flash",),
         "brief": "Multimodal visual judge and spatial auditor. Scores renders "
                  "against Bucket A and Bucket B, flags clipping, missing "
                  "materials, light leaks and z-fighting. NEVER implements.",
@@ -191,20 +191,21 @@ def implementing_workers():
 STUDIO_REVIEW_PREFERENCE = {
     # Architect's own work gets the other frontier reader, not a flash model.
     "Claude-Opus-5.5":  ("openai", "google", "xai", "glm", "deepseek"),
-    "GPT-6-Astra":      ("anthropic", "google", "xai", "glm", "deepseek"),
+    # GPT-6 work goes to the judge family when it is live (studio-api), and
+    # otherwise to GLM on ARC — NOT to anthropic first: on the subscription
+    # profile Claude has ONE slot, shared with the operator's own session.
+    "GPT-6-Astra":      ("google", "glm", "anthropic", "xai", "deepseek"),
     # Mechanical and content work: Gemini first. It is review-capable on the
     # roster, an order of magnitude cheaper, and has the widest lane (cap 6).
     "Grok-4.7":         ("google", "anthropic", "openai", "glm", "deepseek"),
-    "DeepSeek-V4.1-Flash-thinking-max": ("google", "xai", "anthropic", "openai", "glm"),
-    "GLM-5.3":          ("google", "xai", "anthropic", "openai", "deepseek"),
-    # Subscription profile. Note the inversion: here `google` (the Gemini CLI)
-    # is the widest lane at 2 concurrent sessions while `anthropic` is capped
-    # at ONE, because the operator's own interactive Claude Code shares that
-    # plan. Sending every review to anthropic would not merely cost more, it
-    # would serialise the whole fleet behind the human at the keyboard.
-    "GPT-5.2-Codex":    ("google", "anthropic", "glm", "deepseek"),
-    "GPT-6-Sol":        ("google", "anthropic", "xai", "glm", "deepseek"),
-    "GPT-6-Luna":       ("google", "anthropic", "xai", "glm", "deepseek"),
+    "DeepSeek-V4.1-Flash-thinking-max": ("google", "xai", "openai", "anthropic", "glm"),
+    "GLM-5.3":          ("google", "xai", "openai", "anthropic", "deepseek"),
+    # On the subscription profile `anthropic` has ONE slot, shared with the
+    # operator's own Claude Code session, so ARC-served GLM comes before it:
+    # sending every review to anthropic would serialise the whole fleet
+    # behind the human at the keyboard.
+    "GPT-6-Sol":        ("google", "glm", "anthropic", "xai", "deepseek"),
+    "GPT-6-Luna":       ("google", "glm", "anthropic", "xai", "deepseek"),
 }
 
 

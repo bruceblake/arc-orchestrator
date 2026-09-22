@@ -93,9 +93,13 @@ print(json.dumps({
         # OpenRouter. An alias here would silently bill an empty account.
         self.assertEqual(sub["planner"], "Claude-Opus-5.5")
         self.assertEqual(sub["aliases"], {})
-        for harness in ("claude", "codex", "gemini"):
+        for harness in ("claude", "codex"):
             self.assertIn(harness, sub["harnesses"])
         self.assertNotIn("xai", sub["fams"], "no Grok without a subscription CLI")
+        # Gemini is only usable inside Antigravity on the operator's plan, so
+        # the subscription roster has no google family and no gemini harness.
+        self.assertNotIn("google", sub["fams"])
+        self.assertNotIn("gemini", sub["harnesses"])
 
         # API: everything through opencode/openrouter, with aliases.
         self.assertEqual(api["planner"], "Claude-Opus-5.5")
@@ -131,24 +135,25 @@ print(json.dumps({
     IMAGE_PROBE = """
 import json, drivers
 out = {}
-for m in ("Gemini-3-Pro", "GPT-5.2-Codex", "Claude-Opus-5.5"):
-    d = drivers.driver_for(m, "reviewer")
+for key, d in (("gemini", drivers.GeminiDriver("any", "reviewer", bench=True)),
+               ("codex", drivers.driver_for("GPT-6-Astra", "reviewer")),
+               ("claude", drivers.driver_for("Claude-Opus-5.5", "reviewer"))):
     d.images = ["/renders/a.png"]
-    out[m] = " ".join(d.argv("SCORE THIS", None))
+    out[key] = " ".join(d.argv("SCORE THIS", None))
 print(json.dumps(out))
 """
 
     def test_each_cli_attaches_images_its_own_way(self):
         """The visual judge is useless if the renders never reach the model."""
         argv = json.loads(in_studio(self.IMAGE_PROBE))
-        self.assertIn("@/renders/a.png", argv["Gemini-3-Pro"])
-        self.assertIn("-i /renders/a.png", argv["GPT-5.2-Codex"])
-        self.assertIn("/renders/a.png", argv["Claude-Opus-5.5"])
+        self.assertIn("@/renders/a.png", argv["gemini"])
+        self.assertIn("-i /renders/a.png", argv["codex"])
+        self.assertIn("/renders/a.png", argv["claude"])
 
     ROLE_PROBE = """
 import drivers
 try:
-    drivers.driver_for("Gemini-3-Pro", "implementer")
+    drivers.driver_for("GPT-6-Astra", "planner")
     print("NO ERROR")
 except ValueError:
     print("refused")
@@ -173,6 +178,83 @@ except ValueError:
     def test_studio_fleet_config_path_is_separate(self):
         out = in_studio("import config; print(config.OPENCODE_FLEET_CONFIG.name)")
         self.assertNotEqual(out, config.OPENCODE_FLEET_CONFIG.name)
+
+
+# Real headless streams, captured 2026-09-22 (trimmed). They pin the parsers
+# to what the CLIs ACTUALLY emit rather than to what their docs describe.
+CODEX_STREAM = "\n".join([
+    '{"type":"thread.started","thread_id":"01a0cac5-5b94-7e51-b39c-bc1315ad50d3"}',
+    '{"type":"turn.started"}',
+    '{"type":"item.completed","item":{"id":"item_r","type":"reasoning","text":"the user wants a verdict"}}',
+    '{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"{\\"pass\\": true}"}}',
+    '{"type":"turn.completed","usage":{"input_tokens":13731,"cached_input_tokens":11776,'
+    '"cache_write_input_tokens":0,"output_tokens":9,"reasoning_output_tokens":0}}',
+])
+CLAUDE_STREAM = "\n".join([
+    '{"type":"system","subtype":"init","session_id":"55feada1","model":"claude-opus-5-5","apiKeySource":"none"}',
+    '{"type":"assistant","message":{"content":[{"type":"text","text":"thinking about it"}]},"session_id":"55feada1"}',
+    '{"type":"result","subtype":"success","is_error":false,"result":"{\\"pass\\": true}",'
+    '"session_id":"55feada1","usage":{"input_tokens":2,"cache_creation_input_tokens":8175,'
+    '"cache_read_input_tokens":8141,"output_tokens":9}}',
+])
+
+
+class TestSubscriptionStreams(unittest.TestCase):
+    """The subscription CLIs' real output reaches the pipeline intact."""
+
+    def test_codex_answer_is_the_agent_message_not_the_reasoning(self):
+        import drivers
+        sid, text = drivers.parse_transcript(CODEX_STREAM)
+        self.assertEqual(sid, "01a0cac5-5b94-7e51-b39c-bc1315ad50d3")
+        self.assertEqual(text, '{"pass": true}')
+        self.assertNotIn("the user wants", text)
+
+    def test_codex_verdict_parses_for_review(self):
+        import code_tasks, drivers
+        self.assertEqual(code_tasks._parse_verdict(drivers.parse_transcript(CODEX_STREAM)[1]),
+                         {"pass": True, "issues": []})
+
+    def test_codex_tokens_do_not_double_count_the_cache(self):
+        import drivers
+        self.assertEqual(drivers.transcript_tokens(CODEX_STREAM), (13740, 13731, 9))
+
+    def test_claude_answer_and_tokens(self):
+        import code_tasks, drivers
+        sid, text = drivers.parse_transcript(CLAUDE_STREAM)
+        self.assertEqual(sid, "55feada1")
+        self.assertEqual(code_tasks._parse_verdict(text), {"pass": True, "issues": []})
+        # cache reads and writes are prompt tokens: 2 + 8175 + 8141
+        self.assertEqual(drivers.transcript_tokens(CLAUDE_STREAM), (16327, 16318, 9))
+
+    MODEL_PROBE = """
+import config, drivers, json
+d = drivers.driver_for(config.STUDIO_OPENAI_MODEL, "implementer")
+print(json.dumps({"model": config.STUDIO_OPENAI_MODEL, "argv": d.argv("P", None)}))
+"""
+
+    def test_codex_runs_the_model_the_roster_names(self):
+        d = json.loads(in_studio(self.MODEL_PROBE))
+        self.assertEqual(d["model"], "GPT-6-Astra",
+                         "the subscription default is Astra: no per-token cost")
+        i = d["argv"].index("-m")
+        self.assertEqual(d["argv"][i + 1], "gpt-6-astra")
+
+    def test_api_profile_defaults_to_sol(self):
+        out = in_studio("import config; print(config.STUDIO_OPENAI_MODEL)",
+                        fleet="studio-api")
+        self.assertEqual(out, "GPT-6-Sol")
+
+    def test_single_claude_slot_is_not_the_default_reviewer(self):
+        """Your own Claude session shares the plan; review must not queue on it."""
+        out = in_studio(
+            "import config, json;"
+            "from studio.schemas.task import implementing_workers, worker_model,"
+            " preferred_reviewer;"
+            "print(json.dumps([preferred_reviewer(worker_model(w)) or"
+            " config.cross_family_reviewer(worker_model(w))"
+            " for w in implementing_workers()"
+            " if worker_model(w) != 'Claude-Opus-5.5']))")
+        self.assertNotIn("anthropic", json.loads(out))
 
 
 class TestGameTaskGovernance(unittest.TestCase):
@@ -462,11 +544,14 @@ class TestJudgeContract(StudioDirTest):
         out = in_studio(
             "import json;"
             "from studio.evaluation import judge_loop as j;"
-            "print(json.dumps([j.judge_for_round(n) for n in (1,2,3,4)]))")
-        picks = json.loads(out)
-        self.assertEqual(picks[0], picks[3], "the rotation must cycle")
-        self.assertGreater(len(set(picks)), 1,
-                           "one model judging every round is not a rotation")
+            "n=len(j.available_judges());"
+            "print(json.dumps({'n': n,"
+            " 'picks': [j.judge_for_round(r) for r in range(1, 2 * n + 1)]}))")
+        d = json.loads(out)
+        n, picks = d["n"], d["picks"]
+        self.assertGreater(n, 1, "one model judging every round is not a rotation")
+        self.assertEqual(picks[:n], picks[n:], "the rotation must cycle")
+        self.assertEqual(len(set(picks[:n])), n, "every judge takes a turn")
 
 
 class TestBudget(StudioDirTest):

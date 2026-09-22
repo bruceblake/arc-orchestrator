@@ -228,7 +228,14 @@ _STUDIO_OPENAI_CHOICES = {
     "GPT-6-Sol":   "openrouter/openai/gpt-6-sol",
     "GPT-6-Luna":  "openrouter/openai/gpt-6-luna",
 }
-STUDIO_OPENAI_MODEL = os.getenv("ARC_STUDIO_OPENAI_MODEL", "GPT-6-Sol")
+# The default depends on how the tier is PAID FOR. On studio-api every token
+# is billed, so the default is Sol at a fifth of Astra's rate. On the
+# subscription profile the same models come through the operator's ChatGPT
+# plan with no per-token charge — verified 2026-09-22: `codex exec` on that
+# plan runs gpt-6-astra by default and also serves gpt-6-sol and gpt-6-luna —
+# so the default there is Astra, the model the 3D/Blender work was scoped for.
+STUDIO_OPENAI_MODEL = (os.getenv("ARC_STUDIO_OPENAI_MODEL")
+                       or ("GPT-6-Sol" if FLEET == "studio-api" else "GPT-6-Astra"))
 if STUDIO_OPENAI_MODEL not in _STUDIO_OPENAI_CHOICES:
     raise ValueError(
         f"ARC_STUDIO_OPENAI_MODEL={STUDIO_OPENAI_MODEL!r} is not one of "
@@ -256,8 +263,8 @@ _STUDIO_FAMILIES = {
     # (every render, every round) and is the cheapest model on the studio
     # roster, so it gets the widest lane.
     "google":    Family("google",    6, {"default": "Gemini-3.8-Flash"}),
-    # (the subscription profile's google model is Gemini-3-Pro; `models` here
-    #  is only consulted by the research workload, which runs on ARC)
+    # (only minted under studio-api; `models` is consulted by the research
+    #  workload, which runs on ARC)
 }
 if STUDIO:
     # Only the families a LIVE roster row names. A family with no row raises
@@ -265,8 +272,8 @@ if STUDIO:
     # Union-Alpha's `union` family on 2026-09-17 — and the subscription
     # profile has no xai model, because Grok has no subscription CLI path
     # worth driving headlessly.
-    _wanted = {"anthropic", "openai", "google"} | (
-        {"xai"} if FLEET == "studio-api" else set())
+    _wanted = {"anthropic", "openai"} | (
+        {"xai", "google"} if FLEET == "studio-api" else set())
     FAMILIES.update({k: v for k, v in _STUDIO_FAMILIES.items() if k in _wanted})
 
 # Derived, never hand-written: a literal list here kept naming gpt-oss after it
@@ -686,16 +693,17 @@ ROSTER = [
 # the fleet's strongest model: PLANNER_MODEL, the head of REVIEW_FAMILIES, and
 # the last escalation stage. Claude is last in both, on purpose.
 _STUDIO_SUB_ROSTER = [
-    # The visual judge. REVIEWER ROLES ONLY — it never implements. The Gemini
-    # CLI takes images as @path references, which is what lets it score
-    # renders; inside the code pipeline it is the cheap, wide-context reviewer.
-    ("Gemini-3-Pro",     "google",    "gemini", "medium", 2,
-     ("reviewer", "pr_reviewer"),                          None, None),
-    # Codex on the ChatGPT plan: the implementation workhorse of this profile,
-    # and the closest thing a subscription gives to the spec's 3D/asset
-    # operator. `codex exec --json` streams events; `--output-schema` pins a
-    # review verdict's shape.
-    ("GPT-5.2-Codex",    "openai",    "codex",  "hard",   2,
+    # No Gemini row. The Gemini CLI was the planned judge here, but on the
+    # operator's Google plan Gemini is usable only inside the Antigravity IDE,
+    # not from a headless CLI (operator report, 2026-09-22). GeminiDriver stays
+    # in drivers.py for an account that can use it; the visual judge on this
+    # profile rotates between Claude and GPT-6, both of which read images.
+    #
+    # Codex on the ChatGPT plan, running the GPT-6 tier STUDIO_OPENAI_MODEL
+    # names (`codex exec -m gpt-6-astra` etc.). Verified 2026-09-22: the plan
+    # serves gpt-6-astra (its default), gpt-6-sol and gpt-6-luna. This is the
+    # spec's 3D/asset operator, on the subscription.
+    (STUDIO_OPENAI_MODEL, "openai",   "codex",  "hard",   2,
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
     # Claude Code on Claude Pro: architect, netcode, and the studio PLANNER.
     # Capped at ONE concurrent session — the operator's own interactive Claude
@@ -736,7 +744,9 @@ _STUDIO_ALIASES = {
 # the CLI use its own default", which is the safest posture: a plan serves
 # what it serves, and naming a model the plan does not carry fails the run.
 CLAUDE_CLI_MODEL = os.getenv("ARC_CLAUDE_MODEL", "opus")
-CODEX_CLI_MODEL = os.getenv("ARC_CODEX_MODEL", "")
+# Derived from the roster model by default (GPT-6-Astra -> gpt-6-astra), so the
+# model the roster NAMES is the model Codex RUNS; ARC_CODEX_MODEL overrides.
+CODEX_CLI_MODEL = os.getenv("ARC_CODEX_MODEL", "") or STUDIO_OPENAI_MODEL.lower()
 GEMINI_CLI_MODEL = os.getenv("ARC_GEMINI_MODEL", "")
 
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
