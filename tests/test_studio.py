@@ -858,6 +858,43 @@ class TestScaffoldUnderGodot(unittest.TestCase):
             self.assertAlmostEqual(metrics["wall_height_m"], 6.0, places=2)
 
 
+def _can_render():
+    import os
+    return godot.available() and bool(config.STUDIO_DISPLAY or os.environ.get("DISPLAY")
+                                      or os.path.exists("/tmp/.X11-unix/X0"))
+
+
+@unittest.skipUnless(_can_render(), "needs godot and a display")
+class TestRenderUnderGodot(unittest.TestCase):
+    """A real render: lit, aimed, and not blank.
+
+    The first live render hung for 400s+ (the harness was launched as a scene,
+    not with --script); the second produced ~2KB solid-black frames (no light
+    in a graybox, and look_at() called before the tree started).
+    """
+
+    def test_graybox_renders_real_frames(self):
+        import os
+        from studio import scaffold
+        with tempfile.TemporaryDirectory() as d:
+            scaffold.create(d)
+            subprocess.run([godot.godot_bin(), "--headless", "--path", d, "--import",
+                            "--quit"], capture_output=True, timeout=300)
+            old = config.STUDIO_DISPLAY
+            config.STUDIO_DISPLAY = old or os.environ.get("DISPLAY") or ":0"
+            try:
+                shots = godot.render(d, camera_system.to_json(
+                    camera_system.cameras_for_round("t", 1)), Path(d) / "out",
+                    scene="res://scenes/world.tscn", resolution="480x270", timeout=300)
+            finally:
+                config.STUDIO_DISPLAY = old
+            self.assertEqual(len(shots), 4)
+            for s in shots:
+                # A lit, aimed graybox frame compresses to tens of KB; the
+                # blank frames it replaced were ~2KB of one or two colours.
+                self.assertGreater(Path(s).stat().st_size, 10_000, s)
+
+
 class TestScaffold(unittest.TestCase):
     def test_scaffold_passes_its_own_phase_0_gate(self):
         from studio import scaffold

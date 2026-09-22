@@ -203,9 +203,13 @@ def doctor(probe=True):
         problems.append(
             "ARC_FLEET is 'local': the studio roster is not loaded. Every "
             "studio command needs ARC_FLEET=studio.")
-    if not report["openrouter_key"]:
+    # The key only matters on studio-api. On the subscription profile every
+    # frontier model is reached through its own CLI and OpenRouter is never
+    # called, so flagging a missing key there sent the operator after a
+    # credential nothing needs.
+    if config.STUDIO_API and not report["openrouter_key"]:
         problems.append(
-            "OPENROUTER_API_KEY is not set — no studio model can be called.")
+            "OPENROUTER_API_KEY is not set — no studio-api model can be called.")
     for name, st in (report.get("cli") or {}).items():
         if not st["bin"]:
             problems.append(
