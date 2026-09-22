@@ -311,6 +311,60 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .kb-help li { padding: 3px 0; }
 .kb-help kbd { display: inline-block; min-width: 18px; padding: 1px 6px; border: 1px solid var(--border); border-radius: 4px; background: #0d1117; text-align: center; margin-right: 8px; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---- tabs ---- */
+.tabs { display: flex; gap: 4px; margin: 0 0 12px; border-bottom: 1px solid var(--border); }
+.tab { background: none; border: 1px solid transparent; border-bottom: none; color: var(--dim);
+  padding: 6px 14px; border-radius: 6px 6px 0 0; cursor: pointer; font: inherit; font-size: 12px; }
+.tab:hover { color: var(--text); }
+.tab[aria-selected="true"] { color: var(--accent); border-color: var(--border); background: var(--panel);
+  margin-bottom: -1px; }
+.tab-hidden { display: none !important; }
+/* ---- studio ---- */
+.st-head { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+.st-head .pill.good b { color: var(--ok); } .st-head .pill.warn b { color: var(--warn); }
+.st-head .pill.bad b { color: var(--err); }
+.st-proj { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.st-proj.open { border-color: #3d444d; background: #11161d; }
+.st-proj-h { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; cursor: pointer; }
+.st-proj h3 { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px;
+  margin: 14px 0 6px; }
+.st-phases { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin: 10px 0 2px; }
+.st-phase { display: flex; gap: 6px; align-items: center; padding: 4px 10px; border-radius: 14px;
+  border: 1px solid var(--border); color: var(--dim); font-size: 12px; }
+.st-phase .n { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%;
+  background: #21262d; font-size: 10px; }
+.st-phase.done { color: var(--ok); border-color: #2a4a33; } .st-phase.done .n { background: #1f3a28; }
+.st-phase.current { color: var(--accent); border-color: var(--accent); background: #1c1629; }
+.st-phase.current .n { background: var(--accent); color: #0d1117; }
+.st-arrow { color: #484f58; }
+.st-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 14px; }
+.st-fails { margin: 6px 0; padding-left: 18px; font-size: 12px; color: var(--text); }
+.st-fails li { margin: 2px 0; }
+.st-metrics { border-collapse: collapse; font-size: 12px; margin-top: 8px; width: 100%; }
+.st-metrics th { text-align: left; color: var(--dim); font-weight: normal; border-bottom: 1px solid var(--border); padding: 3px 6px; }
+.st-metrics td { padding: 3px 6px; border-bottom: 1px solid #21262d; }
+.st-metrics .num { text-align: right; font-variant-numeric: tabular-nums; }
+.st-board { margin-bottom: 10px; }
+.st-board-h { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.st-bar { height: 4px; background: #21262d; border-radius: 2px; margin: 6px 0; overflow: hidden; }
+.st-bar span { display: block; height: 100%; background: var(--ok); }
+.st-task { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 12px; padding: 3px 0; }
+.st-task .g { width: 12px; color: var(--dim); } .st-task.running .g { color: var(--accent); }
+.st-task.merged .g, .st-task.done .g { color: var(--ok); } .st-task.failed .g { color: var(--err); }
+.st-task .id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.st-err { flex-basis: 100%; font-size: 11px; padding-left: 20px; }
+.st-round { margin-bottom: 8px; } .st-round > summary { cursor: pointer; font-size: 12px; }
+.st-shots { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; margin: 8px 0; }
+.st-shot { display: block; border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+  text-decoration: none; color: var(--dim); font-size: 11px; background: #0d1117; }
+.st-shot img { display: block; width: 100%; aspect-ratio: 16/9; object-fit: cover; }
+.st-shot span { display: block; padding: 3px 6px; }
+.st-shot.adversarial { border-color: var(--warn); }
+.st-verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 8px; }
+.st-verdict { border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 12px; }
+.st-verdict b { font-size: 16px; } .st-verdict ul { margin: 4px 0; padding-left: 18px; }
+.st-halt { margin-top: 10px; }
 </style>
 </head>
 <body>
@@ -346,6 +400,16 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   <div class="panel err" id="vpn-banner" style="display:none" role="alert"></div>
   <div class="panel err" id="stale-banner" style="display:none"></div>
   <div id="view-list">
+    <div class="tabs" role="tablist" aria-label="dashboard sections">
+      <button class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+      <button class="tab" role="tab" data-tab="studio" aria-selected="false">Studio</button>
+      <button class="tab" role="tab" data-tab="projects" aria-selected="false">Projects</button>
+      <button class="tab" role="tab" data-tab="activity" aria-selected="false">Activity</button>
+    </div>
+    <div class="panel tab-hidden" id="studio-panel">
+      <h2>Studio <span class="hint" id="studio-meta"></span></h2>
+      <div id="studio"><div class="empty">loading…</div></div>
+    </div>
     <div class="panel" id="summary-panel">
       <h2>Summary <span class="hint">is everything OK?</span></h2>
       <div class="hint" id="summary-line">waiting for fleet data…</div>
@@ -533,6 +597,9 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 
 <script src="/common.js"></script>
 <script src="/panels/state.js"></script>
+<!-- tabs.js BEFORE summary.js: summary.js reads TAB_PRIMARY, a const, and a
+     const read before its declaration runs throws even under typeof. -->
+<script src="/panels/tabs.js"></script>
 <script src="/panels/fleet.js"></script>
 <script src="/panels/slots.js"></script>
 <script src="/panels/agents.js"></script>
@@ -543,6 +610,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/transcript.js"></script>
 <script src="/panels/summary.js"></script>
 <script src="/panels/keyboard.js"></script>
+<script src="/panels/studio.js"></script>
 <script>
 // ---- boot: staggered polls so nothing fires all at once ----
 loadHash(); syncFilterControls();
@@ -558,6 +626,11 @@ setTimeout(() => setInterval(pollEvents, 8000), 1200);
 setInterval(pollProjects, 5000);
 setInterval(pollGithub, 20000);
 setTimeout(() => { pollTopos(); setInterval(pollTopos, 30000); }, 2000);
+// Studio: poll fast only while its tab is showing; the snapshot runs gate
+// checks and reads render archives, which there is no point doing unseen.
+jget("/api/studio").then(d => { STUDIO = d; initTabs(((d || {}).projects || []).length > 0); renderStudio(); })
+  .catch(() => initTabs(false));
+setInterval(() => { if (TAB === "studio") pollStudio(); }, 5000);
 </script>
 </body>
 </html>

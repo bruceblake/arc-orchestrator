@@ -115,10 +115,26 @@ def cmd_status(args):
     return 0
 
 
+def _measure_first(repo):
+    """Refresh Bucket A measurements on the repo before a gate reads them."""
+    from studio.engine import godot
+    if not godot.available():
+        print("  (godot not installed: gating on the last recorded measurements)")
+        return
+    try:
+        m = godot.measure(repo)
+    except godot.GodotError as exc:
+        print(f"  measurer FAILED — {str(exc).splitlines()[0]}")
+        return
+    if m is not None:
+        print(f"  measured {len(m)} dimension(s) on {repo}")
+
+
 def cmd_gate(args):
     from studio.engine import stage_manager
-    result = stage_manager.check(args.project, str(Path(args.repo).expanduser()),
-                                 args.phase)
+    repo = str(Path(args.repo).expanduser())
+    _measure_first(repo)
+    result = stage_manager.check(args.project, repo, args.phase)
     print(f"phase {result['phase']}: {'PASS' if result['passed'] else 'FAIL'}")
     for f in result["failures"]:
         print(f"  - {f}")
@@ -127,6 +143,7 @@ def cmd_gate(args):
 
 def cmd_promote(args):
     from studio.engine import stage_manager
+    _measure_first(str(Path(args.repo).expanduser()))
     result = stage_manager.promote(args.project, str(Path(args.repo).expanduser()),
                                    force=args.force, reason=args.reason or "")
     if result["promoted"]:

@@ -63,6 +63,16 @@ def load_taskfile(path, policy=None):
     the allowed implementers/reviewers, permit self-review, or disable review;
     with policy=None the governance defaults apply byte-for-byte."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
+    # A taskfile planned by the studio names models that exist only on the
+    # studio roster. Loaded under another fleet it failed with "model X must
+    # be an implementer ([GLM, DeepSeek])", which reads like a bad plan rather
+    # than the wrong fleet. Say which fleet it needs instead.
+    fleet = (data.get("project") or {}).get("fleet")
+    if fleet and fleet != config.FLEET:
+        raise ValueError(
+            f"{Path(path).name} was planned for ARC_FLEET={fleet}, but this "
+            f"process runs ARC_FLEET={config.FLEET}; run it with "
+            f"ARC_FLEET={fleet}")
     repo = Path(data["project"]["repo"]).resolve()
     pol = policy or {}
     models = set(config.IMPLEMENTER_MODELS) | set(pol.get("implementers", []))

@@ -340,6 +340,24 @@ class TestGameTaskGovernance(unittest.TestCase):
                 else (code_tasks.load_taskfile(path), None, None)
         self.assertTrue(tasks)
 
+    def test_compiled_taskfile_records_its_fleet(self):
+        with tempfile.TemporaryDirectory() as d:
+            doc = gt.compile_taskfile(name="p", repo=d, tasks=[self._task()])
+        self.assertEqual(doc["project"]["fleet"], config.FLEET)
+
+    def test_loader_refuses_a_taskfile_from_another_fleet(self):
+        """It used to say 'model X must be an implementer', naming the wrong problem."""
+        import code_tasks
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "tf.json"
+            path.write_text(json.dumps({"project": {
+                "name": "p", "repo": d, "fleet": "studio",
+                "tasks": [{"id": "a", "prompt": "x", "model": "GPT-6-Sol",
+                           "reviewer": "glm", "verify_cmd": "true"}]}}))
+            with self.assertRaises(ValueError) as cm:
+                code_tasks.load_taskfile(path)
+        self.assertIn("ARC_FLEET=studio", str(cm.exception))
+
     def test_unknown_dep_is_rejected_at_compile(self):
         with self.assertRaises(ValueError):
             gt.compile_taskfile(name="p", repo="/tmp",
@@ -390,6 +408,64 @@ print(json.dumps({"len": len(p), "has_planner": config.PLANNER_MODEL in p,
             d = json.loads(in_studio(self.PROBE, fleet=fleet))
             self.assertGreater(d["len"], 3000, fleet)
             self.assertEqual(len(d["workers"]), 3, fleet)
+
+
+class TestStudioStatus(unittest.TestCase):
+    """The dashboard's Studio snapshot: read-only, contained, and accurate."""
+
+    def setUp(self):
+        self._dirs = [tempfile.TemporaryDirectory() for _ in range(3)]
+        self.studio, self.tasks, self.repo = (Path(d.name) for d in self._dirs)
+        self._old = (config.STUDIO_DIR, config.TASKS_DIR)
+        config.STUDIO_DIR, config.TASKS_DIR = self.studio, str(self.tasks)
+        (self.repo / "studio_target.json").write_text(json.dumps(
+            {"bucket_a": {"corridor_width_m": 2.4, "vent_bore_m": 0.7},
+             "bucket_b": {"mood": "dusk"}}))
+        (self.repo / "studio_metrics.json").write_text(json.dumps({"corridor_width_m": 2.41}))
+        stage_manager.promote("game", str(self.repo), force=True)
+        (self.tasks / "game-phase_1_graybox_prototyping.json").write_text(json.dumps(
+            {"project": {"name": "game", "repo": str(self.repo), "tasks": [
+                {"id": "a", "model": "GLM-5.3", "reviewer": "deepseek", "deps": []},
+                {"id": "b", "model": "GLM-5.3", "reviewer": "deepseek", "deps": ["a"]}]}}))
+
+    def tearDown(self):
+        config.STUDIO_DIR, config.TASKS_DIR = self._old
+        for d in self._dirs:
+            d.cleanup()
+
+    def test_snapshot_reports_phase_gate_metrics_and_board(self):
+        from studio import status
+        snap = status.snapshot(None, live_tasks={"a": "reviewer"})
+        (p,) = snap["projects"]
+        self.assertEqual(p["phase"], "PHASE_1_GRAYBOX_PROTOTYPING")
+        self.assertEqual([x["state"] for x in p["phases"]][:3], ["done", "current", "todo"])
+        m = {r["key"]: r for r in p["metrics"]}
+        self.assertTrue(m["corridor_width_m"]["ok"])
+        self.assertIsNone(m["vent_bore_m"]["measured"])
+        tasks = {t["id"]: t for t in p["boards"][0]["tasks"]}
+        self.assertEqual(tasks["a"]["status"], "in_review",
+                         "a task under review must not read as 'running'")
+        self.assertEqual(tasks["b"]["status"], "pending")
+
+    def test_snapshot_does_not_emit_gate_events(self):
+        """The view polls every few seconds; looking is not an event."""
+        from studio import status
+        with capture_events() as evs:
+            status.snapshot(None)
+        self.assertEqual(evs.of("studio.gate"), [])
+
+    def test_image_path_is_contained(self):
+        from studio import status
+        rd = config.studio_run_dir("game", create=True) / "round_1"
+        rd.mkdir(parents=True)
+        (rd / "shot.png").write_bytes(b"\x89PNG")
+        (rd / "meta.json").write_text("{}")
+        self.assertIsNotNone(status.image_path("game", "round_1/shot.png"))
+        for bad in ("../../etc/passwd", "round_1/meta.json", "/etc/hosts",
+                    "round_1/../../x.png"):
+            self.assertIsNone(status.image_path("game", bad), bad)
+        for bad_project in ("../game", "", "a/b", "x" * 200):
+            self.assertIsNone(status.image_path(bad_project, "round_1/shot.png"))
 
 
 class TestCameras(unittest.TestCase):

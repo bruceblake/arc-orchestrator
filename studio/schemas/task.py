@@ -424,7 +424,11 @@ def compile_taskfile(*, name, repo, tasks, pattern="", after=None, goal=""):
         for d in t["deps"]:
             if d not in seen:
                 raise ValueError(f"task {t['id']}: unknown dep {d!r}")
-    project = {"name": name, "repo": str(repo), "tasks": compiled}
+    # The fleet a taskfile was planned under travels WITH it: its models only
+    # exist on that roster, so `code run`, check.sh and the dashboard's Run
+    # button all need to know which fleet can load it.
+    project = {"name": name, "repo": str(repo), "fleet": config.FLEET,
+               "tasks": compiled}
     if pattern:
         project["pattern"] = pattern
     if after:
