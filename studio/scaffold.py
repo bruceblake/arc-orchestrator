@@ -72,7 +72,13 @@ const DOOR_WIDTH_M := 1.1
 const DOOR_HEIGHT := 2.1
 
 const VENT_BORE_M := 0.7         # square vent shaft interior
-const VENT_HEIGHT := 2.6         # height of the vent floor above the corridor floor
+# The vent runs in the crawl space ABOVE the corridor ceiling, its floor slab
+# resting on the ceiling slab. (The first cut of this table put it at 2.6m,
+# inside a 3.0m corridor, and the phase-1 gate measured the ceiling cutting
+# the crawl space to 0.38m — the gate working exactly as intended.)
+const CEILING_SLAB := 0.2
+const VENT_SLAB := 0.15
+const VENT_HEIGHT := CEILING_HEIGHT_M + CEILING_SLAB + VENT_SLAB  # vent floor, top face
 
 const TOWER_HEIGHT := 9.0
 const TOWER_FOOTPRINT := 3.0
@@ -117,17 +123,17 @@ func _build_cell_block() -> void:
 \tvar half := Layout.CORRIDOR_WIDTH_M * 0.5
 \tvar block_len := float(Layout.CELLS_PER_SIDE) * Layout.CELL_WIDTH
 \tfor side in [-1.0, 1.0]:
-\t\tvar wall_x := side * (half + Layout.WALL_THICKNESS * 0.5)
+\t\tvar wall_x: float = side * (half + Layout.WALL_THICKNESS * 0.5)
 \t\t_box("CorridorWall%d" % int(side), Vector3(Layout.WALL_THICKNESS,
 \t\t\tLayout.CEILING_HEIGHT_M, block_len),
 \t\t\tVector3(wall_x, Layout.CEILING_HEIGHT_M * 0.5, 0.0))
-\t\tvar back_x := side * (half + Layout.CELL_DEPTH)
+\t\tvar back_x: float = side * (half + Layout.CELL_DEPTH)
 \t\t_box("CellBack%d" % int(side), Vector3(Layout.WALL_THICKNESS,
 \t\t\tLayout.CEILING_HEIGHT_M, block_len),
 \t\t\tVector3(back_x, Layout.CEILING_HEIGHT_M * 0.5, 0.0))
 \t_box("Ceiling", Vector3(Layout.CORRIDOR_WIDTH_M + Layout.CELL_DEPTH * 2.0,
-\t\t0.2, block_len),
-\t\tVector3(0.0, Layout.CEILING_HEIGHT_M + 0.1, 0.0))
+\t\tLayout.CEILING_SLAB, block_len),
+\t\tVector3(0.0, Layout.CEILING_HEIGHT_M + Layout.CEILING_SLAB * 0.5, 0.0))
 
 func _build_perimeter() -> void:
 \tvar h := Layout.YARD_SIZE * 0.5
@@ -154,7 +160,7 @@ func _build_vent() -> void:
 \tvar bore := Layout.VENT_BORE_M
 \tvar y := Layout.VENT_HEIGHT + bore * 0.5
 \tvar length := Layout.CORRIDOR_LENGTH
-\tvar t := 0.15
+\tvar t: float = Layout.VENT_SLAB
 \t_box("VentFloor", Vector3(bore + t * 2.0, t, length),
 \t\tVector3(0.0, Layout.VENT_HEIGHT - t * 0.5, 0.0))
 \t_box("VentRoof", Vector3(bore + t * 2.0, t, length),
@@ -177,22 +183,27 @@ FILES["tools/measure.gd"] = '''extends SceneTree
 const OUT := "res://studio_metrics.json"
 
 func _initialize() -> void:
-\tvar world := load("res://scenes/world.tscn").instantiate()
+\tvar world: Node3D = load("res://scenes/world.tscn").instantiate()
 \tget_root().add_child(world)
 \tawait physics_frame
 \tawait physics_frame
-\tvar space := world.get_world_3d().direct_space_state
+\tvar space: PhysicsDirectSpaceState3D = world.get_world_3d().direct_space_state
 \tvar metrics := {}
 \tmetrics["corridor_width_m"] = _span(space, Vector3(0, 1.2, 0), Vector3.RIGHT)
-\tmetrics["ceiling_height_m"] = _distance(space, Vector3(0, 0.05, 0), Vector3.UP)
+\t# Vertical heights are ABSOLUTE: start height + distance to the hit.
+\tmetrics["ceiling_height_m"] = _height_above(space, Vector3(0, 0.01, 0))
 \tvar vent_y: float = Layout.VENT_HEIGHT + Layout.VENT_BORE_M * 0.5
 \tmetrics["vent_bore_m"] = _span(space, Vector3(0, vent_y, 0), Vector3.RIGHT)
-\tmetrics["crouch_clearance_m"] = _distance(
-\t\tspace, Vector3(0, Layout.VENT_HEIGHT + 0.02, 0), Vector3.UP)
+\tmetrics["crouch_clearance_m"] = snappedf(
+\t\t_height_above(space, Vector3(0, Layout.VENT_HEIGHT + 0.01, 0))
+\t\t- Layout.VENT_HEIGHT, 0.001)
 \tmetrics["walk_speed_mps"] = Layout.WALK_SPEED_MPS
 \tmetrics["sprint_speed_mps"] = Layout.SPRINT_SPEED_MPS
-\tmetrics["wall_height_m"] = _distance(
-\t\tspace, Vector3(0, 0.05, Layout.YARD_SIZE * 0.5), Vector3.UP)
+\t# Cast DOWN onto the wall top from above: a ray that starts inside a
+\t# shape never reports hitting it, so casting up from the wall's own
+\t# footprint measured nothing at all (-1).
+\tmetrics["wall_height_m"] = _top_below(
+\t\tspace, Vector3(0, 80.0, Layout.YARD_SIZE * 0.5))
 \tvar f := FileAccess.open(OUT, FileAccess.WRITE)
 \tf.store_string(JSON.stringify(metrics, "  "))
 \tf.close()
@@ -207,9 +218,13 @@ func _cast(space: PhysicsDirectSpaceState3D, from: Vector3, dir: Vector3,
 \t\treturn -1.0
 \treturn from.distance_to(hit["position"])
 
-func _distance(space: PhysicsDirectSpaceState3D, from: Vector3,
-\t\tdir: Vector3) -> float:
-\treturn snappedf(_cast(space, from, dir), 0.001)
+func _height_above(space: PhysicsDirectSpaceState3D, from: Vector3) -> float:
+\tvar d := _cast(space, from, Vector3.UP)
+\treturn -1.0 if d < 0.0 else snappedf(from.y + d, 0.001)
+
+func _top_below(space: PhysicsDirectSpaceState3D, from: Vector3) -> float:
+\tvar d := _cast(space, from, Vector3.DOWN)
+\treturn -1.0 if d < 0.0 else snappedf(from.y - d, 0.001)
 
 func _span(space: PhysicsDirectSpaceState3D, from: Vector3,
 \t\taxis: Vector3) -> float:
