@@ -239,15 +239,22 @@ func _initialize() -> void:
 \t\troot.add_child(packed.instantiate())
 \tvar cam := Camera3D.new()
 \troot.add_child(cam)
+\t# _initialize runs BEFORE the tree starts: nothing is "inside the tree"
+\t# yet, so look_at() fails and scenes have not run _ready() (the graybox
+\t# level builds itself there). One frame lets both happen.
+\tawait process_frame
 \tcam.make_current()
+\t_ensure_inspection_light(root)
 \tvar manifest := []
 \tfor entry in parsed["cameras"]:
 \t\tvar pos: Array = entry.get("position", [0, 2, 5])
 \t\tvar look: Array = entry.get("look_at", [0, 0, 0])
-\t\tcam.position = Vector3(pos[0], pos[1], pos[2])
+\t\tvar p := Vector3(pos[0], pos[1], pos[2])
 \t\tvar target := Vector3(look[0], look[1], look[2])
-\t\tif not cam.position.is_equal_approx(target):
-\t\t\tcam.look_at(target, Vector3.UP)
+\t\tif p.is_equal_approx(target):
+\t\t\tcam.position = p
+\t\telse:
+\t\t\tcam.look_at_from_position(p, target, Vector3.UP)
 \t\tcam.fov = float(entry.get("fov", 70.0))
 \t\tfor _i in range(SETTLE_FRAMES):
 \t\t\tawait process_frame
@@ -266,6 +273,34 @@ func _initialize() -> void:
 \tmf.close()
 \tprint("STUDIO_RENDER_OK ", manifest.size())
 \tquit(0)
+
+
+# A graybox has no lights on purpose (lighting is phase 3), but a judge cannot
+# score what it cannot see: an unlit render is solid black. So when a scene
+# brings NO light and NO environment, the harness adds neutral inspection
+# lighting (a sun and a procedural sky) and nothing else. A scene with its own
+# lighting renders exactly as authored; phase 3 is judged on the game's
+# lights, never on these.
+func _ensure_inspection_light(root: Node) -> void:
+\tif root.find_children("*", "Light3D", true, false).is_empty():
+\t\tvar sun := DirectionalLight3D.new()
+\t\tsun.name = "StudioInspectionSun"
+\t\tsun.rotation_degrees = Vector3(-50.0, 35.0, 0.0)
+\t\tsun.light_energy = 1.2
+\t\tsun.shadow_enabled = true
+\t\troot.add_child(sun)
+\tif root.find_children("*", "WorldEnvironment", true, false).is_empty():
+\t\tvar env := Environment.new()
+\t\tvar sky := Sky.new()
+\t\tsky.sky_material = ProceduralSkyMaterial.new()
+\t\tenv.background_mode = Environment.BG_SKY
+\t\tenv.sky = sky
+\t\tenv.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+\t\tenv.ambient_light_energy = 0.6
+\t\tvar we := WorldEnvironment.new()
+\t\twe.name = "StudioInspectionEnvironment"
+\t\twe.environment = env
+\t\troot.add_child(we)
 ''' % {"settle": SETTLE_FRAMES}
 
 
@@ -296,8 +331,11 @@ def render(project, cameras, out_dir, *, scene="", timeout=900, display=None,
     cam_file = out_dir / "cameras.json"
     cam_file.write_text(json.dumps({"cameras": list(cameras)}, indent=2),
                         encoding="utf-8")
+    # `--script` is essential. A bare .gd path is taken as a SCENE to open:
+    # Godot then runs the project's main scene in a window forever and the
+    # harness never executes (the first live render hung for 400s+ exactly so).
     args = ["--rendering-driver", "opengl3", "--resolution", resolution,
-            RENDER_HARNESS, "--", str(cam_file), str(out_dir)]
+            "--script", RENDER_HARNESS, "--", str(cam_file), str(out_dir)]
     if scene:
         args.append(scene)
     rc, out = _run(args, project=project, timeout=timeout, display=disp)
