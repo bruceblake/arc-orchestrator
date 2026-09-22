@@ -2203,18 +2203,19 @@ class CodexDriver(Driver):
     images = ()          # attached with -i, which codex exec supports natively
 
     def argv(self, prompt, session_id):
-        a = [config.codex_bin(), "exec", "--json", "--skip-git-repo-check",
-             "-s", config.CODEX_SANDBOX]
-        for img in self.images:
-            a += ["-i", str(img)]
+        # `resume` is a subcommand of exec, not a flag, so it has to sit
+        # immediately after `exec`.
+        a = [config.codex_bin(), "exec"] + (["resume", session_id] if session_id else [])
+        a += ["--json", "--skip-git-repo-check", "-s", config.CODEX_SANDBOX]
+        if not session_id:
+            for img in self.images:
+                a += ["-i", str(img)]
         if config.CODEX_CLI_MODEL:
             a += ["-m", config.CODEX_CLI_MODEL]
-        if session_id:
-            # `resume` is a subcommand of exec, not a flag, so it has to sit
-            # immediately after `exec`.
-            a = ([config.codex_bin(), "exec", "resume", session_id, "--json",
-                  "--skip-git-repo-check", "-s", config.CODEX_SANDBOX]
-                 + (["-m", config.CODEX_CLI_MODEL] if config.CODEX_CLI_MODEL else []))
+        if config.CODEX_REASONING_EFFORT:
+            # Verified 2026-09-22: the session record then carries
+            # "reasoning_effort":"high" for gpt-6-sol.
+            a += ["-c", f'model_reasoning_effort="{config.CODEX_REASONING_EFFORT}"']
         return a + [prompt]
 
     def extra_env(self, worktree):

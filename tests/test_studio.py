@@ -133,10 +133,10 @@ print(json.dumps({
             self.assertLessEqual(cap, 2, f"{h} must not fan out on a consumer plan")
 
     IMAGE_PROBE = """
-import json, drivers
+import json, config, drivers
 out = {}
 for key, d in (("gemini", drivers.GeminiDriver("any", "reviewer", bench=True)),
-               ("codex", drivers.driver_for("GPT-6-Astra", "reviewer")),
+               ("codex", drivers.driver_for(config.STUDIO_OPENAI_MODEL, "reviewer")),
                ("claude", drivers.driver_for("Claude-Opus-5.5", "reviewer"))):
     d.images = ["/renders/a.png"]
     out[key] = " ".join(d.argv("SCORE THIS", None))
@@ -153,7 +153,8 @@ print(json.dumps(out))
     ROLE_PROBE = """
 import drivers
 try:
-    drivers.driver_for("GPT-6-Astra", "planner")
+    import config
+    drivers.driver_for(config.STUDIO_OPENAI_MODEL, "planner")
     print("NO ERROR")
 except ValueError:
     print("refused")
@@ -234,10 +235,36 @@ print(json.dumps({"model": config.STUDIO_OPENAI_MODEL, "argv": d.argv("P", None)
 
     def test_codex_runs_the_model_the_roster_names(self):
         d = json.loads(in_studio(self.MODEL_PROBE))
-        self.assertEqual(d["model"], "GPT-6-Astra",
-                         "the subscription default is Astra: no per-token cost")
+        self.assertEqual(d["model"], "GPT-6-Sol", "operator decision 2026-09-22")
         i = d["argv"].index("-m")
-        self.assertEqual(d["argv"][i + 1], "gpt-6-astra")
+        self.assertEqual(d["argv"][i + 1], "gpt-6-sol")
+
+    def test_codex_runs_at_high_effort_not_the_model_default(self):
+        """gpt-6-sol defaults to medium; the operator chose high."""
+        argv = json.loads(in_studio(self.MODEL_PROBE))["argv"]
+        self.assertIn('model_reasoning_effort="high"', argv)
+        self.assertEqual(argv[argv.index('model_reasoning_effort="high"') - 1], "-c")
+
+    RESUME_PROBE = """
+import config, drivers, json
+d = drivers.driver_for(config.STUDIO_OPENAI_MODEL, "implementer")
+print(json.dumps(d.argv("P", "sess-1")))
+"""
+
+    def test_a_resumed_session_keeps_model_and_effort(self):
+        argv = json.loads(in_studio(self.RESUME_PROBE))
+        self.assertEqual(argv[1:4], ["exec", "resume", "sess-1"])
+        self.assertIn("gpt-6-sol", argv)
+        self.assertIn('model_reasoning_effort="high"', argv)
+
+    def test_ultra_effort_is_refused(self):
+        """ultra delegates to sub-agents, multiplying sessions past the cap."""
+        env = dict(os.environ, ARC_FLEET="studio", ARC_CODEX_REASONING="ultra",
+                   PYTHONPATH=str(ROOT))
+        p = subprocess.run([sys.executable, "-c", "import config"], env=env,
+                           capture_output=True, text=True, cwd=str(ROOT), timeout=60)
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("ultra", p.stderr)
 
     def test_api_profile_defaults_to_sol(self):
         out = in_studio("import config; print(config.STUDIO_OPENAI_MODEL)",

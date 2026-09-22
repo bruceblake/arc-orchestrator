@@ -19,7 +19,7 @@ Rules 1–9, byte for byte.
 
 | | `local` (default) | `studio` | `studio-api` |
 |---|---|---|---|
-| Frontier models | — | Claude Code (Opus 5.5), Codex CLI (GPT-6 Astra/Sol/Luna) | Opus 5.5, GPT-6 (Sol default), Grok-4.7, Gemini-3.8-Flash |
+| Frontier models | — | Claude Code (Opus 5.5), Codex CLI (**GPT-6 Sol, high effort**) | Opus 5.5, GPT-6 Sol, Grok-4.7, Gemini-3.8-Flash |
 | Reached via | — | **the operator's own subscriptions** | OpenRouter, per token |
 | Always present | GLM-5.3 + DeepSeek on ARC | same | same |
 | Families | 2 | 4 | 6 |
@@ -47,10 +47,11 @@ Verified live on 2026-09-22, not assumed:
 - **Claude Code** on Claude Pro runs `claude-opus-5-5` with
   `apiKeySource: "none"` — the plan, not an API key.
 - **Codex** on the ChatGPT plan runs **`gpt-6-astra` by default**, and the plan
-  also serves `gpt-6-sol` and `gpt-6-luna`. So the spec's 3D/asset operator is
-  available on the subscription, and the roster names it `GPT-6-Astra` (or
-  whichever tier `ARC_STUDIO_OPENAI_MODEL` picks); `codex exec -m` is derived
-  from that name, so the model the roster names is the model Codex runs.
+  also serves `gpt-6-sol` and `gpt-6-luna`. The studio runs **`GPT-6-Sol` at
+  `high` reasoning effort** (operator decision); `codex exec -m` is derived
+  from the roster name and the effort is passed as
+  `-c model_reasoning_effort="high"`, which the session record confirms. It is
+  passed explicitly because Sol's own default is `medium`.
 - **Gemini is not on this profile.** On the operator's Google plan it is usable
   only inside the Antigravity IDE, not from a headless CLI. `GeminiDriver`
   stays in `drivers.py` for an account that can use it, and Gemini remains
@@ -351,10 +352,10 @@ to Astra deliberately, for work that has actually stalled, and compare whether
 it converged in fewer rounds. That comparison is what `main.py code bench`
 exists for; paying 5x on an untested assumption is not a measurement.
 
-On **`studio`** the default is `GPT-6-Astra`: through the ChatGPT plan there is
-no per-token charge, and Astra is what the plan runs by default. It will draw
-down the plan's allowance faster than Sol; set
-`ARC_STUDIO_OPENAI_MODEL=GPT-6-Sol` if the plan's windows start to bind.
+On **`studio`** the default is also `GPT-6-Sol`, at `high` reasoning effort
+(`ARC_CODEX_REASONING`), by operator decision: Sol at high effort in place of
+Astra, trading some depth for a slower draw on the plan's rolling allowance.
+`ARC_STUDIO_OPENAI_MODEL=GPT-6-Astra` switches back.
 
 ---
 
@@ -441,8 +442,9 @@ Subscription CLI: `npm install -g @openai/codex`.
 | `ARC_STUDIO_FUZZ_BOTS` | 16 | bots in the swarm |
 | `ARC_STUDIO_FUZZ_SECONDS` | 60 | how long the swarm runs |
 | `ARC_STUDIO_DISPLAY` | `$DISPLAY` | X display for rendering and computer use |
-| `ARC_STUDIO_OPENAI_MODEL` | GPT-6-Astra on `studio`, GPT-6-Sol on `studio-api` | which GPT-6 tier the studio runs: `GPT-6-Luna`, `GPT-6-Sol` or `GPT-6-Astra`; fatal on any other value |
+| `ARC_STUDIO_OPENAI_MODEL` | GPT-6-Sol | which GPT-6 tier the studio runs: `GPT-6-Luna`, `GPT-6-Sol` or `GPT-6-Astra`; fatal on any other value |
 | `ARC_CLAUDE_MODEL` | opus | model argument for the Claude Code harness |
+| `ARC_CODEX_REASONING` | high | Codex reasoning effort (`low`, `medium`, `high`, `xhigh`, `max`; empty = the model's default, `medium` for Sol). `ultra` is refused: it delegates to sub-agents past the harness cap |
 | `ARC_CODEX_MODEL` | (unset) | model argument for `codex exec`; empty derives it from the roster (`GPT-6-Astra` -> `gpt-6-astra`) |
 | `ARC_GEMINI_MODEL` | (unset) | model argument for `gemini -p`, for an account whose plan allows the Gemini CLI (not on the default subscription roster) |
 | `ARC_CODEX_SANDBOX` | workspace-write | Codex sandbox policy; the agent may edit its worktree and nothing outside it |

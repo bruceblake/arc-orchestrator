@@ -228,14 +228,12 @@ _STUDIO_OPENAI_CHOICES = {
     "GPT-6-Sol":   "openrouter/openai/gpt-6-sol",
     "GPT-6-Luna":  "openrouter/openai/gpt-6-luna",
 }
-# The default depends on how the tier is PAID FOR. On studio-api every token
-# is billed, so the default is Sol at a fifth of Astra's rate. On the
-# subscription profile the same models come through the operator's ChatGPT
-# plan with no per-token charge — verified 2026-09-22: `codex exec` on that
-# plan runs gpt-6-astra by default and also serves gpt-6-sol and gpt-6-luna —
-# so the default there is Astra, the model the 3D/Blender work was scoped for.
-STUDIO_OPENAI_MODEL = (os.getenv("ARC_STUDIO_OPENAI_MODEL")
-                       or ("GPT-6-Sol" if FLEET == "studio-api" else "GPT-6-Astra"))
+# GPT-6 Sol on both studio profiles, by operator decision 2026-09-22. On the
+# subscription profile it comes through the ChatGPT plan (verified: the plan
+# serves gpt-6-astra, gpt-6-sol and gpt-6-luna), and Sol at high reasoning
+# effort (CODEX_REASONING_EFFORT) is the chosen trade between Astra's depth
+# and the plan's rolling allowance. Astra and Luna stay one variable away.
+STUDIO_OPENAI_MODEL = os.getenv("ARC_STUDIO_OPENAI_MODEL", "GPT-6-Sol")
 if STUDIO_OPENAI_MODEL not in _STUDIO_OPENAI_CHOICES:
     raise ValueError(
         f"ARC_STUDIO_OPENAI_MODEL={STUDIO_OPENAI_MODEL!r} is not one of "
@@ -747,6 +745,20 @@ CLAUDE_CLI_MODEL = os.getenv("ARC_CLAUDE_MODEL", "opus")
 # Derived from the roster model by default (GPT-6-Astra -> gpt-6-astra), so the
 # model the roster NAMES is the model Codex RUNS; ARC_CODEX_MODEL overrides.
 CODEX_CLI_MODEL = os.getenv("ARC_CODEX_MODEL", "") or STUDIO_OPENAI_MODEL.lower()
+
+# Reasoning effort for `codex exec`, passed as -c model_reasoning_effort=...
+# Set EXPLICITLY because the model's own default is not what was chosen:
+# gpt-6-sol defaults to `medium` (Codex's model cache, 2026-09-22), and an
+# unset effort would silently run every task at medium. The plan supports
+# low, medium, high, xhigh, max and ultra; empty leaves the model default.
+# `ultra` is refused here: it adds "automatic task delegation", i.e. the model
+# spawning its own sub-agents, which would multiply sessions behind the
+# harness cap this repo uses to protect the operator's plan.
+CODEX_REASONING_EFFORT = os.getenv("ARC_CODEX_REASONING", "high")
+if CODEX_REASONING_EFFORT not in ("", "low", "medium", "high", "xhigh", "max"):
+    raise ValueError(
+        f"ARC_CODEX_REASONING={CODEX_REASONING_EFFORT!r}: use low, medium, high, "
+        "xhigh or max (ultra is refused: it delegates to sub-agents)")
 GEMINI_CLI_MODEL = os.getenv("ARC_GEMINI_MODEL", "")
 
 TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
