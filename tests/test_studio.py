@@ -368,6 +368,30 @@ class TestGameTaskGovernance(unittest.TestCase):
                            "review load must not funnel into one family")
 
 
+class TestPlannerPrompt(unittest.TestCase):
+    """The planner prompt renders on every studio profile.
+
+    It once read a WORKERS key that no longer existed, and nothing rendered
+    the prompt, so the first live `studio plan` died with a KeyError.
+    """
+
+    PROBE = """
+from studio import planner
+from studio.schemas.task import PHASE_1_GRAYBOX_PROTOTYPING as P
+p = planner.system_prompt(P, "/tmp/game")
+import json, config
+print(json.dumps({"len": len(p), "has_planner": config.PLANNER_MODEL in p,
+                  "workers": [w for w in ("opus_architect", "gpt_6_astra_operator",
+                                          "deepseek_qa_swarm") if w in p]}))
+"""
+
+    def test_prompt_renders_on_both_studio_profiles(self):
+        for fleet in ("studio", "studio-api"):
+            d = json.loads(in_studio(self.PROBE, fleet=fleet))
+            self.assertGreater(d["len"], 3000, fleet)
+            self.assertEqual(len(d["workers"]), 3, fleet)
+
+
 class TestCameras(unittest.TestCase):
     def test_anchors_only_before_the_adversarial_round(self):
         cams = camera_system.cameras_for_round("p", 1)
@@ -799,6 +823,39 @@ class TestFuzzSwarm(StudioDirTest):
             with self.assertRaises(deepseek_fuzzer.ProtocolError) as cm:
                 deepseek_fuzzer.load_protocol(d)
         self.assertIn("WebSocketMultiplayerPeer", str(cm.exception))
+
+
+@unittest.skipUnless(godot.available(), "godot is not installed")
+class TestScaffoldUnderGodot(unittest.TestCase):
+    """Run the scaffold's GDScript in a REAL Godot and check what it measures.
+
+    The first real run found two classes of bug that no Python test could:
+    `:=` type inference that Godot 4 refuses on untyped values (the scripts
+    did not parse at all), and a level whose vent shaft ran THROUGH the
+    corridor ceiling, which the raycast measurer reported as 0.38m of crawl
+    clearance against a 0.7m target. Skipped where Godot is absent (CI).
+    """
+
+    def test_scaffold_parses_measures_and_meets_its_own_target(self):
+        from studio import scaffold
+        with tempfile.TemporaryDirectory() as d:
+            scaffold.create(d)
+            exe = godot.godot_bin()
+            subprocess.run([exe, "--headless", "--path", d, "--import", "--quit"],
+                           capture_output=True, text=True, timeout=300)
+            out = subprocess.run(
+                [exe, "--headless", "--path", d, "--script", "res://tools/measure.gd"],
+                capture_output=True, text=True, timeout=300)
+            text = out.stdout + out.stderr
+            self.assertEqual(godot.output_errors(text), [], text[-2000:])
+            self.assertIn("STUDIO_METRICS_OK", text)
+            gate = subprocess.run([sys.executable, "tools/assert_metrics.py"],
+                                  cwd=d, capture_output=True, text=True, timeout=60)
+            self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+            metrics = json.loads(Path(d, "studio_metrics.json").read_text())
+            self.assertAlmostEqual(metrics["crouch_clearance_m"], 0.7, places=2)
+            self.assertAlmostEqual(metrics["ceiling_height_m"], 3.0, places=2)
+            self.assertAlmostEqual(metrics["wall_height_m"], 6.0, places=2)
 
 
 class TestScaffold(unittest.TestCase):

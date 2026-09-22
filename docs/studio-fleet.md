@@ -422,6 +422,14 @@ support partial upgrades, so refresh and upgrade in one step. `mesa` is listed
 explicitly because rendering on WSLg needs its d3d12 driver, and it is not
 installed by default.
 
+Godot's `--headless` mode (script checks, imports, the raycast measurer,
+logic tests) needs **none** of this: the official self-contained Linux build
+runs on a bare WSL Arch install, and is a reasonable stopgap installed to
+`~/.local/opt/godot` without sudo. RENDERING does: a minimal Arch install has
+no `libX11`, `libxkbcommon`, `fontconfig` or GL at all, so Godot cannot reach
+the WSLg display even though its socket exists. Installing the `godot` and
+`blender` packages pulls those libraries in as dependencies.
+
 Subscription CLI: `npm install -g @openai/codex`.
 
 ---

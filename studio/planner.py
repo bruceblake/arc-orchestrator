@@ -24,6 +24,7 @@ What the planner is told, in order:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -73,9 +74,10 @@ def _roster_prose():
     """Today's workers, from the roster — never a written-down list."""
     lines = []
     for worker in sorted(WORKERS):
-        model = WORKERS[worker]["model"]
-        if model not in config.MODEL_ROLES:
-            continue
+        try:
+            model = worker_model(worker)
+        except ValueError:
+            continue                  # no live model for this worker today
         tier = next((t for t, ms in config.IMPLEMENT_TIERS.items() if model in ms), "-")
         roles = sorted(config.MODEL_ROLES[model])
         may_impl = "implementer" in roles
@@ -90,8 +92,9 @@ def _capacity_prose():
     """How much can actually run at once, so the plan's width is realistic."""
     rows = []
     for worker in sorted(WORKERS):
-        model = WORKERS[worker]["model"]
-        if model not in config.MODEL_ROLES:
+        try:
+            model = worker_model(worker)
+        except ValueError:
             continue
         rows.append(f"  {worker}: at most {config.driver_limit(model)} at once")
     harness = ", ".join(f"{h} pool {config.harness_limit(h)}"
@@ -214,6 +217,37 @@ Two to six tasks. Prefer breadth: independent tasks that can run at once beat \
 a chain of dependent ones."""
 
 
+async def _plan_via_harness(model, phase, repo, goal, project):
+    """Plan through the model's own CLI harness (the subscription profile).
+
+    A subscription model has no API route at all — it is reached only through
+    its CLI — so the planner runs as an ordinary planner-role driver, exactly
+    as `main.py code plan` runs GLM-5.3. That also gives the planning call a
+    transcript and a harness_runs row (Rule 7) and puts it under the harness
+    cap, which matters here: on Claude Pro the cap is ONE session, shared with
+    the operator's own Claude Code.
+
+    It runs in a scratch directory, not the game repo: a planner reads the
+    goal and writes a plan, and has no business editing the code it plans.
+    """
+    import tempfile
+    import drivers
+    driver = drivers.driver_for(model, "planner")
+    prompt = (system_prompt(phase, repo)
+              + "\n\n--- THE GOAL ---\n" + goal
+              + "\n\nReply with the JSON object only. Do not create or edit any "
+                "files; the plan is your whole answer.")
+    with tempfile.TemporaryDirectory(prefix="studio-plan-") as scratch:
+        res = await driver.run(prompt, scratch, task_id=f"plan-{project}")
+    if res.exit_code != 0 and not (res.text or "").strip():
+        raise ValueError(f"the planner ({model}) exited {res.exit_code} with no output; "
+                         f"transcript: {res.transcript_path}")
+    usage = {"prompt_tokens": res.prompt_tokens,
+             "completion_tokens": res.completion_tokens,
+             "cost_usd": 0.0}          # covered by the subscription
+    return res.text or "", usage
+
+
 def plan(goal, repo, *, phase, project="prison-escape", model=None,
          out_path=None, pattern=""):
     """Ask the planner for a taskfile, validate it, and write it.
@@ -230,18 +264,22 @@ def plan(goal, repo, *, phase, project="prison-escape", model=None,
             f"(fleet={config.FLEET}); planner is {config.PLANNER_MODEL}")
     if phase not in PHASES:
         raise ValueError(f"unknown phase {phase!r}")
-    msg, usage = openrouter.chat(
-        model,
-        [{"role": "system", "content": system_prompt(phase, repo)},
-         {"role": "user", "content": goal}],
-        temperature=0.3, max_tokens=16000,
-        response_format={"type": "json_object"},
-        task=f"plan:{project}:{phase}")
-    doc = openrouter.parse_json_object(msg.content or "")
+    if config.STUDIO_API:
+        msg, usage = openrouter.chat(
+            model,
+            [{"role": "system", "content": system_prompt(phase, repo)},
+             {"role": "user", "content": goal}],
+            temperature=0.3, max_tokens=16000,
+            response_format={"type": "json_object"},
+            task=f"plan:{project}:{phase}")
+        text = msg.content or ""
+    else:
+        text, usage = asyncio.run(_plan_via_harness(model, phase, repo, goal,
+                                                    project))
+    doc = openrouter.parse_json_object(text)
     if not doc or not isinstance(doc.get("tasks"), list) or not doc["tasks"]:
         raise ValueError(
-            "the planner returned no usable task list:\n"
-            + (msg.content or "")[:2000])
+            "the planner returned no usable task list:\n" + text[:2000])
     tasks = []
     for raw in doc["tasks"]:
         raw.setdefault("phase", phase)
