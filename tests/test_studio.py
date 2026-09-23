@@ -518,6 +518,40 @@ class TestGameTaskGovernance(unittest.TestCase):
                            "review load must not funnel into one family")
 
 
+class TestPlannerFullReply(unittest.TestCase):
+    """A long plan must reach the parser uncut (a 34k-char plan once did not)."""
+
+    def _res(self, lines, text):
+        import types
+        d = tempfile.mkdtemp()
+        path = Path(d, "plan.jsonl")
+        path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        return types.SimpleNamespace(text=text, transcript_path=str(path))
+
+    def test_the_uncut_result_record_wins_over_the_truncated_text(self):
+        from studio import planner
+        plan = json.dumps({"tasks": [{"id": f"t{i}", "prompt": "x" * 3000}
+                                     for i in range(12)]})
+        res = self._res([{"type": "system"}, {"type": "result", "result": plan}],
+                        text=plan[-3000:])
+        self.assertEqual(planner._full_reply(res), plan)
+
+    def test_codex_and_antigravity_finals_are_read(self):
+        from studio import planner
+        long = "y" * 5000
+        codex = self._res([{"type": "item.completed",
+                            "item": {"type": "agent_message", "text": long}}], "y")
+        agy = self._res([{"event": "result", "result": {"response": long}}], "y")
+        self.assertEqual(planner._full_reply(codex), long)
+        self.assertEqual(planner._full_reply(agy), long)
+
+    def test_missing_transcript_falls_back_to_text(self):
+        import types
+        from studio import planner
+        res = types.SimpleNamespace(text="short", transcript_path="/nonexistent/x")
+        self.assertEqual(planner._full_reply(res), "short")
+
+
 class TestPlannerPrompt(unittest.TestCase):
     """The planner prompt renders on every studio profile.
 
