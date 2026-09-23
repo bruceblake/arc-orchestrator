@@ -846,11 +846,25 @@ class HttpWriteRequestGuard(_PostCase):
         for path in ("/api/projects/create", "/api/projects/run",
                      "/api/projects/stop", "/api/promote",
                      "/api/projects/archive", "/api/projects/retry-task",
+                     "/api/restart",
                      "/api/does-not-exist"):
             with self.subTest(path=path):
                 status, _, req = self._post_raw(path, b"{}")
                 self.assertEqual(status, 401, path)
                 self._assert_untouched(req)
+
+    def test_restart_endpoint_via_http(self):
+        orig_reexec = dashboard._reexec_fn
+        orig_restarting = dashboard._restarting
+        dashboard._reexec_fn = lambda: None
+        dashboard._restarting = False
+        try:
+            status, body, _ = self._post_raw("/api/restart", json.dumps({"force": False}).encode())
+            self.assertEqual(status, 200)
+            self.assertEqual(body.get("status"), "restarting")
+        finally:
+            dashboard._reexec_fn = orig_reexec
+            dashboard._restarting = orig_restarting
 
     def test_get_is_not_gated_by_the_token(self):
         # the pages are meant to be glanced at from a phone without a login

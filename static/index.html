@@ -453,7 +453,10 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 </header>
 <main>
   <div class="panel err" id="vpn-banner" style="display:none" role="alert"></div>
-  <div class="panel err" id="stale-banner" style="display:none"></div>
+  <div class="panel err" id="stale-banner" style="display:none" role="alert">
+    <span id="stale-banner-msg"></span>
+    <button class="act" id="btn-restart-dashboard" type="button" style="margin-left:8px">Restart dashboard</button>
+  </div>
   <div id="view-list">
     <div class="tabs" role="tablist" aria-label="dashboard sections">
       <button class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
