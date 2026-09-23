@@ -152,6 +152,24 @@ if FLEET not in FLEET_PROFILES:
 STUDIO = FLEET in ("studio", "studio-api")
 STUDIO_API = FLEET == "studio-api"
 
+# The concurrency ceiling for the SUBSCRIPTION seats (Claude Code, Codex).
+# Operator directive 2026-09-22: no local session limit on the studio's plan
+# models — let the fleet run as many Claude / GPT-6 sessions as the work
+# offers, and let the PLAN say no. When it does (a 5-hour or weekly usage
+# window runs out) the driver waits for the window to reset instead of
+# failing the task: see USAGE_LIMIT_MAX_WAIT and Driver.run. This used to be
+# claude 1 / codex 2, sized for "one human at one terminal"; a large number
+# rather than a sentinel keeps every cap consumer (semaphores, leases,
+# admission) on plain integers. ARC_SUBSCRIPTION_SESSION_CAP=1 restores a
+# polite single seat when the operator wants their plan back.
+SUBSCRIPTION_SESSION_CAP = max(1, int(os.getenv("ARC_SUBSCRIPTION_SESSION_CAP", "32")))
+# The OpenRouter profile's per-model cap for the same two models. Their
+# driver cap is this // 2 (opencode holds two sessions per process), so 10
+# makes the binding ceiling the opencode harness pool — a measured local
+# cliff, not a provider limit.
+_STUDIO_API_FRONTIER_CAP = 10
+_FRONTIER_CAP = _STUDIO_API_FRONTIER_CAP if STUDIO_API else SUBSCRIPTION_SESSION_CAP
+
 
 @dataclass(frozen=True)
 class Family:
@@ -257,8 +275,8 @@ if STUDIO_OPENAI_MODEL not in _STUDIO_OPENAI_CHOICES:
 # through. Tighten per family with ARC_LIMIT_<FAMILY> the moment OpenRouter
 # starts returning 429s; that is the honest knob, not these numbers.
 _STUDIO_FAMILIES = {
-    "anthropic": Family("anthropic", 4, {"default": "Claude-Opus-5.5"}),
-    "openai":    Family("openai",    4, {"default": STUDIO_OPENAI_MODEL}),
+    "anthropic": Family("anthropic", _FRONTIER_CAP, {"default": "Claude-Opus-5.5"}),
+    "openai":    Family("openai",    _FRONTIER_CAP, {"default": STUDIO_OPENAI_MODEL}),
     "xai":       Family("xai",       4, {"default": "Grok-4.7"}),
     # Gemini is the judge: it is called far more often than the implementers
     # (every render, every round) and is the cheapest model on the studio
@@ -445,6 +463,19 @@ DRIVER_PROGRESS_INTERVAL = float(os.getenv("ARC_DRIVER_PROGRESS_INTERVAL", "60")
 # Capacity rejections back off on this longer, jittered ladder instead.
 DRIVER_CAPACITY_BACKOFF = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF", "90"))
 DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP", "600"))
+# A subscription plan that has spent its usage window (Claude's 5-hour and
+# weekly limits, the ChatGPT plan's Codex limits) is neither a crash nor
+# momentary contention: nothing succeeds until the window RESETS, which can
+# be hours or days away. Driver.run parks the harness until the reset time
+# the refusal names (plus USAGE_LIMIT_MARGIN), polling every USAGE_LIMIT_POLL
+# seconds when it names none, and does not count the wait as an attempt.
+# The whole wait per driver run is bounded by USAGE_LIMIT_MAX_WAIT — 8 days
+# by default, so even a weekly window resets inside it. Before this, a plan
+# refusal was filed as a crash, retried every 60 s for ~20 minutes, and then
+# spent fix rounds and escalations on a model that was simply out of quota.
+USAGE_LIMIT_MAX_WAIT = float(os.getenv("ARC_USAGE_LIMIT_MAX_WAIT", str(8 * 86400)))
+USAGE_LIMIT_POLL = float(os.getenv("ARC_USAGE_LIMIT_POLL", "900"))
+USAGE_LIMIT_MARGIN = float(os.getenv("ARC_USAGE_LIMIT_MARGIN", "60"))
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
@@ -704,12 +735,12 @@ _STUDIO_SUB_ROSTER = [
     # names (`codex exec -m gpt-6-astra` etc.). Verified 2026-09-22: the plan
     # serves gpt-6-astra (its default), gpt-6-sol and gpt-6-luna. This is the
     # spec's 3D/asset operator, on the subscription.
-    (STUDIO_OPENAI_MODEL, "openai",   "codex",  "hard",   2,
+    (STUDIO_OPENAI_MODEL, "openai",   "codex",  "hard",   SUBSCRIPTION_SESSION_CAP,
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
-    # Claude Code on Claude Pro: architect, netcode, and the studio PLANNER.
-    # Capped at ONE concurrent session — the operator's own interactive Claude
-    # Code shares this plan.
-    ("Claude-Opus-5.5",  "anthropic", "claude", "hard",   1,
+    # Claude Code on the Claude plan: architect, netcode, and the studio
+    # PLANNER. Uncapped locally (SUBSCRIPTION_SESSION_CAP); the plan's usage
+    # window is the real limit, and a refusal waits for its reset.
+    ("Claude-Opus-5.5",  "anthropic", "claude", "hard",   SUBSCRIPTION_SESSION_CAP,
      ALL_ROLES,                                            None, None),
 ]
 
@@ -721,9 +752,9 @@ _STUDIO_API_ROSTER = [
      ("reviewer", "pr_reviewer"),                          None, None),
     ("Grok-4.7",          "xai",       "opencode", "medium", 4,
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
-    (STUDIO_OPENAI_MODEL, "openai",    "opencode", "hard",   4,
+    (STUDIO_OPENAI_MODEL, "openai",    "opencode", "hard",   _STUDIO_API_FRONTIER_CAP,
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
-    ("Claude-Opus-5.5",   "anthropic", "opencode", "hard",   4,
+    ("Claude-Opus-5.5",   "anthropic", "opencode", "hard",   _STUDIO_API_FRONTIER_CAP,
      ALL_ROLES,                                            None, None),
 ]
 _STUDIO_ROSTER = _STUDIO_API_ROSTER if FLEET == "studio-api" else _STUDIO_SUB_ROSTER
@@ -1277,19 +1308,18 @@ _MODEL_DRIVER_CAP = {
 # ("kimi" stays in _SESSIONS_PER_PROCESS only so a historical transcript's
 # harness still resolves; no live model maps to that harness. "dsh" stays in
 # _HARNESS_CAP for the same reason since reasonix replaced it on 2026-09-13.)
-# Subscription harnesses are capped LOW on purpose, and the reason is not
-# technical. A consumer plan is metered for one developer at one terminal —
-# Claude Pro on 5-hour and weekly windows, ChatGPT and Google AI similarly —
-# so a fleet that opens six parallel sessions burns the operator's own
-# allowance in minutes and competes with the human using the same plan. The
-# parallel work in this repo belongs on ARC, which is free and has real
-# concurrency; the subscription slots carry the one or two roles that need
-# frontier quality.
-#
-# claude = 1 deliberately: the operator's interactive Claude Code session
-# shares that plan, and a second concurrent fleet session is felt immediately.
+# Subscription harnesses were once capped LOW (claude 1, codex 2) on the
+# grounds that a consumer plan is metered for one developer at one terminal —
+# Claude on 5-hour and weekly windows, ChatGPT similarly — so a wide fleet
+# spends the allowance fast and competes with the human on the same plan.
+# That trade is now the operator's to make, and they made it:
+# claude and codex are NOT capped low any more (operator directive
+# 2026-09-22): SUBSCRIPTION_SESSION_CAP lets them run as wide as the work
+# offers, and the plan's usage window — waited out by Driver.run, not failed
+# on — is the real limit. gemini keeps 2: no live roster row uses it.
 _HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 7,
-                "claude": 1, "codex": 2, "gemini": 2}
+                "claude": SUBSCRIPTION_SESSION_CAP,
+                "codex": SUBSCRIPTION_SESSION_CAP, "gemini": 2}
 
 
 def kimi_wire_model():
