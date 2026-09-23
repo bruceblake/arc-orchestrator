@@ -282,6 +282,45 @@ def usage_reset_at(text, now=None):
 # for the same reset instead of each spending a refusal to find out.
 _usage_blocked_until = {}
 
+# Failover order when a plan window is spent. Cursor is its own subscription,
+# so it is tried before Claude: a Codex refusal should not spend the planner's
+# Claude plan while `agent` still has quota. Same-harness models are never
+# substitutes — another GPT on Codex is the same ChatGPT window.
+# Cursor's Grok first, then Antigravity, then the other plan seats, then
+# OpenCode Zen free implementers (preference 4), then billed API models (5).
+_SWAP_PREFERENCE = {"cursor": 0, "agy": 1, "claude": 2, "codex": 3}
+_ZEN_SWAP_RANK = 4
+
+
+def usage_substitute(model, harness, exclude=()):
+    """An implementer on a harness that is not `harness` and not itself blocked.
+
+    None when swapping is off, or every other seat is blocked too — the caller
+    then parks until this harness's window resets, which is the old behaviour.
+    """
+    if not config.USAGE_SWAP:
+        return None
+    now = time.time()
+    skip = set(exclude)
+    skip.add(model)
+    ranked = []
+    for candidate, cand_harness in config.MODEL_HARNESS.items():
+        if candidate in skip or cand_harness == harness:
+            continue
+        if "implementer" not in config.MODEL_ROLES.get(candidate, ()):
+            continue
+        if _usage_blocked_until.get(cand_harness, 0) > now:
+            continue
+        if candidate.startswith("Zen-"):
+            rank = _ZEN_SWAP_RANK
+        else:
+            rank = _SWAP_PREFERENCE.get(cand_harness, 5)
+        ranked.append((rank, candidate))
+    if not ranked:
+        return None
+    ranked.sort()
+    return ranked[0][1]
+
 
 async def wait_for_usage_reset(harness, model, task_id, until, budget_s):
     """Sleep until `until` (epoch) or `budget_s` runs out; returns seconds slept.
@@ -837,6 +876,8 @@ def opencode_fleet_config():
         # drift from the roster the way a hardcoded provider name would.
         for _ext in config.EXTERNAL_MODELS:
             _alias = config.MODEL_HARNESS_ALIAS.get(_ext, "")
+            if not _alias:
+                continue
             _prov, _, _mid = _alias.partition("/")
             _pmodels = ((doc.get("provider", {}).get(_prov) or {})
                         .get("models") or {})
@@ -1074,6 +1115,7 @@ def parse_transcript(raw):
     texts, sid_holder = [], [None]
     final = None
     codex_msg, codex_sid = None, None
+    agy_msg, agy_sid = None, None
     for line in raw.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -1100,7 +1142,30 @@ def parse_transcript(raw):
             if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
                 codex_msg = item["text"]
             continue
+        # `agy --print --output-format stream-json`: events are `event`, not
+        # `type`. The answer is result.response; step_update.text_delta is the
+        # same text arriving in pieces, and folding it would double a verdict.
+        if isinstance(obj, dict) and obj.get("event") in (
+                "init", "step_update", "result"):
+            if obj.get("event") == "init" and isinstance(
+                    obj.get("conversation_id"), str):
+                agy_sid = obj["conversation_id"]
+            elif obj.get("event") == "result" and isinstance(
+                    obj.get("result"), dict):
+                body = obj["result"]
+                if isinstance(body.get("response"), str):
+                    agy_msg = body["response"]
+                if isinstance(body.get("conversation_id"), str):
+                    agy_sid = body["conversation_id"]
+            continue
         _dig(obj, texts, sid_holder)
+    if agy_msg is not None and final is None and codex_msg is None:
+        sid = agy_sid or sid_holder[0]
+        tail = agy_msg[-3000:]
+        if len(agy_msg) > len(tail):
+            head = _result_head(agy_msg)
+            return sid, (head + "\n" + tail) if head else tail
+        return sid, tail
     if codex_msg is not None and final is None:
         return codex_sid or sid_holder[0], codex_msg[-3000:]
     if final is not None:
@@ -1282,17 +1347,40 @@ class Driver:
         low = (text or "").lower()
         return any(m in low for m in cls._VPN_MARKERS)
 
-    async def run(self, prompt, worktree, session_id=None, task_id=None):
+    async def _swap_run(self, prompt, worktree, task_id, tried):
+        """Re-run `prompt` on another harness, or None when there is no seat."""
+        sub = usage_substitute(self.model, self.harness, exclude=tried)
+        if not sub:
+            return None
+        events.emit("driver.usage_swap", harness=self.harness, model=self.model,
+                    role=self.role, task=task_id, to_model=sub,
+                    to_harness=config.MODEL_HARNESS.get(sub))
+        log.warning("%s: plan usage limit reached; swapping this attempt to %s",
+                    self.model, sub)
+        other = driver_for(sub, self.role,
+                           interactive=getattr(self, "interactive", False))
+        # A Codex session id is meaningless to `agent` or `claude`. The
+        # substitute starts in the same worktree and reads what is there.
+        return await other.run(prompt, worktree, session_id=None, task_id=task_id,
+                               _swapped_from=set(tried) | {self.model})
+
+    async def run(self, prompt, worktree, session_id=None, task_id=None,
+                  _swapped_from=None):
         attempt = 0
         sid = session_id
         continuation = None
         usage_waited = 0.0     # seconds this run has spent parked on a plan window
+        tried = set(_swapped_from or ())
         while True:
             attempt += 1
-            # A sibling already learned this harness's plan is out: wait for
-            # the same reset rather than spend a refusal rediscovering it.
+            # A sibling already learned this harness's plan is out. Move to
+            # another seat when one is free; otherwise wait for the same reset
+            # rather than spend a refusal rediscovering it.
             blocked = _usage_blocked_until.get(self.harness, 0)
             if blocked > time.time():
+                swapped = await self._swap_run(prompt, worktree, task_id, tried)
+                if swapped is not None:
+                    return swapped
                 usage_waited += await wait_for_usage_reset(
                     self.harness, self.model, task_id, blocked,
                     config.USAGE_LIMIT_MAX_WAIT - usage_waited)
@@ -1360,6 +1448,10 @@ class Driver:
                         raise
                     _usage_blocked_until[self.harness] = max(
                         _usage_blocked_until.get(self.harness, 0), until)
+                    swapped = await self._swap_run(
+                        continuation or prompt, worktree, task_id, tried)
+                    if swapped is not None:
+                        return swapped
                     log.warning("%s: plan usage limit reached; waiting %.0fs for "
                                 "the window to reset", self.model,
                                 max(0, until - time.time()))
@@ -2407,6 +2499,91 @@ class CodexDriver(Driver):
         return {"OPENAI_API_KEY": "", "CODEX_QUIET_MODE": "1"}
 
 
+class CursorDriver(Driver):
+    """The Cursor Agent CLI (`agent --print`) on the operator's Cursor plan.
+
+    `--output-format stream-json` emits one JSON object per line and ends with
+    `{"type": "result", "result": ..., "session_id": ...}`, which
+    parse_transcript already treats as the answer. `--force` and `--trust`
+    keep it from stopping on an approval or a workspace-trust prompt, and
+    `--sandbox disabled` lets it write the task worktree. The worktree is the
+    boundary: the process cwd is that directory.
+
+    CURSOR_API_KEY is blanked so a key in the environment cannot bill the API
+    account instead of the logged-in plan, the same rule as Claude and Codex.
+    """
+
+    harness = "cursor"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    images = ()
+
+    def argv(self, prompt, session_id):
+        if self.images:
+            prompt = (prompt + "\n\nRead these image files before answering "
+                      "(use your Read tool on each):\n"
+                      + "\n".join(f"  {i}" for i in self.images))
+        a = [config.cursor_bin(), "--print", "--output-format", "stream-json",
+             "--force", "--trust", "--sandbox", "disabled"]
+        if config.CURSOR_CLI_MODEL:
+            a += ["--model", config.CURSOR_CLI_MODEL]
+        if session_id:
+            a += ["--resume", session_id]
+        return a + [prompt]
+
+    def extra_env(self, worktree):
+        return {"CURSOR_API_KEY": ""}
+
+
+class AntigravityDriver(Driver):
+    """Antigravity CLI (`agy --print`) on the operator's Google account.
+
+    `--output-format stream-json` emits `{"event": ...}` lines and ends a turn
+    with `{"event":"result","result":{"response","conversation_id",...}}`.
+    parse_transcript reads `response` as the answer and ignores `text_delta`.
+    `--dangerously-skip-permissions` is the documented unattended-write flag
+    (there is no `--yolo`). `--sandbox` is left off so the agent can edit the
+    worktree, which is the process cwd.
+
+    Resume is `--conversation <id>`, not `--resume`. GEMINI_API_KEY is blanked
+    so an API-key provider setting cannot bill a key instead of the signed-in
+    account. The account itself is a one-time `agy` login; this driver does
+    not start that browser flow.
+    """
+
+    harness = "agy"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    images = ()
+
+    def argv(self, prompt, session_id):
+        if self.images:
+            prompt = (prompt + "\n\nRead these image files before answering "
+                      "(use your Read tool on each):\n"
+                      + "\n".join(f"  {i}" for i in self.images))
+        # `-p` / `--print` is a boolean. The prompt is the positional argument.
+        a = [config.agy_bin(), "--print", "--output-format", "stream-json",
+             "--dangerously-skip-permissions"]
+        if config.AGY_CLI_MODEL:
+            a += ["--model", config.AGY_CLI_MODEL]
+        if session_id:
+            a += ["--conversation", session_id]
+        return a + [prompt]
+
+    def extra_env(self, worktree):
+        return {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}
+
+
 class GeminiDriver(Driver):
     """The Gemini CLI (`gemini -p`) on the operator's Google AI plan.
 
@@ -2468,6 +2645,10 @@ def driver_for(model, role, bench=False, interactive=False):
         return CodexDriver(model, role, bench=bench, interactive=interactive)
     if harness == "gemini":
         return GeminiDriver(model, role, bench=bench, interactive=interactive)
+    if harness == "cursor":
+        return CursorDriver(model, role, bench=bench, interactive=interactive)
+    if harness == "agy":
+        return AntigravityDriver(model, role, bench=bench, interactive=interactive)
     if harness == "kimi":
         return KimiDriver(role, bench=bench, interactive=interactive)
     if harness == "dsh":

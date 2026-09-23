@@ -52,11 +52,18 @@ Verified live on 2026-09-22, not assumed:
   from the roster name and the effort is passed as
   `-c model_reasoning_effort="high"`, which the session record confirms. It is
   passed explicitly because Sol's own default is `medium`.
-- **Gemini is not on this profile.** On the operator's Google plan it is usable
-  only inside the Antigravity IDE, not from a headless CLI. `GeminiDriver`
-  stays in `drivers.py` for an account that can use it, and Gemini remains
-  available per token on `studio-api`. The visual judge here rotates between
-  Claude and GPT-6, both of which read images.
+- **Cursor Agent CLI** (`agent --print`) on the Cursor subscription runs
+  **Grok 4.7** (`grok-4.7-high`). The roster name is `Cursor-Grok-4.7`, not
+  OpenRouter's `Grok-4.7`. It is a separate plan, so a spent Codex or Claude
+  window can keep implementing without waiting and without spending the other
+  frontier plan first.
+- **Antigravity CLI** (`agy --print`) on the Google account is the next seat
+  after Cursor. Install is `~/.local/bin/agy`. One interactive `agy` sign-in
+  caches the account; `agy models` lists slugs only after that. An empty
+  `ARC_AGY_MODEL` leaves the account's default model. The old Gemini CLI is
+  still not a roster row. Gemini remains available per token on `studio-api`
+  as the judge. The visual judge on this profile rotates between Claude and
+  GPT-6, both of which read images.
 
 A consumer plan is metered on rolling windows — a live run shows
 `five_hour: {utilization: 0.4}` and, when exhausted,
@@ -67,21 +74,45 @@ and the plan's usage window is the real limit. This was once 1 for Claude and
 2 for Codex; set `ARC_SUBSCRIPTION_SESSION_CAP=1` to go back to a single seat
 when you want your own interactive session to have the plan to itself.
 
-**When a window runs out, the task waits for it to reset — it does not
-fail.** `drivers.Driver.run` recognises the plans' refusals ("usage limit
+**When a window runs out, the attempt moves to a free harness, and waits
+only if every seat is blocked.** `drivers.Driver.run` recognises the plans'
+refusals ("usage limit
 reached", "You've hit your limit · resets 3pm", Codex's
-`usage_limit_reached`, a rejected `rate_limit_event`), reads the reset time
-the refusal names, and parks the harness until then plus
+`usage_limit_reached`, a rejected `rate_limit_event`), marks that harness
+blocked, and reruns the same prompt on the next free implementer: Cursor's
+`agent` CLI (`Cursor-Grok-4.7`) first, then Antigravity (`agy`), then Claude,
+then Codex, then an API model. A substitute starts fresh in the same
+worktree; a Codex session cannot be resumed on `agent` or `agy`. `ARC_USAGE_SWAP=0` skips that and parks until the
+reset the refusal names, plus
 `ARC_USAGE_LIMIT_MARGIN`. A refusal that names no time is retried every
 `ARC_USAGE_LIMIT_POLL` seconds. The wait does not count as an attempt, costs
-no fix round or escalation, and every other task on the same harness waits
-for the same reset rather than spending its own refusal. The dashboard sees
+no fix round or escalation, and every other task on the same harness takes
+the same substitute rather than spending its own refusal. The dashboard sees
 `driver.usage_limit` once and `driver.usage_wait` every five minutes while
 parked. One driver run waits at most `ARC_USAGE_LIMIT_MAX_WAIT` (8 days, so a
 weekly window fits) before the attempt fails normally.
 
 `studio-api` is the same roles through OpenRouter: billed per token, but with
 real parallelism and no plan windows. Use it when the work outgrows the plans.
+
+### OpenCode Zen free models (parallel zero-cost pools)
+
+With `ARC_ZEN_FREE=1` (the default on both studio profiles), the roster admits
+every slug returned by `https://opencode.ai/zen/v1/models` whose id contains
+`free` or is `big-pickle`. Each slug is a **separate family** with its own
+`ARC_ZEN_MODEL_CAP` (default 2) so independent partner rate limits do not
+block each other — the intended “max free throughput” pattern is one concurrent
+task per slug, then rotate when a pool returns `FreeUsageLimitError`.
+
+Roster names are `Zen-<Slug>` (for example `Zen-Mimo-V2.6-Flash-Free`); the
+harness is `opencode` with provider alias `opencode/<slug>`. They implement
+only: pre-merge review and PR review stay on GLM-5.3 / DeepSeek / the studio
+frontier models. On a spent subscription window, `ARC_USAGE_SWAP` tries Cursor,
+Antigravity, Claude, and Codex first, then any unblocked `Zen-*` implementer,
+then billed OpenRouter rows.
+
+Re-sync `config.ZEN_OPENCODE_SLUGS` when Zen rotates its free lineup (the live
+list is also visible as `opencode models | grep opencode/`).
 
 ### Subscription models have no provider alias
 
@@ -472,13 +503,22 @@ Subscription CLI: `npm install -g @openai/codex`.
 | `ARC_CLAUDE_BIN` | (unset) | pin the Claude Code binary |
 | `ARC_CODEX_BIN` | (unset) | pin the Codex binary (npm global bins are often off PATH) |
 | `ARC_GEMINI_BIN` | (unset) | pin the Gemini CLI binary |
-| `ARC_SUBSCRIPTION_SESSION_CAP` | 32 | concurrent sessions per plan seat (Claude Code, Codex): the roster cap, driver cap and harness pool for both; 1 restores a single seat |
+| `ARC_CURSOR_BIN` | agent | pin the Cursor Agent CLI (`agent`) |
+| `ARC_CURSOR_MODEL` | grok-4.7-high | model id passed to `agent --model` (Cursor's Grok 4.7) |
+| `ARC_AGY_BIN` | agy | pin the Antigravity CLI (`agy`) |
+| `ARC_AGY_MODEL` | (unset) | model slug passed to `agy --model`; empty leaves the signed-in account's default |
+| `ARC_USAGE_SWAP` | 1 | on a spent plan window, rerun the attempt on the next free harness (Cursor Grok 4.7, then Antigravity, then Claude, then Codex, then OpenCode Zen free models, then billed API models); `0` waits out the reset on the same model |
+| `ARC_ZEN_FREE` | 1 on studio | admit every live OpenCode Zen free slug as its own roster family (`Zen-*`, `opencode/<slug>`); `0` drops them |
+| `ARC_ZEN_MODEL_CAP` | 2 | per-slug driver/account cap — each partner pool is independent, so run different slugs in parallel and wait for daily resets per model |
+| `ARC_SUBSCRIPTION_SESSION_CAP` | 32 | concurrent sessions per plan seat (Claude Code, Codex, Cursor, Antigravity): the roster cap, driver cap and harness pool; 1 restores a single seat |
 | `ARC_USAGE_LIMIT_MAX_WAIT` | 691200 (8 days) | the longest one driver run waits for a spent plan window to reset before the attempt fails |
 | `ARC_USAGE_LIMIT_POLL` | 900 | re-check interval, in seconds, when a usage-limit refusal names no reset time |
 | `ARC_USAGE_LIMIT_MARGIN` | 60 | seconds added past a named reset time before retrying |
 | `ARC_HARNESS_LIMIT_CLAUDE` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent Claude Code sessions (harness pool only) |
 | `ARC_HARNESS_LIMIT_CODEX` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `codex exec` sessions (harness pool only) |
 | `ARC_HARNESS_LIMIT_GEMINI` | 2 | concurrent Gemini CLI sessions |
+| `ARC_HARNESS_LIMIT_CURSOR` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `agent` sessions (harness pool only) |
+| `ARC_HARNESS_LIMIT_AGY` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `agy` sessions (harness pool only) |
 | `ARC_STUDIO_FREE_JUDGE_MODEL` | (unset) | a raw OpenRouter `vendor/id` used instead of the roster judge, to exercise the visual loop at $0; its verdicts are marked `validation` and never gate a phase |
 | `ARC_GODOT_BIN` | (unset) | pin the Godot binary |
 | `ARC_BLENDER_BIN` | (unset) | pin the Blender binary |
