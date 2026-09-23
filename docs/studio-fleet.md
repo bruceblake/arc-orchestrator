@@ -551,6 +551,7 @@ This writes a paste-ready review: instructions, the task spec (found through the
 | `ARC_FLEET` | local | `local` or `studio`; fatal on any other value |
 | `ARC_EXTERNAL_CONTEXT` | 262144 | context budget declared for OpenRouter-served models (the 64k `ARC_OPENCODE_CONTEXT` exists for an ARC pathology those models do not share) |
 | `ARC_STUDIO_DIR` | `logs/studio` | renders, verdicts, phase state, fuzz reports, spend ledger |
+| `ARC_BOARD_DIR` | `logs/boards` | project-wide agent board (`board.py`); per-task threads stay in the worktree at `.arc/board.jsonl` and are not committed |
 | `ARC_STUDIO_BUDGET_USD` | 25 | ceiling for direct studio calls; 0 disables |
 | `ARC_STUDIO_JUDGE_PASS` | 75 | judge score (0–100) a phase must reach to promote |
 | `ARC_STUDIO_ADVERSARIAL_ROUND` | 3 | first round that adds adversarial cameras |

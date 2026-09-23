@@ -18,6 +18,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import board
 import config
 import errors
 import events
@@ -520,7 +521,7 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
-def _impl_prompt(t, feedback, hints="", roster=None):
+def _impl_prompt(t, feedback, hints="", roster=None, board=""):
     """The implementer's whole world: the task, where its code is, the rules.
 
     `hints` is graft.hints_block output — the file:line spans the code graph
@@ -573,6 +574,8 @@ def _impl_prompt(t, feedback, hints="", roster=None):
     )
     if feedback:
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"
+    if board:
+        p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
     return p
@@ -852,30 +855,26 @@ def _gate_full_list_block(lines):
     return _GATE_FULL_LIST_HEADER + "\n" + "\n".join(lines)
 
 
-def _resume_session(results, tid, model):
+def _resume_session(results, tid, model, harness=None):
     """The harness session to continue for this fix round, or None.
 
-    A rework is the SAME model mending the SAME worktree it just wrote, fed
-    the gate/review feedback: continuing its harness session keeps the
-    context it already paid for. Re-reading the repo is the dominant cost of
-    a hard task (measured 60–85 min before the first edit on GLM-5.3), and
-    every fix round re-paid it in full. A tier change starts fresh — the
-    escalating model has no stake in another model's session, and its
-    harness may not even read the previous harness's session files. A run
-    restart also starts fresh (the graph context is new and alloc may have
-    reset the branch), because there is no previous attempt in `results`.
+    A rework continues only when the SAME model on the SAME harness is
+    mending the worktree it just wrote. A session id is a file in that
+    harness's own store (a Codex rollout, a Cursor chat). Handing a Cursor
+    chat id to `codex exec resume` exits immediately with "no rollout found"
+    and burns the retry ladder. A usage swap records the harness that
+    actually ran; a mismatch starts fresh and the shared board carries what
+    the other harness did. A recorded session with no harness cannot be
+    proven to belong to this one, so it is not resumed either.
     """
     prev = (results or {}).get(f"implement_{tid}") or {}
-    if prev.get("model") == model and prev.get("session_id"):
-        # Both live drivers map a truthy session id to `-c` = "continue the
-        # newest session in the workspace", discarding the actual id — safe
-        # here because the only other writer (the reviewer) is always the
-        # OTHER harness with a session store the implementer's harness
-        # cannot read. A bench policy that puts implementer and reviewer on
-        # the same harness in one worktree (e.g. kimi-via-opencode) must NOT
-        # reuse sessions — the implementer would resume the reviewer's.
-        return prev["session_id"]
-    return None
+    if prev.get("model") != model or not prev.get("session_id"):
+        return None
+    prev_h = prev.get("harness")
+    if harness:
+        if not prev_h or prev_h != harness:
+            return None
+    return prev["session_id"]
 
 
 def _rework_feedback(tid, results):
@@ -992,7 +991,7 @@ def _scope_lock_prose(flag):
     )
 
 
-def _review_prompt(t, diff, impact="", roster=None):
+def _review_prompt(t, diff, impact="", roster=None, board=""):
     p = (
         f"You are reviewing an implementation produced by another AI agent.\n\n"
         f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
@@ -1005,6 +1004,8 @@ def _review_prompt(t, diff, impact="", roster=None):
     if config.REQUIRE_TESTS:
         p += ("A code change MUST come with tests that would FAIL without it. "
               "Documentation-only changes are exempt.\n")
+    if board:
+        p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
     p += "\n" + _scope_lock_prose("pass")
@@ -1076,7 +1077,7 @@ def _parse_verdict(text):
 
 
 def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
-                      roster=None):
+                      roster=None, board=""):
     """Prompt for a reviewer reading a real pull request.
 
     Deliberately different from the pre-PR review: this reviewer can BLOCK the
@@ -1112,6 +1113,8 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
           "Review independently: do not assume another reviewer checked "
           "something. Be specific — name the file and line, say what is wrong "
           "and what would fix it. Vague objections waste a whole round.\n\n")
+    if board:
+        p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
     p += _scope_lock_prose("approve")
@@ -1257,6 +1260,7 @@ def _amendment_validator(taskfile, pol):
 def build_code_graph(store, taskset, taskfile="", policy=None):
     repo = taskset["repo"]
     tasks = taskset["tasks"]
+    project_slug = Path(repo).name
     pol = policy if policy is not None else taskset.get("policy") or None
     mfr = (pol or {}).get("max_fix_rounds", config.MAX_FIX_ROUNDS)
     review_on = (pol or {}).get("review", True)
@@ -1574,10 +1578,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # this as `-c` (continue the newest session in the workspace, and
             # the worktree is per-task): drivers.py argv treats a truthy
             # session_id as exactly that flag.
-            resume = _resume_session(results, tid, model)
+            resume = _resume_session(results, tid, model, driver.harness)
+            thread = board.prompt_block(wt, project=project_slug, task=tid)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback, hints, roster), wt,
+                    _impl_prompt(t, feedback, hints, roster, thread), wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
                     avoid_families={reviewer_for(t, model)})
             except DriverError as exc:
@@ -1597,6 +1602,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             model=model, attempt=attempt,
                             error=str(exc)[:200], fingerprint=fp)
                 harvest_proposals(tid, wt, "implementer", model)
+                board.post(wt, task=tid, role="implementer", model=model,
+                           harness=driver.harness, kind="error",
+                           body=str(exc)[:400], project=project_slug)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
             # A spent plan window may have moved this attempt to another
@@ -1606,6 +1614,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, ran_harness, ran_model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
             harvest_proposals(tid, wt, "implementer", ran_model)
+            board.post(wt, task=tid, role="implementer", model=ran_model,
+                       harness=ran_harness, session_id=res.session_id,
+                       kind="result", body=(res.text or "")[:400],
+                       project=project_slug)
             return {"session_id": res.session_id, "harness": ran_harness,
                     "model": ran_model}
 
@@ -1712,8 +1724,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
             try:
-                res = await driver.run(_review_prompt(t, diff, impact, roster), wt,
-                                       task_id=f"{tid}-x{attempt}")
+                res = await driver.run(
+                    _review_prompt(t, diff, impact, roster,
+                                   board.prompt_block(wt, project=project_slug, task=tid)),
+                    wt, task_id=f"{tid}-x{attempt}")
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1753,6 +1767,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             error="review ended without a parseable verdict")
                 return {"pass": False, "crashed": True,
                         "issues": ["reviewer session ended without a verdict"]}
+            issues = verdict.get("issues") or []
+            board.post(wt, task=tid, role="reviewer", model=driver.model,
+                       harness=driver.harness, kind="note",
+                       body=("pass" if verdict.get("pass") else
+                             "reject: " + "; ".join(str(i) for i in issues)[:300]),
+                       project=project_slug)
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
                         reviewer=rev_tok,
                         # The reviewer's MODEL, not just its family token: the
@@ -2017,7 +2037,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 impact = await graft.blast(wt, base, task=tid)
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
-                                      it["prior_issues"], impact, roster),
+                                      it["prior_issues"], impact, roster,
+                                      board.prompt_block(wt, project=project_slug, task=tid)),
                     wt, task_id=f"{tid}-pr{it['round']}")
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —

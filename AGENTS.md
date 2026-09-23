@@ -334,6 +334,15 @@ kinds `note | edit_scope | change_verify | change_model | add_task |
 split_task`), offered in every implement/review prompt with the real task
 ids and legal models (`plan_amend.prompt_block`).
 
+- A second file, `.arc/board.jsonl` (`board.py`), is the thread agents
+  share across harnesses. The orchestrator posts a handoff when a usage
+  swap moves an attempt, and a result or review note after each run.
+  Sibling tasks read the project copy at `logs/boards/<project>.jsonl`
+  (`ARC_BOARD_DIR`). A `session_id` on a post resumes only on the harness
+  named in that post — a Cursor chat id is never passed to `codex exec
+  resume`. The file is excluded from `git add -A` and is not harvested
+  away: the next fix round in the same worktree still needs it.
+
 - Graph nodes HARVEST the file right after every agent run — crash paths
   included — and publish sweeps once more before committing (publish uses
   `git add -A`; the channel file must never land in a PR). Harvest = read +
@@ -840,6 +849,7 @@ Top-level Python modules (one role each):
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), `chat` (one conversational planner turn over a session jsonl — module `orchchat.py`), `captain` (one state-aware supervisor turn — module `captain.py`), and `code {plan,run,status,dream,bench}` |
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
+| `board.py` | Shared agent board: `.arc/board.jsonl` in the task worktree plus `logs/boards/<project>.jsonl`. A session id resumes only on the harness that posted it |
 | `plan_amend.py` | The living-plan channel (Rule 4b): prompt schema, `.arc/plan_proposals.jsonl` harvest (read + delete before `git add -A`), loader-validated amendment of the taskfile with per-entry rollback, `plan_proposals` recording |
 | `pool.py` | `AsyncOpenAI` request pool for the research workload: per-family semaphores, retry/backoff, token accounting |
 | `scheduler.py` | `Supervisor`: runs research rounds continuously (pipeline concurrency, round cooldown, periodic stats) |
