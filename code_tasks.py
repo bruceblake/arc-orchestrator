@@ -1753,7 +1753,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             wt = await worktree(ctx)
             diff = await gitstore.diff_full(wt, base)
             impact = await graft.blast(wt, task=tid)   # uncommitted: tree vs HEAD
-            rev_tok = reviewer_for(t, cur_model(ctx))
+            rev_tok = reviewer_for(t, wrote_the_code(
+                ctx, tid, cur_model(ctx), store))
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
             try:
