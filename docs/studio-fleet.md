@@ -97,7 +97,7 @@ real parallelism and no plan windows. Use it when the work outgrows the plans.
 
 ### OpenCode Zen free models (parallel zero-cost pools)
 
-With `ARC_ZEN_FREE=1` (the default on both studio profiles), the roster admits
+With `ARC_ZEN_FREE=1` (opt-in; off by default because most free slugs may train on what they are sent, and because they add eleven medium-tier stages to the escalation path), the roster admits
 every slug returned by `https://opencode.ai/zen/v1/models` whose id contains
 `free` or is `big-pickle`. Each slug is a **separate family** with its own
 `ARC_ZEN_MODEL_CAP` (default 2) so independent partner rate limits do not
@@ -575,7 +575,7 @@ This writes a paste-ready review: instructions, the task spec (found through the
 | `ARC_AGY_BIN` | agy | pin the Antigravity CLI (`agy`) |
 | `ARC_AGY_MODEL` | (unset) | model slug passed to `agy --model`; empty leaves the signed-in account's default |
 | `ARC_USAGE_SWAP` | 1 | on a spent plan window, rerun the attempt on the next free harness (Cursor Grok 4.7, then Antigravity, then Claude, then Codex, then OpenCode Zen free models, then billed API models); `0` waits out the reset on the same model |
-| `ARC_ZEN_FREE` | 1 on studio | admit every live OpenCode Zen free slug as its own roster family (`Zen-*`, `opencode/<slug>`); `0` drops them |
+| `ARC_ZEN_FREE` | 0 | admit every live OpenCode Zen free slug as its own roster family (`Zen-*`, `opencode/<slug>`); `0` drops them |
 | `ARC_ZEN_MODEL_CAP` | 2 | per-slug driver/account cap — each partner pool is independent, so run different slugs in parallel and wait for daily resets per model |
 | `ARC_SUBSCRIPTION_SESSION_CAP` | 32 | concurrent sessions per plan seat (Claude Code, Codex, Cursor, Antigravity): the roster cap, driver cap and harness pool; 1 restores a single seat |
 | `ARC_USAGE_LIMIT_MAX_WAIT` | 691200 (8 days) | the longest one driver run waits for a spent plan window to reset before the attempt fails |
@@ -591,6 +591,7 @@ This writes a paste-ready review: instructions, the task spec (found through the
 | `ARC_PR_MANUAL_TIMEOUT` | 0 | give up waiting after this many seconds and REJECT (0 = wait as long as it takes) |
 | `ARC_STUDIO_PALETTE_MIN` | 0.6 | share of a render's pixels that must sit on the colour bible |
 | `ARC_STUDIO_PALETTE_TOLERANCE` | 48 | RGB distance that counts as "on" a palette colour |
+| `ARC_STUDIO_PLAYTEST_MIN_CHECKS` | 3 | fewest scripted-playtest checks the phase gates accept |
 | `ARC_STUDIO_MIN_FPS` | 45 | phase-3 frame-rate floor (5th-percentile fps from `tools/perf.gd`) |
 | `ARC_STUDIO_MAX_SHADOW_LIGHTS` | 8 | phase-3 cap on shadow-casting lights |
 | `ARC_STUDIO_FREE_JUDGE_MODEL` | (unset) | a raw OpenRouter `vendor/id` used instead of the roster judge, to exercise the visual loop at $0; its verdicts are marked `validation` and never gate a phase |

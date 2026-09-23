@@ -169,9 +169,13 @@ STUDIO = FLEET in ("studio", "studio-api")
 STUDIO_API = FLEET == "studio-api"
 
 # OpenCode Zen free tier: zero-cost models on the operator's OpenCode account,
-# each with its own usage pool. On by default for studio fleets; re-sync the
+# each with its own usage pool. OPT-IN (ARC_ZEN_FREE=1). Off by default
+# because most free Zen slugs are "limited time" and may train on what they
+# are sent — the game's source — and because enabling them put eleven
+# medium-tier rows into ESCALATION_PATH ahead of GLM and every frontier seat
+# (17 stages x MAX_FIX_ROUNDS attempts before a task could fail). Re-sync the
 # slug list from `curl https://opencode.ai/zen/v1/models` when Zen rotates.
-ZEN_FREE = (os.getenv("ARC_ZEN_FREE", "1" if STUDIO else "0").lower()
+ZEN_FREE = (os.getenv("ARC_ZEN_FREE", "0").lower()
             not in ("0", "false", "no", ""))
 ZEN_MODEL_CAP = max(1, int(os.getenv("ARC_ZEN_MODEL_CAP", "2")))
 # Live on 2026-09-23 (Zen v1/models). IDs are opencode/<slug> in the CLI.
@@ -1618,6 +1622,9 @@ STUDIO_PALETTE_TOLERANCE = float(os.getenv("ARC_STUDIO_PALETTE_TOLERANCE", "48")
 # rate to shadows alone — every shadow-casting lamp re-renders the scene from
 # its own point of view (14,000 shadow draws against 600 visible pieces) — so
 # both the frame rate and the number of shadow casters are gated.
+# The scripted playtest's floor. The implementer writes its own checks, so a
+# single trivially-true check used to satisfy the gate.
+STUDIO_PLAYTEST_MIN_CHECKS = int(os.getenv("ARC_STUDIO_PLAYTEST_MIN_CHECKS", "3"))
 STUDIO_MIN_FPS = float(os.getenv("ARC_STUDIO_MIN_FPS", "45"))
 STUDIO_MAX_SHADOW_LIGHTS = int(os.getenv("ARC_STUDIO_MAX_SHADOW_LIGHTS", "8"))
 

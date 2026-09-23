@@ -36,9 +36,11 @@ from studio.schemas import task as gt  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def in_studio(snippet, fleet="studio"):
+def in_studio(snippet, fleet="studio", **env_extra):
     """Run `snippet` under a studio fleet profile and return its stdout."""
     env = dict(os.environ, ARC_FLEET=fleet, PYTHONPATH=str(ROOT))
+    env.pop("ARC_ZEN_FREE", None)
+    env.update(env_extra)
     p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
                        text=True, env=env, cwd=str(ROOT), timeout=120)
     if p.returncode != 0:
@@ -90,12 +92,12 @@ print(json.dumps({
         sub = json.loads(in_studio(self.PROFILE_PROBE))
         api = json.loads(in_studio(self.PROFILE_PROBE, fleet="studio-api"))
 
-        # Subscription: plan CLIs plus OpenCode Zen free models (opencode/*).
-        # Frontier seats still have NO provider alias — only Zen-* rows do.
+        # Subscription: plan CLIs, and NO provider aliases — a plan-backed
+        # model is reached by its own CLI. Zen (the only aliased rows on this
+        # profile) is opt-in, so the default has none.
         self.assertEqual(sub["planner"], "Claude-Opus-5.5")
-        self.assertEqual(len(sub["aliases"]), len(config.ZEN_OPENCODE_SLUGS))
-        self.assertTrue(all(v.startswith("opencode/") for v in sub["aliases"].values()))
-        for harness in ("claude", "codex", "cursor", "agy", "opencode"):
+        self.assertEqual(sub["aliases"], {})
+        for harness in ("claude", "codex", "cursor", "agy"):
             self.assertIn(harness, sub["harnesses"])
         self.assertIn("cursor", sub["fams"])
         self.assertIn("google", sub["fams"])
@@ -110,8 +112,7 @@ print(json.dumps({
         # API: everything through opencode/openrouter, with aliases.
         self.assertEqual(api["planner"], "Claude-Opus-5.5")
         self.assertEqual(sorted(api["harnesses"]), ["opencode", "reasonix"])
-        self.assertEqual(len(api["aliases"]),
-                         4 + len(config.ZEN_OPENCODE_SLUGS))
+        self.assertEqual(len(api["aliases"]), 4)
         self.assertIn("xai", api["fams"])
 
         for d in (sub, api):
@@ -129,13 +130,22 @@ print(json.dumps({
         self.assertTrue(aliases)
         self.assertTrue(all(a is None for a in aliases), aliases)
 
+    ZEN_PROBE = ("import config, json;"
+                 "zen = sorted(m for m in config.IMPLEMENTER_MODELS if m.startswith('Zen-'));"
+                 "print(json.dumps({'n': len(zen), 'aliases': len(config._ZEN_ALIASES),"
+                 " 'esc': config.ESCALATION_PATH,"
+                 " 'sample': config.provider_model_alias(zen[0]) if zen else None}))")
+
+    def test_zen_is_opt_in_and_stays_off_the_escalation_path(self):
+        """Free Zen slugs may train on the game's source, and 11 of them in the
+        escalation path made a task walk 17 stages before it could fail."""
+        d = json.loads(in_studio(self.ZEN_PROBE))
+        self.assertEqual((d["n"], d["aliases"]), (0, 0))
+        self.assertFalse([m for m in d["esc"] if m.startswith("Zen-")])
+        self.assertLessEqual(len(d["esc"]), 6, d["esc"])
+
     def test_zen_free_models_on_studio_roster(self):
-        out = in_studio(
-            "import config, json;"
-            "zen = sorted(m for m in config.IMPLEMENTER_MODELS if m.startswith('Zen-'));"
-            "print(json.dumps({'n': len(zen), 'aliases': len(config._ZEN_ALIASES),"
-            " 'sample': config.provider_model_alias(zen[0]) if zen else None}))")
-        d = json.loads(out)
+        d = json.loads(in_studio(self.ZEN_PROBE, ARC_ZEN_FREE="1"))
         self.assertEqual(d["n"], len(config.ZEN_OPENCODE_SLUGS))
         self.assertEqual(d["aliases"], len(config.ZEN_OPENCODE_SLUGS))
         self.assertTrue(d["sample"], d["sample"])
@@ -518,6 +528,29 @@ class TestGameTaskGovernance(unittest.TestCase):
                            "review load must not funnel into one family")
 
 
+class TestStudioRouting(unittest.TestCase):
+    """Every studio worker resolves to a live, fitting model on each profile."""
+
+    PROBE = ("import json; from studio.schemas import task as T;"
+             "from studio.evaluation import judge_loop as J;"
+             "print(json.dumps({'workers': {w: T.worker_model(w) for w in T.WORKERS},"
+             " 'judges': J.available_judges()}))")
+
+    def test_subscription_profile(self):
+        d = json.loads(in_studio(self.PROBE))
+        self.assertEqual(d["workers"]["grok_feature_driver"], "Cursor-Grok-4.7",
+                         "Grok work fell through to GPT-6-Sol")
+        self.assertEqual(d["workers"]["gemini_visual_judge"], "Antigravity-Gemini")
+        self.assertIn("Antigravity-Gemini", d["judges"])
+        self.assertGreaterEqual(len(d["judges"]), 3,
+                                "a two-model judge panel cannot rotate away from its own taste")
+
+    def test_api_profile(self):
+        d = json.loads(in_studio(self.PROBE, fleet="studio-api"))
+        self.assertEqual(d["workers"]["grok_feature_driver"], "Grok-4.7")
+        self.assertEqual(d["workers"]["gemini_visual_judge"], "Gemini-3.8-Flash")
+
+
 class TestPlannerFullReply(unittest.TestCase):
     """A long plan must reach the parser uncut (a 34k-char plan once did not)."""
 
@@ -847,7 +880,19 @@ class TestVideoChecks(StudioDirTest):
         fails = stage_manager.playtest_status(d)[0]
         self.assertTrue(any("reaches_yard" in f for f in fails))
         Path(d, "studio_playtest.json").write_text(json.dumps({"passed": True, "checks": [
-            {"name": "reaches_yard", "passed": True, "value": 0, "expected": 0}]}))
+            {"name": n, "passed": True, "value": 0, "expected": 0}
+            for n in ("reaches_yard", "route_time", "unseen")]}))
+        self.assertEqual(stage_manager.playtest_status(d)[0], [])
+
+    def test_a_playtest_needs_more_than_one_check(self):
+        d = self._repo()
+        Path(d, "tools").mkdir()
+        Path(d, "tools", "playtest.gd").write_text("extends SceneTree")
+        one = {"name": "ok", "passed": True, "value": 1, "expected": 1}
+        Path(d, "studio_playtest.json").write_text(json.dumps({"passed": True, "checks": [one]}))
+        self.assertTrue(any("at least" in f for f in stage_manager.playtest_status(d)[0]))
+        Path(d, "studio_playtest.json").write_text(json.dumps(
+            {"passed": True, "checks": [dict(one, name=f"c{i}") for i in range(3)]}))
         self.assertEqual(stage_manager.playtest_status(d)[0], [])
 
     def test_a_playtest_with_no_checks_proves_nothing(self):
