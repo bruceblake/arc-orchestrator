@@ -122,16 +122,16 @@ print(json.dumps({
         self.assertTrue(aliases)
         self.assertTrue(all(a is None for a in aliases), aliases)
 
-    def test_subscription_harnesses_are_capped_for_a_human_plan(self):
+    def test_subscription_harnesses_follow_the_subscription_cap(self):
+        # Operator directive 2026-09-22: the plan seats are not capped low;
+        # the plan's usage window is the limit, and Driver.run waits it out
+        # (tests/test_usage_limit.py).
         out = in_studio(
             "import config, json;"
-            "print(json.dumps({h: config.harness_limit(h)"
-            " for h in ('claude', 'codex', 'gemini')}))")
-        caps = json.loads(out)
-        self.assertEqual(caps["claude"], 1,
-                         "the operator's own Claude session shares this plan")
-        for h, cap in caps.items():
-            self.assertLessEqual(cap, 2, f"{h} must not fan out on a consumer plan")
+            "print(json.dumps([config.SUBSCRIPTION_SESSION_CAP,"
+            " {h: config.harness_limit(h) for h in ('claude', 'codex')}]))")
+        cap, caps = json.loads(out)
+        self.assertEqual(caps, {"claude": cap, "codex": cap})
 
     IMAGE_PROBE = """
 import json, config, drivers

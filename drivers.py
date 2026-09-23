@@ -42,9 +42,17 @@ HEARTBEAT_INTERVAL = 15
 
 
 class DriverError(RuntimeError):
-    def __init__(self, message, session_id=None, capacity=False):
+    def __init__(self, message, session_id=None, capacity=False,
+                 usage_limit=False, resets_at=None):
         super().__init__(message)
         self.session_id = session_id
+        # Set when a subscription plan refused on its usage window; resets_at
+        # is the epoch it said the window reopens (None when it did not say).
+        # Classified at the exit site, where the WHOLE transcript is still in
+        # hand — the message above keeps only its last 300 characters, which
+        # can cut the reset time off.
+        self.usage_limit = usage_limit
+        self.resets_at = resets_at
         # Set when the harness exited non-zero because ARC refused the request
         # (queue full / session limit) rather than because it crashed. The
         # exited-1 paths in _pump/_pump_dual cannot call the caller's ladders,
@@ -167,6 +175,131 @@ async def wait_for_arc(task_id=None, poll_s=30.0):
             events.emit("arc.reachable", after_s=down_for, task=task_id)
             log.warning("ARC reachable again after %ds — resuming", down_for)
             return
+
+
+# --- subscription usage windows ---------------------------------------------
+# A plan-backed harness (Claude Code, Codex) that has spent its usage window
+# refuses every request until the window resets. That is not a crash (the
+# fix loop would repair code nobody criticised) and not ARC-style contention
+# (a 10-minute backoff walks straight back into the same refusal for hours):
+# the only correct response is to wait for the reset. The phrasings below are
+# the plans' own — "Claude AI usage limit reached|<epoch>", "You've hit your
+# limit · resets 3pm (Europe/London)", "5-hour limit reached", Codex's
+# "You've hit your usage limit ... try again in 2 hours 13 minutes" and its
+# `usage_limit_reached` error code. ARC's "concurrent session limit reached"
+# deliberately does NOT match: that is capacity, and clears in seconds.
+_USAGE_LIMIT_RE = re.compile(
+    r"usage[ _]limit|hit your (?:usage )?limit|"
+    r"\b(?:5|five)[- _]hour limit|\bweekly limit|\bseven[ _]day limit|"
+    r"\bopus limit", re.I)
+
+
+def is_usage_limit(text):
+    """True when `text` is a subscription plan refusing on its usage window."""
+    return bool(_USAGE_LIMIT_RE.search(text or ""))
+
+
+_UNIT_S = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+
+
+def _rejected_window(text):
+    """From a stream carrying a REJECTED `rate_limit_event` (Claude Code's
+    per-window status object), the epoch it resets — 0.0 when it names none.
+    None when no window in the stream was rejected."""
+    found = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{") or "rejected" not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        info = obj.get("rate_limit_info") if isinstance(obj, dict) else None
+        if isinstance(info, dict) and info.get("status") == "rejected":
+            at = info.get("resetsAt") or info.get("resets_at")
+            if isinstance(at, (int, float)) and at > 0:
+                return at / 1000 if at > 1e12 else float(at)
+            found = 0.0
+    return found
+
+
+def usage_reset_at(text, now=None):
+    """Epoch seconds the refused usage window resets, or None if unstated.
+
+    Checked most-specific first: an explicit epoch (Claude's `...|<epoch>`
+    suffix, or a stream `rate_limit_event` marked rejected with `resetsAt`),
+    then a relative "try again in 2 hours 13 minutes" / `resets_in_seconds`,
+    then a wall-clock "resets 3pm (Zone)" — the next such time after `now`.
+    A stray `resets_in_seconds` on a window that is NOT exhausted (Codex
+    reports every window on every turn) is ignored unless it sits in an
+    object that says the limit was reached.
+    """
+    now = time.time() if now is None else now
+    text = text or ""
+    # Stream objects first: they carry machine-readable reset times.
+    at = _rejected_window(text)
+    if at:
+        return at
+    m = re.search(r"limit reached\|(\d{10,13})\b", text, re.I)
+    if m:
+        at = int(m.group(1))
+        return at / 1000 if at > 1e12 else float(at)
+    m = re.search(r'"resets_in_seconds"\s*:\s*(\d+)', text)
+    if m and re.search(r"usage_limit_reached|limit_reached", text):
+        return now + int(m.group(1))
+    m = re.search(r"try again in ((?:\s*(?:and\s+|,\s*)?\d+\s*"
+                  r"(?:days?|hours?|hrs?|minutes?|mins?|seconds?|secs?|[dhms])\b)+)",
+                  text, re.I)
+    if m:
+        total = sum(int(n) * _UNIT_S[u[0].lower()]
+                    for n, u in re.findall(r"(\d+)\s*([a-z]+)", m.group(1), re.I))
+        if total:
+            return now + total
+    m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
+                  r"(?:\s*\(([A-Za-z_]+/[A-Za-z_/]+)\))?", text, re.I)
+    if m:
+        import datetime
+        tz = None
+        if m.group(4):
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(m.group(4))
+            except Exception:
+                tz = None
+        hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+        cur = datetime.datetime.fromtimestamp(now, tz)
+        at = cur.replace(hour=hour, minute=int(m.group(2) or 0),
+                         second=0, microsecond=0)
+        if at.timestamp() <= now:
+            at += datetime.timedelta(days=1)
+        return at.timestamp()
+    return None
+
+
+# harness -> epoch its plan's usage window resets. Shared by every driver in
+# this process, so once one attempt learns the plan is out, its siblings wait
+# for the same reset instead of each spending a refusal to find out.
+_usage_blocked_until = {}
+
+
+async def wait_for_usage_reset(harness, model, task_id, until, budget_s):
+    """Sleep until `until` (epoch) or `budget_s` runs out; returns seconds slept.
+
+    Emits driver.usage_wait every few minutes so the dashboard can show a
+    task that is parked on a plan window rather than dead.
+    """
+    slept = 0.0
+    while True:
+        left = min(until - time.time(), budget_s - slept)
+        if left <= 0:
+            return slept
+        events.emit("driver.usage_wait", harness=harness, model=model,
+                    task=task_id, resets_at=round(until),
+                    remaining_s=round(left))
+        step = min(left, 300.0)
+        await asyncio.sleep(step)
+        slept += step
 
 
 async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None,
@@ -1153,8 +1286,16 @@ class Driver:
         attempt = 0
         sid = session_id
         continuation = None
+        usage_waited = 0.0     # seconds this run has spent parked on a plan window
         while True:
             attempt += 1
+            # A sibling already learned this harness's plan is out: wait for
+            # the same reset rather than spend a refusal rediscovering it.
+            blocked = _usage_blocked_until.get(self.harness, 0)
+            if blocked > time.time():
+                usage_waited += await wait_for_usage_reset(
+                    self.harness, self.model, task_id, blocked,
+                    config.USAGE_LIMIT_MAX_WAIT - usage_waited)
             # driver.queued, not driver.start: this attempt has not got a slot
             # yet. Emitting "start" here counted every QUEUED driver as
             # in-flight, which is how the dashboard once reported kimi at 9/3
@@ -1198,6 +1339,32 @@ class Driver:
                     events.emit("driver.vpn_down", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt)
                     await wait_for_arc(task_id)
+                    attempt -= 1
+                    continue
+                if getattr(exc, "usage_limit", False) or is_usage_limit(str(exc)):
+                    # The plan's usage window is spent. Park until it resets
+                    # (or poll when the refusal named no time) and retry the
+                    # SAME attempt number — like the VPN path, a request the
+                    # plan refused to serve was not an attempt at the task.
+                    budget = config.USAGE_LIMIT_MAX_WAIT - usage_waited
+                    resets_at = getattr(exc, "resets_at", None)
+                    until = (resets_at + config.USAGE_LIMIT_MARGIN if resets_at
+                             else time.time() + config.USAGE_LIMIT_POLL)
+                    events.emit("driver.usage_limit", harness=self.harness,
+                                model=self.model, role=self.role, task=task_id,
+                                attempt=attempt, error=str(exc)[:300],
+                                resets_at=round(resets_at) if resets_at else None,
+                                wait_s=round(max(0, until - time.time())),
+                                waited_s=round(usage_waited))
+                    if budget <= 0:
+                        raise
+                    _usage_blocked_until[self.harness] = max(
+                        _usage_blocked_until.get(self.harness, 0), until)
+                    log.warning("%s: plan usage limit reached; waiting %.0fs for "
+                                "the window to reset", self.model,
+                                max(0, until - time.time()))
+                    usage_waited += await wait_for_usage_reset(
+                        self.harness, self.model, task_id, until, budget)
                     attempt -= 1
                     continue
                 # A capacity refusal the harness reported AS an exit-1 (ARC
@@ -1468,14 +1635,23 @@ class Driver:
             # `is_error: true` result object carrying the provider's text. The
             # stdout object is preferred over stderr chatter, and a genuinely
             # silent exit says so instead of trailing off after the colon.
-            detail = harness_error_detail(text or raw, err.decode(errors="replace"))
+            err_text = err.decode(errors="replace")
+            detail = harness_error_detail(text or raw, err_text)
+            # A plan out of its usage window is judged on the FULL output: the
+            # reset time may sit in a stream event or in stderr, not in the
+            # tail kept on the message.
+            usage = (is_usage_limit(detail) or is_usage_limit(err_text)
+                     or _rejected_window(raw) is not None)
             # An exit that carried a capacity refusal (ARC "backend queue is
             # full" / "concurrent session limit") is expected weather, not a
             # crash: mark it so Driver.run retries it on the capacity ladder
             # and skips errors.capture.
             raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}",
                               session_id=sid or session_id,
-                              capacity=self.is_capacity_error(detail))
+                              capacity=self.is_capacity_error(detail),
+                              usage_limit=usage,
+                              resets_at=(usage_reset_at("\n".join((detail, err_text, raw)))
+                                         if usage else None))
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             session_id or sid, str(tpath), text,
                             round(time.monotonic() - t0, 1), toks, ptok, ctok)

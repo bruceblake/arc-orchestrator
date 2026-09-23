@@ -58,14 +58,27 @@ Verified live on 2026-09-22, not assumed:
   available per token on `studio-api`. The visual judge here rotates between
   Claude and GPT-6, both of which read images.
 
-The catch is not technical. **A consumer plan is metered for one human at one
-terminal**, on rolling windows — a live run shows
+A consumer plan is metered on rolling windows — a live run shows
 `five_hour: {utilization: 0.4}` and, when exhausted,
-`overageStatus: "rejected"` with no fallback. So `config._HARNESS_CAP` holds
-these to 1–2 concurrent sessions, and `claude` to **exactly 1**, because the
-operator's own interactive Claude Code session draws on the same plan. Real
-parallelism belongs on ARC, which is free and genuinely concurrent; the
-subscription slots carry the roles that need frontier quality.
+`overageStatus: "rejected"` with no fallback. **The fleet does not cap the
+plan seats locally** (operator directive 2026-09-22): `claude` and `codex`
+run up to `ARC_SUBSCRIPTION_SESSION_CAP` (default 32) concurrent sessions,
+and the plan's usage window is the real limit. This was once 1 for Claude and
+2 for Codex; set `ARC_SUBSCRIPTION_SESSION_CAP=1` to go back to a single seat
+when you want your own interactive session to have the plan to itself.
+
+**When a window runs out, the task waits for it to reset — it does not
+fail.** `drivers.Driver.run` recognises the plans' refusals ("usage limit
+reached", "You've hit your limit · resets 3pm", Codex's
+`usage_limit_reached`, a rejected `rate_limit_event`), reads the reset time
+the refusal names, and parks the harness until then plus
+`ARC_USAGE_LIMIT_MARGIN`. A refusal that names no time is retried every
+`ARC_USAGE_LIMIT_POLL` seconds. The wait does not count as an attempt, costs
+no fix round or escalation, and every other task on the same harness waits
+for the same reset rather than spending its own refusal. The dashboard sees
+`driver.usage_limit` once and `driver.usage_wait` every five minutes while
+parked. One driver run waits at most `ARC_USAGE_LIMIT_MAX_WAIT` (8 days, so a
+weekly window fits) before the attempt fails normally.
 
 `studio-api` is the same roles through OpenRouter: billed per token, but with
 real parallelism and no plan windows. Use it when the work outgrows the plans.
@@ -459,8 +472,12 @@ Subscription CLI: `npm install -g @openai/codex`.
 | `ARC_CLAUDE_BIN` | (unset) | pin the Claude Code binary |
 | `ARC_CODEX_BIN` | (unset) | pin the Codex binary (npm global bins are often off PATH) |
 | `ARC_GEMINI_BIN` | (unset) | pin the Gemini CLI binary |
-| `ARC_HARNESS_LIMIT_CLAUDE` | 1 | concurrent Claude Code sessions; 1 because your own session shares the plan |
-| `ARC_HARNESS_LIMIT_CODEX` | 2 | concurrent `codex exec` sessions |
+| `ARC_SUBSCRIPTION_SESSION_CAP` | 32 | concurrent sessions per plan seat (Claude Code, Codex): the roster cap, driver cap and harness pool for both; 1 restores a single seat |
+| `ARC_USAGE_LIMIT_MAX_WAIT` | 691200 (8 days) | the longest one driver run waits for a spent plan window to reset before the attempt fails |
+| `ARC_USAGE_LIMIT_POLL` | 900 | re-check interval, in seconds, when a usage-limit refusal names no reset time |
+| `ARC_USAGE_LIMIT_MARGIN` | 60 | seconds added past a named reset time before retrying |
+| `ARC_HARNESS_LIMIT_CLAUDE` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent Claude Code sessions (harness pool only) |
+| `ARC_HARNESS_LIMIT_CODEX` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `codex exec` sessions (harness pool only) |
 | `ARC_HARNESS_LIMIT_GEMINI` | 2 | concurrent Gemini CLI sessions |
 | `ARC_STUDIO_FREE_JUDGE_MODEL` | (unset) | a raw OpenRouter `vendor/id` used instead of the roster judge, to exercise the visual loop at $0; its verdicts are marked `validation` and never gate a phase |
 | `ARC_GODOT_BIN` | (unset) | pin the Godot binary |
