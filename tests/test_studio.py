@@ -90,12 +90,12 @@ print(json.dumps({
         sub = json.loads(in_studio(self.PROFILE_PROBE))
         api = json.loads(in_studio(self.PROFILE_PROBE, fleet="studio-api"))
 
-        # Subscription: the three CLI harnesses, and NO provider aliases — a
-        # plan-backed model is reached by its own CLI, never through
-        # OpenRouter. An alias here would silently bill an empty account.
+        # Subscription: plan CLIs plus OpenCode Zen free models (opencode/*).
+        # Frontier seats still have NO provider alias — only Zen-* rows do.
         self.assertEqual(sub["planner"], "Claude-Opus-5.5")
-        self.assertEqual(sub["aliases"], {})
-        for harness in ("claude", "codex", "cursor", "agy"):
+        self.assertEqual(len(sub["aliases"]), len(config.ZEN_OPENCODE_SLUGS))
+        self.assertTrue(all(v.startswith("opencode/") for v in sub["aliases"].values()))
+        for harness in ("claude", "codex", "cursor", "agy", "opencode"):
             self.assertIn(harness, sub["harnesses"])
         self.assertIn("cursor", sub["fams"])
         self.assertIn("google", sub["fams"])
@@ -110,7 +110,8 @@ print(json.dumps({
         # API: everything through opencode/openrouter, with aliases.
         self.assertEqual(api["planner"], "Claude-Opus-5.5")
         self.assertEqual(sorted(api["harnesses"]), ["opencode", "reasonix"])
-        self.assertEqual(len(api["aliases"]), 4)
+        self.assertEqual(len(api["aliases"]),
+                         4 + len(config.ZEN_OPENCODE_SLUGS))
         self.assertIn("xai", api["fams"])
 
         for d in (sub, api):
