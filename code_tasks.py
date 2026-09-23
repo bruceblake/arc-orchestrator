@@ -899,8 +899,11 @@ def wrote_the_code(ctx, tid, assigned, store=None):
             rows = store.harness_runs_prefix(tid)
         except Exception:
             rows = []
+        # harness_runs_prefix is a LIKE prefix, so "t1" also returns "t10".
+        # Only this task's own rows count.
         wrote = [r for r in rows
-                 if r.get("role") == "implementer" and r.get("exit_code") == 0
+                 if r.get("task_id") == tid
+                 and r.get("role") == "implementer" and r.get("exit_code") == 0
                  and r.get("model") in config.MODEL_FAMILY]
         if wrote:
             return wrote[-1]["model"]

@@ -537,9 +537,14 @@ class ReviewsAvoidTheModelThatWroteTheDiff(unittest.TestCase):
             def harness_runs_prefix(self, tid):
                 self.tid = tid
                 return [
-                    {"role": "implementer", "exit_code": 1, "model": assigned},
-                    {"role": "implementer", "exit_code": 0, "model": wrote},
-                    {"role": "reviewer", "exit_code": 0, "model": assigned},
+                    {"task_id": tid, "role": "implementer", "exit_code": 1,
+                     "model": assigned},
+                    {"task_id": tid + "0", "role": "implementer", "exit_code": 0,
+                     "model": assigned},
+                    {"task_id": tid, "role": "implementer", "exit_code": 0,
+                     "model": wrote},
+                    {"task_id": tid, "role": "reviewer", "exit_code": 0,
+                     "model": assigned},
                 ]
         store = Store()
         self.assertEqual(
