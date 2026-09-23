@@ -62,6 +62,18 @@ def gemini_bin():
     return _npm_bin("gemini", "ARC_GEMINI_BIN")
 
 
+def cursor_bin():
+    """The Cursor Agent CLI (`agent`), on the operator's Cursor subscription."""
+    found = shutil.which(os.getenv("ARC_CURSOR_BIN", "agent"))
+    return found or str(Path.home() / ".local" / "bin" / "agent")
+
+
+def agy_bin():
+    """Antigravity CLI (`agy`), on the operator's Google account."""
+    found = shutil.which(os.getenv("ARC_AGY_BIN", "agy"))
+    return found or str(Path.home() / ".local" / "bin" / "agy")
+
+
 # Codex sandbox policy for fleet runs. `workspace-write` lets the agent edit
 # the task's git worktree and nothing outside it, and `codex exec` is
 # non-interactive so there is no approval prompt to block on. The looser
@@ -85,6 +97,10 @@ def harness_bin(harness):
         return codex_bin()
     if harness == "gemini":
         return gemini_bin()
+    if harness == "cursor":
+        return cursor_bin()
+    if harness == "agy":
+        return agy_bin()
     return shutil.which(harness) or harness
 
 
@@ -152,12 +168,49 @@ if FLEET not in FLEET_PROFILES:
 STUDIO = FLEET in ("studio", "studio-api")
 STUDIO_API = FLEET == "studio-api"
 
+# OpenCode Zen free tier: zero-cost models on the operator's OpenCode account,
+# each with its own usage pool. On by default for studio fleets; re-sync the
+# slug list from `curl https://opencode.ai/zen/v1/models` when Zen rotates.
+ZEN_FREE = (os.getenv("ARC_ZEN_FREE", "1" if STUDIO else "0").lower()
+            not in ("0", "false", "no", ""))
+ZEN_MODEL_CAP = max(1, int(os.getenv("ARC_ZEN_MODEL_CAP", "2")))
+# Live on 2026-09-23 (Zen v1/models). IDs are opencode/<slug> in the CLI.
+ZEN_OPENCODE_SLUGS = (
+    "big-pickle",
+    "deepseek-v4-flash-free",
+    "jev-1.13-free",
+    "ling-3.0-flash-fin-free",
+    "mimo-v2.5-free",
+    "mimo-v2.6-flash-free",
+    "muse-spark-1.2-contributor-free",
+    "muse-spark-1.3-contributor-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "space-bunny-free",
+)
+
+
+def _zen_roster_name(slug):
+    return "Zen-" + "-".join(part.capitalize() for part in slug.split("-"))
+
+
+def _zen_family_name(slug):
+    return "zen-" + slug.replace("-", "_")[:28]
+
+
+def _zen_roster_rows():
+    return [(_zen_roster_name(slug), _zen_family_name(slug), "opencode", "medium",
+             ZEN_MODEL_CAP, ("implementer",), None, None)
+            for slug in ZEN_OPENCODE_SLUGS]
+
 # The concurrency ceiling for the SUBSCRIPTION seats (Claude Code, Codex).
 # Operator directive 2026-09-22: no local session limit on the studio's plan
 # models — let the fleet run as many Claude / GPT-6 sessions as the work
 # offers, and let the PLAN say no. When it does (a 5-hour or weekly usage
-# window runs out) the driver waits for the window to reset instead of
-# failing the task: see USAGE_LIMIT_MAX_WAIT and Driver.run. This used to be
+# window runs out) the driver first moves the attempt onto an implementer
+# whose harness is not blocked (Cursor CLI, then Claude, then the API
+# models) and only waits out the reset when every other seat is blocked
+# too: see USAGE_SWAP and Driver.run. This used to be
 # claude 1 / codex 2, sized for "one human at one terminal"; a large number
 # rather than a sentinel keeps every cap consumer (semaphores, leases,
 # admission) on plain integers. ARC_SUBSCRIPTION_SESSION_CAP=1 restores a
@@ -278,22 +331,41 @@ _STUDIO_FAMILIES = {
     "anthropic": Family("anthropic", _FRONTIER_CAP, {"default": "Claude-Opus-5.5"}),
     "openai":    Family("openai",    _FRONTIER_CAP, {"default": STUDIO_OPENAI_MODEL}),
     "xai":       Family("xai",       4, {"default": "Grok-4.7"}),
-    # Gemini is the judge: it is called far more often than the implementers
-    # (every render, every round) and is the cheapest model on the studio
-    # roster, so it gets the widest lane.
-    "google":    Family("google",    6, {"default": "Gemini-3.8-Flash"}),
-    # (only minted under studio-api; `models` is consulted by the research
-    #  workload, which runs on ARC)
+    # studio-api: Gemini-3.8-Flash is the judge and keeps the lane of 6.
+    # studio: Antigravity is a plan seat, so it uses the same frontier cap
+    # as Claude, Codex and Cursor, and the family default names that row.
+    "google":    Family(
+        "google",
+        6 if FLEET == "studio-api" else _FRONTIER_CAP,
+        {"default": (
+            "Gemini-3.8-Flash" if FLEET == "studio-api" else "Antigravity-Gemini")},
+    ),
+    # Cursor Agent CLI on the operator's Cursor subscription. Subscription
+    # profile only: studio-api reaches models through OpenRouter, not `agent`.
+    "cursor":    Family("cursor",    _FRONTIER_CAP, {"default": "Cursor-Grok-4.7"}),
 }
 if STUDIO:
     # Only the families a LIVE roster row names. A family with no row raises
     # KeyError in every family_limit consumer — the failure that retired
     # Union-Alpha's `union` family on 2026-09-17 — and the subscription
-    # profile has no xai model, because Grok has no subscription CLI path
-    # worth driving headlessly.
-    _wanted = {"anthropic", "openai"} | (
-        {"xai", "google"} if FLEET == "studio-api" else set())
+    # profile has no xai model: Grok on this profile is Cursor's
+    # grok-4.7-high, family `cursor`, not OpenRouter's Grok-4.7. `google`
+    # here is Antigravity CLI (`agy`), not the OpenRouter judge.
+    _wanted = {"anthropic", "openai"}
+    if FLEET == "studio":
+        # Cursor Agent and Antigravity CLI are subscription CLIs. xai stays
+        # off this profile: Grok here is Cursor's grok-4.7, not OpenRouter.
+        _wanted |= {"cursor", "google"}
+    if FLEET == "studio-api":
+        _wanted |= {"xai", "google"}
     FAMILIES.update({k: v for k, v in _STUDIO_FAMILIES.items() if k in _wanted})
+if ZEN_FREE and STUDIO:
+    FAMILIES.update({
+        _zen_family_name(slug): Family(
+            _zen_family_name(slug), ZEN_MODEL_CAP,
+            {"default": _zen_roster_name(slug)})
+        for slug in ZEN_OPENCODE_SLUGS
+    })
 
 # Derived, never hand-written: a literal list here kept naming gpt-oss after it
 # was removed from FAMILIES, and every consumer (pool semaphores, the dashboard
@@ -483,6 +555,13 @@ DRIVER_CAPACITY_BACKOFF_CAP = float(os.getenv("ARC_DRIVER_CAPACITY_BACKOFF_CAP",
 USAGE_LIMIT_MAX_WAIT = float(os.getenv("ARC_USAGE_LIMIT_MAX_WAIT", str(8 * 86400)))
 USAGE_LIMIT_POLL = float(os.getenv("ARC_USAGE_LIMIT_POLL", "900"))
 USAGE_LIMIT_MARGIN = float(os.getenv("ARC_USAGE_LIMIT_MARGIN", "60"))
+# Before parking, move the attempt to an implementer on a harness whose plan
+# is not blocked. Cursor CLI is tried first (its own subscription), then
+# Antigravity, Claude, Codex, then OpenCode Zen free models (one family per
+# slug so each partner's daily pool can run in parallel), then billed API
+# models. ARC_USAGE_SWAP=0 restores the old behaviour: wait out the window on
+# the same model.
+USAGE_SWAP = os.getenv("ARC_USAGE_SWAP", "1").lower() not in ("0", "false", "no", "")
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
@@ -752,17 +831,28 @@ ROSTER = [
 # the fleet's strongest model: PLANNER_MODEL, the head of REVIEW_FAMILIES, and
 # the last escalation stage. Claude is last in both, on purpose.
 _STUDIO_SUB_ROSTER = [
-    # No Gemini row. The Gemini CLI was the planned judge here, but on the
-    # operator's Google plan Gemini is usable only inside the Antigravity IDE,
-    # not from a headless CLI (operator report, 2026-09-22). GeminiDriver stays
-    # in drivers.py for an account that can use it; the visual judge on this
-    # profile rotates between Claude and GPT-6, both of which read images.
+    # The old Gemini CLI is still not a roster row: on this plan the headless
+    # Google seat is Antigravity CLI (`agy`), installed at ~/.local/bin/agy.
+    # Gemini-3.8-Flash stays the studio-api judge and is not an implementer.
+    # The visual judge on this profile still rotates between Claude and GPT-6.
     #
     # Codex on the ChatGPT plan, running the GPT-6 tier STUDIO_OPENAI_MODEL
     # names (`codex exec -m gpt-6-astra` etc.). Verified 2026-09-22: the plan
     # serves gpt-6-astra (its default), gpt-6-sol and gpt-6-luna. This is the
     # spec's 3D/asset operator, on the subscription.
     (STUDIO_OPENAI_MODEL, "openai",   "codex",  "hard",   SUBSCRIPTION_SESSION_CAP,
+     ("implementer", "reviewer", "pr_reviewer"),           None, None),
+    # Cursor Agent CLI (`agent --print`) on the Cursor subscription, running
+    # Grok 4.7 (`grok-4.7-high`, `agent --list-models`). A distinct roster
+    # name from OpenRouter's Grok-4.7 so the two prices and families stay
+    # apart. Not the planner: Claude stays last on purpose.
+    ("Cursor-Grok-4.7", "cursor", "cursor", "hard", SUBSCRIPTION_SESSION_CAP,
+     ("implementer", "reviewer", "pr_reviewer"),           None, None),
+    # Antigravity CLI (`agy --print`) on the Google account. Tried after
+    # Cursor when a plan window is spent. Empty ARC_AGY_MODEL leaves the
+    # CLI's own default, because `agy models` is empty until the account
+    # is signed in.
+    ("Antigravity-Gemini", "google", "agy", "hard", SUBSCRIPTION_SESSION_CAP,
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
     # Claude Code on the Claude plan: architect, netcode, and the studio
     # PLANNER. Uncapped locally (SUBSCRIPTION_SESSION_CAP); the plan's usage
@@ -787,6 +877,8 @@ _STUDIO_API_ROSTER = [
 _STUDIO_ROSTER = _STUDIO_API_ROSTER if FLEET == "studio-api" else _STUDIO_SUB_ROSTER
 if STUDIO:
     ROSTER.extend(_STUDIO_ROSTER)
+if ZEN_FREE and STUDIO:
+    ROSTER.extend(_zen_roster_rows())
 
 # OpenRouter ids, for the API profile ONLY. Under the subscription profile the
 # models are reached by their own CLIs and have no provider alias at all —
@@ -798,6 +890,12 @@ _STUDIO_ALIASES = {
     "Grok-4.7":         "openrouter/x-ai/grok-4.7",
     "Gemini-3.8-Flash": "openrouter/google/gemini-3.8-flash",
 } if FLEET == "studio-api" else {}
+# OpenCode Zen free models always route through the built-in `opencode` provider
+# (`opencode/<slug>`), on both studio profiles.
+_ZEN_ALIASES = ({
+    _zen_roster_name(slug): f"opencode/{slug}"
+    for slug in ZEN_OPENCODE_SLUGS
+} if ZEN_FREE and STUDIO else {})
 
 # The model argument each subscription CLI is invoked with. Empty means "let
 # the CLI use its own default", which is the safest posture: a plan serves
@@ -806,6 +904,13 @@ CLAUDE_CLI_MODEL = os.getenv("ARC_CLAUDE_MODEL", "opus")
 # Derived from the roster model by default (GPT-6-Astra -> gpt-6-astra), so the
 # model the roster NAMES is the model Codex RUNS; ARC_CODEX_MODEL overrides.
 CODEX_CLI_MODEL = os.getenv("ARC_CODEX_MODEL", "") or STUDIO_OPENAI_MODEL.lower()
+# Cursor Agent CLI model id (`agent --model`). grok-4.7-high is Grok 4.7
+# on the Cursor plan (`agent --list-models`), not OpenRouter's Grok-4.7.
+CURSOR_CLI_MODEL = os.getenv("ARC_CURSOR_MODEL", "grok-4.7-high")
+# Antigravity CLI model slug (`agy --model`). Empty leaves the signed-in
+# account's default; `agy models` lists slugs only after `agy` has been
+# signed in once.
+AGY_CLI_MODEL = os.getenv("ARC_AGY_MODEL", "")
 
 # Reasoning effort for `codex exec`, passed as -c model_reasoning_effort=...
 # Set EXPLICITLY because the model's own default is not what was chosen:
@@ -842,7 +947,9 @@ TIER_ORDER = ["medium", "hard"]   # weakest first; "basic" is gone with gpt-oss
 # ARC's /models endpoint. Only the API profile additionally has a provider
 # ALIAS (_STUDIO_ALIASES); a subscription model is reached by its own CLI and
 # has none, which is exactly why the two maps are separate.
-EXTERNAL_MODELS = {row[0] for row in _STUDIO_ROSTER} if STUDIO else set()
+EXTERNAL_MODELS = ({row[0] for row in _STUDIO_ROSTER} if STUDIO else set())
+if ZEN_FREE and STUDIO:
+    EXTERNAL_MODELS |= {row[0] for row in _zen_roster_rows()}
 
 
 def roster_date():
@@ -971,6 +1078,7 @@ IMPLEMENT_TIERS = {tier: [m for m, _f, _h, t, _c, roles in _LIVE
                    for tier in TIER_ORDER}
 IMPLEMENT_TIERS = {k: v for k, v in IMPLEMENT_TIERS.items() if v}
 MODEL_FAMILY = {m: fam for m, fam, *_ in _LIVE}
+MODEL_TIER = {m: t for m, _f, _h, t, *_ in _LIVE}
 MODEL_HARNESS = {m: h for m, _f, h, *_ in _LIVE}
 MODEL_ROLES = {m: set(roles) for m, _f, _h, _t, _c, roles in _LIVE}
 _MEASURED_CONCURRENCY = {m: cap for m, _f, _h, _t, cap, _r in _LIVE}
@@ -1169,7 +1277,7 @@ def harness_model(model, harness):
 # OpenRouter models instead; under the local profile it is empty again.
 # provider_model_alias is gated on EXTERNAL_MODELS, so an entry can never
 # outlive the roster row it names.
-MODEL_HARNESS_ALIAS = dict(_STUDIO_ALIASES)
+MODEL_HARNESS_ALIAS = {**_STUDIO_ALIASES, **_ZEN_ALIASES}
 
 
 def provider_model_alias(model):
@@ -1254,7 +1362,8 @@ def kimi_plan_mode_on():
 # single-agent terminal tools, not fleets, and none of them fans out into
 # parallel sub-sessions the way opencode does.
 _SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2,
-                         "claude": 1, "codex": 1, "gemini": 1}
+                         "claude": 1, "codex": 1, "cursor": 1, "agy": 1,
+                         "gemini": 1}
 
 
 def _harness_of_model(model):
@@ -1342,11 +1451,15 @@ _MODEL_DRIVER_CAP = {
 # That trade is now the operator's to make, and they made it:
 # claude and codex are NOT capped low any more (operator directive
 # 2026-09-22): SUBSCRIPTION_SESSION_CAP lets them run as wide as the work
-# offers, and the plan's usage window — waited out by Driver.run, not failed
-# on — is the real limit. gemini keeps 2: no live roster row uses it.
+# offers, and the plan's usage window — swapped off by Driver.run when
+# another harness is free, otherwise waited out, not failed — is the real
+# limit. gemini keeps 2: no live roster row uses the old Gemini CLI.
+# cursor and agy are subscription CLIs and share the same cap knob.
 _HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 7,
                 "claude": SUBSCRIPTION_SESSION_CAP,
-                "codex": SUBSCRIPTION_SESSION_CAP, "gemini": 2}
+                "codex": SUBSCRIPTION_SESSION_CAP,
+                "cursor": SUBSCRIPTION_SESSION_CAP,
+                "agy": SUBSCRIPTION_SESSION_CAP, "gemini": 2}
 
 
 def kimi_wire_model():
@@ -1588,7 +1701,16 @@ MODEL_PRICING = {
     "GPT-6-Luna":       {"prompt_per_mtok":  0.10, "completion_per_mtok":  0.50},
     "Grok-4.7":         {"prompt_per_mtok":  1.60, "completion_per_mtok":  4.80},
     "Gemini-3.8-Flash": {"prompt_per_mtok":  0.75, "completion_per_mtok":  3.75},
+    # Cursor's Grok 4.7 and Antigravity run on their subscriptions, the same
+    # way Claude Code and Codex run on theirs. The plan is the meter; there
+    # is no per-token bill for the fleet to record, so the telemetry figure
+    # is zero on purpose. OpenRouter's Grok-4.7 price above is a different seat.
+    "Cursor-Grok-4.7":     {"prompt_per_mtok":  0.0,  "completion_per_mtok":  0.0},
+    "Antigravity-Gemini":  {"prompt_per_mtok":  0.0,  "completion_per_mtok":  0.0},
 }
+for _slug in ZEN_OPENCODE_SLUGS:
+    MODEL_PRICING[_zen_roster_name(_slug)] = {
+        "prompt_per_mtok": 0.0, "completion_per_mtok": 0.0}
 
 
 def _env_float(name):

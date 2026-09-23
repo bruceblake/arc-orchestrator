@@ -59,7 +59,8 @@ class TestProfileIsolation(unittest.TestCase):
 
     def test_no_studio_model_is_routable_locally(self):
         for model in ("Claude-Opus-5.5", "GPT-6-Astra", "Grok-4.7",
-                      "Gemini-3.8-Flash"):
+                      "Gemini-3.8-Flash", "Cursor-Grok-4.7",
+                      "Antigravity-Gemini"):
             self.assertNotIn(model, config.IMPLEMENTER_MODELS)
             self.assertNotIn(model, config.MODEL_ROLES)
             self.assertNotIn(model, config.ESCALATION_PATH)
@@ -89,23 +90,28 @@ print(json.dumps({
         sub = json.loads(in_studio(self.PROFILE_PROBE))
         api = json.loads(in_studio(self.PROFILE_PROBE, fleet="studio-api"))
 
-        # Subscription: the three CLI harnesses, and NO provider aliases — a
-        # plan-backed model is reached by its own CLI, never through
-        # OpenRouter. An alias here would silently bill an empty account.
+        # Subscription: plan CLIs plus OpenCode Zen free models (opencode/*).
+        # Frontier seats still have NO provider alias — only Zen-* rows do.
         self.assertEqual(sub["planner"], "Claude-Opus-5.5")
-        self.assertEqual(sub["aliases"], {})
-        for harness in ("claude", "codex"):
+        self.assertEqual(len(sub["aliases"]), len(config.ZEN_OPENCODE_SLUGS))
+        self.assertTrue(all(v.startswith("opencode/") for v in sub["aliases"].values()))
+        for harness in ("claude", "codex", "cursor", "agy", "opencode"):
             self.assertIn(harness, sub["harnesses"])
+        self.assertIn("cursor", sub["fams"])
+        self.assertIn("google", sub["fams"])
+        self.assertNotIn("cursor", api["fams"])
         self.assertNotIn("xai", sub["fams"], "no Grok without a subscription CLI")
-        # Gemini is only usable inside Antigravity on the operator's plan, so
-        # the subscription roster has no google family and no gemini harness.
-        self.assertNotIn("google", sub["fams"])
+        # The old Gemini CLI is still not a subscription harness. Google on
+        # this profile is Antigravity (`agy`). Gemini-3.8-Flash stays the
+        # studio-api judge and is not an implementer.
         self.assertNotIn("gemini", sub["harnesses"])
+        self.assertNotIn("agy", api["harnesses"])
 
         # API: everything through opencode/openrouter, with aliases.
         self.assertEqual(api["planner"], "Claude-Opus-5.5")
         self.assertEqual(sorted(api["harnesses"]), ["opencode", "reasonix"])
-        self.assertEqual(len(api["aliases"]), 4)
+        self.assertEqual(len(api["aliases"]),
+                         4 + len(config.ZEN_OPENCODE_SLUGS))
         self.assertIn("xai", api["fams"])
 
         for d in (sub, api):
@@ -116,11 +122,24 @@ print(json.dumps({
         """The bug this guards: routing a plan-backed model through OpenRouter."""
         out = in_studio(
             "import config, json;"
+            "plan = [m for m in config.EXTERNAL_MODELS if not m.startswith('Zen-')];"
             "print(json.dumps([config.provider_model_alias(m)"
-            " for m in sorted(config.EXTERNAL_MODELS)]))")
+            " for m in sorted(plan)]))")
         aliases = json.loads(out)
         self.assertTrue(aliases)
         self.assertTrue(all(a is None for a in aliases), aliases)
+
+    def test_zen_free_models_on_studio_roster(self):
+        out = in_studio(
+            "import config, json;"
+            "zen = sorted(m for m in config.IMPLEMENTER_MODELS if m.startswith('Zen-'));"
+            "print(json.dumps({'n': len(zen), 'aliases': len(config._ZEN_ALIASES),"
+            " 'sample': config.provider_model_alias(zen[0]) if zen else None}))")
+        d = json.loads(out)
+        self.assertEqual(d["n"], len(config.ZEN_OPENCODE_SLUGS))
+        self.assertEqual(d["aliases"], len(config.ZEN_OPENCODE_SLUGS))
+        self.assertTrue(d["sample"], d["sample"])
+        self.assertTrue(d["sample"].startswith("opencode/"))
 
     def test_subscription_harnesses_follow_the_subscription_cap(self):
         # Operator directive 2026-09-22: the plan seats are not capped low;
@@ -129,9 +148,11 @@ print(json.dumps({
         out = in_studio(
             "import config, json;"
             "print(json.dumps([config.SUBSCRIPTION_SESSION_CAP,"
-            " {h: config.harness_limit(h) for h in ('claude', 'codex')}]))")
+            " {h: config.harness_limit(h) for h in "
+            "('claude', 'codex', 'cursor', 'agy')}]))")
         cap, caps = json.loads(out)
-        self.assertEqual(caps, {"claude": cap, "codex": cap})
+        self.assertEqual(caps, {"claude": cap, "codex": cap, "cursor": cap,
+                                "agy": cap})
 
     IMAGE_PROBE = """
 import json, config, drivers
@@ -150,6 +171,39 @@ print(json.dumps(out))
         self.assertIn("@/renders/a.png", argv["gemini"])
         self.assertIn("-i /renders/a.png", argv["codex"])
         self.assertIn("/renders/a.png", argv["claude"])
+
+    def test_cursor_cli_runs_headless_in_the_worktree(self):
+        out = in_studio(
+            "import drivers, json\n"
+            "d = drivers.driver_for('Cursor-Grok-4.7', 'implementer')\n"
+            "print(json.dumps({'fresh': d.argv('fix the door', None),\n"
+            " 'resume': d.argv('fix the door', 'chat-9')}))")
+        argv = json.loads(out)
+        fresh = " ".join(argv["fresh"])
+        self.assertIn("--print", fresh)
+        self.assertIn("stream-json", fresh)
+        self.assertIn("--force", fresh)
+        self.assertIn("--trust", fresh)
+        self.assertIn("--model grok-4.7-high", fresh)
+        self.assertNotIn("--resume", fresh)
+        resumed = " ".join(argv["resume"])
+        self.assertIn("--resume chat-9", resumed)
+
+    def test_antigravity_cli_runs_headless_in_the_worktree(self):
+        out = in_studio(
+            "import drivers, json\n"
+            "d = drivers.driver_for('Antigravity-Gemini', 'implementer')\n"
+            "print(json.dumps({'fresh': d.argv('fix the door', None),\n"
+            " 'resume': d.argv('fix the door', 'conv-9')}))")
+        argv = json.loads(out)
+        fresh = " ".join(argv["fresh"])
+        self.assertIn("--print", fresh)
+        self.assertIn("stream-json", fresh)
+        self.assertIn("--dangerously-skip-permissions", fresh)
+        self.assertNotIn("--sandbox", fresh)
+        self.assertNotIn("--model", fresh)
+        resumed = " ".join(argv["resume"])
+        self.assertIn("--conversation conv-9", resumed)
 
     ROLE_PROBE = """
 import drivers
@@ -201,8 +255,23 @@ CLAUDE_STREAM = "\n".join([
 ])
 
 
+AGY_STREAM = "\n".join([
+    '{"event":"init","conversation_id":"9ec58bfd","init":{"cwd":"/tmp"}}',
+    '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"{\\"pass\\": true}"}}',
+    '{"event":"result","result":{"conversation_id":"9ec58bfd","status":"SUCCESS","response":"{\\"pass\\": true}"}}',
+])
+
+
 class TestSubscriptionStreams(unittest.TestCase):
     """The subscription CLIs' real output reaches the pipeline intact."""
+
+    def test_agy_answer_is_the_result_response_not_the_delta(self):
+        import code_tasks, drivers
+        sid, text = drivers.parse_transcript(AGY_STREAM)
+        self.assertEqual(sid, "9ec58bfd")
+        self.assertEqual(text, '{"pass": true}')
+        self.assertEqual(code_tasks._parse_verdict(text),
+                         {"pass": True, "issues": []})
 
     def test_codex_answer_is_the_agent_message_not_the_reasoning(self):
         import drivers
