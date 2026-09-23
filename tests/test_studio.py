@@ -636,10 +636,16 @@ class TestCompactor(StudioDirTest):
             compactor.archive("p", 1, ["/nonexistent/x.png"])
 
 
+GROUNDED_B = {"mood": "dusk", "palette_hex": ["#c9ccd1", "#5a6069", "#8b5a3c"]}
+ART = " ".join(["Concrete and painted steel, worn at hand height."] * 12)
+
+
 class TestStageGates(StudioDirTest):
-    def _project(self, **target):
+    def _project(self, art=False, **target):
         d = tempfile.mkdtemp()
         (Path(d) / "studio_target.json").write_text(json.dumps(target))
+        if art:
+            (Path(d) / "studio_art_direction.md").write_text(ART)
         return d
 
     def test_phase_0_demands_numeric_bucket_a(self):
@@ -649,10 +655,18 @@ class TestStageGates(StudioDirTest):
         self.assertFalse(r["passed"])
         self.assertTrue(any("NUMERIC" in f for f in r["failures"]))
 
-    def test_phase_0_passes_with_numbers(self):
-        d = self._project(bucket_a={"corridor_width_m": 2.4},
-                          bucket_b={"mood": "dusk"})
-        self.assertTrue(stage_manager.check("p", d, gt.PHASE_0_TARGET_GROUNDING)["passed"])
+    def test_phase_0_passes_when_fully_grounded(self):
+        d = self._project(art=True, bucket_a={"corridor_width_m": 2.4},
+                          bucket_b=GROUNDED_B)
+        r = stage_manager.check("p", d, gt.PHASE_0_TARGET_GROUNDING)
+        self.assertTrue(r["passed"], r["failures"])
+
+    def test_phase_0_demands_a_colour_bible_and_art_direction(self):
+        """'Show the AI what you mean' — the videos' first principle."""
+        d = self._project(bucket_a={"corridor_width_m": 2.4}, bucket_b={"mood": "dusk"})
+        fails = " ".join(stage_manager.check("p", d, gt.PHASE_0_TARGET_GROUNDING)["failures"])
+        self.assertIn("palette_hex", fails)
+        self.assertIn("studio_art_direction.md", fails)
 
     def test_graybox_rejects_mesh_assets(self):
         d = self._project(bucket_a={"corridor_width_m": 2.4}, bucket_b={"m": "x"})
@@ -679,7 +693,7 @@ class TestStageGates(StudioDirTest):
         self.assertTrue(stage_manager.check_bucket_a(d)[0])
 
     def test_promotion_requires_the_gate_and_resets_the_baseline(self):
-        d = self._project(bucket_a={"corridor_width_m": 2.4}, bucket_b={"m": "x"})
+        d = self._project(art=True, bucket_a={"corridor_width_m": 2.4}, bucket_b=GROUNDED_B)
         self.assertEqual(stage_manager.current_phase("p"), gt.PHASE_0_TARGET_GROUNDING)
         res = stage_manager.promote("p", d)
         self.assertTrue(res["promoted"])
@@ -703,6 +717,242 @@ class TestStageGates(StudioDirTest):
         r = stage_manager.check("p", d, gt.PHASE_4_NETWORKED_QA)
         self.assertFalse(r["passed"])
         self.assertTrue(any("fuzz report" in f for f in r["failures"]))
+
+
+class TestVideoChecks(StudioDirTest):
+    """The checks the published workflows use: measure, look, the colour
+    bible, the frame-rate budget and the workbench sign-off."""
+
+    def _repo(self):
+        d = tempfile.mkdtemp()
+        (Path(d) / "studio_target.json").write_text(json.dumps(
+            {"bucket_a": {"corridor_width_m": 2.4}, "bucket_b": GROUNDED_B}))
+        (Path(d) / "studio_metrics.json").write_text(json.dumps({"corridor_width_m": 2.4}))
+        return d
+
+    def test_phase_1_requires_a_scripted_playtest(self):
+        d = self._repo()
+        fails = " ".join(stage_manager.check("p", d, gt.PHASE_1_GRAYBOX_PROTOTYPING)["failures"])
+        self.assertIn("no scripted playtest", fails)
+
+    def test_a_failing_playtest_check_blocks_the_phase(self):
+        d = self._repo()
+        Path(d, "tools").mkdir()
+        Path(d, "tools", "playtest.gd").write_text("extends SceneTree")
+        Path(d, "studio_playtest.json").write_text(json.dumps({"passed": False, "checks": [
+            {"name": "reaches_yard", "passed": False, "value": 3.1, "expected": 0}]}))
+        fails = stage_manager.playtest_status(d)[0]
+        self.assertTrue(any("reaches_yard" in f for f in fails))
+        Path(d, "studio_playtest.json").write_text(json.dumps({"passed": True, "checks": [
+            {"name": "reaches_yard", "passed": True, "value": 0, "expected": 0}]}))
+        self.assertEqual(stage_manager.playtest_status(d)[0], [])
+
+    def test_a_playtest_with_no_checks_proves_nothing(self):
+        d = self._repo()
+        Path(d, "tools").mkdir()
+        Path(d, "tools", "playtest.gd").write_text("extends SceneTree")
+        Path(d, "studio_playtest.json").write_text(json.dumps({"passed": True, "checks": []}))
+        self.assertTrue(stage_manager.playtest_status(d)[0])
+
+    def test_perf_gate_enforces_fps_and_shadow_casters(self):
+        d = self._repo()
+        Path(d, "studio_perf.json").write_text(json.dumps({"fps_p5": 20, "shadow_lights": 40}))
+        fails = " ".join(stage_manager.perf_status(d)[0])
+        self.assertIn("fps", fails)
+        self.assertIn("shadow-casting", fails)
+        Path(d, "studio_perf.json").write_text(json.dumps(
+            {"fps_p5": config.STUDIO_MIN_FPS + 5, "shadow_lights": 2}))
+        self.assertEqual(stage_manager.perf_status(d)[0], [])
+
+    def test_workbench_signoff_gates_phase_2(self):
+        from studio import approvals
+        d = self._repo()
+        rd = config.studio_run_dir("p", create=True)
+        (rd / "mesh-bunk.json").write_text(json.dumps(
+            {"model_path": "/x/bunk.glb", "triangles": 800, "max_triangle_count": 2000}))
+        Path(d, "assets").mkdir()
+        Path(d, "assets", "bunk.glb").write_bytes(b"x")
+        fails = " ".join(stage_manager.check("p", d, gt.PHASE_2_3D_ASSET_AND_ANIMATION)["failures"])
+        self.assertIn("not yet approved", fails)
+        approvals.decide("p", "bunk.glb", "approved")
+        fails = " ".join(stage_manager.check("p", d, gt.PHASE_2_3D_ASSET_AND_ANIMATION)["failures"])
+        self.assertNotIn("not yet approved", fails)
+        approvals.decide("p", "bunk.glb", "rejected", note="legs too thin")
+        fails = " ".join(stage_manager.check("p", d, gt.PHASE_2_3D_ASSET_AND_ANIMATION)["failures"])
+        self.assertIn("rejected assets", fails)
+
+    def test_approvals_refuse_bad_input(self):
+        from studio import approvals
+        with self.assertRaises(ValueError):
+            approvals.decide("p", "../../etc/passwd", "approved")
+        with self.assertRaises(ValueError):
+            approvals.decide("p", "bunk.glb", "maybe")
+
+
+def _png(path, color, w=40, h=24, filt=0):
+    import struct
+    import zlib
+    rows = b""
+    for y in range(h):
+        line = bytes(color) * w
+        if filt == 1:  # "Sub" filter: store differences, the decoder must undo them
+            raw = bytearray(line)
+            line = bytes(raw[:3]) + bytes((raw[i] - raw[i - 3]) & 255 for i in range(3, len(raw)))
+        rows += bytes([filt]) + line
+    ch = lambda t, d: struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    Path(path).write_bytes(b"\x89PNG\r\n\x1a\n" + ch(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0))
+                           + ch(b"IDAT", zlib.compress(rows)) + ch(b"IEND", b""))
+
+
+class TestPalette(unittest.TestCase):
+    def test_hex_parsing(self):
+        from studio.evaluation import palette
+        self.assertEqual(palette.parse_hex("#c9ccd1"), (0xc9, 0xcc, 0xd1))
+        self.assertEqual(palette.parse_hex("fff"), (255, 255, 255))
+        with self.assertRaises(palette.PaletteError):
+            palette.parse_hex("#12")
+
+    def test_on_and_off_palette_renders(self):
+        from studio.evaluation import palette
+        with tempfile.TemporaryDirectory() as d:
+            _png(f"{d}/on.png", (0x8a, 0x7f, 0x74), filt=1)
+            _png(f"{d}/off.png", (0, 0xb0, 0xb0))
+            pal = [palette.parse_hex(c) for c in ("#8b7d73", "#c9ccd1")]
+            self.assertEqual(palette.conformance(f"{d}/on.png", pal, tolerance=40), 1.0)
+            self.assertEqual(palette.conformance(f"{d}/off.png", pal, tolerance=40), 0.0)
+            target = {"bucket_b": {"palette_hex": ["#8b7d73", "#c9ccd1"]}}
+            _res, fails = palette.check_images([{"name": "off", "path": f"{d}/off.png"}],
+                                               target, minimum=0.6)
+            self.assertTrue(fails and "off" in fails[0])
+
+    def test_non_png_is_refused_not_guessed(self):
+        from studio.evaluation import palette
+        with tempfile.TemporaryDirectory() as d:
+            Path(d, "x.png").write_bytes(b"not a png")
+            with self.assertRaises(palette.PaletteError):
+                palette.read_png(Path(d, "x.png"))
+
+
+class TestManualReviewGate(unittest.TestCase):
+    """Gemini (Antigravity) or Cursor, driven by hand, get the last word."""
+
+    def _run(self, responses):
+        import asyncio
+        import code_tasks
+        import gitstore
+        calls = []
+
+        async def fake_gh(args, cwd, timeout=180):
+            calls.append(args)
+            if args[:2] == ["pr", "view"]:
+                doc = responses.pop(0) if len(responses) > 1 else responses[0]
+                return 0, json.dumps(doc), ""
+            return 0, "", ""
+        old_gh, old_poll = gitstore._gh, config.PR_MANUAL_POLL
+        gitstore._gh, config.PR_MANUAL_POLL = fake_gh, 0
+        try:
+            with capture_events():
+                out = asyncio.run(code_tasks._await_manual_review("/repo", "t", 7, 1))
+        finally:
+            gitstore._gh, config.PR_MANUAL_POLL = old_gh, old_poll
+        return out, calls
+
+    def test_approved_label_merges(self):
+        out, _ = self._run([{"labels": [], "comments": []},
+                            {"labels": [{"name": "manual-approved"}], "comments": []}])
+        self.assertEqual(out["decision"], "approved")
+
+    def test_rejection_carries_the_humans_comment_not_the_fleets(self):
+        import datetime as dt
+        now = dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
+        out, calls = self._run([{"labels": [{"name": "manual-rejected"}], "comments": [
+            {"body": "**GLM-5.3** (round 1) — approved.", "createdAt": now},
+            {"body": "The door slides through the wall at x=1.2; clamp it.", "createdAt": now}]}])
+        self.assertEqual(out["decision"], "rejected")
+        self.assertEqual(out["issues"], ["The door slides through the wall at x=1.2; clamp it."])
+        self.assertTrue(any("--remove-label" in c for c in calls),
+                        "the label must be cleared so the next round waits afresh")
+
+    def test_timeout_never_turns_into_a_merge(self):
+        old = config.PR_MANUAL_TIMEOUT
+        config.PR_MANUAL_TIMEOUT = 0.001
+        try:
+            out, _ = self._run([{"labels": [], "comments": []}])
+        finally:
+            config.PR_MANUAL_TIMEOUT = old
+        self.assertEqual(out["decision"], "rejected")
+
+    def test_fleet_comments_are_recognised(self):
+        import code_tasks
+        self.assertTrue(code_tasks._is_fleet_comment("**DeepSeek** (round 2) — changes requested:"))
+        self.assertTrue(code_tasks._is_fleet_comment("**Changes requested** (round 1) —"))
+        self.assertFalse(code_tasks._is_fleet_comment("please clamp the door"))
+
+
+class TestFeatureTracking(StudioDirTest):
+    def test_kanban_places_tasks_and_unplanned_features(self):
+        from studio import status
+        boards = [{"phase": "PHASE_1_GRAYBOX_PROTOTYPING", "tasks": [
+            {"id": "a", "title": "A", "status": "merged", "model": "m", "feature": "routine"},
+            {"id": "b", "title": "B", "status": "in_review", "model": "m"},
+            {"id": "c", "title": "C", "status": "failed", "model": "m"},
+            {"id": "d", "title": "D", "status": "pending", "model": "m"}]}]
+        feats = [{"id": "routine", "title": "Routine"}, {"id": "suspicion", "title": "Suspicion"}]
+        k = status.kanban(boards, feats)
+        self.assertEqual([c["id"] for c in k["done"]], ["a"])
+        self.assertEqual([c["id"] for c in k["review"]], ["b"])
+        self.assertEqual([c["id"] for c in k["blocked"]], ["c"])
+        self.assertEqual([c["id"] for c in k["planned"]], ["d"])
+        self.assertEqual([c["id"] for c in k["backlog"]], ["suspicion"],
+                         "a feature a task already serves is not backlog")
+
+    def test_changelog_reads_merged_task_commits(self):
+        from studio import status
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+            run = lambda *a: subprocess.run(["git", "-C", d, *a], env=env, check=True,
+                                            capture_output=True)
+            run("init", "-q", "-b", "main")
+            Path(d, "f").write_text("1")
+            run("add", "f")
+            run("commit", "-qm", "task(doors): Sliding doors (#4)\n\nModel: GPT-6-Sol\nReviewer: glm")
+            (entry,) = status.changelog(d)
+        self.assertEqual((entry["task"], entry["pr"], entry["model"], entry["reviewer"]),
+                         ("doors", 4, "GPT-6-Sol", "glm"))
+
+    def test_gauntlet_counts_rounds_not_spawn_retries(self):
+        from studio import status
+        log = Path(tempfile.mkdtemp()) / "events.jsonl"
+        ev = [{"type": "driver.start", "role": "implementer", "task": "t-x1"}] * 5 + [
+            {"type": "driver.start", "role": "implementer", "task": "t-x2"},
+            {"type": "task.gate", "task": "t", "passed": False},
+            {"type": "task.gate", "task": "t", "passed": True},
+            {"type": "task.pr_reviewed", "task": "t", "approved": True}]
+        log.write_text("\n".join(json.dumps(e) for e in ev) + "\n")
+        old = config.EVENTS_LOG
+        config.EVENTS_LOG = str(log)
+        try:
+            g = status.gauntlet(["t"])["t"]
+        finally:
+            config.EVENTS_LOG = old
+        self.assertEqual((g["attempts"], g["gate_pass"], g["gate_fail"], g["pr_rounds"]),
+                         (2, 1, 1, 1))
+
+
+class TestApproveRoute(StudioDirTest):
+    def test_route_only_signs_off_measured_assets_of_known_projects(self):
+        import dashboard
+        (config.studio_run_dir("game", create=True) / "stage.json").write_text("{}")
+        (config.studio_run_dir("game") / "mesh-bunk.json").write_text(
+            json.dumps({"model_path": "/x/bunk.glb"}))
+        ok = lambda b: dashboard._studio_approve(b)[1]
+        self.assertEqual(ok({"project": "nope", "asset": "bunk.glb", "state": "approved"}), 404)
+        self.assertEqual(ok({"project": "game", "asset": "other.glb", "state": "approved"}), 404)
+        self.assertEqual(ok({"project": "game", "asset": "bunk.glb", "state": "weird"}), 400)
+        self.assertEqual(ok({"project": "game", "asset": "bunk.glb", "state": "rejected"}), 400,
+                         "a rejection must say what to change")
+        self.assertEqual(ok({"project": "game", "asset": "bunk.glb", "state": "approved"}), 200)
 
 
 class TestJudgeContract(StudioDirTest):
@@ -991,6 +1241,14 @@ class TestScaffoldUnderGodot(unittest.TestCase):
             gate = subprocess.run([sys.executable, "tools/assert_metrics.py"],
                                   cwd=d, capture_output=True, text=True, timeout=60)
             self.assertEqual(gate.returncode, 0, gate.stdout + gate.stderr)
+            pt = subprocess.run(
+                [exe, "--headless", "--path", d, "--script", "res://tools/playtest.gd"],
+                capture_output=True, text=True, timeout=300)
+            self.assertIn("STUDIO_PLAYTEST PASS", pt.stdout + pt.stderr,
+                          (pt.stdout + pt.stderr)[-2000:])
+            report = json.loads(Path(d, "studio_playtest.json").read_text())
+            self.assertTrue(report["passed"])
+            self.assertGreaterEqual(len(report["checks"]), 3)
             metrics = json.loads(Path(d, "studio_metrics.json").read_text())
             self.assertAlmostEqual(metrics["crouch_clearance_m"], 0.7, places=2)
             self.assertAlmostEqual(metrics["ceiling_height_m"], 3.0, places=2)

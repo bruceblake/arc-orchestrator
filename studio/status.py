@@ -143,6 +143,7 @@ def _task_board(project, store, live_tasks):
                           "reviewer": row.get("reviewer") or t.get("reviewer"),
                           "deps": t.get("deps") or [], "status": status,
                           "live": tid in live_tasks, "live_role": role or "",
+                          "feature": t.get("feature", ""),
                           "error": (row.get("error") or "")[:300]})
         done = sum(1 for t in tasks if t["status"] in ("merged", "done"))
         boards.append({"file": path.name, "phase": _phase_of_taskfile(path),
@@ -185,6 +186,7 @@ def _previews(project, limit=12):
         except (OSError, ValueError):
             continue
         meshes.append({"asset": Path(m.get("model_path", r.stem)).name,
+                       "approval": "pending",
                        "triangles": m.get("triangles"),
                        "budget": m.get("max_triangle_count") or None,
                        "over": bool(m.get("over_budget_by")),
@@ -192,6 +194,12 @@ def _previews(project, limit=12):
                        "materials": m.get("material_count"),
                        "bones": ((m.get("skeleton") or {}).get("bone_count")),
                        "actions": m.get("action_count")})
+    from studio import approvals
+    states = approvals.status_of(project, [m["asset"] for m in meshes])
+    notes = approvals.load(project)
+    for m in meshes:
+        m["approval"] = states.get(m["asset"], "pending")
+        m["approval_note"] = (notes.get(m["asset"]) or {}).get("note", "")
     return {"renders": [{"name": p.stem, "url": _image_url(project, str(p))} for p in shots],
             "meshes": meshes}
 
@@ -255,6 +263,184 @@ def plan_windows():
     return None
 
 
+# --- the gauntlet, per task ---------------------------------------------------
+_TAIL_BYTES = 4 * 1024 * 1024
+
+
+def _event_tail():
+    """The newest few MB of the event log: enough for a live project's trail
+    without reading a 100MB log on every dashboard poll."""
+    path = Path(config.EVENTS_LOG)
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            fh.seek(max(0, size - _TAIL_BYTES))
+            data = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    lines = data.splitlines()
+    return lines[1:] if size > _TAIL_BYTES else lines
+
+
+def gauntlet(task_ids):
+    """Every check each task has been through: the "checks from every angle".
+
+    implement attempts, gate passes/fails, critic verdicts, PR rounds and
+    escalations, from the events the pipeline already emits. The board shows
+    this so a task that merged on the first try and one that fought through
+    eleven fix rounds do not look the same.
+    """
+    want = {i: {"attempts": 0, "gate_pass": 0, "gate_fail": 0, "review_pass": 0,
+                "review_fail": 0, "pr_rounds": 0, "pr_rejects": 0,
+                "escalations": 0, "manual": ""} for i in task_ids if i}
+    if not want:
+        return want
+    rounds = {i: set() for i in want}
+    for line in _event_tail():
+        if '"task' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        t = str(e.get("task") or e.get("module") or "")
+        base = re.sub(r"-x\d+$", "", t)
+        g = want.get(base)
+        if g is None:
+            continue
+        kind = e.get("type", "")
+        if kind == "task.gate":
+            g["gate_pass" if e.get("passed") else "gate_fail"] += 1
+        elif kind == "task.reviewed":
+            g["review_pass" if e.get("passed", e.get("pass")) else "review_fail"] += 1
+        elif kind == "task.pr_reviewed":
+            g["pr_rounds"] += 1
+            if not e.get("approved") and not e.get("inconclusive"):
+                g["pr_rejects"] += 1
+        elif kind == "task.escalated":
+            g["escalations"] += 1
+        elif kind == "task.pr_manual":
+            g["manual"] = e.get("decision", "")
+        elif kind == "task.pr_awaiting_manual":
+            g["manual"] = "awaiting"
+        elif kind == "driver.start" and e.get("role") == "implementer":
+            # A fix ROUND, not a spawn: one round's harness may be retried many
+            # times on a transient error, and counting each retry made a task
+            # look like it had been attempted two hundred times.
+            rounds[base].add(t)
+    for i, g in want.items():
+        g["attempts"] = len(rounds[i])
+    return want
+
+
+# --- features: the board, the roadmap, the changelog --------------------------
+KANBAN = ("backlog", "planned", "building", "review", "done", "blocked")
+_COLUMN = {"pending": "planned", "running": "building", "in_review": "review",
+           "merged": "done", "done": "done", "failed": "blocked",
+           "conflict": "blocked", "skipped": "blocked"}
+
+
+def roadmap(repo):
+    """Planned features from the game repo's studio_roadmap.json."""
+    try:
+        doc = json.loads((Path(repo) / "studio_roadmap.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [f for f in doc.get("features") or [] if isinstance(f, dict) and f.get("id")]
+
+
+def kanban(boards, features):
+    """Cards in columns: tasks by status, and roadmap features not yet planned."""
+    cols = {c: [] for c in KANBAN}
+    planned_features = set()
+    for b in boards:
+        for t in b["tasks"]:
+            if t.get("feature"):
+                planned_features.add(t["feature"])
+            cols[_COLUMN.get(t["status"], "planned")].append({
+                "kind": "task", "id": t["id"], "title": t["title"],
+                "phase": b.get("phase", ""), "model": t.get("model"),
+                "feature": t.get("feature", ""), "live": t.get("live"),
+                "live_role": t.get("live_role", ""), "gauntlet": t.get("gauntlet"),
+                "error": t.get("error", "")})
+    for f in features:
+        if f["id"] not in planned_features:
+            cols["backlog"].append({"kind": "feature", "id": f["id"],
+                                    "title": f.get("title") or f["id"],
+                                    "phase": f.get("phase", "")})
+    return cols
+
+
+def changelog(repo, limit=40):
+    """What shipped: merged task commits on the game repo's main, newest first."""
+    if not repo or not (Path(repo) / ".git").exists():
+        return []
+    try:
+        import subprocess
+        # What GitHub merged, when the local branch has not caught up yet:
+        # origin/main is only as fresh as the last fetch, but it is never
+        # BEHIND a merge the fleet made, which the local main can be.
+        ref = "main"
+        if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
+                           "main", "origin/main"], capture_output=True,
+                          timeout=10).returncode == 0:
+            ref = "origin/main"
+        out = subprocess.run(
+            ["git", "-C", str(repo), "log", ref, f"-n{limit}",
+             "--date=iso-strict", "--format=%H%x1f%ad%x1f%s%x1f%b%x1e"],
+            capture_output=True, text=True, timeout=20).stdout
+        remote = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+    except (OSError, ValueError):
+        return []
+    web = ""
+    m = re.search(r"github\.com[:/](.+?)(?:\.git)?$", remote)
+    if m:
+        web = f"https://github.com/{m.group(1)}"
+    entries = []
+    for rec in out.split("\x1e"):
+        parts = rec.strip("\n").split("\x1f")
+        if len(parts) < 3:
+            continue
+        sha, date, subject = parts[0], parts[1], parts[2]
+        body = parts[3] if len(parts) > 3 else ""
+        tm = re.match(r"task\(([^)]+)\):\s*(.*?)(?:\s*\(#(\d+)\))?$", subject)
+        trailers = dict(re.findall(r"(?m)^(Model|Reviewer|Harness):\s*(.+)$", body))
+        pr = tm.group(3) if tm else (re.search(r"\(#(\d+)\)$", subject) or [None, None])[1]
+        entries.append({
+            "sha": sha[:7], "date": date, "task": tm.group(1) if tm else "",
+            "title": tm.group(2) if tm else subject,
+            "pr": int(pr) if pr else None,
+            "pr_url": f"{web}/pull/{pr}" if (web and pr) else "",
+            "model": trailers.get("Model", ""), "reviewer": trailers.get("Reviewer", "")})
+    return entries
+
+
+def evidence(project, repo):
+    """The latest playtest, perf and palette readings, for the Studio view."""
+    from studio.engine import stage_manager
+    out = {}
+    pt = stage_manager._read_json(Path(repo) / stage_manager.PLAYTEST_REPORT) if repo else None
+    if pt:
+        out["playtest"] = {"passed": pt.get("passed"), "seconds": pt.get("seconds"),
+                           "checks": [c for c in pt.get("checks") or [] if isinstance(c, dict)][:30],
+                           "screenshots": len(pt.get("screenshots") or [])}
+    pf = stage_manager._read_json(Path(repo) / stage_manager.PERF_REPORT) if repo else None
+    if pf:
+        out["perf"] = {k: pf.get(k) for k in ("fps_avg", "fps_p5", "frame_ms_p95",
+                                               "draw_calls", "shadow_lights", "renderer")}
+        out["perf"]["min_fps"] = config.STUDIO_MIN_FPS
+        out["perf"]["max_shadow_lights"] = config.STUDIO_MAX_SHADOW_LIGHTS
+    try:
+        _f, pal = stage_manager.palette_status(project, repo) if repo else ([], {})
+        if pal.get("shares"):
+            out["palette"] = {"round": pal.get("round"), "shares": pal["shares"],
+                              "min": config.STUDIO_PALETTE_MIN}
+    except Exception:                                        # noqa: BLE001
+        pass
+    return out
+
+
 def _roster():
     out = []
     for m in sorted(config.MODEL_ROLES):
@@ -288,13 +474,21 @@ def project_snapshot(project, store=None, live_tasks=()):
     except Exception:                                        # noqa: BLE001
         arb = None
     fuzz = stage_manager.latest_fuzz_report(project)
+    boards = _task_board(project, store, live_tasks)
+    trail = gauntlet([t["id"] for b in boards for t in b["tasks"]])
+    for b in boards:
+        for t in b["tasks"]:
+            t["gauntlet"] = trail.get(t["id"])
+    feats = roadmap(repo) if repo else []
     return {
         "name": project, "repo": repo, "phase": phase,
         "phase_label": PHASE_LABELS.get(phase, phase),
         "phases": _phases(phase), "entered_ts": state.get("entered_ts"),
         "history": state.get("history") or [],
         "gate": gate, "metrics": _metrics(repo),
-        "boards": _task_board(project, store, live_tasks),
+        "boards": boards,
+        "kanban": kanban(boards, feats), "roadmap": feats,
+        "changelog": changelog(repo), "evidence": evidence(project, repo),
         "rounds": _rounds(project), "baseline": compactor.baseline(project),
         "workbench": _previews(project), "arbitration": arb,
         "fuzz": ({k: fuzz.get(k) for k in ("bots", "seconds", "messages_sent",
