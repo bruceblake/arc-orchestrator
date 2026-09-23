@@ -479,9 +479,24 @@ class AFixRoundContinuesTheHarnessSession(unittest.TestCase):
     """
 
     def test_same_model_continues(self):
+        results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3",
+                                    "harness": "opencode"}}
+        self.assertEqual(
+            code_tasks._resume_session(results, "t1", "GLM-5.3", "opencode"),
+            "s-1")
+
+    def test_other_harness_session_is_not_resumed(self):
+        # The live failure: GPT-6-Sol's fix round ran `codex exec resume` on
+        # a Cursor chat id and exited with "no rollout found".
+        results = {"implement_t1": {"session_id": "ffc0a77b", "model": "GPT-6-Sol",
+                                    "harness": "cursor"}}
+        self.assertIsNone(
+            code_tasks._resume_session(results, "t1", "GPT-6-Sol", "codex"))
+
+    def test_session_without_a_harness_is_not_resumed(self):
         results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3"}}
-        self.assertEqual(code_tasks._resume_session(results, "t1", "GLM-5.3"),
-                         "s-1")
+        self.assertIsNone(
+            code_tasks._resume_session(results, "t1", "GLM-5.3", "opencode"))
 
     def test_escalation_starts_fresh(self):
         results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3"}}
@@ -2110,6 +2125,7 @@ class PlanAmendmentWiring(unittest.TestCase):
         import gitstore
         src = pathlib.Path(gitstore.__file__).read_text()
         self.assertEqual(src.count('":!.arc/plan_proposals.jsonl"'), 2)
+        self.assertEqual(src.count('":!.arc/board.jsonl"'), 2)
 
     def test_implement_harvests_on_success_and_crash(self):
         body = self._slice("async def implement(ctx):", "async def gate(ctx):")

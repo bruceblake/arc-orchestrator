@@ -1381,6 +1381,15 @@ class Driver:
                     to_harness=config.MODEL_HARNESS.get(sub))
         log.warning("%s: plan usage limit reached; swapping this attempt to %s",
                     self.model, sub)
+        # The substitute must not resume this harness's session. The board
+        # is what it (and the next fix round) reads instead.
+        import board
+        to_h = config.MODEL_HARNESS.get(sub) or "?"
+        board.post(worktree, task=task_id or "", role=self.role, model=self.model,
+                   harness=self.harness, kind="handoff",
+                   body=(f"usage limit on {self.harness}/{self.model}; "
+                         f"this attempt continues on {to_h}/{sub}. "
+                         f"Do not resume a {self.harness} session there."))
         other = driver_for(sub, self.role,
                            interactive=getattr(self, "interactive", False))
         # A Codex session id is meaningless to `agent` or `claude`. The
@@ -1453,6 +1462,31 @@ class Driver:
                     events.emit("driver.vpn_down", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt)
                     await wait_for_arc(task_id)
+                    attempt -= 1
+                    continue
+                if sid and "no rollout found" in str(exc).lower():
+                    # The id belonged to another harness, or the rollout was
+                    # deleted. Retrying resume repeats the same instant exit
+                    # until MAX_RETRIES. Drop the id and continue from the
+                    # worktree and the shared board.
+                    events.emit("driver.resume_missing", harness=self.harness,
+                                model=self.model, task=task_id, attempt=attempt,
+                                session_id=sid)
+                    import board
+                    board.post(worktree, task=task_id or "", role=self.role,
+                               model=self.model, harness=self.harness,
+                               kind="handoff",
+                               body=(f"session {sid} is not a {self.harness} "
+                                     "rollout; continuing without resume."))
+                    sid = None
+                    # Keep the original prompt. `continuation` replaces it
+                    # entirely, and a one-line note would drop the task.
+                    continuation = (
+                        "The previous session id is not a rollout this harness "
+                        "can resume. Continue from the files already in this "
+                        "worktree and from the SHARED BOARD below. Do not "
+                        "assume a prior chat.\n\n" + prompt
+                    )
                     attempt -= 1
                     continue
                 if getattr(exc, "usage_limit", False) or is_usage_limit(str(exc)):

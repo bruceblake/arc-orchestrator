@@ -120,11 +120,12 @@ while it is executing.
   re-validated through the real loader, only tasks with no row (or a
   `failed`/`skipped` one) may be mutated, the in-flight DAG never rewires, and
   amendments take effect on resume.
-- **Cross-agent messaging does not exist today.** Agents are isolated per node:
-  each harness runs in its own worktree and sees only its own prompt, the repo,
-  and its own transcript. The only information paths between agents are the fix
-  loop's feedback edge (gate/review failure text appended to the next implement
-  prompt) and the plan-proposal channel.
+- **A shared board exists** (`board.py`, `.arc/board.jsonl` plus
+  `logs/boards/<project>.jsonl`). It carries handoffs, results and review
+  notes across harnesses, which is what a usage swap needs when the next
+  model cannot resume the previous session. It is not addressed mail and
+  it does not spawn tasks. The fix loop's feedback edge and the
+  plan-proposal channel are still the other two paths.
 
 **This item is the follow-on**, in two pieces:
 

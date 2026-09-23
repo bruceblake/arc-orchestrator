@@ -324,7 +324,8 @@ async def diff_full(wt, base, max_chars=24000):
     """
     # Same `.arc` exclusion as publish(): a surviving proposals file must not
     # leak into the diff reviewers read either.
-    await _git(["add", "-A", "-N", "--", ".", ":!.arc/plan_proposals.jsonl"],
+    await _git(["add", "-A", "-N", "--", ".", ":!.arc/plan_proposals.jsonl",
+                ":!.arc/board.jsonl"],
                cwd=wt, check=False)  # intent-to-add
     rc, mb, _ = await _git(["merge-base", base, "HEAD"], cwd=wt, check=False)
     ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
@@ -345,7 +346,14 @@ async def publish(wt, message, trailers=None):
     # suspenders for the day a delete fails (plan.amend.channel_survives
     # events are the alarm). Verified against git 2.54: the exclusion leaves
     # the file unstaged even when present.
-    await _git(["add", "-A", "--", ".", ":!.arc/plan_proposals.jsonl"], cwd=wt)
+    await _git(["add", "-A", "--", ".", ":!.arc/plan_proposals.jsonl",
+                ":!.arc/board.jsonl"], cwd=wt)
+    # The board is excluded on purpose and is left in the worktree. If it is
+    # the only dirty path, commit would exit 1 with "nothing added to commit"
+    # and a resume that only posted to the board would fail publish.
+    _, staged, _ = await _git(["diff", "--cached", "--name-only"], cwd=wt, check=False)
+    if not staged.strip():
+        return None
     args = ["commit", "-q", "-m", message]
     if trailers:
         args += ["-m", "\n".join(f"{k}: {v}" for k, v in trailers.items())]

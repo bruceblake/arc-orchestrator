@@ -1564,6 +1564,10 @@ def max_tasks_in_flight():
 # archive inside the worktree would land in a pull request (Rule 5 publishes
 # with `git add -A`).
 STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
+# Project-wide agent board (board.py). Per-task threads live in the worktree
+# at .arc/board.jsonl and are excluded from publish; this directory is the
+# copy every task in a project can read. Outside every worktree on purpose.
+BOARD_DIR = Path(os.getenv("ARC_BOARD_DIR") or ROOT / "logs" / "boards")
 
 # The spend ceiling, in USD, for one studio run. The local fleet never needed
 # one: ARC is campus-served and effectively free, so the only cost of a task
