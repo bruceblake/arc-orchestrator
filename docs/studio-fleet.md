@@ -79,9 +79,11 @@ only if every seat is blocked.** `drivers.Driver.run` recognises the plans'
 refusals ("usage limit
 reached", "You've hit your limit · resets 3pm", Codex's
 `usage_limit_reached`, a rejected `rate_limit_event`), marks that harness
-blocked, and reruns the same prompt on the next free implementer: Cursor's
+blocked, and reruns the same prompt on the next free seat: Cursor's
 `agent` CLI (`Cursor-Grok-4.7`) first, then Antigravity (`agy`), then Claude,
-then Codex, then an API model. A substitute starts fresh in the same
+then Codex, then OpenCode Zen, then a billed API model. Implementation, gate
+review and PR review all move. A planner does not. A review swap skips the
+implementer's family, so the cross-family gate still holds. A substitute starts fresh in the same
 worktree; a Codex session cannot be resumed on `agent` or `agy`. `ARC_USAGE_SWAP=0` skips that and parks until the
 reset the refusal names, plus
 `ARC_USAGE_LIMIT_MARGIN`. A refusal that names no time is retried every
@@ -574,7 +576,7 @@ This writes a paste-ready review: instructions, the task spec (found through the
 | `ARC_CURSOR_MODEL` | grok-4.7-high | model id passed to `agent --model` (Cursor's Grok 4.7) |
 | `ARC_AGY_BIN` | agy | pin the Antigravity CLI (`agy`) |
 | `ARC_AGY_MODEL` | (unset) | model slug passed to `agy --model`; empty leaves the signed-in account's default |
-| `ARC_USAGE_SWAP` | 1 | on a spent plan window, rerun the attempt on the next free harness (Cursor Grok 4.7, then Antigravity, then Claude, then Codex, then OpenCode Zen free models, then billed API models); `0` waits out the reset on the same model |
+| `ARC_USAGE_SWAP` | 1 | on a spent plan window, rerun an implementation or review on the next free harness (Cursor Grok 4.7, then Antigravity, then Claude, then Codex, then OpenCode Zen free models, then billed API models); a review never lands in the implementer's family; a planner is not swapped; `0` waits out the reset on the same model |
 | `ARC_ZEN_FREE` | 0 | admit every live OpenCode Zen free slug as its own roster family (`Zen-*`, `opencode/<slug>`); `0` drops them |
 | `ARC_ZEN_MODEL_CAP` | 2 | per-slug driver/account cap — each partner pool is independent, so run different slugs in parallel and wait for daily resets per model |
 | `ARC_SUBSCRIPTION_SESSION_CAP` | 32 | concurrent sessions per plan seat (Claude Code, Codex, Cursor, Antigravity): the roster cap, driver cap and harness pool; 1 restores a single seat |

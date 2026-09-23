@@ -1731,7 +1731,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await driver.run(
                     _review_prompt(t, diff, impact, roster,
                                    board.prompt_block(wt, project=project_slug, task=tid)),
-                    wt, task_id=f"{tid}-x{attempt}")
+                    wt, task_id=f"{tid}-x{attempt}",
+                    avoid_families={config.MODEL_FAMILY[cur_model(ctx)]})
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -2043,7 +2044,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
                                       it["prior_issues"], impact, roster,
                                       board.prompt_block(wt, project=project_slug, task=tid)),
-                    wt, task_id=f"{tid}-pr{it['round']}")
+                    wt, task_id=f"{tid}-pr{it['round']}",
+                    avoid_families={config.MODEL_FAMILY[cur_model(ctx)]})
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather
