@@ -68,6 +68,9 @@ def gemini_bin():
 # `danger-full-access` exists for operators who need it; it is not the default
 # here, because a disposable worktree is a boundary worth keeping.
 CODEX_SANDBOX = os.getenv("ARC_CODEX_SANDBOX", "workspace-write")
+if CODEX_SANDBOX not in ("read-only", "workspace-write", "danger-full-access"):
+    raise ValueError(f"ARC_CODEX_SANDBOX={CODEX_SANDBOX!r}: use read-only, "
+                     "workspace-write or danger-full-access")
 
 
 def harness_bin(harness):
