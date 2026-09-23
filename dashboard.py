@@ -3560,10 +3560,6 @@ def _graceful_reexec():
     log.info("Graceful restart requested (PID %d); closing server and re-executing...", os.getpid())
     if _httpd:
         try:
-            _httpd.shutdown()
-        except Exception as exc:
-            log.warning("error shutting down httpd: %s", exc)
-        try:
             _httpd.server_close()
         except Exception as exc:
             log.warning("error closing httpd socket: %s", exc)
@@ -3573,12 +3569,16 @@ def _graceful_reexec():
         logging.shutdown()
     except Exception:
         pass
-    script = str(Path(sys.argv[0]).resolve())
-    args = [sys.executable, script] + sys.argv[1:]
+    if sys.argv and sys.argv[0].endswith(".py"):
+        script = str(Path(sys.argv[0]).resolve())
+        args = [sys.executable, script] + sys.argv[1:]
+    else:
+        args = [sys.executable] + sys.argv
     os.execv(sys.executable, args)
 
 
 _reexec_fn = _graceful_reexec
+_restart_timer = None
 
 
 def _restart(body):
@@ -3588,7 +3588,7 @@ def _restart(body):
     files from the latest git HEAD are loaded. Preserves PID, file descriptors
     (logs/server.log), and environment.
     """
-    global _restarting
+    global _restarting, _restart_timer
     if not isinstance(body, dict):
         return {"error": "JSON body required"}, 400
     if _restarting:
@@ -3607,7 +3607,23 @@ def _restart(body):
         }, 409
 
     _restarting = True
-    threading.Timer(0.3, _reexec_fn).start()
+
+    def _trigger():
+        if _httpd:
+            try:
+                _httpd.shutdown()
+            except Exception:
+                pass
+        elif _reexec_fn != _graceful_reexec:
+            _reexec_fn()
+
+    if _restart_timer:
+        try:
+            _restart_timer.cancel()
+        except Exception:
+            pass
+    _restart_timer = threading.Timer(0.3, _trigger)
+    _restart_timer.start()
     return {"ok": True, "status": "restarting", "pid": os.getpid()}, 200
 
 
@@ -4584,3 +4600,5 @@ def serve(port=None, db_path=None):
         pass
     finally:
         _httpd = None
+    if _restarting:
+        _graceful_reexec()

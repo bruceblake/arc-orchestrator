@@ -987,6 +987,11 @@ class GracefulRestart(unittest.TestCase):
         self.addCleanup(self._restore)
 
     def _restore(self):
+        if dashboard._restart_timer:
+            try:
+                dashboard._restart_timer.cancel()
+            except Exception:
+                pass
         dashboard._reexec_fn = self._orig_reexec
         dashboard._restarting = self._orig_restarting
         dashboard._launch_registry.clear()
