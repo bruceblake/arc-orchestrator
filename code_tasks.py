@@ -1732,6 +1732,26 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # is not one.
                 wt = await gitstore.existing_worktree(repo, tid)
                 if wt is None:
+                    # No worktree on an in_review/conflict resume: the PR may
+                    # already be MERGED (the run that would have written
+                    # 'merged' died first). Re-imploding through alloc would
+                    # reset a branch whose work is on main and burn a full
+                    # implement cycle re-deriving it. Check GitHub first.
+                    if prior_status in ("in_review", "conflict"):
+                        number, url, pr_st = await gitstore.find_pr(
+                            repo, tid, state="all")
+                        if pr_st == "MERGED":
+                            store.upsert_code_task(
+                                taskfile, tid, t["title"],
+                                cur_model(ctx), reviewer_for(t, cur_model(ctx)),
+                                "merged", finished=True)
+                            events.emit("task.merged", task=tid, pr=number,
+                                        url=url,
+                                        note="PR already merged; row settled "
+                                             "on resume without re-implement")
+                            await gitstore.cleanup(repo, tid)
+                            return {"published": False, "merged": True,
+                                    "empty": True, "head": None}
                     return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)

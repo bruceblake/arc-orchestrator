@@ -5,9 +5,11 @@ The blessed clone (~/repos/<project>) keeps main clean; every task runs in
 the only git actor — harnesses only write files inside their worktree.
 """
 import asyncio
-import re
+import fcntl
 import json
 import logging
+import re
+import shutil
 from pathlib import Path
 
 import config
@@ -20,6 +22,39 @@ GIT_TIMEOUT = 120
 
 class GitError(RuntimeError):
     pass
+
+
+class _RepoLock:
+    """Serialize git mutations against one blessed clone.
+
+    alloc, cleanup and the base fast-forward all rewrite refs and worktrees
+    in the same .git. Parallel tasks (the diamond's three dependents) used to
+    run those at once. A checkout that loses that race leaves a directory of
+    0-byte files and an empty .git pointer; the next resume then dies with
+    "already exists" because `worktree remove` does not recognize it.
+    """
+
+    def __init__(self, repo):
+        git = Path(repo).resolve() / ".git"
+        if git.is_file():
+            line = git.read_text(errors="replace").strip()
+            if line.startswith("gitdir:"):
+                git = Path(line.split(":", 1)[1].strip())
+        self.path = git / "arc-orchestrator.lock"
+        self._fh = None
+
+    async def __aenter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+")
+        await asyncio.to_thread(fcntl.flock, self._fh.fileno(), fcntl.LOCK_EX)
+        return self
+
+    async def __aexit__(self, *_exc):
+        try:
+            fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            self._fh.close()
+            self._fh = None
 
 
 async def _git(args, cwd, check=True):
@@ -140,11 +175,133 @@ async def alloc(repo, task_id, base="main"):
                     commits_discarded=n, base=base_ref)
         log.warning("alloc %s: resetting %s to %s discards %d commit(s)",
                     task_id, branch, base_ref, n)
+    async with _RepoLock(repo):
+        await _replace_worktree(repo, wt, branch, base_ref)
+        if not await _checkout_intact(repo, wt, base_ref):
+            # A parallel checkout on this clone has been observed to return
+            # success and leave every file, including .git, at 0 bytes. git
+            # then refuses the next add ("already exists") and the resume
+            # dies before a model starts. One rebuild is enough; a second
+            # hollow tree is a real failure, not something to paper over.
+            log.warning("alloc %s: checkout at %s was empty; recreating it",
+                        task_id, wt)
+            events.emit("worktree.hollow", task=task_id, path=str(wt))
+            await _replace_worktree(repo, wt, branch, base_ref)
+            if not await _checkout_intact(repo, wt, base_ref):
+                raise GitError(f"worktree {wt} checked out empty")
+    return wt
+
+
+def _untracked_overwrite_paths(err):
+    """Paths from `untracked working tree files would be overwritten by merge`.
+
+    Git indents each path. The header and the "Please move..." trailer are
+    not indented, so they never become candidates.
+    """
+    if "untracked working tree files would be overwritten" not in (err or ""):
+        return []
+    paths = []
+    for line in err.splitlines():
+        if not line[:1].isspace():
+            continue
+        rel = line.strip()
+        if not rel or ".." in Path(rel).parts:
+            continue
+        paths.append(rel)
+    return paths
+
+
+async def _remove_untracked(repo, paths):
+    """Delete untracked files that are blocking a fast-forward. Returns paths.
+
+    Only `??` lines. A tracked local edit must survive — that is the
+    operator's work, and the fast-forward is supposed to refuse it.
+    """
+    removed = []
+    root = Path(repo).resolve()
+    for rel in paths:
+        path = (root / rel).resolve()
+        try:
+            inside = path.is_relative_to(root)
+        except ValueError:
+            inside = False
+        if not inside or not path.is_file():
+            continue
+        rc, out, _ = await _git(["status", "--porcelain", "--", rel],
+                                cwd=repo, check=False)
+        if rc != 0 or not out.startswith("??"):
+            continue
+        path.unlink()
+        removed.append(rel)
+    if removed:
+        events.emit("git.untracked_cleared", repo=str(root),
+                    files=removed[:20], count=len(removed))
+        log.warning("removed %d untracked file(s) so %s can fast-forward: %s",
+                    len(removed), root.name, ", ".join(removed[:8]))
+    return removed
+
+
+async def _drop_worktree_dir(repo, wt):
+    """Make `wt` absent so `worktree add` can create it.
+
+    `git worktree remove` only deletes a path git still recognizes. The
+    prison-escape resume died here: the directory was on disk, its .git
+    file was empty, prune called the gitdir invalid, remove said "not a
+    working tree", and add --force still exited 128 with "already exists".
+    """
+    wt = Path(wt)
     if wt.exists():
         await _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
+    if wt.exists():
+        rc, listed, _ = await _git(["worktree", "list", "--porcelain"],
+                                   cwd=repo, check=False)
+        if rc == 0 and str(wt.resolve()) in listed:
+            raise GitError(
+                f"cannot replace {wt}: git still tracks it and worktree remove failed")
+        shutil.rmtree(wt)
+    await _git(["worktree", "prune"], cwd=repo, check=False)
+
+
+async def _replace_worktree(repo, wt, branch, base_ref):
+    await _drop_worktree_dir(repo, wt)
     await _git(["worktree", "add", "--force", "-B", branch, str(wt), base_ref],
                cwd=repo)
-    return wt
+
+
+async def _checkout_intact(repo, wt, base_ref):
+    """False when a non-empty blob landed as a 0-byte file, or .git is empty."""
+    gitfile = Path(wt) / ".git"
+    try:
+        if not gitfile.is_file() or gitfile.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    rc, out, _ = await _git(["ls-tree", "-r", "--name-only", base_ref],
+                            cwd=repo, check=False)
+    if rc != 0:
+        return False
+    checked = 0
+    for rel in out.splitlines():
+        rel = rel.strip()
+        if not rel:
+            continue
+        rc, size_s, _ = await _git(["cat-file", "-s", f"{base_ref}:{rel}"],
+                                   cwd=repo, check=False)
+        if rc != 0 or not (size_s.strip() or "").isdigit():
+            continue
+        if int(size_s.strip()) <= 0:
+            continue
+        path = Path(wt) / rel
+        try:
+            actual = path.stat().st_size if path.is_file() else -1
+        except OSError:
+            return False
+        if actual <= 0:
+            return False
+        checked += 1
+        if checked >= 3:
+            break
+    return True
 
 
 async def diff_stat(wt):
@@ -274,10 +431,10 @@ async def github_status(repo):
 async def cleanup(repo, task_id, delete_branch=True):
     repo = Path(repo).resolve()
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
-    if wt.exists():
-        await _git(["worktree", "remove", "--force", str(wt)], cwd=repo, check=False)
-    if delete_branch:
-        await _git(["branch", "-d", f"task/{task_id}"], cwd=repo, check=False)
+    async with _RepoLock(repo):
+        await _drop_worktree_dir(repo, wt)
+        if delete_branch:
+            await _git(["branch", "-d", f"task/{task_id}"], cwd=repo, check=False)
 
 
 # --- pull-request flow -------------------------------------------------------
@@ -354,6 +511,17 @@ async def ensure_base_branch(repo, base=None, prod=None):
     return base
 
 
+async def origin_ahead(repo, base=None):
+    """Commits origin/<base> has that the local base does not. 0 if unknown."""
+    repo = Path(repo).resolve()
+    base = base or config.BASE_BRANCH
+    rc, out, _ = await _git(["rev-list", "--count", f"{base}..origin/{base}"],
+                            cwd=repo, check=False)
+    if rc != 0 or not (out.strip() or "").isdigit():
+        return 0
+    return int(out.strip())
+
+
 async def fast_forward_base(repo, base=None):
     """Move the local base branch to what origin has. Returns (ok, note).
 
@@ -364,20 +532,52 @@ async def fast_forward_base(repo, base=None):
     operator's checkout was always `main` and the base was always
     `development`, and it becomes a foot-gun the moment anyone works ON the
     integration branch — which the branch model actively encourages.
+
+    A checked-out base also refuses to fast-forward when untracked files
+    would be overwritten. Godot writes `*.uid` beside every script, and the
+    foundation PR then commits those same paths. The blessed clone still had
+    the untracked copies, so the merge aborted, local main stayed on the
+    scaffold, and every dependent branched without the code it depends on.
+    Those untracked copies are deleted and the fast-forward is retried.
+    A tracked local edit is left alone — that refusal is the point.
     """
     repo = Path(repo).resolve()
     base = base or config.BASE_BRANCH
-    await _git(["fetch", "origin", base], cwd=repo, check=False)
-    rc, cur, _ = await _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=repo, check=False)
-    if rc == 0 and cur.strip() == base:
+    async with _RepoLock(repo):
+        rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
+        if "origin" not in remotes.split():
+            return True, "no origin remote; local base stands"
+        await _git(["fetch", "origin", base], cwd=repo, check=False)
+        rc, _, _ = await _git(["rev-parse", "--verify", f"origin/{base}"],
+                              cwd=repo, check=False)
+        if rc != 0:
+            return True, "origin has no such branch yet; local base stands"
+        rc, cur, _ = await _git(["rev-parse", "--abbrev-ref", "HEAD"],
+                                cwd=repo, check=False)
+        if rc == 0 and cur.strip() == base:
+            return await _ff_checked_out(repo, base)
+        rc, _, err = await _git(
+            ["update-ref", f"refs/heads/{base}", f"origin/{base}"],
+            cwd=repo, check=False)
+        return rc == 0, "updated" if rc == 0 else err.strip()[:400]
+
+
+async def _ff_checked_out(repo, base):
+    rc, _, err = await _git(["merge", "--ff-only", f"origin/{base}"],
+                            cwd=repo, check=False)
+    if rc == 0:
+        return True, "fast-forwarded the checked-out base"
+    removed = await _remove_untracked(repo, _untracked_overwrite_paths(err))
+    if removed:
         rc, _, err = await _git(["merge", "--ff-only", f"origin/{base}"],
                                 cwd=repo, check=False)
         if rc == 0:
-            return True, "fast-forwarded the checked-out base"
-        return False, f"base is checked out and not fast-forwardable: {err.strip()[:160]}"
-    rc, _, err = await _git(["update-ref", f"refs/heads/{base}", f"origin/{base}"],
-                            cwd=repo, check=False)
-    return rc == 0, "updated" if rc == 0 else err.strip()[:160]
+            return True, (
+                "fast-forwarded the checked-out base after removing "
+                f"{len(removed)} untracked file(s) the incoming commit "
+                "already contains")
+    return False, ("base is checked out and not fast-forwardable: "
+                   f"{err.strip()[:400]}")
 
 
 async def merge_in_progress(wt):
@@ -514,6 +714,30 @@ async def pr_state(repo, number):
         return json.loads(out)
     except ValueError:
         return {}
+
+
+async def find_pr(repo, task_id, state="open"):
+    """PR for task/<id> — (number, url, state) or (None, None, None).
+
+    `state` is open | closed | merged | all. Used on resume to notice a PR
+    that already merged (or closed) while the run that would have settled the
+    row was dead: the row can then be marked terminal instead of re-imploding
+    through publish → alloc, which would reset a branch whose work is already
+    on main.
+    """
+    rc, out, _ = await _gh(
+        ["pr", "list", "--head", f"task/{task_id}", "--state", state,
+         "--json", "number,url,state"], cwd=Path(repo).resolve())
+    if rc != 0 or not out.strip():
+        return None, None, None
+    try:
+        rows = json.loads(out)
+    except ValueError:
+        return None, None, None
+    if not rows:
+        return None, None, None
+    pr = rows[0]
+    return pr.get("number"), pr.get("url"), pr.get("state")
 
 
 async def merge_pr(repo, number, method="squash"):

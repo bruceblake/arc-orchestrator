@@ -458,6 +458,18 @@ class Store:
         with self.lock:
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
+    def code_tasks_with_status(self, status):
+        """Every row at exactly this status (e.g. 'in_review')."""
+        with self.lock:
+            return [
+                dict(r)
+                for r in self.conn.execute(
+                    "SELECT id, taskfile, title, model, reviewer, branch, "
+                    "worktree FROM code_tasks WHERE status=? ORDER BY id",
+                    (status,),
+                ).fetchall()
+            ]
+
     def driver_lease_rows(self):
         with self.lock:
             return [dict(r) for r in self.conn.execute(
