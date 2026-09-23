@@ -105,8 +105,44 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .chat-input input { flex: 1; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
 #c-mic.listening { border-color: var(--accent); color: var(--accent); animation: pulse 1.4s infinite; }
 .chat-thinking { display: inline-flex; align-items: center; gap: 6px; font-style: italic; }
+.chat-thinking:has(.cap-think-blocks), .chat-thinking:has(.cap-think-pending) { display: flex; flex-direction: column; align-items: flex-start; }
 .chat-spin { display: inline-block; width: 10px; height: 10px; border: 2px solid var(--dim); border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
 .chat-interim { font-style: italic; color: var(--dim); font-size: 11px; margin-top: 4px; }
+/* ---- captain panel ---- */
+.cap-dialog { max-height: 90vh; }
+.cap-state { border: 1px solid var(--border); border-radius: 8px; background: #0d1117; padding: 8px 10px; margin: 4px 0 8px; font-size: 12px; max-height: 30vh; overflow-y: auto; }
+.cap-row-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.cap-title { font-weight: 600; color: var(--text); }
+.cap-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.cap-caps { display: flex; flex-direction: column; gap: 4px; margin-bottom: 8px; }
+.cap-row { display: flex; align-items: center; gap: 8px; }
+.cap-row.full .cap-num { color: var(--warn, #d29922); }
+.cap-name { flex: 0 0 34%; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cap-bar { flex: 1; height: 6px; background: #21262d; border-radius: 3px; overflow: hidden; }
+.cap-bar span { display: block; height: 100%; background: var(--accent); }
+.cap-row.full .cap-bar span { background: var(--warn, #d29922); }
+.cap-num { flex: 0 0 auto; font-size: 11px; color: var(--dim); white-space: nowrap; }
+.cap-ok { color: var(--ok, #3fb950); font-size: 11px; }
+.cap-empty { color: var(--dim); font-size: 11px; }
+.cap-att-wrap { display: flex; flex-direction: column; gap: 3px; }
+.cap-att { font-size: 11px; line-height: 1.4; }
+.cap-att-status { display: inline-block; padding: 0 5px; border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: .03em; }
+.cap-att-status.failed { background: rgba(248,81,73,.18); color: #f85149; }
+.cap-att-status.conflict { background: rgba(240,136,62,.18); color: #f0883e; }
+.cap-att-status.in_review { background: rgba(88,166,255,.18); color: #58a6ff; }
+.cap-att-err { color: var(--dim); }
+.cap-act { display: flex; flex-direction: column; gap: 1px; border-left: 3px solid var(--border); padding: 4px 8px; margin-top: 4px; background: var(--panel); border-radius: 4px; }
+.cap-act.ok { border-left-color: #3fb950; }
+.cap-act.queued { border-left-color: #d29922; }
+.cap-act.bad { border-left-color: #f85149; }
+.cap-act-kind { font-size: 11px; font-weight: 600; color: var(--text); }
+.cap-act-note { font-size: 11px; color: var(--dim); }
+/* live thinking while a captain turn runs (capThinkingHTML in captain.js) */
+.chat-thinking-head { display: inline-flex; align-items: center; gap: 6px; color: var(--dim); font-style: normal; }
+.cap-think-pending { color: var(--accent); font-size: 11px; white-space: pre-wrap; word-break: break-word; max-height: 8em; overflow: hidden; }
+.cap-think-idle { color: var(--dim); font-size: 11px; }
+.cap-think-blocks { display: flex; flex-direction: column; gap: 2px; max-height: 16em; overflow-y: auto; width: 100%; }
+.cap-think-block { font-size: 11px; color: var(--dim); white-space: pre-wrap; word-break: break-word; border-left: 2px solid var(--border); padding-left: 6px; }
 @keyframes spin { to { transform: rotate(360deg); } }
 .drawer { position: fixed; top: 0; right: 0; width: min(640px, 95vw); height: 100vh; background: var(--panel); border-left: 1px solid var(--border); z-index: 50; transform: translateX(100%); transition: transform .15s ease; display: flex; flex-direction: column; }
 .drawer.open { transform: none; }
@@ -365,6 +401,25 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .st-verdict { border: 1px solid var(--border); border-radius: 6px; padding: 8px; font-size: 12px; }
 .st-verdict b { font-size: 16px; } .st-verdict ul { margin: 4px 0; padding-left: 18px; }
 .st-halt { margin-top: 10px; }
+
+.st-views { display: flex; gap: 4px; margin: 12px 0 4px; flex-wrap: wrap; }
+.st-view { background: none; border: 1px solid var(--border); color: var(--dim); padding: 3px 12px;
+  border-radius: 12px; cursor: pointer; font: inherit; font-size: 12px; }
+.st-view[aria-selected="true"] { color: var(--accent); border-color: var(--accent); background: #1c1629; }
+.gbs { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.gb { font-size: 10px; padding: 0 6px; border-radius: 8px; border: 1px solid #30363d; color: var(--dim); }
+.gb.warn { color: var(--warn); border-color: var(--warn); } .gb.good { color: var(--ok); border-color: var(--ok); }
+.gb.bad { color: var(--err); border-color: var(--err); }
+.kb { display: grid; grid-template-columns: repeat(6, minmax(150px, 1fr)); gap: 8px; overflow-x: auto; margin: 10px 0; }
+.kb-col { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: 6px; min-height: 80px; }
+.kb-h { font-size: 11px; text-transform: uppercase; letter-spacing: .4px; color: var(--dim); margin-bottom: 6px; }
+.kb-done .kb-h { color: var(--ok); } .kb-blocked .kb-h { color: var(--err); } .kb-building .kb-h { color: var(--accent); }
+.kb-review .kb-h { color: var(--purple); }
+.kb-card { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px; margin-bottom: 6px; font-size: 12px; }
+.kb-card.feature { border-style: dashed; }
+.kb-t { color: var(--text); margin-bottom: 2px; } .kb-err { font-size: 10px; margin-top: 3px; }
+.cl-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 4px 0; border-bottom: 1px solid #21262d; font-size: 12px; }
+.cl-d { width: 118px; } .cl-t { color: var(--text); }
 </style>
 </head>
 <body>
@@ -476,6 +531,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <span id="phase-filter"></span>
         <button class="act" id="btn-show-archived">show archived</button>
         <button class="act" id="btn-chat" aria-label="Plan with the fleet planner in chat">💬 Chat</button>
+        <button class="act" id="btn-captain" aria-label="Supervise the fleet with the captain">🧭 Captain</button>
         <button class="act primary" id="btn-new" aria-label="Create a new project">+ New project</button>
       </h2>
       <div id="projects"></div>
@@ -581,6 +637,27 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   </div>
 </div>
 
+<div class="modal" id="capmodal">
+  <div class="dialog chat-dialog cap-dialog">
+    <h3>Captain <span class="pill hint" id="k-session" aria-live="polite"></span></h3>
+    <label class="hint" for="k-repo">repo</label>
+    <select id="k-repo" aria-label="repo"></select>
+    <div id="k-state" class="cap-state" aria-live="polite">loading fleet state…</div>
+    <div class="chat-sessionbar">
+      <label class="hint" for="k-sessions">session</label>
+      <select id="k-sessions" aria-label="captain session"></select>
+      <button class="act" id="k-new" aria-label="Start a new captain session in a fresh session">＋ new</button>
+    </div>
+    <div class="chat-log" id="k-log"></div>
+    <div class="chat-input">
+      <input id="k-text" placeholder="Ask the captain what the fleet is doing, or what to build next…" aria-label="message">
+      <button class="act primary" id="k-send">send</button>
+    </div>
+    <div id="k-msg"></div>
+    <div style="margin-top:8px;text-align:right"><button class="act" id="k-close">close ✕</button></div>
+  </div>
+</div>
+
 <div class="drawer" id="drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
   <header>
     <h1 id="drawer-title">transcript</h1>
@@ -605,6 +682,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/projects.js"></script>
 <script src="/panels/detail.js"></script>
 <script src="/panels/chat.js"></script>
+<script src="/panels/captain.js"></script>
 <script src="/panels/transcript.js"></script>
 <script src="/panels/summary.js"></script>
 <script src="/panels/keyboard.js"></script>

@@ -22,5 +22,8 @@ logs/
 /graft/
 .ignore
 
-# Personal Claude Code permission overrides (not shared)
-.claude/settings.local.json
+# Personal Claude Code state (permissions, local worktrees) — never shared
+.claude/
+
+# Reasonix fleet permissions file: embeds live API keys in allow entries
+reasonix.toml

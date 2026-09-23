@@ -12,7 +12,7 @@ from unittest.mock import patch
 from helpers import capture_events  # sets repository import path
 import config
 from studio import cli, provision
-from studio.engine import godot
+from studio.engine import godot, stage_manager
 
 
 class TestReadiness(unittest.TestCase):
@@ -33,17 +33,22 @@ class TestReadiness(unittest.TestCase):
                                      rc == 0 and output == "Logged in using ChatGPT")
 
     def test_failed_measurement_cannot_gate_or_promote(self):
-        args = argparse.Namespace(project="p", repo="/tmp/game", phase="", force=False, reason="")
-        with patch.object(Path, "exists", return_value=True), \
-             patch.object(godot, "available", return_value=True), \
-             patch.object(godot, "measure", side_effect=godot.GodotError("broken measurement")), \
-             patch("studio.engine.stage_manager.check") as check, \
-             patch("studio.engine.stage_manager.promote") as promote, \
-             contextlib.redirect_stdout(io.StringIO()):
-            self.assertEqual(cli.cmd_gate(args), 1)
-            self.assertEqual(cli.cmd_promote(args), 1)
-            check.assert_not_called()
-            promote.assert_not_called()
+        with tempfile.TemporaryDirectory() as d:
+            script = Path(d) / godot.MEASURER
+            script.parent.mkdir(parents=True, exist_ok=True)
+            script.write_text("placeholder")
+            args = argparse.Namespace(project="p", repo=d, phase="", force=False, reason="")
+            with patch.object(stage_manager, "current_phase", return_value=stage_manager.PHASES[0]), \
+                 patch.object(godot, "available", return_value=True), \
+                 patch.object(godot, "measure", side_effect=godot.GodotError("broken measurement")), \
+                 patch.object(godot, "playtest", return_value=None), \
+                 patch("studio.engine.stage_manager.check") as check, \
+                 patch("studio.engine.stage_manager.promote") as promote, \
+                 contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(cli.cmd_gate(args), 1)
+                self.assertEqual(cli.cmd_promote(args), 1)
+                check.assert_not_called()
+                promote.assert_not_called()
 
     def test_missing_godot_cannot_gate_when_measurer_exists(self):
         with tempfile.TemporaryDirectory() as d:
@@ -66,11 +71,45 @@ class TestReadiness(unittest.TestCase):
             result = {"phase": "graybox", "passed": True, "failures": []}
             with patch.object(godot, "available", return_value=True), \
                  patch.object(godot, "measure", return_value={"width": 12}) as measure, \
+                 patch.object(godot, "playtest", return_value=None), \
                  patch("studio.engine.stage_manager.check", return_value=result) as check, \
                  contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(cli.cmd_gate(args), 0)
                 measure.assert_called_once_with(d)
                 check.assert_called_once_with("p", d, "graybox")
+
+    def test_failed_playtest_cannot_use_stale_gate_evidence(self):
+        args = argparse.Namespace(project="p", repo="/tmp/game", phase=stage_manager.PHASES[1])
+        with patch.object(godot, "available", return_value=True), \
+             patch.object(godot, "measure", return_value=None), \
+             patch.object(godot, "playtest", side_effect=godot.GodotError("broken playtest")), \
+             patch.object(stage_manager, "check") as check, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.cmd_gate(args), 1)
+            check.assert_not_called()
+
+    def test_failed_perf_cannot_use_stale_promotion_evidence(self):
+        args = argparse.Namespace(project="p", repo="/tmp/game", force=False, reason="")
+        with patch.object(stage_manager, "current_phase", return_value=stage_manager.PHASES[3]), \
+             patch.object(godot, "available", return_value=True), \
+             patch.object(godot, "measure", return_value=None), \
+             patch.object(godot, "playtest", return_value=None), \
+             patch.object(godot, "perf", side_effect=godot.GodotError("broken perf")), \
+             patch.object(stage_manager, "promote") as promote, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.cmd_promote(args), 1)
+            promote.assert_not_called()
+
+    def test_missing_perf_script_cannot_use_stale_report(self):
+        args = argparse.Namespace(project="p", repo="/tmp/game", phase=stage_manager.PHASES[3])
+        with patch.object(godot, "available", return_value=True), \
+             patch.object(godot, "measure", return_value=None), \
+             patch.object(godot, "playtest", return_value=None), \
+             patch.object(godot, "perf", return_value=None), \
+             patch.object(stage_manager, "check") as check, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(cli.cmd_gate(args), 1)
+            check.assert_not_called()
 
     def test_nonzero_measurer_cannot_pass_with_success_marker(self):
         with tempfile.TemporaryDirectory() as d:

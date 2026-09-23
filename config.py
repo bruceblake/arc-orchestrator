@@ -367,6 +367,13 @@ def family_limit(name):
 # for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
 TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
+# Captain session files and the capacity queue (`main.py captain`, the
+# dashboard Captain panel). Resolved at call time by captain.captain_dir() and
+# dashboard._captain_dir() — both read ARC_CAPTAIN_DIR directly — NOT from this
+# constant, so a test can redirect either process without an import-order
+# hazard; the constant exists so the docs-truth scan sees the var config.py
+# reads. Defaulting here and there must agree: logs/captain.
+CAPTAIN_DIR = os.getenv("ARC_CAPTAIN_DIR") or str(ROOT / "logs" / "captain")
 # The only directory tree the dashboard will accept a project repo from
 # (/api/projects/create and every taskfile it runs). A network client can
 # name any path in a POST body; this is the fence. It was the operator's
@@ -540,6 +547,26 @@ PR_MAX_ROUNDS = int(os.getenv("ARC_PR_MAX_ROUNDS", "16"))
 # Separate from PR_MAX_ROUNDS on purpose: an infrastructure failure must
 # not consume the rounds reserved for real disagreement about the code.
 PR_MAX_INCONCLUSIVE = int(os.getenv("ARC_PR_MAX_INCONCLUSIVE", "20"))
+
+# The MANUAL review gate: a human (or an agent the human drives by hand —
+# Gemini in Antigravity, Cursor) has the last word on every PR. Off by
+# default. When on, a PR the fleet's reviewers approved is NOT merged: it
+# waits until someone labels it on GitHub.
+#
+#   manual-approved   merge it
+#   manual-rejected   send it back; every PR comment posted while it waited
+#                     (other than the fleet's own) becomes the implementer's
+#                     feedback, exactly like a reviewer's issues
+#
+# Without this the fleet merges the moment its own reviewers agree, so a
+# person reviewing the same PR in another tool is racing it. The wait costs no
+# model time (it polls GitHub); PR_MANUAL_TIMEOUT bounds it (0 = wait for as
+# long as it takes — a human gate should not time out into a merge).
+PR_MANUAL_REVIEW = os.getenv("ARC_PR_MANUAL_REVIEW", "0") == "1"
+PR_MANUAL_POLL = float(os.getenv("ARC_PR_MANUAL_POLL", "30"))
+PR_MANUAL_TIMEOUT = float(os.getenv("ARC_PR_MANUAL_TIMEOUT", "0"))
+PR_MANUAL_APPROVED_LABEL = "manual-approved"
+PR_MANUAL_REJECTED_LABEL = "manual-rejected"
 
 # How many times a conflicting PR may be resynced with the base before
 # giving up. Each resync rewrites the branch and costs a fresh review.
@@ -1459,6 +1486,20 @@ STUDIO_KEEP_ROUNDS = int(os.getenv("ARC_STUDIO_KEEP_ROUNDS", "1"))
 # unvetted judge is exactly the kind of evidence this repo refuses elsewhere.
 # Empty (the default) means the rotation in studio/evaluation/judge_loop.py.
 STUDIO_FREE_JUDGE_MODEL = os.getenv("ARC_STUDIO_FREE_JUDGE_MODEL", "")
+
+# The colour bible (bucket_b.palette_hex). A render passes when this share of
+# its sampled pixels sits within PALETTE_TOLERANCE (RGB distance) of some
+# palette colour. Generous on purpose: light and shading move every pixel,
+# and what this exists to catch is drift, not shading.
+STUDIO_PALETTE_MIN = float(os.getenv("ARC_STUDIO_PALETTE_MIN", "0.6"))
+STUDIO_PALETTE_TOLERANCE = float(os.getenv("ARC_STUDIO_PALETTE_TOLERANCE", "48"))
+
+# The performance gate (phase 3 onward). A published build lost HALF its frame
+# rate to shadows alone — every shadow-casting lamp re-renders the scene from
+# its own point of view (14,000 shadow draws against 600 visible pieces) — so
+# both the frame rate and the number of shadow casters are gated.
+STUDIO_MIN_FPS = float(os.getenv("ARC_STUDIO_MIN_FPS", "45"))
+STUDIO_MAX_SHADOW_LIGHTS = int(os.getenv("ARC_STUDIO_MAX_SHADOW_LIGHTS", "8"))
 
 # Headless bot swarm size and run length for Module E.
 STUDIO_FUZZ_BOTS = int(os.getenv("ARC_STUDIO_FUZZ_BOTS", "16"))

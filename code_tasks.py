@@ -15,6 +15,7 @@ import os
 import re
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
 
 import config
@@ -55,6 +56,10 @@ RETIRED_MODELS = {
     "Union-Alpha":       lambda: next((m for m in config.ESCALATION_PATH
                                        if m in config.IMPLEMENT_TIERS.get("medium", ())),
                                       config.ESCALATION_PATH[0]),
+    # Former hard-tier Studio subscription harnesses. Keep existing taskfiles
+    # runnable after the active Studio profile moved to Claude and Codex.
+    "Cursor-Grok-4.7":   lambda: config.ESCALATION_PATH[-1],
+    "Antigravity-Gemini": lambda: config.ESCALATION_PATH[-1],
 }
 
 
@@ -620,6 +625,77 @@ def _eligible_pr_reviewers(impl_fam, pol):
             continue
         out.append(m)
     return out
+
+
+_FLEET_COMMENT_PREFIXES = ("**Changes requested**", "Noted, non-blocking")
+
+
+def _is_fleet_comment(body):
+    """Comments the fleet itself posts: never a human's review feedback."""
+    b = (body or "").lstrip()
+    if b.startswith(_FLEET_COMMENT_PREFIXES):
+        return True
+    # Per-reviewer verdicts are "**<model>** (round N) — ..."
+    return bool(re.match(r"\*\*[^*]+\*\* \(round \d+\)", b))
+
+
+async def _await_manual_review(repo, tid, number, round_n):
+    """Hold a fleet-approved PR until a human labels it (config.PR_MANUAL_REVIEW).
+
+    Returns {"decision": "approved"|"rejected"|"timeout", "issues": [...]}.
+    A timeout is reported as REJECTED with a clear issue rather than merged:
+    the gate exists because a person wanted the last word, so running out of
+    patience must never turn into a merge nobody approved.
+    """
+    started = time.time()
+    events.emit("task.pr_awaiting_manual", task=tid, pr=number, round=round_n,
+                approve_label=config.PR_MANUAL_APPROVED_LABEL,
+                reject_label=config.PR_MANUAL_REJECTED_LABEL)
+    await gitstore._gh(["pr", "comment", str(number), "--body",
+                        f"**Awaiting manual review** (round {round_n}). The fleet "
+                        f"approved this PR. Label it `{config.PR_MANUAL_APPROVED_LABEL}` "
+                        f"to merge, or `{config.PR_MANUAL_REJECTED_LABEL}` and leave "
+                        "a comment saying what to change."], cwd=repo)
+    while True:
+        rc, out, _ = await gitstore._gh(
+            ["pr", "view", str(number), "--json", "labels,comments,state"], cwd=repo)
+        if rc == 0:
+            try:
+                doc = json.loads(out)
+            except ValueError:
+                doc = {}
+            labels = {l.get("name") for l in doc.get("labels") or []}
+            if doc.get("state") == "MERGED" or config.PR_MANUAL_APPROVED_LABEL in labels:
+                events.emit("task.pr_manual", task=tid, pr=number, decision="approved",
+                            waited_s=round(time.time() - started))
+                return {"decision": "approved", "issues": []}
+            if config.PR_MANUAL_REJECTED_LABEL in labels:
+                issues = []
+                for c in doc.get("comments") or []:
+                    body = (c.get("body") or "").strip()
+                    try:
+                        at = datetime.fromisoformat(c.get("createdAt", "").replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        at = 0
+                    if body and at >= started - 5 and not _is_fleet_comment(body):
+                        issues.append(body[:2000])
+                if not issues:
+                    issues = ["Rejected in manual review (no comment was left; "
+                              "ask the reviewer what to change)."]
+                # Clear the label so the NEXT round waits for a fresh decision
+                # instead of being rejected again by this one.
+                await gitstore._gh(["pr", "edit", str(number), "--remove-label",
+                                    config.PR_MANUAL_REJECTED_LABEL], cwd=repo)
+                events.emit("task.pr_manual", task=tid, pr=number, decision="rejected",
+                            n_issues=len(issues), waited_s=round(time.time() - started))
+                return {"decision": "rejected", "issues": issues}
+        if config.PR_MANUAL_TIMEOUT and time.time() - started > config.PR_MANUAL_TIMEOUT:
+            events.emit("task.pr_manual", task=tid, pr=number, decision="timeout")
+            return {"decision": "rejected",
+                    "issues": [f"No manual review decision within "
+                               f"{int(config.PR_MANUAL_TIMEOUT)}s "
+                               "(ARC_PR_MANUAL_TIMEOUT)."]}
+        await asyncio.sleep(config.PR_MANUAL_POLL)
 
 
 def _tally_reviews(outcomes):
@@ -1732,6 +1808,26 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # is not one.
                 wt = await gitstore.existing_worktree(repo, tid)
                 if wt is None:
+                    # No worktree on an in_review/conflict resume: the PR may
+                    # already be MERGED (the run that would have written
+                    # 'merged' died first). Re-imploding through alloc would
+                    # reset a branch whose work is on main and burn a full
+                    # implement cycle re-deriving it. Check GitHub first.
+                    if prior_status in ("in_review", "conflict"):
+                        number, url, pr_st = await gitstore.find_pr(
+                            repo, tid, state="all")
+                        if pr_st == "MERGED":
+                            store.upsert_code_task(
+                                taskfile, tid, t["title"],
+                                cur_model(ctx), reviewer_for(t, cur_model(ctx)),
+                                "merged", finished=True)
+                            events.emit("task.merged", task=tid, pr=number,
+                                        url=url,
+                                        note="PR already merged; row settled "
+                                             "on resume without re-implement")
+                            await gitstore.cleanup(repo, tid)
+                            return {"published": False, "merged": True,
+                                    "empty": True, "head": None}
                     return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)
@@ -2000,6 +2096,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 if rc != 0:
                     await gitstore._gh(["pr", "comment", str(number),
                                         "--body", body], cwd=repo)
+            manual = None
+            if approved and config.PR_MANUAL_REVIEW:
+                # The fleet agreed; now the human's word. Rejection here goes
+                # down the same path as a reviewer's: the comments become the
+                # implementer's feedback and a new PR round begins.
+                manual = await _await_manual_review(repo, tid, number, round_n)
+                if manual["decision"] == "rejected":
+                    approved = False
+                    issues = manual["issues"]
             if not approved and not inconclusive:
                 await gitstore._gh(
                     ["pr", "comment", str(number), "--body",
@@ -2008,6 +2113,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                          round_n, "\n".join(f"- {i}" for i in issues[:20]))],
                     cwd=repo)
             return {"approved": approved, "issues": issues,
+                    "manual": manual,
                     "follow_ups": follow_ups,
                     "approvals": approvals, "reviewers": chosen,
                     "crashed": crashed, "inconclusive": inconclusive,

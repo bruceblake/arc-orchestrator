@@ -34,6 +34,7 @@ from studio.schemas.task import (
     GameTask, PHASES, PHASE_INTENT, WORKERS, compile_taskfile,
     implementing_workers, preferred_reviewer, worker_model,
     PHASE_1_GRAYBOX_PROTOTYPING, PHASE_2_3D_ASSET_AND_ANIMATION,
+    PHASE_3_ATMOSPHERE_LIGHTING,
     PHASE_4_NETWORKED_QA,
 )
 
@@ -131,6 +132,50 @@ Good gates for this project:
 A task that writes a system MUST ship a test that fails without it."""
 
 
+# How the work is run, distilled from the published AI game-dev workflows the
+# operator pointed this studio at (2026-09): an orchestrator that hands out
+# work and checks what comes back; one task, one fresh session, easy to test;
+# a "gauntlet" where every piece is measured against numbers AND judged by an
+# independent critic before it is accepted; assets built one at a time in a
+# workbench and approved before anything is assembled; and a scripted playtest
+# that both measures and looks. The planner is told this in plain words
+# because every one of those is a planning decision.
+METHOD = """HOW THIS STUDIO WORKS (plan to it):
+
+- ONE TASK = ONE FRESH SESSION, EASY TO TEST. If you cannot say in one sentence \
+how the gate proves a task worked, split the task.
+- THE GAUNTLET. Every task is measured (its verify_cmd: numbers, not greps), \
+then read by an independent critic from a different model family, then \
+PR-reviewed, and only then merged; a failure at any step returns it to the \
+implementer with the failure as feedback. Plan tasks whose gates can FAIL.
+- BUILD PIECES, THEN ASSEMBLE. Assets and systems are built one at a time and \
+proved in isolation before a task wires them together. Never plan "build the \
+level" — plan the kit pieces, then the assembly.
+- LABS. Anything that moves (a controller, an animation, a creature, an AI) \
+gets a small lab scene (scenes/labs/<thing>.tscn) where it can be exercised \
+alone; its test drives the lab.
+- BEST OF N for hero pieces. For an asset or system the whole game rests on, \
+plan two or three independent proposals in parallel and a separate task that \
+compares them and keeps one (the others are deleted in that task).
+- THE PLAYTEST. tools/playtest.gd drives the game along a real route with \
+StudioPlaytest (tools/studio_playtest.gd): named checks with value and \
+expected, plus screenshots along the way, written to studio_playtest.json. \
+The phase gate requires it to pass from phase 1 on, and the screenshots go \
+to the visual judge. When a task adds something a player does, it extends \
+the playtest to do it.
+- ART DIRECTION. studio_art_direction.md and the colour bible \
+(studio_target.json bucket_b.palette_hex) are handed to every asset task; \
+materials use palette colours, which a program checks on the renders.
+- CHARACTERS AND CREATURES start from a rigged base mesh built in logically \
+separated low-poly parts (never one fused mesh) and are adapted, rigged and \
+animated; animations are directed from reference clips, frame by frame. Do \
+not plan modelling an organic character from nothing.
+- COMPLEX FEATURES get a short design note (docs/design/<feature>.md) as their \
+own first task: research the genre's conventions, then the rules.
+- A feature from studio_roadmap.json is named on the task as "feature".
+"""
+
+
 def _phase_prose(phase):
     body = [f"CURRENT PHASE: {phase}", PHASE_INTENT[phase], ""]
     if phase == PHASE_1_GRAYBOX_PROTOTYPING:
@@ -147,6 +192,15 @@ def _phase_prose(phase):
             "(the gate reads mesh reports). A synchronised interaction is ONE "
             "task producing BOTH clips, never two tasks producing one each — "
             "two independently authored clips do not line up.")
+    if phase == PHASE_3_ATMOSPHERE_LIGHTING:
+        body.append(
+            "Lighting is built as PRESETS the game switches between (day, "
+            "night, lockdown, alarm, blackout), each a scene resource with its "
+            "settings exposed, not one hand-tuned lighting pass. The gate "
+            "enforces a frame-rate floor and a cap on shadow-casting lights "
+            "(tools/perf.gd): every shadow caster re-renders the scene from "
+            "its own point of view, so plan lamps that light without "
+            "shadowing wherever the shadow is not doing gameplay work.")
     if phase == PHASE_4_NETWORKED_QA:
         body.append(
             "The server must already expose studio_protocol.json (transport "
@@ -164,6 +218,8 @@ will implement, and you are the only model allowed to plan.
 {GAME_BRIEF}
 
 {_phase_prose(phase)}
+
+{METHOD}
 
 THE WORKERS AVAILABLE TODAY (roster-derived; use no other name):
 {_roster_prose()}
@@ -208,7 +264,8 @@ sees.>",
       "target_asset": "<optional path>",
       "animation_requirements": {{"clip_name": "...", "sync_target_clip": \
 "...", "max_triangle_count": 0, "rig_type": "..."}},
-      "computer_use_enabled": false
+      "computer_use_enabled": false,
+      "feature": "<optional studio_roadmap.json feature id>"
     }}
   ]
 }}

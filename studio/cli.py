@@ -115,29 +115,54 @@ def cmd_status(args):
     return 0
 
 
-def _measure_first(repo):
-    """Refresh Bucket A measurements on the repo before a gate reads them."""
-    from studio.engine import godot
-    if not (Path(repo) / godot.MEASURER).exists():
-        return True
+def _measure_first(repo, project=None, phase=None):
+    """Refresh gate evidence on main; failed refreshes cannot use stale reports."""
+    from studio.engine import godot, stage_manager
+    from studio.schemas.task import phase_index
+    needs_perf = bool(project and phase_index(phase or stage_manager.current_phase(project)) >= 3)
+    needs_engine = (needs_perf or (Path(repo) / godot.MEASURER).exists()
+                    or (Path(repo) / godot.PLAYTEST).exists())
     if not godot.available():
-        print("  godot not installed: cannot refresh measurements")
-        return False
+        if needs_engine:
+            print("  godot not installed: cannot refresh gate evidence")
+        return not needs_engine
+    fresh = True
     try:
         m = godot.measure(repo)
-    except godot.GodotError as exc:
+        if m is not None:
+            print(f"  measured {len(m)} dimension(s) on {repo}")
+    except (godot.GodotError, ValueError) as exc:
         print(f"  measurer FAILED — {str(exc).splitlines()[0]}")
-        return False
-    if m is not None:
-        print(f"  measured {len(m)} dimension(s) on {repo}")
-    return True
+        fresh = False
+    try:
+        rep = godot.playtest(repo)
+        if rep is not None:
+            checks = rep.get("checks") or []
+            ok = sum(1 for c in checks if isinstance(c, dict) and c.get("passed"))
+            print(f"  playtest: {ok}/{len(checks)} checks passed")
+    except (godot.GodotError, ValueError) as exc:
+        print(f"  playtest FAILED — {str(exc).splitlines()[0]}")
+        fresh = False
+    if needs_perf:
+        try:
+            rep = godot.perf(repo)
+            if rep is None:
+                print("  perf FAILED — tools/perf.gd is missing")
+                fresh = False
+            else:
+                print(f"  perf: {rep.get('fps_p5', rep.get('fps_avg'))} fps p5, "
+                      f"{rep.get('shadow_lights')} shadow light(s)")
+        except (godot.GodotError, ValueError) as exc:
+            print(f"  perf FAILED — {str(exc).splitlines()[0]}")
+            fresh = False
+    return fresh
 
 
 def cmd_gate(args):
     from studio.engine import stage_manager
     repo = str(Path(args.repo).expanduser())
-    if not _measure_first(repo):
-        print("phase gate failed: fresh measurements could not be obtained")
+    if not _measure_first(repo, args.project, args.phase):
+        print("phase gate failed: fresh evidence could not be obtained")
         return 1
     result = stage_manager.check(args.project, repo, args.phase)
     print(f"phase {result['phase']}: {'PASS' if result['passed'] else 'FAIL'}")
@@ -148,8 +173,8 @@ def cmd_gate(args):
 
 def cmd_promote(args):
     from studio.engine import stage_manager
-    if not _measure_first(str(Path(args.repo).expanduser())):
-        print("not promoted: fresh measurements could not be obtained")
+    if not _measure_first(str(Path(args.repo).expanduser()), args.project):
+        print("not promoted: fresh evidence could not be obtained")
         return 1
     result = stage_manager.promote(args.project, str(Path(args.repo).expanduser()),
                                    force=args.force, reason=args.reason or "")
@@ -258,6 +283,68 @@ def cmd_astra(args):
     return 0 if result["ok"] else 1
 
 
+def cmd_playtest(args):
+    """Run the scripted playtest; its screenshots become a round for the judge.
+
+    MEASURE and LOOK, the two halves of the published playtest method: the
+    numbers print here and gate phase 1 onward; the screenshots taken along
+    the route are archived as a render round, so `studio judge` looks at the
+    game as it was actually PLAYED, not only from fixed cameras.
+    """
+    from studio.engine import godot
+    from studio.memory import compactor
+    from studio.engine import stage_manager
+    repo = Path(args.repo).expanduser()
+    rep = godot.playtest(repo)
+    if rep is None:
+        print(f"{repo} has no tools/playtest.gd — see docs/studio-fleet.md "
+              "(Scripted playtest)")
+        return 1
+    checks = [c for c in rep.get("checks") or [] if isinstance(c, dict)]
+    for c in checks:
+        mark = "✓" if c.get("passed") else "✗"
+        print(f"  {mark} {c.get('name')}: {c.get('value')!r} (expected {c.get('expected')!r})")
+    shots = []
+    for sp in rep.get("screenshots") or []:
+        path = Path(str(sp).replace("res://", "")) if str(sp).startswith("res://") else Path(sp)
+        path = path if path.is_absolute() else repo / path
+        if path.exists():
+            shots.append(path)
+    if shots:
+        n = compactor.latest_round(args.project) + 1
+        cams = [{"name": s.stem, "kind": "playtest",
+                 "note": "Screenshot taken during the scripted playtest, along "
+                         "the route a player walks."} for s in shots]
+        compactor.archive(args.project, n, shots, cameras=cams,
+                          phase=stage_manager.current_phase(args.project),
+                          note="scripted playtest")
+        print(f"archived {len(shots)} playtest screenshot(s) as round {n} — "
+              f"`studio judge {args.project} {args.repo}` to have them looked at")
+    passed = bool(checks) and all(c.get("passed") for c in checks)
+    print("PLAYTEST PASS" if passed else "PLAYTEST FAIL")
+    return 0 if passed else 1
+
+
+def cmd_approve(args):
+    from studio import approvals
+    state = "rejected" if args.reject else "approved"
+    d = approvals.decide(args.project, args.asset, state, note=args.reject or "")
+    print(f"{args.asset}: {d['state']}" + (f" — {d['note']}" if d["note"] else ""))
+    return 0
+
+
+def cmd_review_pack(args):
+    from studio import review_pack
+    out = review_pack.write(args.repo, args.pr, args.out or None)
+    print(f"wrote {out}")
+    print("Paste it into Gemini (Antigravity) or Cursor. Their verdict becomes a")
+    print("label: manual-approved merges, manual-rejected + a comment sends it back.")
+    if not config.PR_MANUAL_REVIEW:
+        print("NOTE: the manual gate is OFF, so the fleet will not wait for this "
+              "verdict. Run the fleet with ARC_PR_MANUAL_REVIEW=1 to make it wait.")
+    return 0
+
+
 def cmd_budget(args):
     from studio import budget
     _print(budget.summary())
@@ -283,5 +370,7 @@ def run(args):
         "status": cmd_status, "gate": cmd_gate, "promote": cmd_promote,
         "render": cmd_render, "judge": cmd_judge, "fuzz": cmd_fuzz,
         "astra": cmd_astra, "budget": cmd_budget, "scaffold": cmd_scaffold,
+        "playtest": cmd_playtest, "approve": cmd_approve,
+        "review-pack": cmd_review_pack,
     }
     return table[args.studio_cmd](args)
