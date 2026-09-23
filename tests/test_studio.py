@@ -12,6 +12,7 @@ later test in the suite a different fleet.
 """
 import json
 import os
+import re
 import socket
 import socketserver
 import subprocess
@@ -257,6 +258,42 @@ print(json.dumps(d.argv("P", "sess-1")))
         self.assertIn("gpt-6-sol", argv)
         self.assertIn('model_reasoning_effort="high"', argv)
 
+    def test_codex_argv_never_uses_the_s_flag(self):
+        """`codex exec resume` rejects -s; the sandbox must be a -c override."""
+        for sid in (None, "sess-1"):
+            probe = ("import config, drivers, json;"
+                     "d = drivers.driver_for(config.STUDIO_OPENAI_MODEL, 'implementer');"
+                     f"print(json.dumps(d.argv('P', {sid!r})))")
+            argv = json.loads(in_studio(probe))
+            self.assertNotIn("-s", argv, sid)
+            self.assertIn('sandbox_mode="workspace-write"', argv, sid)
+
+    CLI_FLAGS_PROBE = """
+import config, drivers, json
+d = drivers.driver_for(config.STUDIO_OPENAI_MODEL, "implementer")
+d.images = ["/tmp/x.png"]
+print(json.dumps({"fresh": d.argv("P", None), "resume": d.argv("P", "sess-1")}))
+"""
+
+    @unittest.skipUnless(Path(config.codex_bin()).exists(), "codex CLI not installed")
+    def test_every_codex_flag_is_accepted_by_the_installed_cli(self):
+        """Pin the argv to the REAL CLI, so a Codex update cannot silently break it.
+
+        The flag a subcommand rejects fails the whole attempt with exit 2 and
+        no model call at all — indistinguishable, in the fix loop, from a task
+        the model could not do. This asks the installed Codex which flags each
+        subcommand takes and checks every one the driver passes.
+        """
+        argvs = json.loads(in_studio(self.CLI_FLAGS_PROBE))
+        for kind, cmd in (("fresh", ["exec"]), ("resume", ["exec", "resume"])):
+            help_text = subprocess.run([config.codex_bin(), *cmd, "--help"],
+                                       capture_output=True, text=True, timeout=60).stdout
+            accepted = set(re.findall(r"(?m)^\s+(?:(-\w), )?(--[\w-]+)", help_text))
+            flags = {f for pair in accepted for f in pair if f}
+            used = [a for a in argvs[kind] if a.startswith("-") and a != "-"]
+            for flag in used:
+                self.assertIn(flag, flags, f"{kind}: codex {' '.join(cmd)} does not accept {flag}")
+
     def test_ultra_effort_is_refused(self):
         """ultra delegates to sub-agents, multiplying sessions past the cap."""
         env = dict(os.environ, ARC_FLEET="studio", ARC_CODEX_REASONING="ultra",
@@ -282,6 +319,32 @@ print(json.dumps(d.argv("P", "sess-1")))
             " for w in implementing_workers()"
             " if worker_model(w) != 'Claude-Opus-5.5']))")
         self.assertNotIn("anthropic", json.loads(out))
+
+
+class TestDbPath(unittest.TestCase):
+    """`main.py` must record into config.DB_PATH, i.e. honour ARC_DB_PATH."""
+
+    PROBE = """
+import argparse, json, main
+a = argparse.Namespace(db=None)
+print(json.dumps([main.db_path(a, False), main.db_path(a, True)]))
+"""
+
+    def test_run_db_honours_arc_db_path(self):
+        env = dict(os.environ, ARC_DB_PATH="/tmp/elsewhere.db", PYTHONPATH=str(ROOT))
+        p = subprocess.run([sys.executable, "-c", self.PROBE], capture_output=True,
+                           text=True, env=env, cwd=str(ROOT), timeout=60)
+        real, dry = json.loads(p.stdout)
+        self.assertEqual(real, "/tmp/elsewhere.db")
+        self.assertTrue(dry.endswith("dry-run.db"), "dry runs keep their own file")
+
+    def test_default_is_unchanged(self):
+        env = {k: v for k, v in os.environ.items() if k != "ARC_DB_PATH"}
+        env["PYTHONPATH"] = str(ROOT)
+        p = subprocess.run([sys.executable, "-c", self.PROBE], capture_output=True,
+                           text=True, env=env, cwd=str(ROOT), timeout=60)
+        real, _ = json.loads(p.stdout)
+        self.assertEqual(real, str(ROOT / "orchestrator.db"))
 
 
 class TestGameTaskGovernance(unittest.TestCase):

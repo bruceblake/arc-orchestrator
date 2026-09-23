@@ -20,10 +20,22 @@ def setup_logging(verbose):
 
 
 def db_path(args, dry_run):
+    """The sqlite file this command records into.
+
+    Real runs use config.DB_PATH, which honours ARC_DB_PATH. This used to
+    build `<dir of main.py>/orchestrator.db` itself and ignore the override,
+    so a run launched from a second checkout (a git worktree) wrote its task
+    rows into THAT checkout's database while its leases, errors and the
+    dashboard used the shared one: on 2026-09-22 a studio run merged a task
+    that the dashboard and the next resume could not see at all. With
+    ARC_DB_PATH unset the two paths are identical. Dry runs keep their own
+    file next to main.py, as before.
+    """
     if args.db:
         return args.db
-    root = Path(__file__).resolve().parent
-    return str(root / ("dry-run.db" if dry_run else "orchestrator.db"))
+    if dry_run:
+        return str(Path(__file__).resolve().parent / "dry-run.db")
+    return str(config.DB_PATH)
 
 
 def add_common(p, once=False):

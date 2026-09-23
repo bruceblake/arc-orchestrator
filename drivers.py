@@ -2206,7 +2206,16 @@ class CodexDriver(Driver):
         # `resume` is a subcommand of exec, not a flag, so it has to sit
         # immediately after `exec`.
         a = [config.codex_bin(), "exec"] + (["resume", session_id] if session_id else [])
-        a += ["--json", "--skip-git-repo-check", "-s", config.CODEX_SANDBOX]
+        # The sandbox goes in as a CONFIG override, never as `-s`. `codex exec`
+        # accepts `-s` but `codex exec resume` does not ("unexpected argument
+        # '-s' found", exit 2) — and every fix round resumes. On the first live
+        # studio run (2026-09-22) that failed each fix attempt instantly: one
+        # task burned all 16 fix rounds in minutes and was about to escalate
+        # onto Claude. `-c sandbox_mode=...` is accepted by both, and the
+        # session record confirms it takes effect (sandbox_policy:
+        # workspace-write, and a resumed session still writes files).
+        a += ["--json", "--skip-git-repo-check",
+              "-c", f'sandbox_mode="{config.CODEX_SANDBOX}"']
         if not session_id:
             for img in self.images:
                 a += ["-i", str(img)]
