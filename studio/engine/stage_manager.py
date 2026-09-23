@@ -229,6 +229,11 @@ def playtest_status(project_dir):
     if not checks:
         failures.append(f"{PLAYTEST_REPORT} has no checks: a playtest that measures "
                         "nothing proves nothing")
+    elif len(checks) < config.STUDIO_PLAYTEST_MIN_CHECKS:
+        failures.append(f"{PLAYTEST_REPORT} has {len(checks)} check(s); at least "
+                        f"{config.STUDIO_PLAYTEST_MIN_CHECKS} are required "
+                        "(ARC_STUDIO_PLAYTEST_MIN_CHECKS) — measure the route, "
+                        "its timing and what the guards saw")
     for c in failed[:8]:
         failures.append(f"playtest check '{c.get('name')}' failed: got "
                         f"{c.get('value')!r}, expected {c.get('expected')!r}")

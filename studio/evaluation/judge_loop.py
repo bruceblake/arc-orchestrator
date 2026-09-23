@@ -49,8 +49,11 @@ TARGET_FILE = "studio_target.json"
 # roster at call time, so this never routes to a model that is not live:
 # under ARC_FLEET=studio it resolves to the subscription CLIs, under
 # studio-api to the OpenRouter models.
-JUDGE_ROTATION = ("Gemini-3.8-Flash", "Claude-Opus-5.5", "GPT-6-Astra",
-                  "GPT-6-Sol", "GPT-6-Luna")
+# Antigravity-Gemini is Gemini on the subscription profile. Without it that
+# profile's panel was Claude and GPT-6-Sol only: two families judging every
+# round, one of which usually wrote the code being judged.
+JUDGE_ROTATION = ("Gemini-3.8-Flash", "Antigravity-Gemini", "Claude-Opus-5.5",
+                  "GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna")
 
 ARTIFACT_KINDS = ("clipping", "missing_material", "light_leak", "z_fighting",
                   "floating_geometry", "inverted_normals", "texture_stretch",
