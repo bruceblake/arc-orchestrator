@@ -23,6 +23,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import threading
 import time
 from collections import OrderedDict
 from datetime import date as _date, datetime, timedelta
@@ -3550,6 +3551,66 @@ def _stale_source(now=None):
     return files
 
 
+_httpd = None
+_restarting = False
+
+
+def _graceful_reexec():
+    global _httpd, _restarting
+    log.info("Graceful restart requested (PID %d); closing server and re-executing...", os.getpid())
+    if _httpd:
+        try:
+            _httpd.shutdown()
+        except Exception as exc:
+            log.warning("error shutting down httpd: %s", exc)
+        try:
+            _httpd.server_close()
+        except Exception as exc:
+            log.warning("error closing httpd socket: %s", exc)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        logging.shutdown()
+    except Exception:
+        pass
+    script = str(Path(sys.argv[0]).resolve())
+    args = [sys.executable, script] + sys.argv[1:]
+    os.execv(sys.executable, args)
+
+
+_reexec_fn = _graceful_reexec
+
+
+def _restart(body):
+    """POST /api/restart — graceful restart of the dashboard server.
+
+    Re-execs this process in-place using os.execv so fresh bytecode and static
+    files from the latest git HEAD are loaded. Preserves PID, file descriptors
+    (logs/server.log), and environment.
+    """
+    global _restarting
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    if _restarting:
+        return {"ok": True, "status": "already_restarting"}, 200
+    _prune_registry()
+    active_interactive = [
+        k for k, v in _launch_registry.items()
+        if v.get("kind") in ("chat", "captain", "plan")
+    ]
+    force = bool(body.get("force"))
+    if active_interactive and not force:
+        return {
+            "error": "An interactive turn is in progress (chat/captain/plan); pass force: true to restart anyway",
+            "active": True,
+            "sessions": active_interactive,
+        }, 409
+
+    _restarting = True
+    threading.Timer(0.3, _reexec_fn).start()
+    return {"ok": True, "status": "restarting", "pid": os.getpid()}, 200
+
+
 _arc_cache = {"key": 0.0, "value": None}
 
 
@@ -4446,6 +4507,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/projects/escalate-task":
                 obj, code = _escalate_task(body)
                 return self._json(obj, code)
+            if u.path == "/api/restart":
+                obj, code = _restart(body)
+                return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
             pass
@@ -4492,6 +4556,7 @@ def _lan_addresses():
 
 
 def serve(port=None, db_path=None):
+    global _httpd
     port = port or config.DASHBOARD_PORT
     db_path = db_path or config.DB_PATH
     Handler.store = Store(db_path)
@@ -4504,6 +4569,7 @@ def serve(port=None, db_path=None):
             print(f"just open http://localhost:{port} in a browser (or run ./stop.sh, then start it again).")
             raise SystemExit(1)
         raise
+    _httpd = httpd
     log.info("dashboard on http://%s:%d (db=%s, events=%s)", bind, port, db_path, config.EVENTS_LOG)
     # The daily audit runs from here. WSL has no working cron and sleeps when
     # idle; this server is the process that is awake when the operator is.
@@ -4527,5 +4593,7 @@ def serve(port=None, db_path=None):
               "start and stop fleet runs. See README: Who can reach the dashboard.", flush=True)
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, OSError):
         pass
+    finally:
+        _httpd = None

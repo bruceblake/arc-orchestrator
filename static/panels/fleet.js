@@ -8,6 +8,79 @@ const PROBLEM_LABEL = {
   "task.conflict": "merge conflict", "graph.draining": "run draining after a failure",
   "run.interrupted": "run interrupted",
 };
+let _isRestarting = false;
+
+async function restartDashboard(force = false) {
+  if (_isRestarting) return;
+  _isRestarting = true;
+  const btn = $("#btn-restart-dashboard");
+  const msg = $("#stale-banner-msg");
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = "Restarting…";
+  }
+  if (msg) {
+    msg.textContent = "⏳ Restarting dashboard… reloading in a moment";
+  }
+  try {
+    const { code, body } = await jpost("/api/restart", { force: !!force });
+    if (code === 409) {
+      const confirmForce = confirm("An interactive chat/captain turn is in progress. Force restart anyway?");
+      if (confirmForce) {
+        _isRestarting = false;
+        return restartDashboard(true);
+      }
+      _isRestarting = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Restart dashboard";
+      }
+      if (msg) {
+        msg.textContent = "Restart cancelled: interactive session in progress.";
+      }
+      return;
+    }
+    if (code !== 200) {
+      if (msg) msg.textContent = `Restart failed: ${body && body.error ? body.error : "unknown error"}`;
+      _isRestarting = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Restart dashboard";
+      }
+      return;
+    }
+  } catch (err) {
+    // Process re-exec may close the connection abruptly; proceed to poll
+  }
+  let attempts = 0;
+  const pollInterval = setInterval(async () => {
+    attempts++;
+    try {
+      const res = await fetch("/api/fleet", { cache: "no-store" });
+      if (res.ok) {
+        clearInterval(pollInterval);
+        window.location.reload();
+      }
+    } catch (e) {
+      // Server is restarting, continue waiting
+    }
+    if (attempts > 60) {
+      clearInterval(pollInterval);
+      if (msg) msg.textContent = "Restart took longer than expected. Please refresh manually.";
+      _isRestarting = false;
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = "Restart dashboard";
+      }
+    }
+  }, 800);
+}
+
+const restartBtn = $("#btn-restart-dashboard");
+if (restartBtn) {
+  restartBtn.onclick = () => restartDashboard(false);
+}
+
 function renderHealth(h) {
   // The fleet edits this server's own source. A running process keeps serving
   // what it started with, so a merged route can 404 and take the whole page
@@ -27,11 +100,24 @@ function renderHealth(h) {
   }
   const stale = h.stale_source || [];
   const banner = $("#stale-banner");
+  const msg = $("#stale-banner-msg");
+  const btn = $("#btn-restart-dashboard");
   if (banner) {
-    banner.style.display = stale.length ? "" : "none";
-    banner.innerHTML = stale.length
-      ? `⚠ the dashboard is running older code than the repo (${stale.map(esc).join(", ")} changed since it started) — run <code>./stop.sh &amp;&amp; ./start.sh</code> to pick it up`
-      : "";
+    if (_isRestarting) {
+      banner.style.display = "";
+    } else if (stale.length) {
+      banner.style.display = "";
+      if (msg) {
+        msg.innerHTML = `⚠ the dashboard is running older code than the repo (${stale.map(esc).join(", ")} changed since it started) — click restart to reload with latest code`;
+      }
+      if (btn) {
+        btn.style.display = "";
+        btn.disabled = false;
+        btn.textContent = "Restart dashboard";
+      }
+    } else {
+      banner.style.display = "none";
+    }
   }
   const models = h.models || [];
   const drivers = models.reduce((n, m) => n + m.drivers, 0);
