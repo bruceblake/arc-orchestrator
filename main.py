@@ -1147,6 +1147,14 @@ def main():
                         help="absolute repo path under ARC_REPO_ROOT (default: your home)")
     chat_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
+    cap_p = sub.add_parser(
+        "captain", help="supervise the fleet conversationally (state-aware, bounded actions)")
+    cap_p.add_argument("--session", required=True,
+                       help="session id, ^[a-z0-9][a-z0-9-]{0,39}$")
+    cap_p.add_argument("--repo", required=True,
+                       help="absolute repo path under ARC_REPO_ROOT (default: your home)")
+    cap_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+
     args = ap.parse_args()
     setup_logging(getattr(args, "verbose", False))
 
@@ -1180,6 +1188,9 @@ def main():
     elif args.cmd == "chat":
         import orchchat
         sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))
+    elif args.cmd == "captain":
+        import captain
+        sys.exit(asyncio.run(captain.run_turn(args.session, args.repo)))
 
 
 if __name__ == "__main__":

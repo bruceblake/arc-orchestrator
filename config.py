@@ -370,6 +370,13 @@ def family_limit(name):
 # for interactive use of the account.
 WORKTREE_ROOT = os.getenv("ARC_WORKTREE_ROOT") or str(Path.home() / "worktrees")
 TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
+# Captain session files and the capacity queue (`main.py captain`, the
+# dashboard Captain panel). Resolved at call time by captain.captain_dir() and
+# dashboard._captain_dir() — both read ARC_CAPTAIN_DIR directly — NOT from this
+# constant, so a test can redirect either process without an import-order
+# hazard; the constant exists so the docs-truth scan sees the var config.py
+# reads. Defaulting here and there must agree: logs/captain.
+CAPTAIN_DIR = os.getenv("ARC_CAPTAIN_DIR") or str(ROOT / "logs" / "captain")
 # The only directory tree the dashboard will accept a project repo from
 # (/api/projects/create and every taskfile it runs). A network client can
 # name any path in a POST body; this is the fence. It was the operator's
