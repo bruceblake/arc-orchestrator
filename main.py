@@ -1119,6 +1119,21 @@ def main():
     sf.add_argument("--bots", type=int, default=None)
     sf.add_argument("--seconds", type=float, default=None)
 
+    spt = ss.add_parser("playtest", help="run the scripted playtest (measure + look)")
+    spt.add_argument("project")
+    spt.add_argument("repo")
+
+    sap = ss.add_parser("approve", help="approve (or --reject) a workbench asset")
+    sap.add_argument("project")
+    sap.add_argument("asset", help="asset file name, as the workbench lists it")
+    sap.add_argument("--reject", default="", metavar="REASON")
+
+    srp = ss.add_parser("review-pack",
+                        help="write a paste-ready review of a PR for Antigravity/Cursor")
+    srp.add_argument("repo")
+    srp.add_argument("pr", type=int)
+    srp.add_argument("--out", default="")
+
     sa = ss.add_parser("astra", help="run the 3D/animation operator on a goal")
     sa.add_argument("goal")
     sa.add_argument("--project", default="prison-escape")

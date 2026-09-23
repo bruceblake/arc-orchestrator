@@ -2320,6 +2320,38 @@ def _recent_agent_runs(store, limit=40):
     return out
 
 
+def _studio_approve(body):
+    """Record the operator's sign-off on a workbench asset.
+
+    Rule 6b discipline: this writes ONE thing — an approvals entry in a known
+    studio project's own directory — and only for an asset that project has
+    actually measured (a mesh report exists for it). No path, no free-form
+    target, nothing the request can point somewhere else.
+    """
+    from studio import approvals
+    from studio import status as studio_status
+    project = str((body or {}).get("project") or "")
+    asset = str((body or {}).get("asset") or "")
+    state = str((body or {}).get("state") or "")
+    if project not in studio_status.projects():
+        return {"error": "unknown studio project"}, 404
+    if state not in approvals.STATES:
+        return {"error": f"state must be one of {list(approvals.STATES)}"}, 400
+    known = set()
+    for r in config.studio_run_dir(project).glob("mesh-*.json"):
+        try:
+            known.add(Path(json.loads(r.read_text()).get("model_path", r.stem)).name)
+        except (OSError, ValueError):
+            continue
+    if asset not in known:
+        return {"error": "no measured asset by that name in this project"}, 404
+    note = str((body or {}).get("note") or "")[:2000]
+    if state == "rejected" and not note.strip():
+        return {"error": "a rejection needs a note saying what must change"}, 400
+    return {"ok": True, "asset": asset,
+            **approvals.decide(project, asset, state, note=note, by="dashboard")}, 200
+
+
 def _live_task_ids():
     """{task id: role} for every task with a harness running right now.
 
@@ -4146,6 +4178,9 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length).decode("utf-8", errors="replace"))
             except ValueError as exc:
                 return self._json({"error": f"invalid JSON: {exc}"}, 400)
+            if u.path == "/api/studio/approve":
+                obj, code = _studio_approve(body)
+                return self._json(obj, code)
             if u.path == "/api/projects/create":
                 obj, code = _create_project(body)
                 return self._json(obj, code)

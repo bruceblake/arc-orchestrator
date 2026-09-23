@@ -235,6 +235,236 @@ func _span(space: PhysicsDirectSpaceState3D, from: Vector3,
 \treturn snappedf(a + b, 0.001)
 '''
 
+FILES["tools/studio_playtest.gd"] = '''class_name StudioPlaytest
+extends RefCounted
+# The scripted-playtest contract (studio/engine/godot.py playtest()).
+#
+# A playtest DRIVES the game along a real route and reports two things:
+#   MEASURE  named checks with the value seen and the value wanted
+#   LOOK     screenshots along the way, which the visual judge is shown
+# It writes res://studio_playtest.json, which the phase gates read. Use it
+# from any playtest script:
+#
+#   var pt := StudioPlaytest.new()
+#   pt.check("reached_end", reached, reached, true)
+#   pt.shot(get_root(), "corridor_mid")      # no-op when headless
+#   pt.finish()                             # writes the report
+
+const REPORT := "res://studio_playtest.json"
+const SHOTS := "res://studio_shots"
+
+var checks: Array = []
+var screenshots: Array = []
+var _t0 := Time.get_ticks_msec()
+
+func check(name_: String, passed: bool, value: Variant, expected: Variant) -> void:
+\tchecks.append({"name": name_, "passed": passed, "value": value, "expected": expected})
+\tprint(("PASS " if passed else "FAIL ") + name_ + " = " + str(value) + " (expected " + str(expected) + ")")
+
+func shot(root: Viewport, name_: String) -> void:
+\t# Headless Godot has no renderer, so there is nothing to capture; the
+\t# playtest still MEASURES. With a display the frame is real.
+\tif DisplayServer.get_name() == "headless":
+\t\treturn
+\tDirAccess.make_dir_recursive_absolute(SHOTS)
+\tvar path := SHOTS.path_join(name_ + ".png")
+\tvar img := root.get_texture().get_image()
+\tif img != null and img.save_png(path) == OK:
+\t\tscreenshots.append(path.replace("res://", ""))
+
+# Same rule as the studio render harness: a scene with no light of its own
+# (a graybox, by design) renders solid black, which gives the judge nothing to
+# look at and the perf probe nothing real to time. Neutral inspection light is
+# added ONLY when the scene brings none; a lit scene is left exactly as built.
+static func ensure_inspection_light(root: Node) -> void:
+\tif root.find_children("*", "Light3D", true, false).is_empty():
+\t\tvar sun := DirectionalLight3D.new()
+\t\tsun.name = "StudioInspectionSun"
+\t\tsun.rotation_degrees = Vector3(-50.0, 35.0, 0.0)
+\t\tsun.light_energy = 1.2
+\t\tsun.shadow_enabled = true
+\t\troot.add_child(sun)
+\tif root.find_children("*", "WorldEnvironment", true, false).is_empty():
+\t\tvar env := Environment.new()
+\t\tvar sky := Sky.new()
+\t\tsky.sky_material = ProceduralSkyMaterial.new()
+\t\tenv.background_mode = Environment.BG_SKY
+\t\tenv.sky = sky
+\t\tenv.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+\t\tenv.ambient_light_energy = 0.6
+\t\tvar we := WorldEnvironment.new()
+\t\twe.environment = env
+\t\troot.add_child(we)
+
+func passed() -> bool:
+\tif checks.is_empty():
+\t\treturn false
+\tfor c in checks:
+\t\tif not c["passed"]:
+\t\t\treturn false
+\treturn true
+
+func finish() -> bool:
+\tvar ok := passed()
+\tvar f := FileAccess.open(REPORT, FileAccess.WRITE)
+\tf.store_string(JSON.stringify({"passed": ok, "checks": checks,
+\t\t"screenshots": screenshots,
+\t\t"seconds": (Time.get_ticks_msec() - _t0) / 1000.0}, "  "))
+\tf.close()
+\tprint("STUDIO_PLAYTEST " + ("PASS" if ok else "FAIL"))
+\treturn ok
+'''
+
+FILES["tools/playtest.gd"] = '''extends SceneTree
+# Starter scripted playtest. Replace the probe with the real PlayerController
+# once it exists; keep the StudioPlaytest calls.
+#
+# It walks a player-sized capsule down the cell block corridor under physics
+# (simulated input, not a teleport), checks it got there, and checks a
+# crouched player fits the vent's crawl space.
+#   godot --headless --path . --script res://tools/playtest.gd
+
+func _initialize() -> void:
+\tvar pt := StudioPlaytest.new()
+\tvar world: Node3D = load("res://scenes/world.tscn").instantiate()
+\tget_root().add_child(world)
+\tvar cam := Camera3D.new()
+\tget_root().add_child(cam)
+\tawait physics_frame
+\tStudioPlaytest.ensure_inspection_light(get_root())
+\tvar body := CharacterBody3D.new()
+\tvar col := CollisionShape3D.new()
+\tvar cap := CapsuleShape3D.new()
+\tcap.radius = Layout.PLAYER_RADIUS
+\tcap.height = Layout.PLAYER_HEIGHT
+\tcol.shape = cap
+\tbody.add_child(col)
+\tworld.add_child(body)
+\tvar start := Vector3(0.0, Layout.PLAYER_HEIGHT * 0.5 + 0.05, Layout.CORRIDOR_LENGTH * 0.4)
+\tvar goal_z := -Layout.CORRIDOR_LENGTH * 0.4
+\tbody.global_position = start
+\tcam.look_at_from_position(start + Vector3(0, 0.6, 2.5), start + Vector3(0, 0.6, -6), Vector3.UP)
+\tcam.make_current()
+\tfor _i in range(3):
+\t\tawait process_frame
+\tpt.shot(get_root(), "01_corridor_start")
+\tvar frames := 0
+\tvar max_frames := int(Layout.CORRIDOR_LENGTH / Layout.WALK_SPEED_MPS * 60.0 * 2.0)
+\twhile body.global_position.z > goal_z and frames < max_frames:
+\t\tbody.velocity = Vector3(0.0, -1.0, -Layout.WALK_SPEED_MPS)
+\t\tbody.move_and_slide()
+\t\tframes += 1
+\t\tif frames % 20 == 0:
+\t\t\tcam.look_at_from_position(body.global_position + Vector3(0, 0.6, 2.5),
+\t\t\t\tbody.global_position + Vector3(0, 0.6, -6), Vector3.UP)
+\t\tif frames == max_frames / 4:
+\t\t\tpt.shot(get_root(), "02_corridor_mid")
+\t\tawait physics_frame
+\tvar reached := body.global_position.z <= goal_z
+\tpt.check("walks_the_corridor", reached, snappedf(body.global_position.z, 0.01), goal_z)
+\tvar secs := frames / 60.0
+\tvar expected_secs := (start.z - goal_z) / Layout.WALK_SPEED_MPS
+\tpt.check("walk_time_matches_speed", absf(secs - expected_secs) < expected_secs * 0.15,
+\t\tsnappedf(secs, 0.01), snappedf(expected_secs, 0.01))
+\tpt.shot(get_root(), "03_corridor_end")
+\t# A crouched player must fit the vent: shape-cast a crouch capsule inside it.
+\tvar crouch := CapsuleShape3D.new()
+\tcrouch.radius = minf(Layout.PLAYER_RADIUS, Layout.VENT_BORE_M * 0.45)
+\tcrouch.height = maxf(crouch.radius * 2.0, Layout.VENT_BORE_M - 0.08)
+\tvar q := PhysicsShapeQueryParameters3D.new()
+\tq.shape = crouch
+\tq.transform = Transform3D(Basis(), Vector3(0, Layout.VENT_HEIGHT + Layout.VENT_BORE_M * 0.5, 0))
+\tvar hits := world.get_world_3d().direct_space_state.intersect_shape(q, 4)
+\tpt.check("crawlspace_fits_player", hits.is_empty(), hits.size(), 0)
+\tquit(0 if pt.finish() else 1)
+'''
+
+FILES["tools/perf.gd"] = '''extends SceneTree
+# Frame-rate and shadow-caster probe for the phase-3 performance gate. Needs a
+# DISPLAY: headless Godot does not render, so it has no frame cost to measure.
+#   godot --path . --script res://tools/perf.gd
+const FRAMES := 180
+const WARMUP := 30
+
+func _initialize() -> void:
+\tvar world: Node3D = load("res://scenes/world.tscn").instantiate()
+\tget_root().add_child(world)
+\tvar cam := Camera3D.new()
+\tget_root().add_child(cam)
+\tawait process_frame
+\tcam.look_at_from_position(Vector3(0, 1.7, Layout.CORRIDOR_LENGTH * 0.45), Vector3(0, 1.6, -10), Vector3.UP)
+\tcam.make_current()
+\tStudioPlaytest.ensure_inspection_light(get_root())
+\tvar shadow_lights := 0
+\tfor l in get_root().find_children("*", "Light3D", true, false):
+\t\tif (l as Light3D).shadow_enabled:
+\t\t\tshadow_lights += 1
+\tvar times: Array[float] = []
+\tvar draw_calls := 0
+\tvar last := Time.get_ticks_usec()
+\tfor i in range(FRAMES + WARMUP):
+\t\tawait process_frame
+\t\tvar now := Time.get_ticks_usec()
+\t\tif i >= WARMUP:
+\t\t\ttimes.append((now - last) / 1000.0)
+\t\t\tdraw_calls = maxi(draw_calls, RenderingServer.get_rendering_info(
+\t\t\t\tRenderingServer.RENDERING_INFO_TOTAL_DRAW_CALLS_IN_FRAME))
+\t\tlast = now
+\ttimes.sort()
+\tvar total := 0.0
+\tfor t in times:
+\t\ttotal += t
+\tvar p95: float = times[int(times.size() * 0.95) - 1]
+\tvar report := {"fps_avg": snappedf(1000.0 * times.size() / total, 0.1),
+\t\t"fps_p5": snappedf(1000.0 / p95, 0.1), "frame_ms_p95": snappedf(p95, 0.01),
+\t\t"draw_calls": draw_calls, "shadow_lights": shadow_lights,
+\t\t"renderer": RenderingServer.get_video_adapter_name()}
+\tvar f := FileAccess.open("res://studio_perf.json", FileAccess.WRITE)
+\tf.store_string(JSON.stringify(report, "  "))
+\tf.close()
+\tprint("STUDIO_PERF ", JSON.stringify(report))
+\tquit(0)
+'''
+
+FILES["studio_art_direction.md"] = '''# Art direction — Prison Escape
+
+Every asset task is given this file. The visual judge scores renders against
+it (Bucket B), and the colour bible in `studio_target.json` (`palette_hex`) is
+checked by a program, so keep the two in agreement.
+
+## The look in one line
+An orderly, watched institution at dusk: cold fluorescent interiors, warm low
+sun outside, concrete and painted steel worn smooth at hand height.
+
+## References
+Replace these with real reference images in `references/` (screenshots of
+games or photos you like), and name what each one is for.
+- `references/cellblock.jpg` — corridor proportions and repetition
+- `references/yard_dusk.jpg` — outdoor light temperature at dusk
+
+## Rules every model follows
+- Materials come from the palette in `studio_target.json`; no default greys.
+- Wear lives where hands and feet go: rails, door edges, floor paths.
+- Silhouettes read at distance: the tower breaks the roofline, the wall does not.
+- Hard surfaces are modular: walls, bars, bunks and vents are kit pieces sized
+  from `scripts/layout.gd`, assembled rather than modelled per room.
+- Characters start from a rigged base mesh that is adapted, never modelled
+  from nothing (organic modelling is where script-driven 3D is weakest).
+'''
+
+FILES["studio_roadmap.json"] = '''{
+  "_comment": "Features planned but not yet in any taskfile. The dashboard's Studio board shows these as Backlog; a planned task can name one with \\"feature\\".",
+  "features": [
+    {"id": "routine", "title": "Prison routine state machine (roll call, yard, chow, lockup, curfew)", "phase": "PHASE_1_GRAYBOX_PROTOTYPING"},
+    {"id": "suspicion", "title": "Guard suspicion meter and detection", "phase": "PHASE_1_GRAYBOX_PROTOTYPING"},
+    {"id": "contraband", "title": "Contraband pickup, crafting and hiding", "phase": "PHASE_1_GRAYBOX_PROTOTYPING"},
+    {"id": "netcode", "title": "Authoritative server, prediction and reconciliation", "phase": "PHASE_4_NETWORKED_QA"},
+    {"id": "modular-kit", "title": "Modular hard-surface kit: walls, bars, bunks, vents", "phase": "PHASE_2_3D_ASSET_AND_ANIMATION"},
+    {"id": "lighting-states", "title": "Lighting presets: day, night, lockdown, alarm, blackout", "phase": "PHASE_3_ATMOSPHERE_LIGHTING"}
+  ]
+}
+'''
+
 FILES["tools/assert_metrics.py"] = '''#!/usr/bin/env python3
 """Fail if the measured graybox disagrees with the target's Bucket A.
 
@@ -296,7 +526,8 @@ FILES["studio_target.json"] = '''{
     "light": "hard overhead fluorescents inside, low warm sun outside at dusk",
     "wear": "institutional, scuffed at hand height, clean at ceiling",
     "mood": "orderly and watched; the danger is being seen, not being hurt",
-    "silhouette": "long low cell block, one tall tower breaking the roofline"
+    "silhouette": "long low cell block, one tall tower breaking the roofline",
+    "palette_hex": ["#c9ccd1", "#9aa0a8", "#5a6069", "#2f2b24", "#8b5a3c", "#d8c9a3"]
   }
 }
 '''
@@ -325,6 +556,9 @@ FILES[".gitignore"] = '''.godot/
 .import/
 export_presets.cfg
 studio_metrics.json
+studio_playtest.json
+studio_perf.json
+studio_shots/
 studio_render.gd
 *.tmp
 '''

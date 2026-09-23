@@ -8,6 +8,25 @@
 // read-only; nothing here starts or changes work.
 let STUDIO = null;
 let STUDIO_OPEN = "";            // project whose section is expanded
+// Which view of the open project: its sub-tabs. Remembered per browser.
+let STUDIO_VIEW = (() => { try { return localStorage.getItem("arc.studio.view") || "overview"; } catch (e) { return "overview"; } })();
+const STUDIO_VIEWS = [["overview", "Overview"], ["board", "Board"], ["changelog", "Changelog"],
+                      ["evidence", "Evidence"], ["workbench", "Workbench"]];
+
+// The gauntlet a task has been through, as compact badges: every angle it was
+// checked from (fix rounds, the gate's measurements, the independent critic,
+// PR review rounds, escalations, the manual gate).
+function gauntletBadges(g) {
+  if (!g) return "";
+  const b = [];
+  if (g.attempts > 1) b.push(`<span class="gb" title="implementation rounds">↺${g.attempts}</span>`);
+  if (g.gate_pass || g.gate_fail) b.push(`<span class="gb" title="verify gate: passed / failed">gate <b class="good">${g.gate_pass}✓</b>${g.gate_fail ? ` <b class="bad">${g.gate_fail}✗</b>` : ""}</span>`);
+  if (g.review_pass || g.review_fail) b.push(`<span class="gb" title="independent cross-family critic">critic <b class="good">${g.review_pass}✓</b>${g.review_fail ? ` <b class="bad">${g.review_fail}✗</b>` : ""}</span>`);
+  if (g.pr_rounds) b.push(`<span class="gb" title="pull-request review rounds (rejected)">PR r${g.pr_rounds}${g.pr_rejects ? ` <b class="bad">${g.pr_rejects}✗</b>` : ""}</span>`);
+  if (g.escalations) b.push(`<span class="gb warn" title="escalated to a stronger tier">⬆${g.escalations}</span>`);
+  if (g.manual) b.push(`<span class="gb ${g.manual === "approved" ? "good" : g.manual === "awaiting" ? "warn" : "bad"}" title="manual review gate">you: ${esc(g.manual)}</span>`);
+  return `<span class="gbs">${b.join("")}</span>`;
+}
 
 async function pollStudio() {
   try { STUDIO = await jget("/api/studio"); markFail("studio", false); }
@@ -76,6 +95,8 @@ function studioBoards(p) {
         <span class="chip ${esc(t.status)}">${esc(t.status.replace("_", " "))}${t.live ? ` · ${esc((t.live_role || "live").replace("_", " "))}` : ""}</span>
         <span class="hint">${esc(short(t.model))} → rev ${esc(t.reviewer || "—")}</span>
         ${t.deps.length ? `<span class="hint">after ${t.deps.map(esc).join(", ")}</span>` : ""}
+        ${t.feature ? `<span class="tag">◆ ${esc(t.feature)}</span>` : ""}
+        ${gauntletBadges(t.gauntlet)}
         ${t.error ? `<div class="bad st-err">${esc(t.error)}</div>` : ""}
       </div>`).join("");
     return `<div class="st-board">
@@ -128,6 +149,82 @@ function studioWorkbench(p) {
     ${mesh ? `<table class="st-metrics"><thead><tr><th>asset</th><th>tris / budget</th><th>non-manifold</th><th>mats</th><th>bones</th><th>clips</th></tr></thead><tbody>${mesh}</tbody></table>` : ""}`;
 }
 
+const KANBAN_LABEL = {backlog: "Backlog", planned: "Planned", building: "Building",
+                      review: "In review", done: "Done", blocked: "Blocked"};
+
+function studioBoard(p) {
+  const k = p.kanban || {};
+  const col = c => {
+    const cards = k[c] || [];
+    return `<div class="kb-col kb-${c}"><div class="kb-h">${KANBAN_LABEL[c]} <span class="hint">${cards.length}</span></div>
+      ${cards.map(x => `<div class="kb-card ${x.kind}">
+        <div class="kb-t">${x.live ? '<span class="good">● </span>' : ""}${esc(x.title)}</div>
+        <div class="hint">${x.kind === "feature" ? "roadmap feature" : esc(x.id)}${x.phase ? " · " + esc(String(x.phase).replace(/^PHASE_\d_/, "").toLowerCase().replace(/_/g, " ")) : ""}</div>
+        ${x.kind === "task" ? `<div class="hint">${esc(short(x.model))}${x.live_role ? " · " + esc(x.live_role.replace("_", " ")) : ""}${x.feature ? " · ◆ " + esc(x.feature) : ""}</div>${gauntletBadges(x.gauntlet)}` : ""}
+        ${x.error ? `<div class="bad kb-err">${esc(x.error.slice(0, 140))}</div>` : ""}
+      </div>`).join("") || '<div class="hint kb-empty">—</div>'}</div>`;
+  };
+  return `<div class="kb">${["backlog", "planned", "building", "review", "done", "blocked"].map(col).join("")}</div>
+    <div class="hint">Backlog is <code>studio_roadmap.json</code> in the game repo: features not yet in any plan. A planned task that names a feature moves it onto the board.</div>`;
+}
+
+function studioChangelog(p) {
+  const log = p.changelog || [];
+  if (!log.length) return '<div class="empty">Nothing has shipped to <code>main</code> yet.</div>';
+  return `<div class="cl">${log.map(e => `<div class="cl-row">
+      <span class="hint cl-d">${esc((e.date || "").slice(0, 16).replace("T", " "))}</span>
+      ${e.pr ? `<a class="tag" href="${attr(e.pr_url)}" target="_blank" rel="noopener">#${e.pr}</a>` : '<span class="tag">—</span>'}
+      <span class="cl-t">${esc(e.title)}</span>
+      ${e.task ? `<span class="hint">${esc(e.task)}</span>` : ""}
+      ${e.model ? `<span class="hint">built by ${esc(short(e.model))}${e.reviewer ? `, critic ${esc(e.reviewer)}` : ""}</span>` : ""}
+      <span class="hint">${esc(e.sha)}</span></div>`).join("")}</div>`;
+}
+
+function studioEvidence(p) {
+  const ev = p.evidence || {};
+  let out = "";
+  const pt = ev.playtest;
+  out += `<h3>Scripted playtest <span class="hint">measure + look</span></h3>`;
+  out += pt ? `<div class="${pt.passed ? "good" : "bad"}"><b>${pt.passed ? "✓ passed" : "✗ failed"}</b>
+      <span class="hint">${pt.checks.length} checks · ${pt.screenshots} screenshots${pt.seconds ? ` · ${(+pt.seconds).toFixed(1)}s` : ""}</span></div>
+      <table class="st-metrics"><thead><tr><th>check</th><th>value</th><th>expected</th><th></th></tr></thead><tbody>${
+        pt.checks.map(c => `<tr><td>${esc(c.name)}</td><td class="num">${esc(JSON.stringify(c.value))}</td><td class="num">${esc(JSON.stringify(c.expected))}</td><td>${c.passed ? '<span class="good">✓</span>' : '<span class="bad">✗</span>'}</td></tr>`).join("")}</tbody></table>`
+    : `<div class="empty">No playtest report on <code>main</code> yet. <code>tools/playtest.gd</code> writes one; <code>studio gate</code> and <code>studio playtest</code> run it.</div>`;
+  const pf = ev.perf;
+  out += `<h3>Performance</h3>`;
+  out += pf ? `<div class="kv">
+      <span>fps p5 <b class="${pf.fps_p5 >= pf.min_fps ? "good" : "bad"}">${esc(pf.fps_p5)}</b> <span class="hint">(≥ ${esc(pf.min_fps)})</span></span>
+      <span>avg <b>${esc(pf.fps_avg)}</b></span><span>frame p95 <b>${esc(pf.frame_ms_p95)}ms</b></span>
+      <span>draw calls <b>${esc(pf.draw_calls)}</b></span>
+      <span>shadow lights <b class="${pf.shadow_lights > pf.max_shadow_lights ? "bad" : "good"}">${esc(pf.shadow_lights)}</b> <span class="hint">(≤ ${esc(pf.max_shadow_lights)})</span></span>
+      <span class="hint">${esc(pf.renderer || "")}</span></div>`
+    : '<div class="empty">No perf report yet (gated from phase 3; <code>tools/perf.gd</code> needs a display).</div>';
+  const pal = ev.palette;
+  out += `<h3>Colour bible</h3>`;
+  out += pal ? `<div class="kv">${pal.shares.map(x => `<span>${esc(x.name)} <b class="${x.share >= pal.min ? "good" : "bad"}">${Math.round(x.share * 100)}%</b></span>`).join("")}
+      <span class="hint">round ${esc(pal.round)} · needs ${Math.round(pal.min * 100)}% on-palette</span></div>`
+    : '<div class="empty">No renders checked against the palette yet.</div>';
+  return out + studioExtras(p);
+}
+
+function studioWorkbenchView(p) {
+  const w = p.workbench || {};
+  const mesh = (w.meshes || []).map(m => `<tr>
+      <td>${esc(m.asset)}</td>
+      <td class="num ${m.over ? "bad" : ""}">${esc(m.triangles)}${m.budget ? ` / ${esc(m.budget)}` : ""}</td>
+      <td class="num ${m.non_manifold ? "bad" : ""}">${esc(m.non_manifold)}</td>
+      <td class="num">${m.bones == null ? "—" : esc(m.bones)}</td><td class="num">${esc(m.actions)}</td>
+      <td><span class="chip ${m.approval === "approved" ? "merged" : m.approval === "rejected" ? "failed" : "pending"}" title="${attr(m.approval_note || "")}">${esc(m.approval)}</span></td>
+      <td><button class="pill" data-approve="${attr(m.asset)}" data-state="approved">approve</button>
+          <button class="pill" data-approve="${attr(m.asset)}" data-state="rejected">reject…</button></td></tr>`).join("");
+  const shots = (w.renders || []).map(s => `<a class="st-shot" href="${attr(s.url)}" target="_blank" rel="noopener"><img loading="lazy" src="${attr(s.url)}" alt="${attr(s.name)}"><span>${esc(s.name)}</span></a>`).join("");
+  return `<div class="hint">Build each asset on its own, look at it, and lock it in before anything is assembled. The phase-2 gate requires every measured asset to be approved.</div>
+    ${shots ? `<h3>Asset previews</h3><div class="st-shots">${shots}</div>` : ""}
+    <h3>Assets</h3>${mesh ? `<table class="st-metrics"><thead><tr><th>asset</th><th>tris / budget</th><th>non-manifold</th><th>bones</th><th>clips</th><th>sign-off</th><th></th></tr></thead><tbody>${mesh}</tbody></table>`
+      : '<div class="empty">No measured assets yet — assets appear here once phase-2 tasks export and measure them.</div>'}
+    <h3>Renders & judge</h3>${studioRounds(p)}`;
+}
+
 function studioExtras(p) {
   let out = "";
   if (p.arbitration && p.arbitration.halt)
@@ -169,20 +266,43 @@ function renderStudio() {
         <span class="hint">${esc(p.repo || "")}</span>
       </div>
       ${open ? `${studioPhases(p)}
-      <div class="st-grid">
-        <div class="st-col"><h3>Phase gate</h3>${studioGate(p)}</div>
-        <div class="st-col"><h3>Phase tasks</h3>${studioBoards(p)}</div>
-      </div>
-      <h3>Renders & judge</h3>${studioRounds(p)}
-      ${studioWorkbench(p)}${studioExtras(p)}` : ""}
+      <div class="st-views" role="tablist">${STUDIO_VIEWS.map(([v, label]) => {
+        const n = v === "board" ? ((p.kanban || {}).blocked || []).length : 0;
+        return `<button class="st-view" role="tab" data-studio-view="${v}" aria-selected="${STUDIO_VIEW === v}">${label}${n ? ` <span class="bad">${n}</span>` : ""}</button>`;
+      }).join("")}</div>
+      ${STUDIO_VIEW === "board" ? studioBoard(p)
+        : STUDIO_VIEW === "changelog" ? studioChangelog(p)
+        : STUDIO_VIEW === "evidence" ? studioEvidence(p)
+        : STUDIO_VIEW === "workbench" ? studioWorkbenchView(p)
+        : `<div class="st-grid">
+            <div class="st-col"><h3>Phase gate</h3>${studioGate(p)}</div>
+            <div class="st-col"><h3>Phase tasks</h3>${studioBoards(p)}</div>
+          </div>
+          <h3>Latest renders & judge</h3>${studioRounds(p)}`}` : ""}
     </section>`;
   }).join("");
 }
 
 // Delegated, like summary.js, so the test harness's element stubs are untouched.
-document.addEventListener("click", (e) => {
-  const t = e.target && e.target.closest && e.target.closest("[data-studio-project]");
-  if (!t) return;
-  STUDIO_OPEN = t.getAttribute("data-studio-project");
-  renderStudio();
+document.addEventListener("click", async (e) => {
+  const el = e.target && e.target.closest;
+  if (!el) return;
+  const t = e.target.closest("[data-studio-project]");
+  if (t) { STUDIO_OPEN = t.getAttribute("data-studio-project"); renderStudio(); return; }
+  const v = e.target.closest("[data-studio-view]");
+  if (v) {
+    STUDIO_VIEW = v.getAttribute("data-studio-view");
+    try { localStorage.setItem("arc.studio.view", STUDIO_VIEW); } catch (err) {}
+    renderStudio(); return;
+  }
+  const a = e.target.closest("[data-approve]");
+  if (a) {
+    const state = a.getAttribute("data-state");
+    let note = "";
+    if (state === "rejected") { note = prompt("What must change about this asset?") || ""; if (!note.trim()) return; }
+    const {code, body} = await jpost("/api/studio/approve",
+      {project: STUDIO_OPEN, asset: a.getAttribute("data-approve"), state, note});
+    if (code !== 200) alert(`not recorded: ${body.error || code}`);
+    pollStudio();
+  }
 });

@@ -262,6 +262,7 @@ class GameTask:
     reviewer: str = ""
     deps: list = field(default_factory=list)
     files_hint: list = field(default_factory=list)
+    feature: str = ""       # a studio_roadmap.json feature id, for the board
 
     # -- construction --------------------------------------------------------
     @classmethod
@@ -281,6 +282,7 @@ class GameTask:
             reviewer=d.get("reviewer", ""),
             deps=list(d.get("deps", [])),
             files_hint=list(d.get("files_hint", [])),
+            feature=str(d.get("feature", "") or ""),
         )
 
     def to_dict(self):
@@ -370,6 +372,7 @@ class GameTask:
             "verify_cmd": self.verify_cmd,
             "deps": list(self.deps),
             "files_hint": list(self.files_hint),
+            **({"feature": self.feature} if self.feature else {}),
         }
 
     def render_prompt(self):

@@ -211,6 +211,63 @@ def measure(project, timeout=600):
     return json.loads(out_file.read_text(encoding="utf-8"))
 
 
+PLAYTEST = "tools/playtest.gd"
+PLAYTEST_REPORT = "studio_playtest.json"
+PERF = "tools/perf.gd"
+PERF_REPORT = "studio_perf.json"
+
+
+def _run_report_script(project, script, report, *, timeout, display=None):
+    """Run a studio report script and return the JSON report it wrote.
+
+    Both the playtest and the perf probe follow one contract: run, write a JSON
+    report at the project root, exit. Success is judged on the REPORT, never
+    the exit code (Godot exits 0 far more readily than it should, see the
+    module docstring) — and a stale report from an earlier run does not count.
+    """
+    project = Path(project)
+    if not (project / script).exists():
+        return None
+    import_assets(project, timeout=timeout)
+    out_file = project / report
+    before = out_file.stat().st_mtime if out_file.exists() else 0
+    args = ([] if display else ["--headless"]) + ["--script", f"res://{script}"]
+    if display:
+        args = ["--rendering-driver", "opengl3", "--resolution", "1280x720"] + args
+    rc, out = _run(args, project=project, timeout=timeout, display=display)
+    if not out_file.exists() or out_file.stat().st_mtime <= before:
+        raise GodotError(f"{script} wrote no {report} (rc={rc}):\n"
+                         + "\n".join(output_errors(out)[:20] or [out[-1500:]]))
+    doc = json.loads(out_file.read_text(encoding="utf-8"))
+    errs = output_errors(out)
+    if errs:
+        doc.setdefault("script_errors", errs[:20])
+    return doc
+
+
+def playtest(project, timeout=900, display=None):
+    """The scripted playtest: MEASURE (pass/fail numbers) and LOOK (screenshots).
+
+    Straight from the published workflow this studio follows: a script starts
+    the game, simulates the player's input along a route, prints the numbers
+    that say whether it worked, and captures screenshots along the way for
+    another agent to look at. With a display the screenshots are real frames;
+    headless it still measures. Report schema: docs/studio-fleet.md.
+    """
+    disp = display if display is not None else (config.STUDIO_DISPLAY or None)
+    return _run_report_script(project, PLAYTEST, PLAYTEST_REPORT,
+                              timeout=timeout, display=disp)
+
+
+def perf(project, timeout=600, display=None):
+    """Frame rate and shadow casters under REAL rendering (needs a display)."""
+    disp = display or config.STUDIO_DISPLAY or os.environ.get("DISPLAY", "")
+    if not disp:
+        raise GodotError("the perf probe needs a display: headless Godot does not "
+                         "render, so it has no frame cost to measure")
+    return _run_report_script(project, PERF, PERF_REPORT, timeout=timeout, display=disp)
+
+
 def export_release(project, preset, out_path, timeout=1800):
     """Export a build. Checks the artifact exists rather than trusting rc."""
     out_path = Path(out_path)
