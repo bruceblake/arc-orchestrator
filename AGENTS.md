@@ -68,10 +68,11 @@ is still on a branch. Prose reference: [docs/graph-patterns.md](docs/graph-patte
 
 The code workload is the primary occupant of this repo, but the same
 orchestrator core (`graph.py`, `pool.py`, `events.py`, `store.py`) also runs
-two other workloads: a 24/7 research-question round workload
-(`work.py` + `scheduler.py`, `main.py run`) and a Minecraft-style browser-game
-build workload (`build_work.py`, `main.py build`). All workloads share the
-event log and the dashboard.
+a 24/7 research-question round workload (`work.py` + `scheduler.py`,
+`main.py run`). Godot Studio (`studio/`, `main.py studio`) is the sole game
+workload and uses the governed code-task pipeline. The retired Minecraft
+builder has no CLI or dashboard route; historical data is retained.
+All workloads share the event log and the dashboard.
 
 ---
 
@@ -129,7 +130,7 @@ of 10 is the provider-published figure for V4.1 (provider docs updated
   [docs/runbook.md](docs/runbook.md) § "Planning a large goal".
 - Thinking variants (`*-thinking-low/high/max`) and the
   `*-legacy-tool-calling` websearch models registered in `config.FAMILIES`
-  belong to the research/build workloads; the code workload routes only the
+  belong to the research workload; the code workload routes only the
   roster names above (its one thinking variant is DS-max itself).
 
 ---
@@ -825,7 +826,6 @@ Top-level Python modules (one role each):
 
 | File | Role |
 |---|---|
-| `build_work.py` | Minecraft-style browser-game build workload: planner → 6 parallel module producers (each an implement → syntax gate → contract check → cross-model review → fix gauntlet) → assemble → bounded integration-review cycle |
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
 | `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the GLM-5.3 planner prompt (`plan_tasks`, model `config.PLANNER_MODEL`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
@@ -837,7 +837,7 @@ Top-level Python modules (one role each):
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
 | `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (120 s per-git-op timeout); nothing merges locally |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
-| `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `build`, `serve`, `bench` (micro), `chat` (one conversational planner turn over a session jsonl — module `orchchat.py`), and `code {plan,run,status,dream,bench}` |
+| `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `studio`, `serve`, `bench` (micro), `chat` (one conversational planner turn over a session jsonl — module `orchchat.py`), and `code {plan,run,status,dream,bench}` |
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
 | `plan_amend.py` | The living-plan channel (Rule 4b): prompt schema, `.arc/plan_proposals.jsonl` harvest (read + delete before `git add -A`), loader-validated amendment of the taskfile with per-entry rollback, `plan_proposals` recording |
 | `pool.py` | `AsyncOpenAI` request pool for the research workload: per-family semaphores, retry/backoff, token accounting |
@@ -855,7 +855,6 @@ Everything else at the top level:
 | `start.sh` / `stop.sh` | Start/stop the dashboard (`nohup .venv/bin/python main.py serve` → `logs/server.log`; `pkill -f "main\.py serve"` — never touches an orchestrator process) |
 | `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the prose behind `graph_shapes.PATTERNS` (the planner is handed the catalogue from code, not the doc) |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
-| `production/minecraft` | Build-workload output dir (`config.BUILD_OUTPUT_DIR`) |
 | `requirements.txt` | Python dependencies (openai, python-dotenv) — install into `.venv`; the system `python3` lacks them |
 
 State and external directories (not in git):

@@ -204,7 +204,7 @@ def measure(project, timeout=600):
     rc, out = _run(["--headless", "--script", f"res://{MEASURER}"],
                    project=project, timeout=timeout)
     errs = output_errors(out)
-    if errs or "STUDIO_METRICS_OK" not in out:
+    if rc != 0 or errs or "STUDIO_METRICS_OK" not in out:
         raise GodotError("the measurer failed:\n" + "\n".join(errs[:20] or [out[-2000:]]))
     if not out_file.exists() or out_file.stat().st_mtime <= before:
         raise GodotError(f"the measurer reported success but did not write {METRICS_FILE}")

@@ -22,12 +22,11 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 | `/api/project` | `file` = taskfile name | Taskfile detail: task defs, `code_tasks` rows, harness runs, recent events, git block |
 | `/api/agents` | none | In-flight agent runs plus dashboard-launched processes from the launch registry |
 | `/api/transcript` | `file` = `<task>-<role>-<attempt>.jsonl`, `tail` = 1..1000 (default 200; in `activity` mode 1..400, default 150), `view` = `raw` (default) \| `activity` | Last N lines of a harness transcript in `logs/harness/`; `view=activity` returns parsed, human-readable activity `blocks` (reasoning 💭, text ✎, tool calls 🔧/↳, usage —, completions ✓) built incrementally from a server-side LRU byte-offset cache, with `total_blocks` the all-time block count and a `pending` line for an in-flight delta (annotated `— no new output for Xs/Xm, stream may be stalled/dead` once the file's mtime is older than 60 s) — transcripts of unknown shape (e.g. kimi) fall back to the raw tail (no `mode` field in the response) |
-| `/api/summary` | none | Research/build stats, critique matrix, family limits, event-log and build-dir paths |
+| `/api/summary` | none | Research stats, critique matrix, family limits, and event-log path |
 | `/api/metrics` | none | Per-model run/token/stall rollup plus a code-task status rollup — see [Metrics endpoint](#metrics-endpoint) |
 | `/api/queue` | none | LIVE capacity: `running` and `waiting` attempt rows (task, role, model, seconds, why), one `models` row per model and one `harnesses` row per harness with `cap`/`running`/`waiting`/`free`, and `totals` including `reviewers_waiting` |
 | `/api/events` | `after` = 0-based line offset into `logs/events.jsonl`; `since` = epoch seconds (seeds the cursor, first request only) | Batch of parsed events plus `next` offset, `total`, and `reset` flag |
-| `/api/graphs` | none | Static node/edge topology of the research-round and build graphs |
-| `/api/code` | `file` = path relative to the build output dir | Contents of one generated build file (404 outside the build dir) |
+| `/api/graphs` | none | Node/edge topology of the governed code-task pipeline |
 
 ## POST API (JSON body)
 

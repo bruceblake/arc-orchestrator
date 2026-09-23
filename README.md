@@ -2,8 +2,8 @@
 
 Runs research questions past every live AI model family at once (via Virginia
 Tech's ARC LLM API), has them critique each other, verifies the results, and
-stores everything in SQLite. A second workload has the models build a browser
-game piece by piece, and a third drives the two-model coding fleet
+stores everything in SQLite. Godot Studio builds 3D games through the
+governed coding pipeline. The local profile drives the two-model coding fleet
 (GLM-5.3 on `opencode`, DeepSeek-V4.1-Flash-thinking-max on `reasonix`) through a
 governed per-task pipeline. A web dashboard shows it all live — and you can
 open that dashboard from your laptop or phone.
@@ -72,7 +72,7 @@ Server log: `logs/server.log`. Live activity feed the dashboard reads:
 
 | Page | What it is |
 |---|---|
-| `/` | Full dashboard: live graph diagrams (node colors = what's happening now), model leaderboard, critique heatmap, event stream, generated-game code viewer |
+| `/` | Full dashboard: live graph diagrams (node colors = what's happening now), model leaderboard, critique heatmap, event stream, Godot Studio workbench |
 | `/phone.html` | The important bits, laid out for a phone screen |
 | `/usage.html` | Token/request usage per model |
 
@@ -139,33 +139,24 @@ requests stream (the API caps non-streaming at 8,000 tokens). Roles rotate
 across families every round so every model does every job. Retries use
 exponential backoff and honor `Retry-After` on 429/5xx.
 
-## The Minecraft build workload
+## Godot Studio
 
-A second, independent graph (`build_work.py`) has the model families write a
-playable browser voxel game module by module, with every module forced through
-a verification gauntlet:
+Godot Studio is the game-development workload. It plans phase-based tasks,
+implements them in isolated worktrees, runs verification and cross-family
+reviews, and merges through pull requests. The dashboard's Studio tab shows
+phase gates, measurements, task progress, renders and visual reviews.
 
-```
-planner ──> produce_engine ─┐
-           produce_world ───┤
-           produce_player ──┤  produce = implement → syntax gate → contract check →
-           produce_ui ──────┤   cross-model review → fix loop (≤ ARC_MAX_MODULE_RETRIES)
-           produce_main ────┤
-           produce_html ────┘
-                    │
-                    ▼
-              assemble (fan-in) ──> integration_review ──pass──> metrics_store
-                                       │ fail & rounds < ARC_MAX_INTEGRATION_ROUNDS
-                                       ▼
-                                  wiring_fix (re-produces only the broken modules)
+Use the subscription fleet for the dashboard and game commands:
+
+```bash
+ARC_FLEET=studio ./start.sh
+ARC_FLEET=studio .venv/bin/python main.py studio doctor
 ```
 
-- Producers/reviewers rotate across families so no model reviews its own code.
-- `integration_review` reads the assembled files from disk, so a module that
-  claims to export `World` but doesn't gets caught.
-- `--iterations N` runs create-then-improve cycles, each starting from the
-  previous files on disk and the critiques in the DB.
-- Output lands in `production/minecraft/`, viewable in the dashboard at `/api/code`.
+An already-running dashboard must be restarted to change its fleet. See
+[the Studio guide](docs/studio-fleet.md) for scaffolding, planning, running,
+and reviewing a Godot project. The retired Minecraft builder is no longer
+available; existing generated files and historical database records are retained.
 
 ## Setup (first time only)
 
@@ -213,10 +204,9 @@ Then one real round before committing to 24/7:
 .venv/bin/python main.py run --rounds 20    # stop after 20 rounds
 .venv/bin/python main.py run --pipeline 3   # 3 rounds in flight at once
 .venv/bin/python main.py once [--questions N]     # single round
-.venv/bin/python main.py build [--iterations N]   # Minecraft build workload
 .venv/bin/python main.py serve [--port P]         # dashboard manually (prints all addresses too)
 .venv/bin/python main.py status                   # DB statistics
-.venv/bin/python main.py graph                    # print both graph topologies
+.venv/bin/python main.py graph                    # print the research graph topology
 .venv/bin/python main.py bench list               # benchmark suites/tasks
 .venv/bin/python main.py bench run [options]      # run benchmark jobs
 .venv/bin/python main.py bench report [--run-id N]  # score tables (default: latest run)
@@ -274,9 +264,8 @@ unit of measurement* — never compare a `direct` score for model A against a
 Parallel benchmark jobs are bounded by the per-family API concurrency, which
 is governed by the pool semaphores in `.env`.
 
-All commands accept `--dry-run` (simulated model calls, separate `dry-run.db`;
-the build workload writes to `production/minecraft-dry-run/` so it can never
-clobber real artifacts) and `-v` (debug logging).
+Research and code runs accept `--dry-run`; code dry runs validate the task
+graph without calling models or touching git.
 
 ## Run 24/7 with systemd
 
@@ -312,9 +301,6 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_SESSION_BACKOFF_CAP` | 60 | max backoff per session-limit retry (seconds) |
 | `ARC_LIMIT_<FAMILY>` | docs limit | override a family's semaphore (e.g. `ARC_LIMIT_DEEPSEEK=6`) |
 | `ARC_EVENTS_LOG` | logs/events.jsonl | event log path (dashboard tail) |
-| `ARC_BUILD_OUTPUT_DIR` | production/minecraft | where the build workload writes |
-| `ARC_MAX_MODULE_RETRIES` | 6 | fix-loop attempts per module in the gauntlet |
-| `ARC_MAX_INTEGRATION_ROUNDS` | 6 | wiring_fix ⇄ integration_review cycles |
 | `ARC_REVIEW_PASS_SCORE` | 6.5 | cross-model review score required to ship |
 | `ARC_DASHBOARD_PORT` | 8787 | dashboard port |
 | `ARC_REPO_ROOT` | `~` | the only directory tree the dashboard accepts a project repo from (`/api/projects/create`, and every task file it runs) |
@@ -400,10 +386,9 @@ the service evolves. Only `config.py`, `work.py`, and `.env` ever need touching.
 | `work.py` | the round graph (the actual multi-model workflow) |
 | `scheduler.py` | 24/7 supervisor: overlapping rounds, backoff, stats, signals |
 | `store.py` | SQLite persistence: rounds, items, answers, critiques, seeds, builds |
-| `build_work.py` | the Minecraft build graph + verification gauntlet |
 | `events.py` | append-only JSONL event log (contextvars-tagged) |
 | `dashboard.py` + `static/` | live dashboard (desktop, phone, usage pages) and its action endpoints — see *Who can reach the dashboard* |
-| `main.py` | CLI: run / once / build / serve / status / graph / bench / code |
+| `main.py` | CLI: run / once / studio / serve / status / graph / bench / code |
 | `bench.py` | benchmark runner: solvers, scoring (pass@k), report tables |
 | `bench_data.py` | 31-task dataset (humaneval / original / package suites) |
 | `orchbench.py` | orchestration variant benchmark: governed DAG per policy variant |

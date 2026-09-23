@@ -125,7 +125,8 @@ def cli_status(timeout=45):
         try:
             r = subprocess.run([str(codex), "login", "status"],
                                capture_output=True, text=True, timeout=timeout)
-            ok = "not logged in" not in ((r.stdout or "") + (r.stderr or "")).lower()
+            output = ((r.stdout or "") + (r.stderr or "")).lower()
+            ok = r.returncode == 0 and "logged in" in output and "not logged in" not in output
         except (OSError, subprocess.SubprocessError):
             ok = False
     out["codex"] = {"bin": str(codex) if codex.exists() else "",
@@ -146,7 +147,8 @@ def cli_status(timeout=45):
     out["gemini"] = {"bin": str(gemini) if gemini.exists() else "",
                      "logged_in": bool(creds or settings_auth), "plan": "",
                      "login_cmd": f"{gemini}  (choose 'Login with Google')"}
-    return out
+    active_harnesses = {row[2] for row in config.ROSTER}
+    return {name: status for name, status in out.items() if name in active_harnesses}
 
 
 def probe_models(timeout=30):
@@ -242,6 +244,8 @@ def doctor(probe=True):
                 "xdotool is not installed: `sudo pacman -S xdotool` "
                 "(only needed for computer-use clicks)")
     probe_r = report.get("provider_probe") or {}
+    if config.STUDIO_API and probe and not probe_r.get("ok"):
+        problems.append("OpenRouter model probe failed: " + probe_r.get("error", "unknown error"))
     if probe_r.get("unserved"):
         problems.append(
             f"OpenRouter does not serve {probe_r['unserved']} — the roster "
