@@ -1616,7 +1616,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             harvest_proposals(tid, wt, "implementer", ran_model)
             board.post(wt, task=tid, role="implementer", model=ran_model,
                        harness=ran_harness, session_id=res.session_id,
-                       kind="result", body=(res.text or "")[:400],
+                       kind="result", body=(getattr(res, "text", "") or "")[:400],
                        project=project_slug)
             return {"session_id": res.session_id, "harness": ran_harness,
                     "model": ran_model}

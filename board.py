@@ -42,9 +42,7 @@ def project_path(project, create=False):
 
 
 def task_path(worktree):
-    p = Path(worktree) / REL
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+    return Path(worktree) / REL
 
 
 def post(worktree, *, task, role, model, harness, kind="note", body="",
@@ -66,6 +64,9 @@ def post(worktree, *, task, role, model, harness, kind="note", body="",
         rec["session_id"] = str(session_id)
     line = json.dumps(rec, ensure_ascii=False) + "\n"
     try:
+        # Inside the try: a worktree removed mid-run must not turn a board
+        # post into an exception (post is called from except/crash paths).
+        task_path(worktree).parent.mkdir(parents=True, exist_ok=True)
         with task_path(worktree).open("a", encoding="utf-8") as f:
             f.write(line)
         if project:

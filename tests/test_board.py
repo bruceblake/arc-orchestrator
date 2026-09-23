@@ -60,5 +60,11 @@ class BoardPostsAreReadableAndScoped(unittest.TestCase):
         self.assertNotIn("\n", rec["body"])
         self.assertLessEqual(len(rec["body"]), 400)
 
+    def test_post_never_raises_when_the_worktree_is_gone(self):
+        gone = Path(self.tmp.name) / "file-not-dir"
+        gone.write_text("x")                  # a FILE where the worktree was
+        board.post(gone, task="t", role="implementer", model="m",
+                   harness="codex", kind="error", body="crashed")
+
     def test_empty_board_adds_nothing_to_the_prompt(self):
         self.assertEqual(board.prompt_block(self.wt, project="none", task="t"), "")
