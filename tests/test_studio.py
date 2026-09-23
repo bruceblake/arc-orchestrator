@@ -36,9 +36,11 @@ from studio.schemas import task as gt  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def in_studio(snippet, fleet="studio"):
+def in_studio(snippet, fleet="studio", **env_extra):
     """Run `snippet` under a studio fleet profile and return its stdout."""
     env = dict(os.environ, ARC_FLEET=fleet, PYTHONPATH=str(ROOT))
+    env.pop("ARC_ZEN_FREE", None)
+    env.update(env_extra)
     p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
                        text=True, env=env, cwd=str(ROOT), timeout=120)
     if p.returncode != 0:
@@ -59,7 +61,8 @@ class TestProfileIsolation(unittest.TestCase):
 
     def test_no_studio_model_is_routable_locally(self):
         for model in ("Claude-Opus-5.5", "GPT-6-Astra", "Grok-4.7",
-                      "Gemini-3.8-Flash"):
+                      "Gemini-3.8-Flash", "Cursor-Grok-4.7",
+                      "Antigravity-Gemini"):
             self.assertNotIn(model, config.IMPLEMENTER_MODELS)
             self.assertNotIn(model, config.MODEL_ROLES)
             self.assertNotIn(model, config.ESCALATION_PATH)
@@ -89,18 +92,22 @@ print(json.dumps({
         sub = json.loads(in_studio(self.PROFILE_PROBE))
         api = json.loads(in_studio(self.PROFILE_PROBE, fleet="studio-api"))
 
-        # Subscription: the three CLI harnesses, and NO provider aliases — a
-        # plan-backed model is reached by its own CLI, never through
-        # OpenRouter. An alias here would silently bill an empty account.
+        # Subscription: plan CLIs, and NO provider aliases — a plan-backed
+        # model is reached by its own CLI. Zen (the only aliased rows on this
+        # profile) is opt-in, so the default has none.
         self.assertEqual(sub["planner"], "Claude-Opus-5.5")
         self.assertEqual(sub["aliases"], {})
-        for harness in ("claude", "codex"):
+        for harness in ("claude", "codex", "cursor", "agy"):
             self.assertIn(harness, sub["harnesses"])
+        self.assertIn("cursor", sub["fams"])
+        self.assertIn("google", sub["fams"])
+        self.assertNotIn("cursor", api["fams"])
         self.assertNotIn("xai", sub["fams"], "no Grok without a subscription CLI")
-        # Gemini is only usable inside Antigravity on the operator's plan, so
-        # the subscription roster has no google family and no gemini harness.
-        self.assertNotIn("google", sub["fams"])
+        # The old Gemini CLI is still not a subscription harness. Google on
+        # this profile is Antigravity (`agy`). Gemini-3.8-Flash stays the
+        # studio-api judge and is not an implementer.
         self.assertNotIn("gemini", sub["harnesses"])
+        self.assertNotIn("agy", api["harnesses"])
 
         # API: everything through opencode/openrouter, with aliases.
         self.assertEqual(api["planner"], "Claude-Opus-5.5")
@@ -116,11 +123,33 @@ print(json.dumps({
         """The bug this guards: routing a plan-backed model through OpenRouter."""
         out = in_studio(
             "import config, json;"
+            "plan = [m for m in config.EXTERNAL_MODELS if not m.startswith('Zen-')];"
             "print(json.dumps([config.provider_model_alias(m)"
-            " for m in sorted(config.EXTERNAL_MODELS)]))")
+            " for m in sorted(plan)]))")
         aliases = json.loads(out)
         self.assertTrue(aliases)
         self.assertTrue(all(a is None for a in aliases), aliases)
+
+    ZEN_PROBE = ("import config, json;"
+                 "zen = sorted(m for m in config.IMPLEMENTER_MODELS if m.startswith('Zen-'));"
+                 "print(json.dumps({'n': len(zen), 'aliases': len(config._ZEN_ALIASES),"
+                 " 'esc': config.ESCALATION_PATH,"
+                 " 'sample': config.provider_model_alias(zen[0]) if zen else None}))")
+
+    def test_zen_is_opt_in_and_stays_off_the_escalation_path(self):
+        """Free Zen slugs may train on the game's source, and 11 of them in the
+        escalation path made a task walk 17 stages before it could fail."""
+        d = json.loads(in_studio(self.ZEN_PROBE))
+        self.assertEqual((d["n"], d["aliases"]), (0, 0))
+        self.assertFalse([m for m in d["esc"] if m.startswith("Zen-")])
+        self.assertLessEqual(len(d["esc"]), 6, d["esc"])
+
+    def test_zen_free_models_on_studio_roster(self):
+        d = json.loads(in_studio(self.ZEN_PROBE, ARC_ZEN_FREE="1"))
+        self.assertEqual(d["n"], len(config.ZEN_OPENCODE_SLUGS))
+        self.assertEqual(d["aliases"], len(config.ZEN_OPENCODE_SLUGS))
+        self.assertTrue(d["sample"], d["sample"])
+        self.assertTrue(d["sample"].startswith("opencode/"))
 
     def test_subscription_harnesses_follow_the_subscription_cap(self):
         # Operator directive 2026-09-22: the plan seats are not capped low;
@@ -129,9 +158,11 @@ print(json.dumps({
         out = in_studio(
             "import config, json;"
             "print(json.dumps([config.SUBSCRIPTION_SESSION_CAP,"
-            " {h: config.harness_limit(h) for h in ('claude', 'codex')}]))")
+            " {h: config.harness_limit(h) for h in "
+            "('claude', 'codex', 'cursor', 'agy')}]))")
         cap, caps = json.loads(out)
-        self.assertEqual(caps, {"claude": cap, "codex": cap})
+        self.assertEqual(caps, {"claude": cap, "codex": cap, "cursor": cap,
+                                "agy": cap})
 
     IMAGE_PROBE = """
 import json, config, drivers
@@ -150,6 +181,39 @@ print(json.dumps(out))
         self.assertIn("@/renders/a.png", argv["gemini"])
         self.assertIn("-i /renders/a.png", argv["codex"])
         self.assertIn("/renders/a.png", argv["claude"])
+
+    def test_cursor_cli_runs_headless_in_the_worktree(self):
+        out = in_studio(
+            "import drivers, json\n"
+            "d = drivers.driver_for('Cursor-Grok-4.7', 'implementer')\n"
+            "print(json.dumps({'fresh': d.argv('fix the door', None),\n"
+            " 'resume': d.argv('fix the door', 'chat-9')}))")
+        argv = json.loads(out)
+        fresh = " ".join(argv["fresh"])
+        self.assertIn("--print", fresh)
+        self.assertIn("stream-json", fresh)
+        self.assertIn("--force", fresh)
+        self.assertIn("--trust", fresh)
+        self.assertIn("--model grok-4.7-high", fresh)
+        self.assertNotIn("--resume", fresh)
+        resumed = " ".join(argv["resume"])
+        self.assertIn("--resume chat-9", resumed)
+
+    def test_antigravity_cli_runs_headless_in_the_worktree(self):
+        out = in_studio(
+            "import drivers, json\n"
+            "d = drivers.driver_for('Antigravity-Gemini', 'implementer')\n"
+            "print(json.dumps({'fresh': d.argv('fix the door', None),\n"
+            " 'resume': d.argv('fix the door', 'conv-9')}))")
+        argv = json.loads(out)
+        fresh = " ".join(argv["fresh"])
+        self.assertIn("--print", fresh)
+        self.assertIn("stream-json", fresh)
+        self.assertIn("--dangerously-skip-permissions", fresh)
+        self.assertNotIn("--sandbox", fresh)
+        self.assertNotIn("--model", fresh)
+        resumed = " ".join(argv["resume"])
+        self.assertIn("--conversation conv-9", resumed)
 
     ROLE_PROBE = """
 import drivers
@@ -201,8 +265,23 @@ CLAUDE_STREAM = "\n".join([
 ])
 
 
+AGY_STREAM = "\n".join([
+    '{"event":"init","conversation_id":"9ec58bfd","init":{"cwd":"/tmp"}}',
+    '{"event":"step_update","step_update":{"step_type":"agent_response","text_delta":"{\\"pass\\": true}"}}',
+    '{"event":"result","result":{"conversation_id":"9ec58bfd","status":"SUCCESS","response":"{\\"pass\\": true}"}}',
+])
+
+
 class TestSubscriptionStreams(unittest.TestCase):
     """The subscription CLIs' real output reaches the pipeline intact."""
+
+    def test_agy_answer_is_the_result_response_not_the_delta(self):
+        import code_tasks, drivers
+        sid, text = drivers.parse_transcript(AGY_STREAM)
+        self.assertEqual(sid, "9ec58bfd")
+        self.assertEqual(text, '{"pass": true}')
+        self.assertEqual(code_tasks._parse_verdict(text),
+                         {"pass": True, "issues": []})
 
     def test_codex_answer_is_the_agent_message_not_the_reasoning(self):
         import drivers
@@ -447,6 +526,63 @@ class TestGameTaskGovernance(unittest.TestCase):
         reviewers = {r for _m, r in pairs.values()}
         self.assertGreater(len(reviewers), 1,
                            "review load must not funnel into one family")
+
+
+class TestStudioRouting(unittest.TestCase):
+    """Every studio worker resolves to a live, fitting model on each profile."""
+
+    PROBE = ("import json; from studio.schemas import task as T;"
+             "from studio.evaluation import judge_loop as J;"
+             "print(json.dumps({'workers': {w: T.worker_model(w) for w in T.WORKERS},"
+             " 'judges': J.available_judges()}))")
+
+    def test_subscription_profile(self):
+        d = json.loads(in_studio(self.PROBE))
+        self.assertEqual(d["workers"]["grok_feature_driver"], "Cursor-Grok-4.7",
+                         "Grok work fell through to GPT-6-Sol")
+        self.assertEqual(d["workers"]["gemini_visual_judge"], "Antigravity-Gemini")
+        self.assertIn("Antigravity-Gemini", d["judges"])
+        self.assertGreaterEqual(len(d["judges"]), 3,
+                                "a two-model judge panel cannot rotate away from its own taste")
+
+    def test_api_profile(self):
+        d = json.loads(in_studio(self.PROBE, fleet="studio-api"))
+        self.assertEqual(d["workers"]["grok_feature_driver"], "Grok-4.7")
+        self.assertEqual(d["workers"]["gemini_visual_judge"], "Gemini-3.8-Flash")
+
+
+class TestPlannerFullReply(unittest.TestCase):
+    """A long plan must reach the parser uncut (a 34k-char plan once did not)."""
+
+    def _res(self, lines, text):
+        import types
+        d = tempfile.mkdtemp()
+        path = Path(d, "plan.jsonl")
+        path.write_text("\n".join(json.dumps(x) for x in lines) + "\n")
+        return types.SimpleNamespace(text=text, transcript_path=str(path))
+
+    def test_the_uncut_result_record_wins_over_the_truncated_text(self):
+        from studio import planner
+        plan = json.dumps({"tasks": [{"id": f"t{i}", "prompt": "x" * 3000}
+                                     for i in range(12)]})
+        res = self._res([{"type": "system"}, {"type": "result", "result": plan}],
+                        text=plan[-3000:])
+        self.assertEqual(planner._full_reply(res), plan)
+
+    def test_codex_and_antigravity_finals_are_read(self):
+        from studio import planner
+        long = "y" * 5000
+        codex = self._res([{"type": "item.completed",
+                            "item": {"type": "agent_message", "text": long}}], "y")
+        agy = self._res([{"event": "result", "result": {"response": long}}], "y")
+        self.assertEqual(planner._full_reply(codex), long)
+        self.assertEqual(planner._full_reply(agy), long)
+
+    def test_missing_transcript_falls_back_to_text(self):
+        import types
+        from studio import planner
+        res = types.SimpleNamespace(text="short", transcript_path="/nonexistent/x")
+        self.assertEqual(planner._full_reply(res), "short")
 
 
 class TestPlannerPrompt(unittest.TestCase):
@@ -744,7 +880,19 @@ class TestVideoChecks(StudioDirTest):
         fails = stage_manager.playtest_status(d)[0]
         self.assertTrue(any("reaches_yard" in f for f in fails))
         Path(d, "studio_playtest.json").write_text(json.dumps({"passed": True, "checks": [
-            {"name": "reaches_yard", "passed": True, "value": 0, "expected": 0}]}))
+            {"name": n, "passed": True, "value": 0, "expected": 0}
+            for n in ("reaches_yard", "route_time", "unseen")]}))
+        self.assertEqual(stage_manager.playtest_status(d)[0], [])
+
+    def test_a_playtest_needs_more_than_one_check(self):
+        d = self._repo()
+        Path(d, "tools").mkdir()
+        Path(d, "tools", "playtest.gd").write_text("extends SceneTree")
+        one = {"name": "ok", "passed": True, "value": 1, "expected": 1}
+        Path(d, "studio_playtest.json").write_text(json.dumps({"passed": True, "checks": [one]}))
+        self.assertTrue(any("at least" in f for f in stage_manager.playtest_status(d)[0]))
+        Path(d, "studio_playtest.json").write_text(json.dumps(
+            {"passed": True, "checks": [dict(one, name=f"c{i}") for i in range(3)]}))
         self.assertEqual(stage_manager.playtest_status(d)[0], [])
 
     def test_a_playtest_with_no_checks_proves_nothing(self):

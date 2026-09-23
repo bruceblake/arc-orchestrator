@@ -105,17 +105,26 @@ WORKERS = {
                  "does not expose.",
     },
     "grok_feature_driver": {
-        # No subscription CLI worth driving headlessly serves Grok, so on the
-        # subscription profile this worker resolves to whichever GPT-6 tier
-        # Codex runs — the ROLE (fast in-engine feature work) still exists.
-        "models": ("Grok-4.7", "GPT-6-Sol", "GPT-6-Luna", "GPT-6-Astra"),
+        # Subscription profile: Grok 4.7 on the Cursor plan (`agent`).
+        # studio-api: OpenRouter's Grok-4.7. The GPT-6 tiers remain the
+        # fallback for a roster with neither. Cursor-Grok was missing here,
+        # so every Grok task silently resolved to GPT-6-Sol and piled onto
+        # one subscription window.
+        "models": ("Cursor-Grok-4.7", "Grok-4.7", "GPT-6-Sol", "GPT-6-Luna",
+                   "GPT-6-Astra"),
         "brief": "In-engine feature driver. Player input controllers "
                  "(sneak/sprint/crawl/crouch, first and third person), HUD and "
                  "UI data-binding: suspicion meter, stamina, noise radius, "
                  "clock.",
     },
     "gemini_visual_judge": {
-        "models": ("Gemini-3.8-Flash",),
+        # studio-api: Gemini-3.8-Flash via OpenRouter. Subscription profile:
+        # Gemini through Antigravity (`agy`). Without the second name this
+        # worker had NO live model on the studio profile.
+        "models": ("Gemini-3.8-Flash", "Antigravity-Gemini"),
+        # Antigravity-Gemini may implement on the roster; THIS worker never
+        # does, so it is not offered to the planner as an implementing worker.
+        "judge_only": True,
         "brief": "Multimodal visual judge and spatial auditor. Scores renders "
                  "against Bucket A and Bucket B, flags clipping, missing "
                  "materials, light leaks and z-fighting. NEVER implements.",
@@ -163,6 +172,8 @@ def implementing_workers():
             model = worker_model(w)
         except ValueError:
             continue                      # no live model for this worker today
+        if WORKERS[w].get("judge_only"):
+            continue
         if config.model_may(model, "implementer"):
             out.append(w)
     return sorted(out)
@@ -206,6 +217,10 @@ STUDIO_REVIEW_PREFERENCE = {
     # behind the human at the keyboard.
     "GPT-6-Sol":        ("google", "glm", "anthropic", "xai", "deepseek"),
     "GPT-6-Luna":       ("google", "glm", "anthropic", "xai", "deepseek"),
+    # The two other subscription seats: each reviewed by a different plan,
+    # so one spent usage window never stalls both writing and reviewing.
+    "Cursor-Grok-4.7":  ("google", "glm", "openai", "deepseek", "anthropic"),
+    "Antigravity-Gemini": ("cursor", "glm", "openai", "deepseek", "anthropic"),
 }
 
 

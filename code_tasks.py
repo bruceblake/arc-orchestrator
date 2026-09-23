@@ -1582,7 +1582,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             try:
                 res = await driver.run(
                     _impl_prompt(t, feedback, hints, roster), wt,
-                    session_id=resume, task_id=f"{tid}-x{attempt}")
+                    session_id=resume, task_id=f"{tid}-x{attempt}",
+                    avoid_families={reviewer_for(t, model)})
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1602,11 +1603,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 harvest_proposals(tid, wt, "implementer", model)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
-            store.save_harness_run(tid, driver.harness, model, "implementer",
+            # A spent plan window may have moved this attempt to another
+            # model (drivers.usage_substitute): record the one that RAN.
+            ran_model = getattr(res, "model", None) or model
+            ran_harness = getattr(res, "harness", None) or driver.harness
+            store.save_harness_run(tid, ran_harness, ran_model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
-            harvest_proposals(tid, wt, "implementer", model)
-            return {"session_id": res.session_id, "harness": driver.harness,
-                    "model": model}
+            harvest_proposals(tid, wt, "implementer", ran_model)
+            return {"session_id": res.session_id, "harness": ran_harness,
+                    "model": ran_model}
 
         async def gate(ctx):
             cmd = t["verify_cmd"]
@@ -1844,7 +1849,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # entire output is uncommitted in the worktree.
             fresh_head = await gitstore.publish(
                 wt, f"task({tid}): {t['title']}",
-                {"Harness": impl.get("harness", "?"), "Model": model,
+                {"Harness": impl.get("harness", "?"),
+                 "Model": impl.get("model") or model,
                  "Reviewer": rev, "Task-Id": tid})
 
             # Sync with the base on EVERY publish, not only on a resume.

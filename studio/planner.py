@@ -302,7 +302,45 @@ async def _plan_via_harness(model, phase, repo, goal, project):
     usage = {"prompt_tokens": res.prompt_tokens,
              "completion_tokens": res.completion_tokens,
              "cost_usd": 0.0}          # covered by the subscription
-    return res.text or "", usage
+    return _full_reply(res), usage
+
+
+def _full_reply(res):
+    """The planner's WHOLE final answer, read back from its transcript.
+
+    DriverResult.text is cut to a head plus a 3000-char tail (sized for
+    review verdicts), and a real plan is far longer: a 10-task phase plan
+    measured 34,396 chars, and the cut JSON failed to parse after a
+    successful planning session. The transcript holds the uncut final
+    record; fall back to res.text when it cannot be read.
+    """
+    text = res.text or ""
+    path = getattr(res, "transcript_path", "") or ""
+    try:
+        lines = Path(path).read_text(encoding="utf-8", errors="replace").splitlines()
+    except (OSError, ValueError):
+        return text
+    final = None
+    for line in lines:
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        if obj.get("type") == "result" and isinstance(obj.get("result"), str):
+            final = obj["result"]                      # claude / cursor / reasonix
+        elif obj.get("event") == "result" and isinstance(obj.get("result"), dict) \
+                and isinstance(obj["result"].get("response"), str):
+            final = obj["result"]["response"]          # antigravity
+        else:
+            item = obj.get("item") if isinstance(obj.get("item"), dict) else {}
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                final = item["text"]                   # codex
+    return final if final and len(final) > len(text) else text
 
 
 def plan(goal, repo, *, phase, project="prison-escape", model=None,
