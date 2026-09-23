@@ -299,20 +299,19 @@ def _tier_rank(model):
 
 def usage_substitute(model, harness, role="implementer", exclude=(),
                      avoid_families=()):
-    """An implementer on a harness that is not `harness` and not itself blocked.
+    """A same-or-stronger model on a harness that is not `harness` and not blocked.
 
     None when swapping is off, or no seat qualifies — the caller then parks
     until this harness's window resets, which is the old behaviour.
 
-    Only IMPLEMENTATION is swapped. A reviewer does not know whose work it is
-    judging, so a swapped reviewer could land in the implementer's own family
-    (Rule 2); reviewers, planners and judges park instead. A substitute must
-    hold the role on the roster, sit at the same tier or above (Rule 1: a
-    hard task never quietly drops to a free medium model), and come from none
-    of `avoid_families` — the caller passes the task's reviewer family, so
-    the cross-family review still holds after the swap.
+    Implementation, gate review and PR review all swap. A planner stays put:
+    the plan is one seat on purpose. A substitute must hold the role on the
+    roster, sit at the same tier or above (Rule 1: a hard task never quietly
+    drops to a free medium model), and come from none of `avoid_families`.
+    Review callers pass the implementer's family, so a swapped reviewer
+    cannot land in the family that wrote the code (Rule 2).
     """
-    if not config.USAGE_SWAP or role != "implementer":
+    if not config.USAGE_SWAP or role not in ("implementer", "reviewer", "pr_reviewer"):
         return None
     now = time.time()
     skip = set(exclude)
@@ -2634,14 +2633,17 @@ class AntigravityDriver(Driver):
             prompt = (prompt + "\n\nRead these image files before answering "
                       "(use your Read tool on each):\n"
                       + "\n".join(f"  {i}" for i in self.images))
-        # `-p` / `--print` is a boolean. The prompt is the positional argument.
-        a = [config.agy_bin(), "--print", "--output-format", "stream-json",
+        # `--print` takes the NEXT argument as the prompt. It is not a boolean
+        # like `agent --print`. It has to come last, immediately before the
+        # prompt: `agy --print --output-format ...` handed `--output-format`
+        # to `--print` and exited 2 on every review (measured 2026-09-23).
+        a = [config.agy_bin(), "--output-format", "stream-json",
              "--dangerously-skip-permissions"]
         if config.AGY_CLI_MODEL:
             a += ["--model", config.AGY_CLI_MODEL]
         if session_id:
             a += ["--conversation", session_id]
-        return a + [prompt]
+        return a + ["--print", prompt]
 
     def extra_env(self, worktree):
         return {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}

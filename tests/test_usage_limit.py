@@ -189,8 +189,10 @@ class SwapsOffASpentPlan(unittest.TestCase):
         "Sol": ("codex", "openai", "hard", {"implementer", "reviewer"}),
         "Luna": ("codex", "openai", "hard", {"implementer"}),
         "Opus": ("claude", "anthropic", "hard", {"implementer", "reviewer", "planner"}),
-        "Cursor-Grok-4.7": ("cursor", "cursor", "hard", {"implementer", "reviewer"}),
-        "Antigravity-Gemini": ("agy", "google", "hard", {"implementer", "reviewer"}),
+        "Cursor-Grok-4.7": ("cursor", "cursor", "hard",
+                            {"implementer", "reviewer", "pr_reviewer"}),
+        "Antigravity-Gemini": ("agy", "google", "hard",
+                               {"implementer", "reviewer", "pr_reviewer"}),
         "Zen-Big-Pickle": ("opencode", "zen-big_pickle", "medium", {"implementer"}),
         "GLM-5.3": ("opencode", "glm", "hard", {"implementer", "reviewer"}),
     }
@@ -224,10 +226,21 @@ class SwapsOffASpentPlan(unittest.TestCase):
         # Another model on the spent harness is the same plan; Zen is medium.
         self.assertEqual(self._sub("Sol", "codex"), "GLM-5.3")
 
-    def test_only_implementation_is_swapped(self):
-        """A swapped reviewer could land in the implementer's family (Rule 2)."""
-        for role in ("reviewer", "pr_reviewer", "planner"):
-            self.assertIsNone(self._sub("Opus", "claude", role))
+    def test_reviews_swap_but_not_onto_the_implementer_family(self):
+        """A spent review seat moves, and never into the family that wrote the code."""
+        drivers._usage_blocked_until["claude"] = NOW + 1000
+        self.assertEqual(
+            self._sub("Opus", "claude", "reviewer", avoid_families={"cursor"}),
+            "Antigravity-Gemini")
+        self.assertEqual(
+            self._sub("Opus", "claude", "pr_reviewer", avoid_families={"cursor"}),
+            "Antigravity-Gemini")
+        self.assertNotEqual(
+            self._sub("Opus", "claude", "reviewer", avoid_families={"cursor"}),
+            "Cursor-Grok-4.7")
+
+    def test_a_planner_is_not_swapped(self):
+        self.assertIsNone(self._sub("Opus", "claude", "planner"))
 
     def test_the_reviewers_family_is_never_the_substitute(self):
         """Codex implements, Cursor reviews: the swap must not pick Cursor."""

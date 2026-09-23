@@ -513,6 +513,57 @@ class AFixRoundContinuesTheHarnessSession(unittest.TestCase):
         self.assertIsNone(code_tasks._resume_session({}, "t1", "GLM-5.3"))
         self.assertIsNone(code_tasks._resume_session(None, "t1", "GLM-5.3"))
 
+
+class ReviewsAvoidTheModelThatWroteTheDiff(unittest.TestCase):
+    """A usage swap records a different author than the assigned seat.
+
+    Reviews that avoid only the assigned family can land on the harness
+    that actually wrote the code.
+    """
+
+    def _pair(self):
+        models = list(config.MODEL_FAMILY)
+        self.assertGreaterEqual(len(models), 2)
+        return models[0], models[1]
+
+    def test_the_implement_result_wins_over_the_assigned_seat(self):
+        wrote, assigned = self._pair()
+        ctx = {"results": {"implement_t1": {"model": wrote}}}
+        self.assertEqual(code_tasks.wrote_the_code(ctx, "t1", assigned), wrote)
+
+    def test_a_resume_reads_the_last_successful_implementer_row(self):
+        wrote, assigned = self._pair()
+        class Store:
+            def harness_runs_prefix(self, tid):
+                self.tid = tid
+                return [
+                    {"task_id": tid, "role": "implementer", "exit_code": 1,
+                     "model": assigned},
+                    {"task_id": tid + "0", "role": "implementer", "exit_code": 0,
+                     "model": assigned},
+                    {"task_id": tid, "role": "implementer", "exit_code": 0,
+                     "model": wrote},
+                    {"task_id": tid, "role": "reviewer", "exit_code": 0,
+                     "model": assigned},
+                ]
+        store = Store()
+        self.assertEqual(
+            code_tasks.wrote_the_code({"results": {}}, "t1", assigned, store), wrote)
+        self.assertEqual(store.tid, "t1")
+
+    def test_without_a_record_the_assigned_seat_stands(self):
+        _wrote, assigned = self._pair()
+        self.assertEqual(
+            code_tasks.wrote_the_code({"results": {}}, "t1", assigned), assigned)
+
+    def test_review_nodes_ask_who_wrote_the_diff(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        for fn in ("async def review(ctx):", "async def pr_fanout(ctx):",
+                   "async def pr_reviewer(ctx):"):
+            body = src[src.index(fn):]
+            body = body[:body.index("\n        async def ")]
+            self.assertIn("wrote_the_code(", body, fn)
+
     def test_implement_passes_the_session_through(self):
         src = pathlib.Path(code_tasks.__file__).read_text()
         body = src[src.index("async def implement(ctx):"):]
