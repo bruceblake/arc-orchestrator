@@ -423,8 +423,7 @@ planner, before they become task files.
   discovering them. Graft is already wired into the pipeline (`graft build` /
   `ask` for implementers, `blast` for reviewers, `map` for the planner —
   see README § "Code-graph context"); the open question is where else the same
-  treatment applies (the research workload, chat, `gh_ops`, the Minecraft
-  build workload).
+  treatment applies (the research workload, chat, and `gh_ops`).
 - **Per-model max-context enforcement matching the ARC API docs.** The
   operator's question: should every model's max context come from the ARC
   docs? Today only some context values are recorded (the 2026-09-15 docs read

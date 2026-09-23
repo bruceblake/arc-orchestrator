@@ -57,6 +57,10 @@ RETIRED_MODELS = {
     "Union-Alpha":       lambda: next((m for m in config.ESCALATION_PATH
                                        if m in config.IMPLEMENT_TIERS.get("medium", ())),
                                       config.ESCALATION_PATH[0]),
+    # Former hard-tier Studio subscription harnesses. Keep existing taskfiles
+    # runnable after the active Studio profile moved to Claude and Codex.
+    "Cursor-Grok-4.7":   lambda: config.ESCALATION_PATH[-1],
+    "Antigravity-Gemini": lambda: config.ESCALATION_PATH[-1],
 }
 
 

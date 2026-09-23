@@ -194,6 +194,13 @@ class HttpReadEndpoints(unittest.TestCase):
         status, body = self._get("/api/summary")
         self.assertEqual(status, 200)
         self.assertIsInstance(body, dict)
+        self.assertNotIn("build", body)
+        self.assertNotIn("build_dir", body)
+
+    def test_retired_code_viewer_route_is_absent(self):
+        status, body = self._get("/api/code?file=js/main.js")
+        self.assertEqual(status, 404)
+        self.assertEqual(body, {"error": "not found"})
 
     def test_unknown_path_returns_404_json_error(self):
         """An unknown path must 404 with a JSON error body.

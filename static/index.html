@@ -590,13 +590,12 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       <div class="hint">Describe the goal in one or two sentences — the fleet planner drafts the task DAG (the two-model fleet: DeepSeek-V4.1-Flash-thinking-max implements and reviews, GLM-5.3 plans and reviews, every task cross-reviewed by the other family) into ~/tasks/.</div>
       <label class="hint" for="p-repo">repo</label>
       <select id="p-repo">
-        <option>/home/proxyie/minecraft-web</option>
         <option>/home/proxyie/repos/multi-harness-sandbox</option>
         <option value="__custom">custom path…</option>
       </select>
       <input id="p-repo-custom" placeholder="/home/proxyie/…" style="display:none" aria-label="repo path">
       <label class="hint" for="p-goal">goal</label>
-      <textarea id="p-goal" rows="3" placeholder="e.g. Add a settings menu with volume sliders to the minecraft clone"></textarea>
+      <textarea id="p-goal" rows="3" placeholder="e.g. Add a settings menu with volume sliders to the Godot game"></textarea>
       <button class="act primary" id="p-go">Plan project</button>
       <div id="p-msg"></div>
     </div>
@@ -604,7 +603,6 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       <label class="hint" for="j-title">title</label><input id="j-title" placeholder="my feature">
       <label class="hint" for="j-repo">repo</label>
       <select id="j-repo">
-        <option>/home/proxyie/minecraft-web</option>
         <option>/home/proxyie/repos/multi-harness-sandbox</option>
         <option value="__custom">custom path…</option>
       </select>

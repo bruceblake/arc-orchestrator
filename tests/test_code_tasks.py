@@ -1999,6 +1999,19 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
             self.assertIn(dest, config.IMPLEMENTER_MODELS,
                           f"{name} remaps to {dest!r}, which is not live")
 
+    def test_retired_studio_subscription_models_keep_hard_tier_and_cross_review(self):
+        for old in ("Cursor-Grok-4.7", "Antigravity-Gemini"):
+            with self.subTest(model=old):
+                target = code_tasks.RETIRED_MODELS[old]()
+                self.assertIn(target, config.IMPLEMENT_TIERS["hard"])
+                same_family = config.MODEL_FAMILY[target]
+                with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+                    ts = code_tasks.load_taskfile(taskfile([
+                        {**BASIC, "model": old, "reviewer": same_family}]))
+                task = ts["tasks"]["t1"]
+                self.assertEqual(task["model"], target)
+                self.assertNotEqual(task["reviewer"], same_family)
+
 
 class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
     """A retired model's task lands on a live tier; if that tier's family is

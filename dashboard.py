@@ -4006,10 +4006,7 @@ def _graph_topology(g):
 def _build_graph_topologies():
     """The shape of the pipeline the fleet ACTUALLY runs, derived from the code.
 
-    This used to render two other workloads — the research round and the
-    Minecraft build — as static diagrams, on the one page an operator watches.
-    Neither had run in days, and the code-tasks pipeline that had run all day
-    was not depicted at all.
+    This renders the governed code-task pipeline from its graph definition.
 
     The topology is built from code_tasks.build_code_graph on a one-task
     synthetic taskfile and the per-task suffix stripped, so the diagram is
@@ -4271,10 +4268,8 @@ class Handler(BaseHTTPRequestHandler):
                     "ts": time.time(),
                     "research": st.stats(),
                     "critique_matrix": st.critique_matrix(),
-                    "build": st.build_stats(),
                     "limits": {f: config.family_limit(f) for f in config.FAMILY_ORDER},
                     "event_log": str(config.EVENTS_LOG),
-                    "build_dir": str(config.BUILD_OUTPUT_DIR),
                 })
             if u.path == "/api/events":
                 q = parse_qs(u.query)
@@ -4387,14 +4382,6 @@ class Handler(BaseHTTPRequestHandler):
                     _build_graph_topologies()["code"]))
             if u.path == "/api/graphs":
                 return self._json(_build_graph_topologies())
-            if u.path == "/api/code":
-                q = parse_qs(u.query)
-                rel = q.get("file", [""])[0]
-                root = Path(config.BUILD_OUTPUT_DIR).resolve()
-                target = (root / rel).resolve()
-                if not target.is_relative_to(root) or not target.is_file():
-                    return self._json({"error": "not found"}, 404)
-                return self._json({"file": rel, "code": target.read_text(encoding="utf-8", errors="replace")})
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
             pass

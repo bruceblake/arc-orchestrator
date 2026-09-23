@@ -2,6 +2,8 @@
 # Start the ARC dashboard and print the exact addresses to open on your laptop/phone.
 # Safe to run any time: if the server is already up, it just prints the addresses.
 set -euo pipefail
+# Game development uses the Godot Studio subscription fleet by default.
+export ARC_FLEET="${ARC_FLEET:-studio}"
 cd "$(dirname "$0")"
 
 PORT="${1:-}"

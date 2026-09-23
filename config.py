@@ -399,7 +399,6 @@ SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "24"))
 SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "60"))
 
 EVENTS_LOG = os.getenv("ARC_EVENTS_LOG") or str(ROOT / "logs" / "events.jsonl")
-BUILD_OUTPUT_DIR = os.getenv("ARC_BUILD_OUTPUT_DIR") or str(ROOT / "production" / "minecraft")
 DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
 # --- dashboard exposure -----------------------------------------------------
 # The dashboard listens on every interface so a phone on the same wifi can
@@ -417,8 +416,6 @@ DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
 # glanced at from a phone without a login step.
 DASHBOARD_BIND = os.getenv("ARC_DASHBOARD_BIND", "0.0.0.0")
 DASHBOARD_TOKEN = os.getenv("ARC_DASHBOARD_TOKEN", "")
-MAX_MODULE_RETRIES = int(os.getenv("ARC_MAX_MODULE_RETRIES", "6"))
-MAX_INTEGRATION_ROUNDS = int(os.getenv("ARC_MAX_INTEGRATION_ROUNDS", "6"))
 REVIEW_PASS_SCORE = float(os.getenv("ARC_REVIEW_PASS_SCORE", "6.5"))
 
 
