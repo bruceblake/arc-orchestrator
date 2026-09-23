@@ -192,6 +192,96 @@ def judge_status(project, *, minimum=None):
     return failures, detail
 
 
+ART_DIRECTION = "studio_art_direction.md"
+PLAYTEST_REPORT = "studio_playtest.json"
+PERF_REPORT = "studio_perf.json"
+
+
+def _read_json(path):
+    try:
+        doc = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) else None
+
+
+def playtest_status(project_dir):
+    """(failures, detail) for the scripted playtest: MEASURE.
+
+    The published method this studio follows tests a game two ways: a script
+    that plays it and prints pass/fail numbers, and screenshots along the way
+    for another agent to judge. This is the first half; the screenshots go to
+    the visual judge. A game with no scripted playtest has not been played.
+    """
+    root = Path(project_dir)
+    if not (root / "tools" / "playtest.gd").exists():
+        return (["no scripted playtest: add tools/playtest.gd, which drives the "
+                 "player along a real route and writes studio_playtest.json "
+                 "(passed + per-check numbers + screenshots) — see "
+                 "docs/studio-fleet.md"], {})
+    rep = _read_json(root / PLAYTEST_REPORT)
+    if rep is None:
+        return ([f"tools/playtest.gd exists but no valid {PLAYTEST_REPORT} was "
+                 "written; `studio gate` runs it — check it writes the report"], {})
+    checks = [c for c in rep.get("checks") or [] if isinstance(c, dict)]
+    failed = [c for c in checks if not c.get("passed")]
+    failures = []
+    if not checks:
+        failures.append(f"{PLAYTEST_REPORT} has no checks: a playtest that measures "
+                        "nothing proves nothing")
+    for c in failed[:8]:
+        failures.append(f"playtest check '{c.get('name')}' failed: got "
+                        f"{c.get('value')!r}, expected {c.get('expected')!r}")
+    if rep.get("passed") is False and not failed:
+        failures.append("the playtest reported failure")
+    if rep.get("script_errors"):
+        failures.append("the playtest raised script errors: "
+                        + "; ".join(rep["script_errors"][:3]))
+    return failures, {"checks": len(checks), "failed": len(failed),
+                      "screenshots": len(rep.get("screenshots") or [])}
+
+
+def perf_status(project_dir):
+    """(failures, detail): frame rate and shadow casters (phase 3 onward)."""
+    rep = _read_json(Path(project_dir) / PERF_REPORT)
+    if rep is None:
+        return ([f"no {PERF_REPORT}: add tools/perf.gd (the scaffold ships one); "
+                 "`studio gate` runs it with a display"], {})
+    failures = []
+    fps = rep.get("fps_p5", rep.get("fps_avg"))
+    if not isinstance(fps, (int, float)):
+        failures.append(f"{PERF_REPORT} has no fps_p5/fps_avg")
+    elif fps < config.STUDIO_MIN_FPS:
+        failures.append(f"performance: {fps:.0f} fps (5th percentile) is below the "
+                        f"{config.STUDIO_MIN_FPS:.0f} required")
+    shadows = rep.get("shadow_lights")
+    if isinstance(shadows, int) and shadows > config.STUDIO_MAX_SHADOW_LIGHTS:
+        failures.append(f"performance: {shadows} shadow-casting lights (max "
+                        f"{config.STUDIO_MAX_SHADOW_LIGHTS}) — every one re-renders "
+                        "the scene from its own point of view")
+    return failures, {k: rep.get(k) for k in ("fps_avg", "fps_p5", "frame_ms_p95",
+                                               "draw_calls", "shadow_lights")}
+
+
+def palette_status(project, project_dir):
+    """(failures, detail): the latest round's renders against the colour bible."""
+    from studio.evaluation import palette
+    try:
+        target = judge_loop.load_target(project_dir)
+    except (FileNotFoundError, ValueError):
+        return [], {}
+    if not palette.load_palette(target):
+        return (["bucket_b has no palette_hex: without a colour bible nothing "
+                 "can check that models kept to one"], {})
+    n = latest_judged_round(project) or compactor.latest_round(project)
+    meta = compactor.round_meta(project, n) if n else None
+    images = [i for i in (meta or {}).get("images", []) if Path(i.get("path", "")).exists()]
+    if not images:
+        return ([], {"round": n})
+    results, failures = palette.check_images(images, target)
+    return failures, {"round": n, "shares": results}
+
+
 def latest_fuzz_report(project):
     d = config.studio_run_dir(project)
     reports = sorted(d.glob("fuzz-*.json"))
@@ -225,7 +315,25 @@ def gate_phase_0(project, project_dir):
             "bucket_a contains no NUMERIC targets, so nothing in it can be "
             "checked without a model. Give the measurable facts as numbers "
             "(e.g. \"corridor_width_m\": 2.4)")
-    return failures, {"bucket_a_numeric": len(nums)}
+    # "Show the AI what you mean": the art direction and the colour bible are
+    # what every later model builds against (and what the judge and the
+    # palette check measure). Without them phase 0 has grounded nothing visual.
+    from studio.evaluation import palette
+    try:
+        pal = palette.load_palette(target)
+    except palette.PaletteError as exc:
+        pal, _ = [], failures.append(f"bucket_b.palette_hex: {exc}")
+    if len(pal) < 3:
+        failures.append(
+            "bucket_b.palette_hex needs at least 3 hex colours: the colour bible "
+            "is the contract every model's materials are checked against")
+    art = Path(project_dir) / ART_DIRECTION
+    if not art.exists() or len(art.read_text(encoding="utf-8", errors="replace").split()) < 60:
+        failures.append(
+            f"{ART_DIRECTION} is missing or too thin: write the art direction "
+            "(style, references, what each area looks like, rules) that every "
+            "asset task will be given")
+    return failures, {"bucket_a_numeric": len(nums), "palette": len(pal)}
 
 
 def gate_phase_1(project, project_dir):
@@ -241,6 +349,9 @@ def gate_phase_1(project, project_dir):
     a_fail, a_count = check_bucket_a(project_dir)
     failures += a_fail
     detail["bucket_a_checked"] = a_count
+    p_fail, p_detail = playtest_status(project_dir)
+    failures += p_fail
+    detail["playtest"] = p_detail
     j_fail, j_detail = judge_status(project)
     failures += j_fail
     detail["judge"] = j_detail
@@ -278,6 +389,25 @@ def gate_phase_2(project, project_dir):
     if over:
         failures.append("triangle budget exceeded: " + "; ".join(over[:6]))
     detail["mesh_reports"] = len(reports)
+    # The workbench sign-off: every asset built individually must be looked at
+    # and approved before it is assembled into the game.
+    from studio import approvals
+    names = []
+    for r in reports:
+        doc = _read_json(r) or {}
+        names.append(Path(doc.get("model_path", r.stem)).name)
+    states = approvals.status_of(project, names)
+    pending = [a for a, s in states.items() if s == "pending"]
+    rejected = [a for a, s in states.items() if s == "rejected"]
+    if pending:
+        failures.append(f"{len(pending)} asset(s) not yet approved in the workbench: "
+                        + ", ".join(pending[:8]))
+    if rejected:
+        failures.append("rejected assets still in the build: " + ", ".join(rejected[:8]))
+    detail["approvals"] = states
+    p_fail, p_detail = playtest_status(project_dir)
+    failures += p_fail
+    detail["playtest"] = p_detail
     j_fail, j_detail = judge_status(project)
     failures += j_fail
     detail["judge"] = j_detail
@@ -300,6 +430,15 @@ def gate_phase_3(project, project_dir):
             "high-severity visual artifacts are unresolved: "
             + "; ".join(blocking[:6]))
     detail["high_severity"] = len(blocking)
+    f_fail, f_detail = perf_status(project_dir)
+    failures += f_fail
+    detail["perf"] = f_detail
+    c_fail, c_detail = palette_status(project, project_dir)
+    failures += c_fail
+    detail["palette"] = c_detail
+    p_fail, p_detail = playtest_status(project_dir)
+    failures += p_fail
+    detail["playtest"] = p_detail
     return failures, detail
 
 

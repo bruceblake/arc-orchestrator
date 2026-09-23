@@ -447,6 +447,72 @@ Subscription CLI: `npm install -g @openai/codex`.
 
 ---
 
+## 9b. The method, and where each piece of it lives
+
+The studio's working method is taken from published AI game-development
+workflows (September 2026: a week-long space-game build with 100+ agents, two
+GPT-6 Astra asset and animation workflows, and a "games that don't suck"
+framework). Each practice below is enforced by code, not left to a prompt:
+
+| Practice from the workflows | Where it is enforced |
+|---|---|
+| An orchestrator hands out work and checks what comes back; it does not build | the planner (`studio/planner.py`) plus the governed pipeline |
+| One task = one fresh session, easy to test | planner method block; every task needs a `verify_cmd` that can fail (Rule 4) |
+| **The gauntlet**: every piece measured against numbers *and* judged by an independent critic before it is accepted | `verify_cmd` gate → cross-family review (Rule 2) → PR review → merge, with the bounded fix loop; the Studio board shows each task's trail |
+| Show the AI what you mean: references, art direction | phase-0 gate requires `studio_art_direction.md` |
+| The **colour bible**: one palette every model must use | `bucket_b.palette_hex`; `studio/evaluation/palette.py` checks renders (phase 3 gate) |
+| Test two ways: a script that **plays** the game and prints pass/fail numbers, and **screenshots** another agent looks at | `tools/playtest.gd` + `StudioPlaytest`; gated from phase 1; `studio playtest` archives the screenshots for the judge |
+| Build assets one at a time in a live **workbench**, approve them, *then* assemble | Studio → Workbench; `studio approve`; phase-2 gate requires every measured asset approved |
+| Labs / playgrounds for anything that moves | planner method block (`scenes/labs/`) |
+| Several proposals for hero pieces, keep the best | planner method block (best-of-N) |
+| Characters from low-poly parts, rigged and animated from reference clips | planner method block; the operator's prompt refuses to model organic characters from nothing |
+| Lighting as presets (day / night / emergency / blackout) | phase-3 planner guidance |
+| Shadows halved one build's frame rate | phase-3 perf gate (`tools/perf.gd`): fps floor + shadow-caster cap |
+| The last check is a human | promotions are manual (`studio promote`); optional manual PR gate below |
+
+### Scripted playtest contract
+
+`tools/playtest.gd` drives the game along a real route (simulated input, not a
+teleport) and writes `studio_playtest.json` through the scaffold's
+`StudioPlaytest` helper:
+
+```json
+{"passed": true, "seconds": 7.4,
+ "checks": [{"name": "walks_the_corridor", "passed": true, "value": -9.61, "expected": -9.6}],
+ "screenshots": ["studio_shots/02_corridor_mid.png"]}
+```
+
+A playtest with no checks fails the gate: a playtest that measures nothing
+proves nothing. Headless runs still measure; with a display the screenshots
+are real frames, lit with neutral inspection light when the scene has none.
+
+### Feature tracking
+
+The Studio view has five sub-views per project:
+
+- **Overview**: gate, Bucket A, phase tasks.
+- **Board**: Kanban with columns Backlog → Planned → Building → In review → Done / Blocked. Backlog is `studio_roadmap.json`: features not yet in any plan. A task names the feature it serves with `"feature"`.
+- **Changelog**: merged task commits on the game repo, with model, critic and PR link.
+- **Evidence**: playtest checks, perf, colour bible, fuzz.
+- **Workbench**: assets with approve/reject, plus renders and verdicts.
+
+Every task shows its gauntlet trail: fix rounds, gate ✓/✗, critic ✓/✗, PR rounds, escalations and the manual decision.
+
+### Manual PR review: your own agents as the last word
+
+You can put an agent you drive by hand on any PR, for example Gemini in the Antigravity IDE or Cursor. With `ARC_PR_MANUAL_REVIEW=1`, a PR the fleet's reviewers approved is **not merged** until someone labels it on GitHub:
+
+- `manual-approved`: the fleet merges it.
+- `manual-rejected`: every comment posted while it waited (other than the fleet's own) becomes the implementer's feedback, and a new PR round begins.
+
+The wait polls GitHub and uses no model time. A timeout, if you set one, rejects the PR and never merges it.
+
+```bash
+.venv/bin/python main.py studio review-pack ~/repos/<game> <PR#>
+```
+
+This writes a paste-ready review: instructions, the task spec (found through the commit's `Task-Id`), the gate, what the fleet's reviewers said, the full diff, and the exact label commands. It also creates the two labels on the repo.
+
 ## 10. Environment
 
 | Variable | Default | Meaning |
@@ -479,6 +545,13 @@ Subscription CLI: `npm install -g @openai/codex`.
 | `ARC_HARNESS_LIMIT_CLAUDE` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent Claude Code sessions (harness pool only) |
 | `ARC_HARNESS_LIMIT_CODEX` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `codex exec` sessions (harness pool only) |
 | `ARC_HARNESS_LIMIT_GEMINI` | 2 | concurrent Gemini CLI sessions |
+| `ARC_PR_MANUAL_REVIEW` | 0 | `1` holds every fleet-approved PR for a human label (`manual-approved` / `manual-rejected`) |
+| `ARC_PR_MANUAL_POLL` | 30 | seconds between GitHub checks while a PR waits for manual review |
+| `ARC_PR_MANUAL_TIMEOUT` | 0 | give up waiting after this many seconds and REJECT (0 = wait as long as it takes) |
+| `ARC_STUDIO_PALETTE_MIN` | 0.6 | share of a render's pixels that must sit on the colour bible |
+| `ARC_STUDIO_PALETTE_TOLERANCE` | 48 | RGB distance that counts as "on" a palette colour |
+| `ARC_STUDIO_MIN_FPS` | 45 | phase-3 frame-rate floor (5th-percentile fps from `tools/perf.gd`) |
+| `ARC_STUDIO_MAX_SHADOW_LIGHTS` | 8 | phase-3 cap on shadow-casting lights |
 | `ARC_STUDIO_FREE_JUDGE_MODEL` | (unset) | a raw OpenRouter `vendor/id` used instead of the roster judge, to exercise the visual loop at $0; its verdicts are marked `validation` and never gate a phase |
 | `ARC_GODOT_BIN` | (unset) | pin the Godot binary |
 | `ARC_BLENDER_BIN` | (unset) | pin the Blender binary |
