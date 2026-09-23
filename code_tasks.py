@@ -881,6 +881,32 @@ def _resume_session(results, tid, model, harness=None):
     return prev["session_id"]
 
 
+def wrote_the_code(ctx, tid, assigned, store=None):
+    """The model whose diff the reviewers must not share a family with.
+
+    cur_model is the assigned seat. A spent plan can move the attempt onto
+    another harness, and implement() records that model on its result. A
+    resume that starts at publish has no implement result in the graph, so
+    the last successful implementer row in harness_runs is the same fact.
+    Falling back to the assigned seat is only for a run that never recorded
+    one.
+    """
+    ran = ((ctx or {}).get("results", {}).get(f"implement_{tid}") or {}).get("model")
+    if ran in config.MODEL_FAMILY:
+        return ran
+    if store is not None:
+        try:
+            rows = store.harness_runs_prefix(tid)
+        except Exception:
+            rows = []
+        wrote = [r for r in rows
+                 if r.get("role") == "implementer" and r.get("exit_code") == 0
+                 and r.get("model") in config.MODEL_FAMILY]
+        if wrote:
+            return wrote[-1]["model"]
+    return assigned
+
+
 def _rework_feedback(tid, results):
     """Why this task is being implemented again, most authoritative first.
 
@@ -1732,7 +1758,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     _review_prompt(t, diff, impact, roster,
                                    board.prompt_block(wt, project=project_slug, task=tid)),
                     wt, task_id=f"{tid}-x{attempt}",
-                    avoid_families={config.MODEL_FAMILY[cur_model(ctx)]})
+                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
+                        ctx, tid, cur_model(ctx), store)]})
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1990,7 +2017,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             diff = await gitstore.pr_diff(repo, number)
             # Reviewers differ from the implementer's family AND from each
             # other, so two approvals mean two genuinely separate readings.
-            impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
+            impl_fam = config.MODEL_FAMILY.get(
+                wrote_the_code(ctx, tid, cur_model(ctx), store))
             pool = _eligible_pr_reviewers(impl_fam, pol)
             # Least-contended first; contention is whichever ceiling binds
             # first, the model's own cap or its harness's (_reviewer_pressure).
@@ -2045,7 +2073,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                       it["prior_issues"], impact, roster,
                                       board.prompt_block(wt, project=project_slug, task=tid)),
                     wt, task_id=f"{tid}-pr{it['round']}",
-                    avoid_families={config.MODEL_FAMILY[cur_model(ctx)]})
+                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
+                        ctx, tid, cur_model(ctx), store)]})
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather
