@@ -121,11 +121,37 @@ class CaptainCapacity(unittest.TestCase):
     def test_queues_when_a_model_has_no_free_slot(self):
         m = sorted(config.IMPLEMENTER_MODELS)[0]
         name = self._write_taskfile("busy.json", [m, m])
-        self.cap = {m: {"batch_headroom": 1}}
+        self.cap = {m: {"batch_headroom": 0}}
         r = captain.plan_pressure(name)
         self.assertFalse(r["admit"])
-        self.assertEqual(r["deficit"], {m: 1})
+        self.assertEqual(r["deficit"], {m: 2})
         self.assertIn(m, r["reason"])
+
+    def test_wider_than_the_cap_still_admits_when_a_slot_is_free(self):
+        """Demanding a slot per task would queue any taskfile wider than the
+        driver cap forever; the run's own leases pace the rest."""
+        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        name = self._write_taskfile("wide.json", [m] * 6)
+        self.cap = {m: {"batch_headroom": 1}}
+        self.assertTrue(captain.plan_pressure(name)["admit"])
+
+    def test_taskfile_outside_tasks_dir_is_refused(self):
+        outside = self.tmp / "evil.json"
+        outside.write_text("{}", encoding="utf-8")
+        self.assertIsNone(captain._taskfile_path(str(outside)))
+        self.assertIsNone(captain._taskfile_path("../evil.json"))
+        self.assertIsNotNone(captain._taskfile_path("ok.json"))
+
+    def test_recent_events_reads_only_the_tail(self):
+        log = self.tmp / "events.jsonl"
+        big = json.dumps({"type": "task.gate", "task": "old", "pad": "x" * 500})
+        with open(log, "w", encoding="utf-8") as f:
+            for _ in range(captain.EVENTS_TAIL_BYTES // len(big) + 50):
+                f.write(big + "\n")
+            f.write(json.dumps({"type": "task.merged", "task": "new"}) + "\n")
+        evs = captain._recent_events(path=log)
+        self.assertEqual(evs[-1]["task"], "new")
+        self.assertLessEqual(len(evs), captain.EVENTS_TAIL)
 
     def test_missing_taskfile_admits_so_the_run_reports_it(self):
         r = captain.plan_pressure("nope.json")

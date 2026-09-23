@@ -50,6 +50,7 @@ ACTION_KINDS = ("plan", "run", "resume", "status", "amend")
 
 HISTORY_CHARS = orchchat.HISTORY_CHARS
 EVENTS_TAIL = 40          # recent event lines shown to the captain
+EVENTS_TAIL_BYTES = 2 * 1024 * 1024
 EVENTS_KEEP = ("task.", "chain.", "driver.cap_wait", "driver.error",
                "run.", "graph.", "plan.", "promotion.", "dream.")
 
@@ -127,10 +128,11 @@ def capacity_snapshot(db_path=None):
 def plan_pressure(taskfile, db_path=None):
     """How a taskfile's plan would spend the fleet's slots.
 
-    Counts the implementer models the taskfile names (one slot per task,
-    since every task can be in flight at once) and compares each against its
-    live batch headroom. `admit` is False when ANY model the plan needs has
-    no free driver slot — the captain then queues instead of launching into
+    Counts the implementer models the taskfile names and checks each has live
+    batch headroom. `admit` is False when ANY model the plan needs has NO free
+    driver slot. More tasks than free slots still admits: the run's own driver
+    leases pace them (`driver.cap_wait`), whereas demanding a slot per task
+    would queue any taskfile wider than a model's driver cap forever — the captain then queues instead of launching into
     capacity refusals. A taskfile that will not parse admits (the run itself
     reports the parse error, which is the honest place for it).
     """
@@ -148,9 +150,8 @@ def plan_pressure(taskfile, db_path=None):
     cap = capacity_snapshot(db_path)
     deficit = {}
     for model, want in need.items():
-        head = cap.get(model, {}).get("batch_headroom", 0)
-        if want > head:
-            deficit[model] = want - head
+        if cap.get(model, {}).get("batch_headroom", 0) <= 0:
+            deficit[model] = want
     return {"admit": not deficit,
             "reason": ("capacity free" if not deficit
                        else "no free slot for " + ", ".join(
@@ -190,14 +191,15 @@ def _taskfile_path(taskfile):
     """Resolve a bare taskfile name under TASKS_DIR; None if it escapes it."""
     if not isinstance(taskfile, str) or not taskfile.strip():
         return None
-    name = taskfile.strip()
-    if os.path.isabs(name) or "/" in name:
-        p = Path(name)
-    else:
-        p = Path(config.TASKS_DIR) / name
+    # The name comes from model output steered by a dashboard message, and
+    # `code run` executes the file's verify_cmd strings (Rule 6b), so an
+    # absolute path or a `..` that lands outside TASKS_DIR is refused.
     try:
-        rp = p.resolve()
-    except OSError:
+        root = Path(config.TASKS_DIR).resolve()
+        rp = (root / taskfile.strip()).resolve()
+    except (OSError, ValueError):
+        return None
+    if rp.parent != root:
         return None
     return rp
 
@@ -216,7 +218,14 @@ def _recent_events(path=None, n=EVENTS_TAIL, keep=EVENTS_KEEP):
     """The last `n` interesting events, oldest first."""
     path = Path(path or config.EVENTS_LOG)
     try:
-        tail = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        # The dashboard polls this; the log grows to 100 MiB before rotating,
+        # so read only its newest bytes.
+        with path.open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - EVENTS_TAIL_BYTES))
+            tail = fh.read().decode("utf-8", errors="replace").splitlines()
+        if size > EVENTS_TAIL_BYTES:
+            tail = tail[1:]        # the first line was cut mid-record
     except OSError:
         return []
     out = []
