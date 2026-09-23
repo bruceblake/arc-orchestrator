@@ -209,6 +209,30 @@ class FindingAnExistingWorktree(unittest.TestCase):
         (stray / ".git").write_text("gitdir: /nowhere\n")
         self.assertIsNone(asyncio.run(gitstore.existing_worktree(self.repo, "t1")))
 
+    def test_alloc_replaces_a_hollow_directory_git_does_not_track(self):
+        """Resume of prison-escape died on this shape.
+
+        The directory was still on disk, .git was 0 bytes, and the admin
+        gitdir was invalid. `worktree remove` said "not a working tree" and
+        `worktree add --force` still refused with "already exists".
+        """
+        stray = gitstore.worktree_for(self.repo, "t1")
+        stray.mkdir(parents=True)
+        (stray / ".git").write_text("")
+        (stray / "f.txt").write_text("")
+        admin = self.repo / ".git" / "worktrees" / "t1"
+        admin.mkdir(parents=True)
+        (admin / "gitdir").write_text("")
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        self.assertEqual((wt / "f.txt").read_text(), "x\n")
+        self.assertGreater((wt / ".git").stat().st_size, 0)
+
+    def test_a_zero_byte_checkout_of_a_real_blob_is_not_intact(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (wt / "f.txt").write_text("")
+        self.assertFalse(asyncio.run(
+            gitstore._checkout_intact(self.repo, wt, "main")))
+
     def test_alloc_reports_when_it_discards_committed_work(self):
         wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
         (wt / "new.txt").write_text("work\n")
@@ -404,6 +428,32 @@ class AdvancingTheLocalBaseBranch(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("fast-forward", note.lower())
         self.assertTrue((self.repo / "mine.txt").exists())
+
+    def test_untracked_copies_of_incoming_files_do_not_block_the_fast_forward(self):
+        """The prison-escape failure.
+
+        cell-wing-foundation merged on GitHub, which committed the .uid files
+        Godot had already written into the blessed clone as untracked. The
+        fast-forward aborted, local main stayed on the scaffold, and the
+        three dependents branched without the foundation they were written
+        against.
+        """
+        (self.other / "generated.uid").write_text("from-origin\n")
+        self._git("add", "-A", cwd=self.other)
+        self._git("commit", "-qm", "uid", cwd=self.other)
+        self._git("push", "-q", "origin", "development", cwd=self.other)
+        (self.repo / "generated.uid").write_text("local-godot\n")
+        ok, note = asyncio.run(gitstore.fast_forward_base(self.repo, "development"))
+        self.assertTrue(ok, note)
+        self.assertEqual((self.repo / "generated.uid").read_text(), "from-origin\n")
+        self.assertEqual((self.repo / "f.txt").read_text(), "one\ntwo\n")
+        self.assertEqual(self._dirty(), "")
+
+    def test_a_tracked_local_edit_is_not_discarded_to_fast_forward(self):
+        (self.repo / "f.txt").write_text("local edit\n")
+        ok, note = asyncio.run(gitstore.fast_forward_base(self.repo, "development"))
+        self.assertFalse(ok, note)
+        self.assertEqual((self.repo / "f.txt").read_text(), "local edit\n")
 
 
 class BranchAheadUsesTheIntegrationBranch(unittest.TestCase):

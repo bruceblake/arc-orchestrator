@@ -10,7 +10,7 @@
 // "120B", "V4"); index.html's longer labels are canonical, so the phone page
 // now spells model names out too. Retired models stay mapped (and say so) so
 // historical usage/harness_runs rows still render a name, never a raw id.
-const SHORT = {"GLM-5.3":"GLM 5.3","DeepSeek-V4.1-Flash-thinking-max":"DeepSeek V4.1 Flash max","DeepSeek-V4.1-Flash":"DeepSeek V4.1 Flash","Kimi-K3":"Kimi K3 (retired)","gpt-oss-120b":"gpt-oss 120B (retired)","DeepSeek-V4-Flash":"DeepSeek V4 Flash (retired)"};
+const SHORT = {"Claude-Opus-5.5":"Opus 5.5","GPT-6-Sol":"GPT-6 Sol","GPT-6-Astra":"GPT-6 Astra","GPT-6-Luna":"GPT-6 Luna","Grok-4.7":"Grok 4.7","Gemini-3.8-Flash":"Gemini 3.8 Flash","GLM-5.3":"GLM 5.3","DeepSeek-V4.1-Flash-thinking-max":"DeepSeek V4.1 Flash max","DeepSeek-V4.1-Flash":"DeepSeek V4.1 Flash","Kimi-K3":"Kimi K3 (retired)","gpt-oss-120b":"gpt-oss 120B (retired)","DeepSeek-V4-Flash":"DeepSeek V4 Flash (retired)"};
 const short = m => SHORT[m] || m || "—";
 
 // The fleet plans with config.PLANNER_MODEL (GLM-5.3 on the 2026-09-12

@@ -42,9 +42,17 @@ HEARTBEAT_INTERVAL = 15
 
 
 class DriverError(RuntimeError):
-    def __init__(self, message, session_id=None, capacity=False):
+    def __init__(self, message, session_id=None, capacity=False,
+                 usage_limit=False, resets_at=None):
         super().__init__(message)
         self.session_id = session_id
+        # Set when a subscription plan refused on its usage window; resets_at
+        # is the epoch it said the window reopens (None when it did not say).
+        # Classified at the exit site, where the WHOLE transcript is still in
+        # hand — the message above keeps only its last 300 characters, which
+        # can cut the reset time off.
+        self.usage_limit = usage_limit
+        self.resets_at = resets_at
         # Set when the harness exited non-zero because ARC refused the request
         # (queue full / session limit) rather than because it crashed. The
         # exited-1 paths in _pump/_pump_dual cannot call the caller's ladders,
@@ -167,6 +175,131 @@ async def wait_for_arc(task_id=None, poll_s=30.0):
             events.emit("arc.reachable", after_s=down_for, task=task_id)
             log.warning("ARC reachable again after %ds — resuming", down_for)
             return
+
+
+# --- subscription usage windows ---------------------------------------------
+# A plan-backed harness (Claude Code, Codex) that has spent its usage window
+# refuses every request until the window resets. That is not a crash (the
+# fix loop would repair code nobody criticised) and not ARC-style contention
+# (a 10-minute backoff walks straight back into the same refusal for hours):
+# the only correct response is to wait for the reset. The phrasings below are
+# the plans' own — "Claude AI usage limit reached|<epoch>", "You've hit your
+# limit · resets 3pm (Europe/London)", "5-hour limit reached", Codex's
+# "You've hit your usage limit ... try again in 2 hours 13 minutes" and its
+# `usage_limit_reached` error code. ARC's "concurrent session limit reached"
+# deliberately does NOT match: that is capacity, and clears in seconds.
+_USAGE_LIMIT_RE = re.compile(
+    r"usage[ _]limit|hit your (?:usage )?limit|"
+    r"\b(?:5|five)[- _]hour limit|\bweekly limit|\bseven[ _]day limit|"
+    r"\bopus limit", re.I)
+
+
+def is_usage_limit(text):
+    """True when `text` is a subscription plan refusing on its usage window."""
+    return bool(_USAGE_LIMIT_RE.search(text or ""))
+
+
+_UNIT_S = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+
+
+def _rejected_window(text):
+    """From a stream carrying a REJECTED `rate_limit_event` (Claude Code's
+    per-window status object), the epoch it resets — 0.0 when it names none.
+    None when no window in the stream was rejected."""
+    found = None
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{") or "rejected" not in line:
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        info = obj.get("rate_limit_info") if isinstance(obj, dict) else None
+        if isinstance(info, dict) and info.get("status") == "rejected":
+            at = info.get("resetsAt") or info.get("resets_at")
+            if isinstance(at, (int, float)) and at > 0:
+                return at / 1000 if at > 1e12 else float(at)
+            found = 0.0
+    return found
+
+
+def usage_reset_at(text, now=None):
+    """Epoch seconds the refused usage window resets, or None if unstated.
+
+    Checked most-specific first: an explicit epoch (Claude's `...|<epoch>`
+    suffix, or a stream `rate_limit_event` marked rejected with `resetsAt`),
+    then a relative "try again in 2 hours 13 minutes" / `resets_in_seconds`,
+    then a wall-clock "resets 3pm (Zone)" — the next such time after `now`.
+    A stray `resets_in_seconds` on a window that is NOT exhausted (Codex
+    reports every window on every turn) is ignored unless it sits in an
+    object that says the limit was reached.
+    """
+    now = time.time() if now is None else now
+    text = text or ""
+    # Stream objects first: they carry machine-readable reset times.
+    at = _rejected_window(text)
+    if at:
+        return at
+    m = re.search(r"limit reached\|(\d{10,13})\b", text, re.I)
+    if m:
+        at = int(m.group(1))
+        return at / 1000 if at > 1e12 else float(at)
+    m = re.search(r'"resets_in_seconds"\s*:\s*(\d+)', text)
+    if m and re.search(r"usage_limit_reached|limit_reached", text):
+        return now + int(m.group(1))
+    m = re.search(r"try again in ((?:\s*(?:and\s+|,\s*)?\d+\s*"
+                  r"(?:days?|hours?|hrs?|minutes?|mins?|seconds?|secs?|[dhms])\b)+)",
+                  text, re.I)
+    if m:
+        total = sum(int(n) * _UNIT_S[u[0].lower()]
+                    for n, u in re.findall(r"(\d+)\s*([a-z]+)", m.group(1), re.I))
+        if total:
+            return now + total
+    m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
+                  r"(?:\s*\(([A-Za-z_]+/[A-Za-z_/]+)\))?", text, re.I)
+    if m:
+        import datetime
+        tz = None
+        if m.group(4):
+            try:
+                from zoneinfo import ZoneInfo
+                tz = ZoneInfo(m.group(4))
+            except Exception:
+                tz = None
+        hour = int(m.group(1)) % 12 + (12 if m.group(3).lower() == "pm" else 0)
+        cur = datetime.datetime.fromtimestamp(now, tz)
+        at = cur.replace(hour=hour, minute=int(m.group(2) or 0),
+                         second=0, microsecond=0)
+        if at.timestamp() <= now:
+            at += datetime.timedelta(days=1)
+        return at.timestamp()
+    return None
+
+
+# harness -> epoch its plan's usage window resets. Shared by every driver in
+# this process, so once one attempt learns the plan is out, its siblings wait
+# for the same reset instead of each spending a refusal to find out.
+_usage_blocked_until = {}
+
+
+async def wait_for_usage_reset(harness, model, task_id, until, budget_s):
+    """Sleep until `until` (epoch) or `budget_s` runs out; returns seconds slept.
+
+    Emits driver.usage_wait every few minutes so the dashboard can show a
+    task that is parked on a plan window rather than dead.
+    """
+    slept = 0.0
+    while True:
+        left = min(until - time.time(), budget_s - slept)
+        if left <= 0:
+            return slept
+        events.emit("driver.usage_wait", harness=harness, model=model,
+                    task=task_id, resets_at=round(until),
+                    remaining_s=round(left))
+        step = min(left, 300.0)
+        await asyncio.sleep(step)
+        slept += step
 
 
 async def _lease_acquire(model, task_id, emit_ctx, cap=None, report_as=None,
@@ -690,7 +823,8 @@ def opencode_fleet_config():
         st = src.stat()
     except OSError:
         return None
-    key = (st.st_size, st.st_mtime_ns, config.OPENCODE_CONTEXT)
+    key = (st.st_size, st.st_mtime_ns, config.OPENCODE_CONTEXT,
+           config.EXTERNAL_CONTEXT, config.FLEET)
     if _fleet_cfg["key"] == key and _fleet_cfg["path"]:
         return _fleet_cfg["path"]
     try:
@@ -707,7 +841,12 @@ def opencode_fleet_config():
             _pmodels = ((doc.get("provider", {}).get(_prov) or {})
                         .get("models") or {})
             if _mid in _pmodels:
-                _pmodels[_mid].setdefault("limit", {})["context"] = config.OPENCODE_CONTEXT
+                # Not OPENCODE_CONTEXT: that budget exists for an ARC
+                # pathology (requests stop returning near 55-60k input), which
+                # an OpenRouter-served model does not share. See
+                # config.opencode_context_for.
+                _pmodels[_mid].setdefault("limit", {})["context"] = (
+                    config.opencode_context_for(_ext))
         # Lowering context can leave `output` above it (an external model may
         # declare a large native output window), which asks the API for more
         # completion tokens than the budget allows. Clamp output under context.
@@ -934,6 +1073,7 @@ def parse_transcript(raw):
     """
     texts, sid_holder = [], [None]
     final = None
+    codex_msg, codex_sid = None, None
     for line in raw.splitlines():
         line = line.strip()
         if not line.startswith("{"):
@@ -946,7 +1086,23 @@ def parse_transcript(raw):
                 and isinstance(obj.get("result"), str)):
             final = obj
             continue
+        # `codex exec --json` (measured 2026-09-22): a thread.started event
+        # carrying the session id, and the answer as item.completed items of
+        # type agent_message. Its stream ALSO carries reasoning and command
+        # items with "text" fields, which the generic dig would fold into a
+        # reviewer's verdict — so the LAST agent_message is taken as THE
+        # answer, the same way reasonix's result object is.
+        if isinstance(obj, dict) and obj.get("type") == "thread.started":
+            codex_sid = obj.get("thread_id") or codex_sid
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "item.completed":
+            item = obj.get("item") or {}
+            if item.get("type") == "agent_message" and isinstance(item.get("text"), str):
+                codex_msg = item["text"]
+            continue
         _dig(obj, texts, sid_holder)
+    if codex_msg is not None and final is None:
+        return codex_sid or sid_holder[0], codex_msg[-3000:]
     if final is not None:
         sid = final.get("session_id") if isinstance(final.get("session_id"), str) else None
         payload = final["result"] or raw
@@ -1004,6 +1160,50 @@ def transcript_tokens(raw):
     """
     tokens = prompt = completion = 0
     for line in raw.splitlines():
+        # Claude Code / Codex / Gemini headless: the TERMINAL result object
+        # carries the whole run's usage, so it is summed once rather than per
+        # step. Without this the subscription harnesses reported (0, 0, 0) and
+        # the usage page showed a run that cost nothing — Rule 7 evidence that
+        # quietly says "no tokens" is worse than none, because it looks like a
+        # measurement. Cache reads and writes are prompt tokens (they are
+        # charged as such), matching the opencode branch below.
+        if '"type":"result"' in line or '"type": "result"' in line:
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            u = e.get("usage")
+            if isinstance(u, dict) and ("input_tokens" in u or "output_tokens" in u):
+                p_ = ((u.get("input_tokens") or 0)
+                      + (u.get("cache_read_input_tokens") or 0)
+                      + (u.get("cache_creation_input_tokens") or 0))
+                c_ = (u.get("output_tokens") or 0)
+                prompt += p_
+                completion += c_
+                tokens += (u.get("total_tokens") or (p_ + c_))
+                continue
+            if isinstance(u, dict) and ("prompt_tokens" in u or "completion_tokens" in u):
+                p_ = u.get("prompt_tokens") or 0
+                c_ = u.get("completion_tokens") or 0
+                prompt += p_
+                completion += c_
+                tokens += (u.get("total_tokens") or (p_ + c_))
+                continue
+        # codex exec --json: one turn.completed per turn with the turn's usage.
+        # input_tokens already INCLUDES cached_input_tokens (OpenAI's usage
+        # convention), so the cached count is not added a second time.
+        if '"turn.completed"' in line:
+            try:
+                u = (json.loads(line).get("usage") or {})
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(u, dict) and "input_tokens" in u:
+                p_ = u.get("input_tokens") or 0
+                c_ = u.get("output_tokens") or 0
+                prompt += p_
+                completion += c_
+                tokens += p_ + c_
+            continue
         if '"kind":"usage"' in line or '"kind": "usage"' in line:
             try:
                 u = (json.loads(line).get("usage") or {})
@@ -1086,8 +1286,16 @@ class Driver:
         attempt = 0
         sid = session_id
         continuation = None
+        usage_waited = 0.0     # seconds this run has spent parked on a plan window
         while True:
             attempt += 1
+            # A sibling already learned this harness's plan is out: wait for
+            # the same reset rather than spend a refusal rediscovering it.
+            blocked = _usage_blocked_until.get(self.harness, 0)
+            if blocked > time.time():
+                usage_waited += await wait_for_usage_reset(
+                    self.harness, self.model, task_id, blocked,
+                    config.USAGE_LIMIT_MAX_WAIT - usage_waited)
             # driver.queued, not driver.start: this attempt has not got a slot
             # yet. Emitting "start" here counted every QUEUED driver as
             # in-flight, which is how the dashboard once reported kimi at 9/3
@@ -1131,6 +1339,32 @@ class Driver:
                     events.emit("driver.vpn_down", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt)
                     await wait_for_arc(task_id)
+                    attempt -= 1
+                    continue
+                if getattr(exc, "usage_limit", False) or is_usage_limit(str(exc)):
+                    # The plan's usage window is spent. Park until it resets
+                    # (or poll when the refusal named no time) and retry the
+                    # SAME attempt number — like the VPN path, a request the
+                    # plan refused to serve was not an attempt at the task.
+                    budget = config.USAGE_LIMIT_MAX_WAIT - usage_waited
+                    resets_at = getattr(exc, "resets_at", None)
+                    until = (resets_at + config.USAGE_LIMIT_MARGIN if resets_at
+                             else time.time() + config.USAGE_LIMIT_POLL)
+                    events.emit("driver.usage_limit", harness=self.harness,
+                                model=self.model, role=self.role, task=task_id,
+                                attempt=attempt, error=str(exc)[:300],
+                                resets_at=round(resets_at) if resets_at else None,
+                                wait_s=round(max(0, until - time.time())),
+                                waited_s=round(usage_waited))
+                    if budget <= 0:
+                        raise
+                    _usage_blocked_until[self.harness] = max(
+                        _usage_blocked_until.get(self.harness, 0), until)
+                    log.warning("%s: plan usage limit reached; waiting %.0fs for "
+                                "the window to reset", self.model,
+                                max(0, until - time.time()))
+                    usage_waited += await wait_for_usage_reset(
+                        self.harness, self.model, task_id, until, budget)
                     attempt -= 1
                     continue
                 # A capacity refusal the harness reported AS an exit-1 (ARC
@@ -1401,14 +1635,23 @@ class Driver:
             # `is_error: true` result object carrying the provider's text. The
             # stdout object is preferred over stderr chatter, and a genuinely
             # silent exit says so instead of trailing off after the colon.
-            detail = harness_error_detail(text or raw, err.decode(errors="replace"))
+            err_text = err.decode(errors="replace")
+            detail = harness_error_detail(text or raw, err_text)
+            # A plan out of its usage window is judged on the FULL output: the
+            # reset time may sit in a stream event or in stderr, not in the
+            # tail kept on the message.
+            usage = (is_usage_limit(detail) or is_usage_limit(err_text)
+                     or _rejected_window(raw) is not None)
             # An exit that carried a capacity refusal (ARC "backend queue is
             # full" / "concurrent session limit") is expected weather, not a
             # crash: mark it so Driver.run retries it on the capacity ladder
             # and skips errors.capture.
             raise DriverError(f"{argv[0]} exited {proc.returncode}: {detail[-300:]}",
                               session_id=sid or session_id,
-                              capacity=self.is_capacity_error(detail))
+                              capacity=self.is_capacity_error(detail),
+                              usage_limit=usage,
+                              resets_at=(usage_reset_at("\n".join((detail, err_text, raw)))
+                                         if usage else None))
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
                             session_id or sid, str(tpath), text,
                             round(time.monotonic() - t0, 1), toks, ptok, ctok)
@@ -2021,6 +2264,191 @@ class ReasonixDriver(Driver):
                 "REASONIX_WORKSPACE_ROOT": str(worktree)}
 
 
+# --- subscription-CLI harnesses ----------------------------------------------
+# Claude Code, the Codex CLI and the Gemini CLI run on the OPERATOR'S OWN
+# PLANS rather than on per-token API billing. That is the whole reason they
+# exist here: the studio roster's frontier models are otherwise a metered
+# expense, and a plan the operator already pays for is not.
+#
+# All three fit the base Driver unmodified, because all three stream JSON
+# events on stdout in headless mode:
+#
+#   claude -p --output-format stream-json    ends with {"type":"result",...}
+#   codex exec --json                        JSONL events
+#   gemini -p -o stream-json                 JSONL events
+#
+# so the stdout pump, the stall clock, the live transcript the dashboard
+# tails, and parse_transcript all work as they do for reasonix.
+#
+# WHAT IS DIFFERENT, and it is not technical: a consumer plan is metered for
+# one human at one terminal, on rolling windows. config._HARNESS_CAP holds
+# these to 1-2 concurrent sessions for that reason, and `claude` is 1 because
+# the operator's own interactive session shares the same plan. Parallel fleet
+# work belongs on ARC, which is free and genuinely concurrent; these slots
+# carry the roles that need frontier quality.
+
+
+def _check_roster(model, role, bench):
+    """The roster/role gate every driver applies (Rules 1 and 2).
+
+    Factored out rather than copied a fourth time: the duplicated version of
+    this check is exactly the shape of the drift AGENTS.md Rule 2 warns about,
+    where a hand-kept opinion about who may do what diverges from the roster.
+    """
+    if bench:
+        return
+    _GH_OPS = ("issue-triager", "issue-maker", "pr-reviewer")
+    if model not in config.MODEL_ROLES:
+        raise ValueError(f"{model!r} is not on today's roster "
+                         f"({sorted(config.MODEL_ROLES)})")
+    need = "planner" if role in _GH_OPS else role
+    if not config.model_may(model, need):
+        raise ValueError(f"{model} may hold {sorted(config.MODEL_ROLES[model])}, "
+                         f"not {role!r}")
+
+
+class ClaudeCodeDriver(Driver):
+    """Claude Code (`claude -p`) on the operator's Claude subscription.
+
+    Headless Claude Code streams the same event objects the interactive TUI
+    renders and ends with `{"type": "result", "result": ..., "session_id":
+    ...}` — the shape parse_transcript already treats as THE answer, so a
+    review verdict comes back intact without a new parser.
+
+    `--verbose` is REQUIRED alongside `--output-format stream-json` in print
+    mode; without it the CLI refuses the combination, and a driver that
+    silently fell back to text would lose the per-event stream the stall clock
+    depends on.
+    """
+
+    harness = "claude"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    # Renders the visual judge attaches. Claude Code has no image FLAG: its
+    # Read tool opens image files, so the paths are named in the prompt and
+    # the agent reads them. Set by studio.evaluation.judge_loop.
+    images = ()
+
+    def argv(self, prompt, session_id):
+        if self.images:
+            prompt = (prompt + "\n\nRead these image files before answering "
+                      "(use your Read tool on each):\n"
+                      + "\n".join(f"  {i}" for i in self.images))
+        a = [config.claude_bin(), "-p", "--output-format", "stream-json",
+             "--verbose", "--permission-mode", "bypassPermissions"]
+        if config.CLAUDE_CLI_MODEL:
+            a += ["--model", config.CLAUDE_CLI_MODEL]
+        if session_id:
+            a += ["--resume", session_id]
+        return a + [prompt]
+
+    def extra_env(self, worktree):
+        # Never let an API key hijack a subscription run: with
+        # ANTHROPIC_API_KEY set, Claude Code bills the API account instead of
+        # the plan, which is the opposite of why this harness exists.
+        return {"ANTHROPIC_API_KEY": "", "CLAUDE_CODE_DISABLE_TELEMETRY": "1"}
+
+
+class CodexDriver(Driver):
+    """The Codex CLI (`codex exec`) on the operator's ChatGPT plan.
+
+    `--json` prints events as JSONL, `-C` sets the workspace root to the task
+    worktree, and `--skip-git-repo-check` keeps it from refusing a worktree it
+    does not recognise as a repository root.
+
+    Sandbox posture is `config.CODEX_SANDBOX` (default `workspace-write`): the
+    agent may edit its own worktree and nothing outside it. `codex exec` is
+    non-interactive, so there is no approval prompt to deadlock on — which is
+    why the far blunter `--dangerously-bypass-approvals-and-sandbox` is not
+    the default here.
+    """
+
+    harness = "codex"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    images = ()          # attached with -i, which codex exec supports natively
+
+    def argv(self, prompt, session_id):
+        # `resume` is a subcommand of exec, not a flag, so it has to sit
+        # immediately after `exec`.
+        a = [config.codex_bin(), "exec"] + (["resume", session_id] if session_id else [])
+        # The sandbox goes in as a CONFIG override, never as `-s`. `codex exec`
+        # accepts `-s` but `codex exec resume` does not ("unexpected argument
+        # '-s' found", exit 2) — and every fix round resumes. On the first live
+        # studio run (2026-09-22) that failed each fix attempt instantly: one
+        # task burned all 16 fix rounds in minutes and was about to escalate
+        # onto Claude. `-c sandbox_mode=...` is accepted by both, and the
+        # session record confirms it takes effect (sandbox_policy:
+        # workspace-write, and a resumed session still writes files).
+        a += ["--json", "--skip-git-repo-check",
+              "-c", f'sandbox_mode="{config.CODEX_SANDBOX}"']
+        if not session_id:
+            for img in self.images:
+                a += ["-i", str(img)]
+        if config.CODEX_CLI_MODEL:
+            a += ["-m", config.CODEX_CLI_MODEL]
+        if config.CODEX_REASONING_EFFORT:
+            # Verified 2026-09-22: the session record then carries
+            # "reasoning_effort":"high" for gpt-6-sol.
+            a += ["-c", f'model_reasoning_effort="{config.CODEX_REASONING_EFFORT}"']
+        return a + [prompt]
+
+    def extra_env(self, worktree):
+        return {"OPENAI_API_KEY": "", "CODEX_QUIET_MODE": "1"}
+
+
+class GeminiDriver(Driver):
+    """The Gemini CLI (`gemini -p`) on the operator's Google AI plan.
+
+    This is the studio's VISUAL JUDGE as well as a reviewer: the CLI resolves
+    `@path` references in a prompt by reading that file, images included, so a
+    judge prompt can attach real renders without a multimodal API call.
+
+    `--approval-mode yolo` is what makes it non-interactive; without it the
+    CLI waits for approval on its first tool use and the stall clock kills a
+    session that was only ever waiting for a human.
+    """
+
+    harness = "gemini"
+
+    def __init__(self, model, role, bench=False, interactive=False):
+        _check_roster(model, role, bench)
+        self.model = model
+        self.role = role
+        self.interactive = interactive
+
+    # The Gemini CLI resolves `@path` inside a prompt by reading that file,
+    # images included — which is what makes it the visual judge without a
+    # single multimodal API call.
+    images = ()
+
+    def argv(self, prompt, session_id):
+        if self.images:
+            prompt = ("\n".join(f"@{i}" for i in self.images)
+                      + "\n\n" + prompt)
+        a = [config.gemini_bin(), "--output-format", "stream-json",
+             "--approval-mode", "yolo"]
+        if config.GEMINI_CLI_MODEL:
+            a += ["-m", config.GEMINI_CLI_MODEL]
+        if session_id:
+            a += ["--session-id", session_id]
+        return a + ["-p", prompt]
+
+    def extra_env(self, worktree):
+        return {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": "",
+                "GEMINI_CLI_DISABLE_TELEMETRY": "1"}
+
+
 def driver_for(model, role, bench=False, interactive=False):
     """The driver for `model` on the harness its ROSTER row names.
 
@@ -2034,6 +2462,12 @@ def driver_for(model, role, bench=False, interactive=False):
     if harness is None:
         raise ValueError(f"{model!r} is not on today's roster "
                          f"({sorted(config.MODEL_HARNESS)})")
+    if harness == "claude":
+        return ClaudeCodeDriver(model, role, bench=bench, interactive=interactive)
+    if harness == "codex":
+        return CodexDriver(model, role, bench=bench, interactive=interactive)
+    if harness == "gemini":
+        return GeminiDriver(model, role, bench=bench, interactive=interactive)
     if harness == "kimi":
         return KimiDriver(role, bench=bench, interactive=interactive)
     if harness == "dsh":

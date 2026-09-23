@@ -340,6 +340,8 @@ supervisor marks orphaned rounds as failed on startup, so the DB never lies.
 | `ARC_DASHBOARD_BIND` | 0.0.0.0 | address the dashboard listens on (see *Who can reach the dashboard*) |
 | `ARC_DASHBOARD_TOKEN` | (unset) | when set, every dashboard action must carry it; viewing stays open |
 | `ARC_CAPTAIN_DIR` | logs/captain | captain session files + the capacity queue (`main.py captain`, the dashboard Captain panel); resolved at call time so tests can redirect it |
+| `ARC_FLEET` | local | which fleet roster to load: `local` (GLM + DeepSeek) or `studio` (plus four OpenRouter models for the 3D game workload — see [docs/studio-fleet.md](docs/studio-fleet.md)); fatal on any other value |
+| `ARC_EXTERNAL_CONTEXT` | 262144 | context budget declared for externally-served (OpenRouter) models; `ARC_OPENCODE_CONTEXT`'s 64k exists for an ARC-specific pathology they do not share |
 
 A round makes roughly `13 x questions` model calls. Defaults are polite; the
 per-model semaphores are the hard guarantee that you never exceed ARC's

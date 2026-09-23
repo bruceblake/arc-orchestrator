@@ -287,17 +287,37 @@ sys.exit(bad)
 PYEOF
 
 step "taskfile validity"
+# Each taskfile is validated under the fleet it was PLANNED for
+# (project.fleet): a studio taskfile's models exist only on the studio roster,
+# and loading it under the default local fleet reported a perfectly good plan
+# as broken. Each fleet gets its own interpreter because config derives the
+# roster at import time.
 "$PY" - <<'PYEOF' || rc=1
-import sys, pathlib, config, code_tasks
-bad = 0
+import json, os, pathlib, subprocess, sys
+import config
 d = pathlib.Path(config.TASKS_DIR)
+by_fleet = {}
 for f in sorted(d.glob("*.json")) if d.is_dir() else []:
     try:
-        code_tasks.load_taskfile(f)
-    except Exception as exc:
-        print(f"FAIL: {f.name}: {exc}")
-        bad = 1
-sys.exit(bad)
+        fleet = (json.loads(f.read_text(encoding="utf-8")).get("project") or {}).get("fleet")
+    except (OSError, ValueError):
+        fleet = None
+    by_fleet.setdefault(fleet or os.environ.get("ARC_FLEET") or "local", []).append(str(f))
+bad = 0
+for fleet, files in sorted(by_fleet.items()):
+    code = ("import sys, pathlib, code_tasks\n"
+            "bad = 0\n"
+            "for f in sys.argv[1:]:\n"
+            "    try:\n"
+            "        code_tasks.load_taskfile(f)\n"
+            "    except Exception as exc:\n"
+            "        print(f'FAIL: {pathlib.Path(f).name}: {exc}')\n"
+            "        bad = 1\n"
+            "sys.exit(bad)\n")
+    r = subprocess.run([sys.executable, "-c", code, *files],
+                       env=dict(os.environ, ARC_FLEET=fleet))
+    bad = bad or r.returncode
+sys.exit(1 if bad else 0)
 PYEOF
 
 printf '\n=== check.sh %s ===\n' "$([ $rc -eq 0 ] && echo PASS || echo FAIL)"

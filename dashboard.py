@@ -17,6 +17,7 @@ import hmac
 import json
 import logging
 import os
+import sys
 import re
 import signal
 import socket
@@ -2319,6 +2320,57 @@ def _recent_agent_runs(store, limit=40):
     return out
 
 
+def _studio_approve(body):
+    """Record the operator's sign-off on a workbench asset.
+
+    Rule 6b discipline: this writes ONE thing — an approvals entry in a known
+    studio project's own directory — and only for an asset that project has
+    actually measured (a mesh report exists for it). No path, no free-form
+    target, nothing the request can point somewhere else.
+    """
+    from studio import approvals
+    from studio import status as studio_status
+    project = str((body or {}).get("project") or "")
+    asset = str((body or {}).get("asset") or "")
+    state = str((body or {}).get("state") or "")
+    if project not in studio_status.projects():
+        return {"error": "unknown studio project"}, 404
+    if state not in approvals.STATES:
+        return {"error": f"state must be one of {list(approvals.STATES)}"}, 400
+    known = set()
+    for r in config.studio_run_dir(project).glob("mesh-*.json"):
+        try:
+            known.add(Path(json.loads(r.read_text()).get("model_path", r.stem)).name)
+        except (OSError, ValueError):
+            continue
+    if asset not in known:
+        return {"error": "no measured asset by that name in this project"}, 404
+    note = str((body or {}).get("note") or "")[:2000]
+    if state == "rejected" and not note.strip():
+        return {"error": "a rejection needs a note saying what must change"}, 400
+    return {"ok": True, "asset": asset,
+            **approvals.decide(project, asset, state, note=note, by="dashboard")}, 200
+
+
+def _live_task_ids():
+    """{task id: role} for every task with a harness running right now.
+
+    Drivers name a fix-round attempt `<task>-x<n>` (the transcript is
+    `<task>-x<n>-<role>-<attempt>.jsonl`), so the suffix is stripped to get
+    back to the taskfile's id.
+    """
+    try:
+        inflight, _ = _collect_inflight(time.time(), Handler.store)
+    except Exception:                                        # noqa: BLE001
+        return set()
+    out = {}
+    for a in inflight:
+        t = a.get("task")
+        if t:
+            out[re.sub(r"-x\d+$", "", str(t))] = a.get("role") or "running"
+    return out
+
+
 def _agents(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
@@ -2690,14 +2742,14 @@ def _prune_registry():
             del _launch_registry[key]
 
 
-def _spawn_logged(argv, log_name):
+def _spawn_logged(argv, log_name, env_extra=None):
     log_dir = Path(config.ROOT) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     lf = open(log_dir / log_name, "ab", buffering=0)
     # Unbuffered: with stdout redirected to a file Python block-buffers it,
     # so a live run's log stayed EMPTY until the process exited and "view
     # log" on a running project showed nothing at all.
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = dict(os.environ, PYTHONUNBUFFERED="1", **(env_extra or {}))
     proc = subprocess.Popen(argv, cwd=str(config.ROOT), stdout=lf, stderr=subprocess.STDOUT,
                             start_new_session=True, close_fds=True, env=env)
     return proc, log_name
@@ -2850,13 +2902,25 @@ def _run_project(body):
                          f"{', '.join(map(str, others))} (started outside this "
                          f"dashboard — the queue, or a terminal)",
                 "pid": others[0]}, 409
-    argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py", "code", "run",
-            str(path)]
+    venv_py = Path(config.ROOT) / ".venv" / "bin" / "python"
+    # A dashboard served from a git worktree has no .venv of its own (it is
+    # gitignored); its own interpreter is the one with the dependencies.
+    argv = [str(venv_py) if venv_py.exists() else sys.executable, "main.py",
+            "code", "run", str(path)]
     if dry_run:
         argv.append("--dry-run")
     slug = _task_slug(path.stem)
     log_name = f"run-{slug}-{int(time.time())}.log"
-    proc, log_name = _spawn_logged(argv, log_name)
+    # Launch under the fleet the taskfile was planned for: a studio taskfile's
+    # models do not exist on the local roster.
+    try:
+        fleet = (json.loads(path.read_text(encoding="utf-8")).get("project") or {}).get("fleet")
+    except (OSError, ValueError):
+        fleet = None
+    if isinstance(fleet, str) and fleet:
+        proc, log_name = _spawn_logged(argv, log_name, {"ARC_FLEET": fleet})
+    else:
+        proc, log_name = _spawn_logged(argv, log_name)
     # "started" must mean the run is actually going, not merely that a
     # process was forked. On 09-12 a bad asyncio.run() in `code run` killed
     # every run in its first second; the button said "started (pid N)" and
@@ -4029,6 +4093,26 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     since = 0
                 return self._json(_captain_poll(session, since))
+            if u.path == "/api/studio":
+                # The Studio view: phases, gates, the phase task board, the
+                # render workbench and judge verdicts, read-only (studio.status).
+                from studio import status as studio_status
+                return self._json(studio_status.snapshot(
+                    Handler.store, live_tasks=_live_task_ids()))
+            if u.path == "/api/studio/image":
+                # Rule 6b: this server has no authentication, so it serves an
+                # image ONLY from inside the named project's studio directory
+                # (studio.status.image_path refuses traversal, non-images and
+                # malformed project names). Never a path taken as-is.
+                from studio import status as studio_status
+                q = parse_qs(u.query)
+                img = studio_status.image_path(q.get("project", [""])[0],
+                                               q.get("path", [""])[0])
+                if img is None:
+                    return self._json({"error": "not found"}, 404)
+                ctype = {".png": "image/png", ".webp": "image/webp"}.get(
+                    img.suffix.lower(), "image/jpeg")
+                return self._file(img, ctype)
             if u.path == "/api/project":
                 q = parse_qs(u.query)
                 obj, code = _project_detail(Handler.store, q.get("file", [""])[0])
@@ -4315,6 +4399,9 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length).decode("utf-8", errors="replace"))
             except ValueError as exc:
                 return self._json({"error": f"invalid JSON: {exc}"}, 400)
+            if u.path == "/api/studio/approve":
+                obj, code = _studio_approve(body)
+                return self._json(obj, code)
             if u.path == "/api/projects/create":
                 obj, code = _create_project(body)
                 return self._json(obj, code)

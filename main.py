@@ -20,10 +20,22 @@ def setup_logging(verbose):
 
 
 def db_path(args, dry_run):
+    """The sqlite file this command records into.
+
+    Real runs use config.DB_PATH, which honours ARC_DB_PATH. This used to
+    build `<dir of main.py>/orchestrator.db` itself and ignore the override,
+    so a run launched from a second checkout (a git worktree) wrote its task
+    rows into THAT checkout's database while its leases, errors and the
+    dashboard used the shared one: on 2026-09-22 a studio run merged a task
+    that the dashboard and the next resume could not see at all. With
+    ARC_DB_PATH unset the two paths are identical. Dry runs keep their own
+    file next to main.py, as before.
+    """
     if args.db:
         return args.db
-    root = Path(__file__).resolve().parent
-    return str(root / ("dry-run.db" if dry_run else "orchestrator.db"))
+    if dry_run:
+        return str(Path(__file__).resolve().parent / "dry-run.db")
+    return str(config.DB_PATH)
 
 
 def add_common(p, once=False):
@@ -182,8 +194,25 @@ def cmd_code(args):
     if args.code_cmd == "status":
         store = Store(args.db or config.DB_PATH)
         if args.reset_stale:
-            n = store.reset_stale_code_tasks()
-            print(f"reset {n} stale 'running' task(s) -> failed")
+            # Only rows whose taskfile has NO live run are stale. A blanket
+            # reset used to flip every 'running' row — including the ones a
+            # concurrent `code run` was actively executing — because the help
+            # text promised a guard the code never had.
+            import reconcile as _rec
+            live_tf = {str(Path(r["taskfile"]).resolve())
+                       for r in _rec.live_runs() if r.get("taskfile")}
+            rows = store.running_code_tasks()
+            n = 0
+            seen = set()
+            for r in rows:
+                raw = r.get("taskfile") or ""
+                key = str(Path(raw).resolve()) if raw else ""
+                if key in live_tf or raw in seen:
+                    continue
+                seen.add(raw)
+                n += store.reset_stale_code_tasks(taskfile=raw)
+            print(f"reset {n} stale 'running' task(s) -> failed "
+                  f"({len(live_tf)} live taskfile(s) left alone)")
         out = store.code_status()
         out["chains"] = pending_chains(store)
         print(json.dumps(out, indent=2, default=str))
@@ -297,7 +326,26 @@ def cmd_code(args):
         events.set_context(workload="code-tasks")
         log = logging.getLogger("code-cmd")
         import gitstore as _gs
-        await _gs.ensure_base_branch(Path(args.repo or taskset["repo"]).resolve())
+        repo_path = Path(args.repo or taskset["repo"]).resolve()
+        await _gs.ensure_base_branch(repo_path)
+        # Dependents branch from the LOCAL base. A PR that merged on GitHub
+        # while this checkout failed to fast-forward (Godot's untracked
+        # *.uid files did exactly that to cell-wing-foundation) leaves origin
+        # ahead, and a resume skips the already-merged task so nothing else
+        # advances the branch. Tasks then rebuild the scaffold and miss the
+        # code they depend on. Refuse unless the operator passes --force.
+        ok_ff, ff_note = await _gs.fast_forward_base(repo_path)
+        if not ok_ff and await _gs.origin_ahead(repo_path):
+            log.error(
+                "local %s is behind origin/%s (%s).\n"
+                "Tasks branch from the local base, so a merge that landed on "
+                "GitHub but not here is invisible to every dependent. "
+                "Fix the checkout, or pass --force to branch from it anyway.",
+                config.BASE_BRANCH, config.BASE_BRANCH, ff_note)
+            events.emit("run.refused", taskfile=tf,
+                        reason=f"base behind origin: {ff_note[:300]}")
+            if not args.force:
+                sys.exit(1)
         # Only when a live model actually runs the kimi harness (Kimi-K3 was
         # retired 2026-09-12; nothing does today, so this is a no-op and the
         # check stays for a future kimi-harness model).
@@ -889,7 +937,8 @@ def main():
     cs_p = code_sub.add_parser("status", help="show code-task and harness-run stats")
     cs_p.add_argument("--db", default=None, help="sqlite database path")
     cs_p.add_argument("--reset-stale", action="store_true",
-                      help="mark stale 'running' tasks 'failed' (only when no run process is alive)")
+                      help="mark 'running' tasks 'failed' when their taskfile "
+                           "has no live run (concurrent runs are left alone)")
     cpr = code_sub.add_parser(
         "promote",
         help=f"open a {config.BASE_BRANCH} -> {config.PROD_BRANCH} PR for you to merge")
@@ -1001,6 +1050,95 @@ def main():
                         help=f"agent model (default {config.GH_MODEL})")
         gp.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
+    # --- studio: the 3D multiplayer game workload (ARC_FLEET=studio) -------
+    st_studio = sub.add_parser(
+        "studio",
+        help="3D game workload: phases, visual judge, 3D operator, fuzz swarm")
+    ss = st_studio.add_subparsers(dest="studio_cmd", required=True)
+
+    sd = ss.add_parser("doctor", help="what the studio can and cannot do here")
+    sd.add_argument("--json", action="store_true")
+    sd.add_argument("--no-probe", action="store_true",
+                    help="skip the OpenRouter model probe (works offline)")
+
+    sp = ss.add_parser("provision",
+                       help="add the studio models to the opencode config")
+    sp.add_argument("--write", action="store_true",
+                    help="apply the change (the config is backed up first)")
+
+    sc = ss.add_parser("scaffold", help="write a Godot graybox starter project")
+    sc.add_argument("repo")
+    sc.add_argument("--project", default="prison-escape")
+    sc.add_argument("--force", action="store_true",
+                    help="overwrite files that already exist")
+
+    spl = ss.add_parser("plan", help="plan one phase's tasks into a taskfile")
+    spl.add_argument("goal")
+    spl.add_argument("repo")
+    spl.add_argument("--project", default="prison-escape")
+    spl.add_argument("--phase", default="",
+                     help="default: the project's current phase")
+    spl.add_argument("--out", default="")
+
+    for name, helptext in (("status", "phase, gate and round summary"),
+                           ("gate", "run the current phase gate"),
+                           ("budget", "studio spend so far")):
+        q = ss.add_parser(name, help=helptext)
+        if name != "budget":
+            q.add_argument("project")
+            q.add_argument("repo")
+        if name == "gate":
+            q.add_argument("--phase", default="")
+
+    spr = ss.add_parser("promote", help="advance to the next phase if the gate passes")
+    spr.add_argument("project")
+    spr.add_argument("repo")
+    spr.add_argument("--force", action="store_true",
+                     help="promote over a FAILING gate; recorded forever")
+    spr.add_argument("--reason", default="")
+
+    sr = ss.add_parser("render", help="render a round's cameras (needs a display)")
+    sr.add_argument("project")
+    sr.add_argument("repo")
+    sr.add_argument("--round", type=int, default=0)
+    sr.add_argument("--phase", default="")
+    sr.add_argument("--scene", default="", help="scene to render (default: main)")
+    sr.add_argument("--resolution", default="1600x900")
+
+    sj = ss.add_parser("judge", help="score the latest rendered round (blind)")
+    sj.add_argument("project")
+    sj.add_argument("repo")
+    sj.add_argument("--round", type=int, default=0)
+    sj.add_argument("--phase", default="")
+    sj.add_argument("--model", default="",
+                    help="override the round's rotation pick")
+
+    sf = ss.add_parser("fuzz", help="run the headless multiplayer fuzz swarm")
+    sf.add_argument("project")
+    sf.add_argument("repo")
+    sf.add_argument("--bots", type=int, default=None)
+    sf.add_argument("--seconds", type=float, default=None)
+
+    spt = ss.add_parser("playtest", help="run the scripted playtest (measure + look)")
+    spt.add_argument("project")
+    spt.add_argument("repo")
+
+    sap = ss.add_parser("approve", help="approve (or --reject) a workbench asset")
+    sap.add_argument("project")
+    sap.add_argument("asset", help="asset file name, as the workbench lists it")
+    sap.add_argument("--reject", default="", metavar="REASON")
+
+    srp = ss.add_parser("review-pack",
+                        help="write a paste-ready review of a PR for Antigravity/Cursor")
+    srp.add_argument("repo")
+    srp.add_argument("pr", type=int)
+    srp.add_argument("--out", default="")
+
+    sa = ss.add_parser("astra", help="run the 3D/animation operator on a goal")
+    sa.add_argument("goal")
+    sa.add_argument("--project", default="prison-escape")
+    sa.add_argument("--max-steps", type=int, default=24, dest="max_steps")
+
     chat_p = sub.add_parser(
         "chat", help="conversational planning with the fleet's planner")
     chat_p.add_argument("--session", required=True,
@@ -1044,6 +1182,9 @@ def main():
         cmd_doctor(args)
     elif args.cmd == "bench":
         cmd_bench(args)
+    elif args.cmd == "studio":
+        from studio import cli as studio_cli
+        sys.exit(studio_cli.run(args))
     elif args.cmd == "chat":
         import orchchat
         sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))

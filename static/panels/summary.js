@@ -154,7 +154,10 @@ function applyDisclosure(d) {
     const el = $("#" + id);
     if (!el) continue;
     if (!(" " + el.className + " ").includes(" foldable ")) el.className = (el.className + " foldable").trim();
-    const open = prefs[id] ? prefs[id] === "open" : att[id];
+    // A tab's primary panel is never auto-folded (tabs.js TAB_PRIMARY): the
+    // tab exists to show it. A fold the operator chose is still honoured.
+    const primary = typeof TAB_PRIMARY !== "undefined" && TAB_PRIMARY.has(id);
+    const open = prefs[id] ? prefs[id] === "open" : (primary || att[id]);
     fold(el, !open);
   }
 }
@@ -171,6 +174,7 @@ function gotoPanel(figEl) {
   const id = figEl.getAttribute("data-goto");
   const el = id ? $("#" + id) : null;
   if (!el) return;
+  if (typeof showTabFor === "function") showTabFor(id);
   fold(el, false);
   // Record the open state like toggleFold does: renderSummary re-runs
   // applyDisclosure every poll, and an unremembered unfold would be folded

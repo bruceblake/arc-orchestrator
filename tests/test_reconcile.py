@@ -116,6 +116,57 @@ class RowAndLeaseSweep(RepoFixture):
         self.assertEqual(rep["leases"], 1)
         self.assertEqual(self.store.driver_lease_rows(), [])
 
+    def test_force_does_not_reset_running_rows_of_a_live_taskfile(self):
+        """Two taskfiles in parallel is normal. `--force` exists to clean up
+        around a WEDGED process — it must not mark a healthy concurrent run's
+        rows failed."""
+        import reconcile as _rec
+        self.store.upsert_code_task(
+            "live.json", "t-live", "T", "gpt-oss-120b",
+            config.cross_family_reviewer("gpt-oss-120b"), "running")
+        self.store.upsert_code_task(
+            "dead.json", "t-dead", "T", "gpt-oss-120b",
+            config.cross_family_reviewer("gpt-oss-120b"), "running")
+        orig = _rec.live_runs
+        _rec.live_runs = lambda: [{"pid": 99999, "taskfile": "live.json"}]
+        try:
+            rep = self.run_reconcile()
+        finally:
+            _rec.live_runs = orig
+        self.assertEqual([r["id"] for r in rep["rows"]], ["t-dead"])
+        self.assertEqual([r["id"] for r in rep["rows_kept"]], ["t-live"])
+        by_id = {r["id"]: r for r in self.store.code_tasks_all()}
+        self.assertEqual(by_id["t-dead"]["status"], "failed")
+        self.assertEqual(by_id["t-live"]["status"], "running")
+
+    def test_settles_in_review_rows_whose_pr_is_already_merged(self):
+        """The run that would have written 'merged' died first; a resume
+        alone should not be required just to do bookkeeping."""
+        self.alloc("t-merged")  # gives the row a worktree path _find_repo can use
+        self.store.upsert_code_task(
+            "f.json", "t-merged", "T", "gpt-oss-120b",
+            config.cross_family_reviewer("gpt-oss-120b"), "in_review",
+            branch="task/t-merged",
+            worktree=str(self.wt_root / "proj" / "t-merged"))
+        import gitstore as _gs
+        orig = _gs.find_pr
+
+        async def fake_find_pr(repo, tid, state="open"):
+            if tid == "t-merged":
+                return 42, "https://example/pr/42", "MERGED"
+            return None, None, None
+
+        _gs.find_pr = fake_find_pr
+        try:
+            rep = self.run_reconcile()
+        finally:
+            _gs.find_pr = orig
+        self.assertEqual(rep["merged_settled"],
+                         [{"id": "t-merged", "pr": 42,
+                           "url": "https://example/pr/42"}])
+        row = self.store.code_tasks_for("f.json")[0]
+        self.assertEqual(row["status"], "merged")
+
 
 class LiveRunGuard(unittest.TestCase):
     def test_live_run_detection_ignores_unrelated_command_lines(self):
