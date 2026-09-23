@@ -1078,6 +1078,7 @@ IMPLEMENT_TIERS = {tier: [m for m, _f, _h, t, _c, roles in _LIVE
                    for tier in TIER_ORDER}
 IMPLEMENT_TIERS = {k: v for k, v in IMPLEMENT_TIERS.items() if v}
 MODEL_FAMILY = {m: fam for m, fam, *_ in _LIVE}
+MODEL_TIER = {m: t for m, _f, _h, t, *_ in _LIVE}
 MODEL_HARNESS = {m: h for m, _f, h, *_ in _LIVE}
 MODEL_ROLES = {m: set(roles) for m, _f, _h, _t, _c, roles in _LIVE}
 _MEASURED_CONCURRENCY = {m: cap for m, _f, _h, _t, cap, _r in _LIVE}

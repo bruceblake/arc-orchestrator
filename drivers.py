@@ -292,22 +292,42 @@ _SWAP_PREFERENCE = {"cursor": 0, "agy": 1, "claude": 2, "codex": 3}
 _ZEN_SWAP_RANK = 4
 
 
-def usage_substitute(model, harness, exclude=()):
+def _tier_rank(model):
+    tier = config.MODEL_TIER.get(model)
+    return config.TIER_ORDER.index(tier) if tier in config.TIER_ORDER else -1
+
+
+def usage_substitute(model, harness, role="implementer", exclude=(),
+                     avoid_families=()):
     """An implementer on a harness that is not `harness` and not itself blocked.
 
-    None when swapping is off, or every other seat is blocked too — the caller
-    then parks until this harness's window resets, which is the old behaviour.
+    None when swapping is off, or no seat qualifies — the caller then parks
+    until this harness's window resets, which is the old behaviour.
+
+    Only IMPLEMENTATION is swapped. A reviewer does not know whose work it is
+    judging, so a swapped reviewer could land in the implementer's own family
+    (Rule 2); reviewers, planners and judges park instead. A substitute must
+    hold the role on the roster, sit at the same tier or above (Rule 1: a
+    hard task never quietly drops to a free medium model), and come from none
+    of `avoid_families` — the caller passes the task's reviewer family, so
+    the cross-family review still holds after the swap.
     """
-    if not config.USAGE_SWAP:
+    if not config.USAGE_SWAP or role != "implementer":
         return None
     now = time.time()
     skip = set(exclude)
     skip.add(model)
+    avoid = set(avoid_families)
+    floor = _tier_rank(model)
     ranked = []
     for candidate, cand_harness in config.MODEL_HARNESS.items():
         if candidate in skip or cand_harness == harness:
             continue
-        if "implementer" not in config.MODEL_ROLES.get(candidate, ()):
+        if not config.model_may(candidate, role):
+            continue
+        if _tier_rank(candidate) < floor:
+            continue
+        if config.MODEL_FAMILY.get(candidate) in avoid:
             continue
         if _usage_blocked_until.get(cand_harness, 0) > now:
             continue
@@ -1347,9 +1367,13 @@ class Driver:
         low = (text or "").lower()
         return any(m in low for m in cls._VPN_MARKERS)
 
-    async def _swap_run(self, prompt, worktree, task_id, tried):
-        """Re-run `prompt` on another harness, or None when there is no seat."""
-        sub = usage_substitute(self.model, self.harness, exclude=tried)
+    async def _swap_run(self, prompt, worktree, task_id, tried, avoid_families):
+        """Re-run `prompt` on another harness, or None when there is no seat.
+
+        The result carries the SUBSTITUTE's model and harness, so callers
+        record (and trailers name) the model that actually did the work."""
+        sub = usage_substitute(self.model, self.harness, self.role,
+                               exclude=tried, avoid_families=avoid_families)
         if not sub:
             return None
         events.emit("driver.usage_swap", harness=self.harness, model=self.model,
@@ -1362,10 +1386,11 @@ class Driver:
         # A Codex session id is meaningless to `agent` or `claude`. The
         # substitute starts in the same worktree and reads what is there.
         return await other.run(prompt, worktree, session_id=None, task_id=task_id,
-                               _swapped_from=set(tried) | {self.model})
+                               _swapped_from=set(tried) | {self.model},
+                               avoid_families=avoid_families)
 
     async def run(self, prompt, worktree, session_id=None, task_id=None,
-                  _swapped_from=None):
+                  _swapped_from=None, avoid_families=()):
         attempt = 0
         sid = session_id
         continuation = None
@@ -1378,7 +1403,8 @@ class Driver:
             # rather than spend a refusal rediscovering it.
             blocked = _usage_blocked_until.get(self.harness, 0)
             if blocked > time.time():
-                swapped = await self._swap_run(prompt, worktree, task_id, tried)
+                swapped = await self._swap_run(prompt, worktree, task_id, tried,
+                                               avoid_families)
                 if swapped is not None:
                     return swapped
                 usage_waited += await wait_for_usage_reset(
@@ -1448,8 +1474,11 @@ class Driver:
                         raise
                     _usage_blocked_until[self.harness] = max(
                         _usage_blocked_until.get(self.harness, 0), until)
+                    # The full prompt, not `continuation`: a continuation
+                    # only makes sense inside this harness's own session, and
+                    # the substitute starts a fresh one.
                     swapped = await self._swap_run(
-                        continuation or prompt, worktree, task_id, tried)
+                        prompt, worktree, task_id, tried, avoid_families)
                     if swapped is not None:
                         return swapped
                     log.warning("%s: plan usage limit reached; waiting %.0fs for "

@@ -185,30 +185,63 @@ class SwapsOffASpentPlan(unittest.TestCase):
         drivers._usage_blocked_until.clear()
         self.addCleanup(drivers._usage_blocked_until.clear)
 
+    ROSTER = {  # model: (harness, family, tier, roles)
+        "Sol": ("codex", "openai", "hard", {"implementer", "reviewer"}),
+        "Luna": ("codex", "openai", "hard", {"implementer"}),
+        "Opus": ("claude", "anthropic", "hard", {"implementer", "reviewer", "planner"}),
+        "Cursor-Grok-4.7": ("cursor", "cursor", "hard", {"implementer", "reviewer"}),
+        "Antigravity-Gemini": ("agy", "google", "hard", {"implementer", "reviewer"}),
+        "Zen-Big-Pickle": ("opencode", "zen-big_pickle", "medium", {"implementer"}),
+        "GLM-5.3": ("opencode", "glm", "hard", {"implementer", "reviewer"}),
+    }
+
+    def _roster(self, **drop):
+        r = {m: v for m, v in self.ROSTER.items() if m not in drop}
+        return (mock.patch.object(config, "MODEL_HARNESS", {m: v[0] for m, v in r.items()}),
+                mock.patch.object(config, "MODEL_FAMILY", {m: v[1] for m, v in r.items()}),
+                mock.patch.object(config, "MODEL_TIER", {m: v[2] for m, v in r.items()}),
+                mock.patch.object(config, "MODEL_ROLES", {m: v[3] for m, v in r.items()}),
+                mock.patch.object(config, "USAGE_SWAP", True),
+                mock.patch.object(drivers.time, "time", lambda: NOW))
+
+    def _sub(self, *a, **kw):
+        patches = self._roster()
+        for p in patches:
+            p.start()
+        try:
+            return drivers.usage_substitute(*a, **kw)
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
     def test_cursor_is_tried_before_claude_and_a_blocked_seat_is_skipped(self):
-        harness = {"Sol": "codex", "Opus": "claude", "Cursor-Grok-4.7": "cursor",
-                   "Antigravity-Gemini": "agy", "GLM-5.3": "opencode"}
-        roles = {m: {"implementer"} for m in harness}
-        with mock.patch.object(config, "USAGE_SWAP", True), \
-                mock.patch.object(config, "MODEL_HARNESS", harness), \
-                mock.patch.object(config, "MODEL_ROLES", roles):
-            self.assertEqual(drivers.usage_substitute("Sol", "codex"),
-                             "Cursor-Grok-4.7")
-            drivers._usage_blocked_until["cursor"] = NOW + 1000
-            with mock.patch.object(drivers.time, "time", lambda: NOW):
-                self.assertEqual(drivers.usage_substitute("Sol", "codex"),
-                                 "Antigravity-Gemini")
-            drivers._usage_blocked_until["agy"] = NOW + 1000
-            with mock.patch.object(drivers.time, "time", lambda: NOW):
-                self.assertEqual(drivers.usage_substitute("Sol", "codex"), "Opus")
-            drivers._usage_blocked_until["claude"] = NOW + 1000
-            with mock.patch.object(drivers.time, "time", lambda: NOW):
-                self.assertEqual(drivers.usage_substitute("Sol", "codex"), "GLM-5.3")
-            # Another model on the spent harness is the same plan.
-            harness["Luna"] = "codex"
-            roles["Luna"] = {"implementer"}
-            with mock.patch.object(drivers.time, "time", lambda: NOW):
-                self.assertNotEqual(drivers.usage_substitute("Sol", "codex"), "Luna")
+        self.assertEqual(self._sub("Sol", "codex"), "Cursor-Grok-4.7")
+        drivers._usage_blocked_until["cursor"] = NOW + 1000
+        self.assertEqual(self._sub("Sol", "codex"), "Antigravity-Gemini")
+        drivers._usage_blocked_until["agy"] = NOW + 1000
+        self.assertEqual(self._sub("Sol", "codex"), "Opus")
+        drivers._usage_blocked_until["claude"] = NOW + 1000
+        # Another model on the spent harness is the same plan; Zen is medium.
+        self.assertEqual(self._sub("Sol", "codex"), "GLM-5.3")
+
+    def test_only_implementation_is_swapped(self):
+        """A swapped reviewer could land in the implementer's family (Rule 2)."""
+        for role in ("reviewer", "pr_reviewer", "planner"):
+            self.assertIsNone(self._sub("Opus", "claude", role))
+
+    def test_the_reviewers_family_is_never_the_substitute(self):
+        """Codex implements, Cursor reviews: the swap must not pick Cursor."""
+        self.assertEqual(self._sub("Sol", "codex", avoid_families={"cursor"}),
+                         "Antigravity-Gemini")
+
+    def test_a_hard_task_never_drops_to_a_medium_model(self):
+        """Rule 1: the tier floor holds through a swap."""
+        for h in ("cursor", "agy", "claude"):
+            drivers._usage_blocked_until[h] = NOW + 1000
+        self.assertEqual(self._sub("Sol", "codex", avoid_families={"glm"}), None)
+        # Upward is fine: a medium task may move to a hard seat.
+        self.assertIn(self._sub("Zen-Big-Pickle", "fake", avoid_families={"glm"}),
+                      ("Sol", "Luna"))
 
     def test_a_refusal_reruns_on_the_substitute_without_waiting(self):
         clock = [NOW]
@@ -233,6 +266,8 @@ class SwapsOffASpentPlan(unittest.TestCase):
             drivers._semaphores.pop(drv.model, None)
             result = asyncio.run(drv.run("p", Path("."), task_id="t1"))
         self.assertEqual(result.text, "from-cursor")
+        self.assertEqual(result.model, "GLM-5.3",
+                         "the result names the model that RAN, for the records")
         self.assertEqual(clock[0], NOW, "swapping must not park for the reset")
         self.assertEqual(len(ev.of("driver.usage_swap")), 1)
         self.assertEqual(ev.of("driver.usage_swap")[0]["to_model"],
