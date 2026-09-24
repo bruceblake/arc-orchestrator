@@ -727,3 +727,69 @@ class EnsureRemote(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GitHubQuota(unittest.TestCase):
+    """A spent GitHub quota waits or goes through REST; it never fails a task."""
+
+    SPENT = "GraphQL: API rate limit already exceeded for user ID 64327054."
+
+    def run_gh(self, replies, fn):
+        calls = []
+
+        async def fake_raw(args, cwd, timeout=180):
+            calls.append(list(args))
+            if args[:2] == ["api", "rate_limit"]:
+                return 0, '{"resources": {"graphql": {"remaining": 0, "reset": 0}}}', ""
+            return replies.pop(0)
+
+        async def no_sleep(_s):
+            return None
+        with mock.patch.object(gitstore, "_gh_raw", fake_raw), \
+                mock.patch.object(gitstore.asyncio, "sleep", no_sleep), \
+                capture_events() as evs:
+            result = asyncio.run(fn())
+        return result, calls, evs
+
+    def test_the_live_refusal_text_is_a_quota_refusal(self):
+        self.assertTrue(gitstore.is_rate_limited(self.SPENT))
+        self.assertFalse(gitstore.is_rate_limited("GraphQL: No commits between main and task/x"))
+
+    def test_a_quota_refusal_waits_for_the_reset_and_retries(self):
+        (rc, out, _), calls, evs = self.run_gh(
+            [(1, "", self.SPENT), (0, "ok", "")],
+            lambda: gitstore._gh(["pr", "view", "3"], cwd="."))
+        self.assertEqual((rc, out), (0, "ok"))
+        self.assertEqual([c for c in calls if c[0] == "pr"], [["pr", "view", "3"]] * 2)
+        self.assertIn("git.quota_wait", [t for t, _ in evs.seen])
+
+    def test_other_refusals_are_not_retried(self):
+        (rc, _, _), calls, evs = self.run_gh(
+            [(1, "", "HTTP 401: Bad credentials")],
+            lambda: gitstore._gh(["pr", "view", "3"], cwd="."))
+        self.assertEqual(rc, 1)
+        self.assertEqual(len(calls), 1)
+        self.assertNotIn("git.quota_wait", [t for t, _ in evs.seen])
+
+    def test_the_wait_is_bounded(self):
+        with mock.patch.object(config, "GH_QUOTA_MAX_WAIT", 100):
+            (rc, _, _), calls, _ = self.run_gh(
+                [(1, "", self.SPENT)] * 50,
+                lambda: gitstore._gh(["pr", "view", "3"], cwd="."))
+        self.assertEqual(rc, 1)
+        self.assertLess(len([c for c in calls if c[0] == "pr"]), 50)
+
+    def test_open_pr_goes_through_rest_when_graphql_is_spent(self):
+        replies = [
+            (1, "", self.SPENT),              # gh pr list (GraphQL)
+            (0, "[]", ""),                    # REST: no open PR yet
+            (1, "", self.SPENT),              # gh pr create (GraphQL)
+            (0, "https://github.com/o/r/pull/77\n", ""),  # REST create
+        ]
+        (number, url, note), calls, evs = self.run_gh(
+            replies, lambda: gitstore.open_pr(".", "t1", "task(t1): x", "body", base="main"))
+        self.assertEqual((number, note), (77, "opened"))
+        self.assertEqual(calls[-1][:2], ["api", "repos/{owner}/{repo}/pulls"])
+        self.assertIn("head=task/t1", calls[-1])
+        self.assertIn("git.rest_fallback", [t for t, _ in evs.seen])
+        self.assertNotIn(["api", "rate_limit"], calls, "REST path must not wait first")

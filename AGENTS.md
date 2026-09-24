@@ -876,7 +876,13 @@ GLM-5.3; each `gh` subprocess is bounded by
 `config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 120 s). Pipeline pushes and
 `gh pr create` retry NETWORK failures only (`gitstore.is_transient_network_error`)
 with backoff `ARC_NET_RETRY_DELAYS` (default `5,15,45,90,180` s, `git.retry`
-events); a lease, auth or no-commits refusal is never retried.
+events); a lease, auth or no-commits refusal is never retried. A GitHub
+API-quota refusal (`gitstore.is_rate_limited`: the 5000/h GraphQL quota is
+shared by every run, the dashboard and any other tool on the account) is not
+network weather: pipeline `gh` calls wait for the reset `gh api rate_limit`
+reports, bounded per call by `ARC_GH_QUOTA_MAX_WAIT` (default 3600 s,
+`git.quota_wait` events), and `gh pr create` first falls back to the REST
+API, which has its own quota (`git.rest_fallback`).
 
 **Preview by default.** `--apply-labels`, `--create`, and `--post` are the
 ONLY paths that write to GitHub; without them every command is read-only.
