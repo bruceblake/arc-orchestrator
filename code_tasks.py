@@ -28,6 +28,7 @@ import graft
 import drivers
 import plan_amend
 import dossier as dossier_mod
+import project_contract
 from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
                      ReasonixDriver,
                      driver_for, transcript_tokens)
@@ -323,7 +324,8 @@ def _downstream(tasks, tid):
 
 def describe(taskset):
     import graph_shapes
-    lines = [f"repo: {taskset['repo']}"]
+    lines = [f"repo: {taskset['repo']}",
+             project_contract.status_line(taskset["repo"])]
     if taskset.get("after"):
         lines.append("after: " + ", ".join(
             Path(k).name for k in taskset["after"]))
@@ -527,7 +529,8 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
-def _impl_prompt(t, feedback, hints="", roster=None, board="", dossier=""):
+def _impl_prompt(t, feedback, hints="", roster=None, board="", contract="",
+                 dossier=""):
     """The implementer's whole world: the task, where its code is, the rules.
 
     `hints` is graft.hints_block output — the file:line spans the code graph
@@ -544,6 +547,8 @@ def _impl_prompt(t, feedback, hints="", roster=None, board="", dossier=""):
         f"You are implementing one task in this repository.\n\n"
         f"TASK {t['id']}: {t['title']}\n\n{t['prompt']}\n"
     )
+    if contract:
+        p += "\n" + contract.strip() + "\n"
     if t["files_hint"]:
         p += f"\nFiles you are expected to touch: {', '.join(t['files_hint'])}\n"
     if hints:
@@ -1045,7 +1050,8 @@ def _scope_lock_prose(flag):
     )
 
 
-def _review_prompt(t, diff, impact="", roster=None, board="", dossier=""):
+def _review_prompt(t, diff, impact="", roster=None, board="", contract="",
+                   dossier=""):
     p = (
         (dossier + "\n" if dossier else "") +
         f"You are reviewing an implementation produced by another AI agent.\n\n"
@@ -1063,6 +1069,8 @@ def _review_prompt(t, diff, impact="", roster=None, board="", dossier=""):
         p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
+    if contract:
+        p += "\n" + contract.strip() + "\n"
     p += "\n" + _scope_lock_prose("pass")
     return p
 
@@ -1132,7 +1140,7 @@ def _parse_verdict(text):
 
 
 def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
-                      roster=None, board="", dossier=""):
+                      roster=None, board="", contract="", dossier=""):
     """Prompt for a reviewer reading a real pull request.
 
     Deliberately different from the pre-PR review: this reviewer can BLOCK the
@@ -1173,6 +1181,8 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
         p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
+    if contract:
+        p += "\n" + contract.strip() + "\n"
     p += _scope_lock_prose("approve")
     return p
 
@@ -1758,7 +1768,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             try:
                 res = await driver.run(
                     _impl_prompt(t, feedback, hints, roster, thread,
-                                 dossier_block(tid, "implementer")), wt,
+                                 project_contract.role_block(wt, "implementer"),
+                                 dossier=dossier_block(tid, "implementer")), wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
                     avoid_families={reviewer_for(t, model)})
             except DriverError as exc:
@@ -2041,7 +2052,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     _review_prompt(t, diff, impact, roster,
                                    board.prompt_block(wt, project=project_slug, task=tid)
                                    + evidence.prompt_block(shown),
-                                   dossier_block(tid, "reviewer")),
+                                   project_contract.role_block(wt, "reviewer"),
+                                   dossier=dossier_block(tid, "reviewer")),
                     wt, task_id=f"{tid}-x{attempt}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
@@ -2449,7 +2461,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                       it["prior_issues"], impact, roster,
                                       board.prompt_block(wt, project=project_slug, task=tid)
                                       + evidence.prompt_block(shown),
-                                      dossier_block(tid, "pr-reviewer")),
+                                      project_contract.role_block(wt, "reviewer"),
+                                      dossier=dossier_block(tid, "pr-reviewer")),
                     wt, task_id=f"{tid}-pr{it['round']}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
@@ -3127,7 +3140,8 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
         + _orientation_prose(await graft.repo_map(repo))
         + _routing_tiers_prose()
         + graph_shapes.planner_prose()
-        + _existing_projects_prose(repo, store) +
+        + _existing_projects_prose(repo, store)
+        + project_contract.planner_block(repo) +
         "TASK DESIGN:\n"
         "- Each task prompt must be fully self-contained: the implementer "
         "sees ONLY its prompt and the repo, never this goal. Include file "

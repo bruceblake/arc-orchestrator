@@ -165,6 +165,66 @@ class Retention(ErrorCase):
         self.assertEqual(len(errors.recent()), 1)
 
 
+class TaskPrefixFilter(ErrorCase):
+    """`task_prefix=True` widens a task filter to its attempts.
+
+    A fix round records `<tid>-x2` and a PR round `<tid>-pr1`, so an exact
+    match hides every attempt but the first — the attempts being exactly what
+    a task timeline exists to show. The suffix is matched explicitly, so a
+    SIBLING task that merely shares this id's prefix stays out."""
+
+    def test_prefix_matches_the_task_and_its_attempts(self):
+        errors.capture(self._raise(ValueError("first")), task="t1")
+        errors.capture(self._raise(ValueError("second")), task="t1-x2")
+        errors.capture(self._raise(ValueError("third")), task="t1-pr1")
+        errors.capture(self._raise(ValueError("other")), task="t10")
+        exact = errors.recent(task="t1")
+        self.assertEqual([r["message"] for r in exact], ["first"])
+        wide = errors.recent(task="t1", task_prefix=True)
+        self.assertEqual(sorted(r["message"] for r in wide),
+                         ["first", "second", "third"])
+
+    def test_prefix_does_not_leak_a_sibling_task(self):
+        """A sibling whose id merely STARTS with this one is a different task.
+
+        Task ids are hyphenated English, so `t1` / `t1-sibling` and
+        `evidence` / `evidence-scene-stats` are both real pairs. An earlier
+        version matched any `-` suffix and would have shown a sibling's
+        defects on this task's timeline."""
+        errors.capture(self._raise(ValueError("other")), task="t10")
+        errors.capture(self._raise(ValueError("hyphen sibling")), task="t1-other")
+        errors.capture(self._raise(ValueError("word sibling")), task="t1-sibling")
+        errors.capture(self._raise(ValueError("scene stats")),
+                       task="evidence-scene-stats")
+        self.assertEqual(errors.recent(task="t1", task_prefix=True), [])
+        self.assertEqual(errors.recent(task="evidence", task_prefix=True), [])
+
+    def test_prefix_still_matches_attempts_of_this_task(self):
+        """The narrow pattern must not have narrowed the thing it exists for:
+        `-x<n>` fix rounds and `-pr<n>` PR rounds are this task's own."""
+        errors.capture(self._raise(ValueError("x")), task="evidence")
+        errors.capture(self._raise(ValueError("x attempt")), task="evidence-x3")
+        errors.capture(self._raise(ValueError("pr attempt")), task="evidence-pr2")
+        errors.capture(self._raise(ValueError("sibling")),
+                       task="evidence-scene-stats")
+        got = sorted(r["message"] for r in
+                     errors.recent(task="evidence", task_prefix=True))
+        self.assertEqual(got, ["pr attempt", "x", "x attempt"])
+
+    def test_a_wildcard_in_the_id_is_literal_not_a_pattern(self):
+        """The id is validated upstream, but a `%` here must still be a
+        character rather than a LIKE wildcard — this query is the last line.
+
+        Without the ESCAPE clause `t1%x` would match `t1-anything-x` through
+        the `%` and report a stranger's defects as this task's."""
+        errors.capture(self._raise(ValueError("literal")), task="t1%x")
+        errors.capture(self._raise(ValueError("literal attempt")), task="t1%x-x2")
+        errors.capture(self._raise(ValueError("wildcard match")), task="t1Zx-x2")
+        got = sorted(r["message"] for r in
+                     errors.recent(task="t1%x", task_prefix=True))
+        self.assertEqual(got, ["literal", "literal attempt"])
+
+
 class TheDailyAudit(unittest.TestCase):
     """A report nobody reads twice is one that says '14 warnings' and stops.
 

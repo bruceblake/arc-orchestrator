@@ -466,6 +466,14 @@ each a fixed `main.py` argv the backend spawns detached; it never edits code
 and never touches git. All governance (worktrees, verify gates, cross-family
 review, the PR gate) is exactly the pipeline's.
 
+The captain is bound to one target repo. Product structure (layout, how to
+test, what not to touch) lives in that repo's own `AGENTS.md`, not in this
+checkout. Each turn says whether that contract exists
+(`project_contract.captain_block`). `code plan` and `code run --dry-run`
+print the same fact as `project contract: ...`. A session opened inside
+this directory is for operating or changing the fleet; it loads this repo's
+[AGENTS.md](AGENTS.md) and does not replace the product's.
+
 The captain is **capacity-aware**, which is the thing that bites a 36-hour
 run: `run`/`resume` is admitted only when every implementer model the taskfile
 names has a free driver slot. When they do not, the work is QUEUED

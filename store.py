@@ -689,12 +689,16 @@ class Store:
             return [dict(r) for r in self.conn.execute(sql, args).fetchall()]
 
     def harness_runs_prefix(self, task_id_prefix):
+        # created_at is SELECTed because callers order by it: the task
+        # timeline interleaves these rows with events by time, and without it
+        # every run row sorted as undated (at the head of the list, `ts: null`).
         with self.lock:
             return [
                 dict(r)
                 for r in self.conn.execute(
                     "SELECT task_id, harness, model, role, attempt, exit_code, "
-                    "transcript, seconds, verdict FROM harness_runs WHERE task_id LIKE ? "
+                    "transcript, seconds, verdict, created_at FROM harness_runs "
+                    "WHERE task_id LIKE ? "
                     "ORDER BY id", (task_id_prefix + "%",),
                 ).fetchall()
             ]

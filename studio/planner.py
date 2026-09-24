@@ -29,6 +29,7 @@ import json
 from pathlib import Path
 
 import config
+import project_contract
 from studio import openrouter
 from studio.schemas.task import (
     GameTask, PHASES, PHASE_INTENT, WORKERS, compile_taskfile,
@@ -259,6 +260,7 @@ concern each. Split anything bigger.
   6. The repository is {repo}. Tasks never run git; the orchestrator commits, \
 opens the pull request and merges.
 
+{project_contract.planner_block(repo)}
 {VERIFY_GUIDANCE}
 
 OUTPUT: exactly one JSON object, no prose, no code fence:

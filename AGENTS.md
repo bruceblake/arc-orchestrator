@@ -843,6 +843,38 @@ upstream taskfile paths (bare filenames resolve under `~/tasks`). Never use
   its DAG starts with a dashed ⛓ gate node per upstream taskfile (click =
   that project), and a run holding at the gate is labelled so — never "live".
 
+### Rule 10 — A product's structure lives in that repo, not in this file
+
+This `AGENTS.md` governs the fleet. The repo a taskfile names
+(`project.repo`) has its own contract: `AGENTS.md` and `CLAUDE.md` at its
+root, plus `*.md` / `*.mdc` files in `.cursor/rules`. Harnesses already run
+with that worktree as their working directory. The prompts name the files
+so they are read, and so fleet rules are not copied into the product.
+
+- `project_contract.discover` lists those files and ignores a symlink that
+  resolves outside the repo. `status_line` is the one line `describe` prints
+  on `code plan` and `code run --dry-run`.
+- `project_contract.planner_block` is inserted into `code_tasks.plan_tasks`,
+  `orchchat.build_prompt`, and `studio.planner.system_prompt`. When a
+  contract exists, the planner gets a capped excerpt and must bake the
+  rules into every task prompt. When it does not, a goal that starts or
+  reshapes the project must make the first task add `AGENTS.md`; a small
+  change to an existing codebase must not invent that task.
+- `project_contract.role_block` is passed into `code_tasks._impl_prompt`,
+  `_review_prompt`, and `_pr_review_prompt` from the task worktree.
+  Implementers are told to read the contract and to ignore this file.
+  Reviewers may reject a diff that breaks a stated rule the task did not
+  override, and must not invent a violation when no contract file exists.
+- `project_contract.captain_block` is inserted into `captain.build_prompt`.
+  The captain tells the operator when the bound repo has no contract. It
+  does not edit either repository.
+- A missing contract does **not** fail `load_taskfile`. Existing repos keep
+  running. The absence is reported, not gated.
+
+Talk to the fleet from this checkout (captain, `code plan`, or a session
+whose job is the orchestrator). Put layout, test commands, and "do not
+touch" rules in the product repo's own `AGENTS.md`.
+
 ### Benchmarking exception — the bench `policy` escape hatch
 
 `code_tasks.load_taskfile` / `code_tasks.build_code_graph` accept an optional
@@ -957,6 +989,7 @@ Top-level Python modules (one role each):
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
 | `board.py` | Shared agent board: `.arc/board.jsonl` in the task worktree plus `logs/boards/<project>.jsonl`. A session id resumes only on the harness that posted it |
 | `plan_amend.py` | The living-plan channel (Rule 4b): prompt schema, `.arc/plan_proposals.jsonl` harvest (read + delete before `git add -A`), loader-validated amendment of the taskfile with per-entry rollback, `plan_proposals` recording |
+| `project_contract.py` | The target repo's agent contract (Rule 10): discovers `AGENTS.md`, `CLAUDE.md`, and `.cursor/rules` inside the product repo, and supplies the planner, implementer, reviewer, captain, and chat prompts. This file stays fleet-only |
 | `pool.py` | `AsyncOpenAI` request pool for the research workload: per-family semaphores, retry/backoff, token accounting |
 | `scheduler.py` | `Supervisor`: runs research rounds continuously (pipeline concurrency, round cooldown, periodic stats) |
 | `store.py` | sqlite persistence: `rounds`, `items`, `answers`, `seeds`, `builds`, `build_modules`, `harness_runs`, `code_tasks` |
@@ -989,7 +1022,16 @@ State and external directories (not in git):
 ## 5. Workflow (short version)
 
 The full operator runbook, with troubleshooting, is
-[docs/runbook.md](docs/runbook.md). The loop:
+[docs/runbook.md](docs/runbook.md).
+
+Two directories, two contracts (Rule 10). This checkout is where you talk
+to the fleet: the captain (`main.py captain --repo /path/to/product`), the
+chat panel, or `code plan`. The product checkout (`~/repos/<project>`,
+passed as `--repo` or as the plan path) is where that project's `AGENTS.md`
+lives. A session opened in this directory loads *this* file and does not
+see the product's layout unless the plan step reads the product repo.
+
+The loop:
 
 1. **Plan** — `.venv/bin/python main.py code plan "<goal>" /path/to/repo`
    (GLM-5.3 drafts a taskfile into
