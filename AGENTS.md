@@ -818,6 +818,55 @@ upstream taskfile paths (bare filenames resolve under `~/tasks`). Never use
   its DAG starts with a dashed ⛓ gate node per upstream taskfile (click =
   that project), and a run holding at the gate is labelled so — never "live".
 
+### Rule 10 — The captain autopilot manages; it never builds, merges or kills
+
+`main.py captain --autopilot` (`captain_autopilot.py`, systemd unit
+`deploy/arc-captain.service`) runs the captain as an always-on project
+manager. Every `config.CAPTAIN_INTERVAL` seconds (`ARC_CAPTAIN_INTERVAL`,
+default 600) one tick runs four stages: `observe` (task rows with time in
+status, fix round, escalations, last gate/review and board activity; open
+PRs over `gh api` REST, cached; `logs/watchdog/status.json`; seats — leases
+vs caps, recent `driver.cap_wait`, usage-limit windows; board mentions of
+`captain`, open questions, claim conflicts; chain gates), `detect`
+(deterministic rules with a severity: stuck implementing / in review, any
+conflict, the same gate failure 3+ rounds, a model idle while others
+cap-wait, a parked or stopped run, a question unanswered 30+ min,
+overlapping claims, a PR open 2+ h with no review activity, quota/infra
+failures, a blocked chain), `decide` (deterministic playbooks first; the
+model — `config.PLANNER_MODEL` — only for judgment: answering a question or
+a re-plan, and on a plan usage limit the driver swaps to GLM-5.3 through
+`drivers.usage_substitute`, planner role allowed for the captain only), and
+`act`.
+
+**What it MAY do — the closed action set:** `board_post` (a message or ping
+in any board channel), `standup` (a per-project summary in `project` every
+`config.CAPTAIN_STANDUP_S`, `ARC_CAPTAIN_STANDUP_S`, default 3600),
+`propose_plan_change` (a `proposal` message plus a loader-validated
+`plan_amend` amendment, only for a task with **no `code_tasks` row or a
+`failed` row**), `resume` (only through `captain.execute_actions`, i.e. the
+capacity gate and the captain queue), `escalate_to_operator` (a message in
+`operator` plus a `captain.escalation` event; the dashboard badge counts the
+unacknowledged ones), and `captain.py`'s own `run` / `status` / `amend`. An
+action outside that set — from a playbook or the model — is dropped with a
+`captain.auto.dropped` event.
+
+**What it MUST NOT do:** any git operation, kill a process, edit code, merge
+a PR, touch an in-flight task's plan, or overrule an operator's
+`run.stopped` (it escalates instead).
+
+**Guardrails:** at most `config.CAPTAIN_MAX_ACTIONS_PER_TICK`
+(`ARC_CAPTAIN_MAX_ACTIONS_PER_TICK`, default 5) actions a tick, most severe
+first; a per-target cooldown of `config.CAPTAIN_COOLDOWN_S`
+(`ARC_CAPTAIN_COOLDOWN_S`, default 1800) so it never nags the same task
+twice in 30 min; `--dry-run` records decisions without acting; the pause
+file `logs/captain/autopilot.pause` (the dashboard's Pause button, a POST
+under the same `_refuse_post` guard and `ARC_DASHBOARD_TOKEN` as every other
+action). Every decision is a `captain.auto.*` event (`action`, `dry_run`,
+`skipped`, `dropped`, `tick`, `paused`) carrying its finding, action and
+reason, plus a line in `logs/captain/autopilot.jsonl`, and the captain posts
+its reasoning to the board's `captain` channel. Operator steps:
+[docs/runbook.md](docs/runbook.md) § "The captain autopilot".
+
 ### Benchmarking exception — the bench `policy` escape hatch
 
 `code_tasks.load_taskfile` / `code_tasks.build_code_graph` accept an optional
@@ -916,6 +965,7 @@ Top-level Python modules (one role each):
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
 | `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the GLM-5.3 planner prompt (`plan_tasks`, model `config.PLANNER_MODEL`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `captain.py` | The conversational supervisor (`main.py captain`, the dashboard Captain panel): gathers LIVE fleet state (`fleet_state` — task rows by status, the three concurrency layers via `capacity_snapshot`, recent events), runs one captain turn on `config.PLANNER_MODEL`, and executes a CLOSED action set (`parse_actions` / `execute_actions` — `plan`, `run`, `resume`, `status`, `amend`) as fixed `main.py` argv. `plan_pressure` is the capacity-aware admission gate: a `run`/`resume` whose implementer models have no free driver slot is QUEUED (`logs/captain/queue.jsonl`) instead of launched into capacity refusals. Sessions live under `logs/captain/` (`ARC_CAPTAIN_DIR`), separate from chat. It never edits code or touches git — all governance stays in the pipeline. |
+| `captain_autopilot.py` | The captain as an always-on project manager (`main.py captain --autopilot [--interval N] [--once] [--dry-run]`, `deploy/arc-captain.service`, Rule 10): `observe` → `detect` → `decide` → `act` each tick, posting through the agent board; closed action set, per-tick cap, per-target cooldowns, pause file, `captain.auto.*` events and `logs/captain/autopilot.jsonl` |
 | `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
 | `graph_shapes.py` | The graph BETWEEN tasks (§1 "Two graphs"): the pattern catalogue as data (`PATTERNS`, with a drawable sketch each), `normalize_pattern` (label aliases → catalogue id, used by the loader), `classify` (the shape a taskfile's `deps` actually form: single/chain/fanout/fanin/diamond/hierarchical/mixed, width, depth, declared-vs-detected mismatch), `planner_prose` (the GRAPH DESIGN block of the planner prompt, from the catalogue and today's caps), `describe` (→ `GET /api/graph-shapes`: patterns, every taskfile classified, what the engine can and cannot express) |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local `git init` + one commit, then best-effort gh remote creation), `POST /api/repos/remote` (gh remote for an existing allowlisted checkout), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |

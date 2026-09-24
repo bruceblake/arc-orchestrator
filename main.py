@@ -1085,10 +1085,19 @@ def main():
 
     cap_p = sub.add_parser(
         "captain", help="supervise the fleet conversationally (state-aware, bounded actions)")
-    cap_p.add_argument("--session", required=True,
-                       help="session id, ^[a-z0-9][a-z0-9-]{0,39}$")
-    cap_p.add_argument("--repo", required=True,
+    cap_p.add_argument("--session",
+                       help="session id, ^[a-z0-9][a-z0-9-]{0,39}$ (conversational turn)")
+    cap_p.add_argument("--repo",
                        help="absolute repo path under ARC_REPO_ROOT (default: your home)")
+    cap_p.add_argument("--autopilot", action="store_true",
+                       help="run the autonomous project manager (captain_autopilot.py)")
+    cap_p.add_argument("--interval", type=int, default=None,
+                       help="autopilot: seconds between ticks (default ARC_CAPTAIN_INTERVAL=600)")
+    cap_p.add_argument("--once", action="store_true", help="autopilot: one tick, then exit")
+    cap_p.add_argument("--dry-run", action="store_true",
+                       help="autopilot: log decisions without acting")
+    cap_p.add_argument("--no-llm", action="store_true",
+                       help="autopilot: playbooks only, never call the model")
     cap_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     args = ap.parse_args()
@@ -1123,6 +1132,13 @@ def main():
         import orchchat
         sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))
     elif args.cmd == "captain":
+        if args.autopilot:
+            import captain_autopilot
+            sys.exit(captain_autopilot.run(
+                interval=args.interval or captain_autopilot.INTERVAL_S,
+                once=args.once, dry_run=args.dry_run, llm=not args.no_llm))
+        if not args.session or not args.repo:
+            ap.error("captain: --session and --repo are required without --autopilot")
         import captain
         sys.exit(asyncio.run(captain.run_turn(args.session, args.repo)))
 

@@ -3358,7 +3358,37 @@ def _captain_state():
         sessions = _captain_sessions()["sessions"]
     except Exception:
         sessions = []
-    return {"state": state, "sessions": sessions}
+    return {"state": state, "sessions": sessions, "autopilot": _autopilot_view()}
+
+
+def _autopilot_view():
+    """GET /api/captain/autopilot — the autopilot's state, latest findings,
+    recent actions and unacknowledged escalations. Never raises."""
+    try:
+        import captain_autopilot
+        return captain_autopilot.view()
+    except Exception:
+        return {"paused": False, "running": False, "findings": [], "actions": [],
+                "escalations": []}
+
+
+def _autopilot_pause(body):
+    """POST /api/captain/autopilot/pause {"paused": bool} — toggles the pause
+    file. Guarded like every POST (_refuse_post: JSON, same origin, and
+    ARC_DASHBOARD_TOKEN when set)."""
+    if not isinstance(body, dict) or not isinstance(body.get("paused"), bool):
+        return {"error": "body must be {\"paused\": true|false}"}, 400
+    import captain_autopilot
+    return {"paused": captain_autopilot.set_paused(body["paused"], by="dashboard")}, 200
+
+
+def _autopilot_ack(body):
+    """POST /api/captain/autopilot/ack {"id": "<escalation id>"}."""
+    esc = body.get("id") if isinstance(body, dict) else None
+    import captain_autopilot
+    if not captain_autopilot.ack_escalation(esc, by="dashboard"):
+        return {"error": "no such escalation"}, 404
+    return {"ok": True, "id": esc}, 200
 
 
 def _captain_sessions():
@@ -4272,6 +4302,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_captain_sessions())
             if u.path == "/api/captain/queue":
                 return self._json(_captain_queue())
+            if u.path == "/api/captain/autopilot":
+                return self._json(_autopilot_view())
             if u.path == "/api/captain/poll":
                 q = parse_qs(u.query)
                 session = q.get("session", [""])[0]
@@ -4613,6 +4645,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/captain/start":
                 obj, code = _captain_start(body)
+                return self._json(obj, code)
+            if u.path == "/api/captain/autopilot/pause":
+                obj, code = _autopilot_pause(body)
+                return self._json(obj, code)
+            if u.path == "/api/captain/autopilot/ack":
+                obj, code = _autopilot_ack(body)
                 return self._json(obj, code)
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)

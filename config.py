@@ -450,6 +450,15 @@ TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 # hazard; the constant exists so the docs-truth scan sees the var config.py
 # reads. Defaulting here and there must agree: logs/captain.
 CAPTAIN_DIR = os.getenv("ARC_CAPTAIN_DIR") or str(ROOT / "logs" / "captain")
+# Captain autopilot (`main.py captain --autopilot`, captain_autopilot.py,
+# AGENTS.md Rule 10): seconds between ticks, the most actions one tick may
+# take, how often each active project gets a standup on the board, and how
+# long the captain leaves one target (a task, a PR, a question) alone after
+# acting on it.
+CAPTAIN_INTERVAL = int(os.getenv("ARC_CAPTAIN_INTERVAL", "600"))
+CAPTAIN_MAX_ACTIONS_PER_TICK = int(os.getenv("ARC_CAPTAIN_MAX_ACTIONS_PER_TICK", "5"))
+CAPTAIN_STANDUP_S = int(os.getenv("ARC_CAPTAIN_STANDUP_S", "3600"))
+CAPTAIN_COOLDOWN_S = int(os.getenv("ARC_CAPTAIN_COOLDOWN_S", "1800"))
 # The only directory tree the dashboard will accept a project repo from
 # (/api/projects/create and every taskfile it runs). A network client can
 # name any path in a POST body; this is the fence. It was the operator's

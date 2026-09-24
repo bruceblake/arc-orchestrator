@@ -359,6 +359,29 @@ class CaptainRoutes(unittest.TestCase):
         self.assertIn("state", resp)
         self.assertIn("sessions", resp)
 
+    def test_autopilot_routes_pause_and_ack(self):
+        import captain_autopilot
+        status, resp = self._get("/api/captain/autopilot")
+        self.assertEqual(status, 200)
+        self.assertEqual((resp["paused"], resp["escalations"]), (False, []))
+        self.assertIn("autopilot", self._get("/api/captain/state")[1])
+        self.assertEqual(self._post("/api/captain/autopilot/pause",
+                                    {"paused": "yes"})[0], 400)
+        status, resp = self._post("/api/captain/autopilot/pause", {"paused": True})
+        self.assertEqual((status, resp), (200, {"paused": True}))
+        self.assertTrue((self._capdir / "autopilot.pause").exists())
+        self.assertTrue(self._get("/api/captain/autopilot")[1]["paused"])
+        self._post("/api/captain/autopilot/pause", {"paused": False})
+        self.assertFalse(captain_autopilot.is_paused())
+        captain_autopilot._append(captain_autopilot._escalations_path(),
+                                  {"id": "abc123def456", "ts": 1, "body": "x"})
+        self.assertEqual(len(self._get("/api/captain/autopilot")[1]["escalations"]), 1)
+        self.assertEqual(self._post("/api/captain/autopilot/ack",
+                                    {"id": "nope"})[0], 404)
+        self.assertEqual(self._post("/api/captain/autopilot/ack",
+                                    {"id": "abc123def456"})[0], 200)
+        self.assertEqual(self._get("/api/captain/autopilot")[1]["escalations"], [])
+
     def test_sessions_route_empty_when_dir_missing(self):
         status, resp = self._get("/api/captain/sessions")
         self.assertEqual(status, 200)

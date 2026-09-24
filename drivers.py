@@ -302,7 +302,7 @@ def _tier_rank(model):
 
 
 def usage_substitute(model, harness, role="implementer", exclude=(),
-                     avoid_families=()):
+                     avoid_families=(), allow_planner=False):
     """A same-or-stronger model on a harness that is not `harness` and not blocked.
 
     None when swapping is off, or no seat qualifies — the caller then parks
@@ -314,8 +314,14 @@ def usage_substitute(model, harness, role="implementer", exclude=(),
     drops to a free medium model), and come from none of `avoid_families`.
     Review callers pass the implementer's family, so a swapped reviewer
     cannot land in the family that wrote the code (Rule 2).
+
+    ``allow_planner`` is the captain autopilot's opt-in (a driver with
+    ``planner_swap`` set): its turns are advisory, not a plan, so a spent
+    PLANNER_MODEL window moves to another planner-capable seat (GLM-5.3).
     """
-    if not config.USAGE_SWAP or role not in ("implementer", "reviewer", "pr_reviewer"):
+    roles = ("implementer", "reviewer", "pr_reviewer") + (
+        ("planner",) if allow_planner else ())
+    if not config.USAGE_SWAP or role not in roles:
         return None
     now = time.time()
     skip = set(exclude)
@@ -1376,7 +1382,8 @@ class Driver:
         The result carries the SUBSTITUTE's model and harness, so callers
         record (and trailers name) the model that actually did the work."""
         sub = usage_substitute(self.model, self.harness, self.role,
-                               exclude=tried, avoid_families=avoid_families)
+                               exclude=tried, avoid_families=avoid_families,
+                               allow_planner=getattr(self, "planner_swap", False))
         if not sub:
             return None
         events.emit("driver.usage_swap", harness=self.harness, model=self.model,
