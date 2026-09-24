@@ -56,7 +56,8 @@ const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setGH = v => { GH = v; };"
   + "\nglobalThis.__setSlots = v => { SLOTS = v; };"
   + "\nglobalThis.__setProjects = v => { PROJECTS = v; };"
-  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY};");
+  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY,"
+  + " tlGist, tlEntry, renderTimeline, openTaskTimeline, closeTimeline, tlWhen};");
 const api = mod();
 
 let n = 0;
@@ -405,6 +406,73 @@ ok(clean(document.querySelector("#drv-events").innerHTML), "usage: driver-event 
   globalThis.prompt = () => { prompted++; return "x"; };
   const r3 = await api.jpost("/api/promote", {});
   ok(r3.code === 200 && prompted === 0, "jpost: no prompt when the server does not ask for a token");
+}
+
+// ---- task timeline drawer --------------------------------------------------
+// Clicking a DAG task node opens the timeline: every event, harness run, error
+// and evidence manifest of that task, in time order. The drawer must render
+// entries as MARKUP (it is a <pre>, so the whitespace model matters), must
+// highlight the errors, and must never let a task-supplied string reach the
+// DOM as HTML.
+{
+  const errEntry = api.tlEntry({kind: "error", ts: 1700000000, type: "error",
+    task: "t1", fingerprint: "ValueError:gate_t1:publish_t1",
+    error_kind: "ValueError", message: "gate exploded", body: "gate exploded",
+    traceback: "Traceback...\nValueError: gate exploded"});
+  ok(errEntry.includes('class="tl-row error"'), "timeline: an error entry is highlighted");
+  ok(errEntry.includes("ValueError:gate_t1:publish_t1"), "timeline: the fingerprint is shown");
+  ok(errEntry.includes("gate exploded"), "timeline: the message is shown");
+
+  const evEntry = api.tlEntry({kind: "evidence", type: "evidence.manifest",
+    ts: 1700000000, project: "prison-escape", attempt: "x3",
+    shots: [{name: "cell.png", url: "/api/evidence-file?path=p/x3/cell.png"}],
+    compare: [], warnings: [], godot_errors: [], coverage: null});
+  ok(evEntry.includes('class="tl-row evidence"'), "timeline: an evidence entry is highlighted");
+  ok(evEntry.includes("<img"), "timeline: evidence renders thumbnails");
+  ok(evEntry.includes('alt="evidence cell.png"'), "timeline: every thumbnail has alt text");
+  ok(evEntry.includes("/api/evidence-file?path=p/x3/cell.png"), "timeline: the thumbnail uses the evidence route");
+
+  // A video has no still: it must render as a link, not a broken <img>.
+  const vid = api.tlEntry({kind: "evidence", type: "evidence.manifest",
+    shots: [{name: "fly.mp4", url: "/api/evidence-file?path=x/fly.mp4"}],
+    compare: [], warnings: [], godot_errors: []});
+  ok(!/<img[^>]*fly\.mp4/.test(vid), "timeline: a video is a link, not a broken <img>");
+  ok(vid.includes("fly.mp4"), "timeline: the video link is labelled");
+
+  // A godot error and a coverage gap are what a reviewer must not miss.
+  const gap = api.tlEntry({kind: "evidence", type: "evidence.manifest", shots: [],
+    coverage: {playtest: {status: "failed", reason: "exited 0 but wrote no video"}},
+    godot_errors: ["SCRIPT ERROR: bad node"], warnings: [], compare: []});
+  ok(gap.includes("coverage gaps"), "timeline: a coverage gap is called out");
+  ok(gap.includes("SCRIPT ERROR: bad node"), "timeline: godot errors are shown");
+  ok(gap.includes("exited 0 but wrote no video"), "timeline: the gap carries its reason");
+
+  const noc = api.tlEntry({kind: "evidence", type: "evidence.manifest", shots: [],
+    no_visible_change: true, compare: [], warnings: [], godot_errors: []});
+  ok(noc.includes("no visible change"), "timeline: a no-visible-change flag is surfaced");
+
+  // Escaping: an event field is attacker-influenced in the general case (a
+  // branch name, a reviewer's prose), and this drawer renders markup.
+  const evil = api.tlEntry({kind: "event", type: "task.gate", ts: 1,
+    task: EVIL, body: EVIL, reason: EVIL, tail: EVIL});
+  ok(clean(evil), "timeline: a hostile event field is escaped");
+  const evil2 = api.tlEntry({kind: "evidence", type: "evidence.manifest", shots: [],
+    godot_errors: [EVIL], warnings: [EVIL], compare: []});
+  ok(clean(evil2), "timeline: a hostile evidence field is escaped");
+  const evil3 = api.tlEntry({kind: "run", type: "harness.run", ts: 1,
+    model: EVIL, role: EVIL, verdict: EVIL, task: EVIL});
+  ok(clean(evil3), "timeline: a hostile run row is escaped");
+
+  // Gists: the common entries say what they mean instead of showing a name.
+  ok(api.tlGist({type: "task.reviewed", passed: false, issues: ["a", "b"]})
+     .includes("2 issues"), "timeline: a rejected review names its issue count");
+  ok(api.tlGist({type: "task.gate", passed: false}).includes("FAILED"),
+     "timeline: a failed gate says so");
+  ok(api.tlGist({type: "task.escalated", from_model: "DeepSeek-V4.1-Flash-thinking-max",
+                 to_model: "GLM-5.3", n: 2}).includes("→"),
+     "timeline: an escalation shows the tier move");
+  ok(api.tlWhen(1700000000).length > 5, "timeline: an entry is timestamped");
+  ok(api.tlWhen(null) === "—", "timeline: a missing timestamp degrades to a dash");
 }
 
 if (failures.length) {

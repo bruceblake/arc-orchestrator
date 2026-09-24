@@ -3075,6 +3075,355 @@ def _exited_early(proc, seconds):
 
 _RUN_LOG_RE = re.compile(r"^(run|plan)-[\w.-]+\.log$")
 
+# --- task timeline: everything that happened to one task -------------------
+# Debugging a task used to mean grepping events.jsonl, the harness
+# transcripts, error_events, gate output and logs/evidence by hand. This is
+# the one read-only view that gathers them, and the whole of its input is a
+# task id plus an OPTIONAL taskfile name — never a command, a path or a ref
+# from a request body (AGENTS.md Rule 6b: the dashboard is unauthenticated
+# and listens on every interface).
+#
+# The id is validated before it is used as a path segment under logs/evidence
+# or as a harness_runs LIKE prefix, exactly like the file parameters of
+# /api/gate-log and /api/transcript. `.` and `-` are legal INSIDE an id
+# (`deepseek-v4.1-flash`), but an id made only of dots is a traversal — ".."
+# matched the character class and then became a path segment under the
+# evidence root, which is exactly the hole this validates against.
+_TASK_ID_RE = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]{1,120}$")
+
+# How far back the timeline reads events.jsonl. The log is append-ordered and
+# rotates at 100 MiB, so the newest records are the last lines: a 100 MiB file
+# must not be parsed to answer "what happened to this one task". Two bounds
+# guard that — the number of LINES examined and the number of events kept —
+# and both are reported, so a truncated answer is visible rather than passed
+# off as the whole history.
+TIMELINE_SCAN_LINES = 20000
+TIMELINE_MAX_EVENTS = 4000
+_TIMELINE_BYTES_PER_LINE = 512      # tail window sized from the line budget
+
+# Which events belong on a task's timeline. Prefix families, not an
+# enumeration of today's names: the driver and code-task namespaces grow
+# (`driver.usage_limit`, `driver.usage_swap`, `driver.queued`… all exist and
+# all belong here), and a hand-kept list would silently drop the next one.
+# That silent drop is exactly the failure this feature exists to end — the
+# scan is bounded separately, so breadth here costs nothing.
+TIMELINE_PREFIXES = ("driver.", "task.", "worktree.", "git.", "evidence.",
+                     "chain.")
+# Events that are technically in those namespaces but are fleet weather on a
+# task that happens to share the account, not this task's history.
+TIMELINE_SKIP = frozenset(("driver.heartbeat", "driver.queued",
+                           "driver.slot_wait", "driver.cap_timeout"))
+# What the drawer renders as the body of an entry. A driver.done carries a
+# verdict, a task.gate its output tail; dumping the whole event is unreadable.
+TIMELINE_BODY_KEYS = ("tail", "output", "why", "reason", "error", "issues",
+                      "message", "note", "review_issues")
+
+
+def _timeline_owns(etype):
+    """Whether an event type is one a task timeline shows."""
+    if not isinstance(etype, str):
+        return False
+    return (etype not in TIMELINE_SKIP
+            and etype.startswith(TIMELINE_PREFIXES))
+
+
+def _timeline_id_matches(ev_task, tid):
+    """Whether this event's task field names this task or one of its attempts.
+
+    Fix rounds record `<tid>-x<attempt>` and PR rounds `<tid>-pr<n>`, so a
+    timeline matching only the bare id would miss every attempt that was not
+    the first — which is exactly where the debugging is.
+
+    The suffix is matched EXPLICITLY (`-x`, `-pr`), not as a bare `-`: a
+    sibling task named `<id>-something` (task ids are hyphenated English, so
+    `t1-sibling` and `t1` are both real) shares the prefix without being an
+    attempt of this task, and its events would otherwise appear here.
+    """
+    if not isinstance(ev_task, str):
+        return False
+    if ev_task == tid:
+        return True
+    return ev_task.startswith((tid + "-x", tid + "-pr"))
+
+
+def _evidence_root():
+    return Path(config.EVIDENCE_DIR).resolve()
+
+
+def _evidence_url(root, p):
+    """The /api/evidence-file URL for a path inside the evidence root, or None.
+
+    Containment, not string matching: a manifest naming /etc/passwd or
+    ../../id_rsa resolves OUTSIDE the root and gets no URL at all.
+    """
+    try:
+        rel = Path(p).resolve().relative_to(root)
+    except (ValueError, OSError):
+        return None
+    return "/api/evidence-file?path=" + str(rel)
+
+
+def _timeline_evidence(tid):
+    """Evidence manifests under logs/evidence/<project>/<tid>/x*/manifest.json.
+
+    Bounded twice: the project directories listed and the attempt directories
+    walked. Each manifest's shots become /api/evidence-file URLs, but only for
+    files that resolve inside the evidence root.
+    """
+    root = _evidence_root()
+    out = []
+    if not root.is_dir():
+        return out
+    try:
+        projects = sorted(p for p in root.iterdir() if p.is_dir())[:64]
+    except OSError:
+        return out
+    for proj in projects:
+        tdir = proj / tid
+        if not tdir.is_dir():
+            continue
+        try:
+            attempts = sorted(a for a in tdir.iterdir()
+                              if a.is_dir() and a.name.startswith("x"))
+        except OSError:
+            continue
+        for adir in attempts:
+            mf = adir / "manifest.json"
+            if not mf.is_file():
+                continue
+            try:
+                man = json.loads(mf.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue                    # a half-written manifest is skipped
+            if not isinstance(man, dict):
+                continue
+            cands, shots, seen = [], [], set()
+            cands += list(man.get("shots") or [])
+            cands += list(man.get("playtest_shots") or [])
+            cands += [c.get("side_by_side") for c in (man.get("compare") or [])
+                      if isinstance(c, dict)]
+            for sc in (man.get("scenes") or []):
+                if isinstance(sc, dict):
+                    cands += list(sc.get("shots") or [])
+            for s in cands:
+                if not s or str(s) in seen:
+                    continue
+                seen.add(str(s))
+                url = _evidence_url(root, s)
+                if url:
+                    shots.append({"name": Path(str(s)).name, "url": url})
+            out.append({
+                "project": proj.name, "attempt": adir.name,
+                "manifest": str(mf), "seconds": man.get("seconds"),
+                # A manifest records no instant of its own; the capture wrote
+                # it into the attempt directory, so that directory's mtime is
+                # when this evidence belongs on the timeline.
+                "ts": _ts_of(mf.stat().st_mtime) if mf.exists() else None,
+                "shots": shots, "videos": man.get("videos") or {},
+                "compare": [c for c in (man.get("compare") or [])
+                            if isinstance(c, dict)],
+                "coverage": man.get("coverage"),
+                "godot_errors": man.get("godot_errors") or [],
+                "no_visible_change": man.get("no_visible_change"),
+                "warnings": man.get("warnings") or [],
+            })
+    return out
+
+
+def _timeline_events(tid, max_events=None, scan_lines=None):
+    """This task's events, oldest first, from a BOUNDED backward scan.
+
+    events.jsonl is append-ordered, so the newest records are the last lines,
+    and a task's own attempts are near the end. Reading the whole history on
+    every drawer open is what this avoids: at most `scan_lines` lines are
+    examined and the scan stops once `max_events` matches are held.
+    `truncated` reports that a bound was hit, so the page can say the view is
+    partial instead of showing a cut-off history as if it were complete.
+    """
+    path = Path(config.EVENTS_LOG)
+    try:
+        st = path.stat()
+    except OSError:
+        return {"events": [], "scanned": 0, "truncated": False}
+    # Resolved at CALL time, not bound as a default: the module constants are
+    # the live policy, and a default argument would freeze the value the
+    # module was imported with (so lowering the bound has no effect).
+    max_events = TIMELINE_MAX_EVENTS if max_events is None else max_events
+    scan_lines = TIMELINE_SCAN_LINES if scan_lines is None else scan_lines
+    # mtime-gated cache: the drawer polls, and re-parsing an unchanged tail
+    # every 3 s is the same waste twice.
+    key = (str(path), st.st_size, st.st_mtime_ns, tid,
+           int(max_events), int(scan_lines))
+    if _timeline_cache["key"] == key:
+        return _timeline_cache["value"]
+    lines, window_is_partial = [], False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            window = min(st.st_size,
+                         max(1, int(scan_lines)) * _TIMELINE_BYTES_PER_LINE)
+            window_is_partial = window < st.st_size
+            if window:
+                fh.seek(st.st_size - window)
+            if window_is_partial:
+                fh.readline()               # discard the partial first line
+            lines = fh.read().splitlines()
+    except OSError:
+        lines = []
+    if len(lines) > scan_lines:
+        lines = lines[-scan_lines:]
+        window_is_partial = True
+    events, scanned, hit_bound = [], 0, False
+    for line in reversed(lines):
+        if len(events) >= max_events:
+            hit_bound = True
+            break
+        scanned += 1
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue                        # corrupt line: skip, never 500
+        if not isinstance(e, dict):
+            continue
+        if _timeline_owns(e.get("type")) and _timeline_id_matches(e.get("task"), tid):
+            events.append(e)
+    events.reverse()                        # the scan walked backwards
+    value = {"events": events, "scanned": scanned,
+             "truncated": bool(hit_bound or window_is_partial)}
+    _timeline_cache.update(key=key, value=value)
+    return value
+
+
+_timeline_cache = {"key": None, "value": None}
+
+
+def _ts_of(v):
+    """A sortable epoch from whatever a source records time as.
+
+    events.jsonl writes epochs, but harness_runs and error_events store an ISO
+    string (`Store._now`). Sorting the two together needs one type, so an ISO
+    timestamp is converted and anything unparsable is None.
+    """
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str) and v:
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _timeline_entry(e):
+    """One event reduced to the shape the drawer renders, body text inline.
+
+    A driver.done carries a verdict, a task.gate its output tail, a
+    task.failed its reason. `body` picks the first of these that is present so
+    the page shows WHY an entry matters rather than a JSON blob.
+    """
+    out = {"kind": "event", "ts": e.get("ts"), "type": e.get("type"),
+           "task": e.get("task"), "run_id": e.get("run_id")}
+    for k, v in e.items():
+        if k not in out:
+            out[k] = v
+    for k in TIMELINE_BODY_KEYS:
+        v = e.get(k)
+        if v:
+            out["body"] = v if isinstance(v, list) else str(v)[:2000]
+            break
+    return out
+
+
+def _timeline(tid, taskfile=None, store=None):
+    """Everything recorded about one task, in time order.
+
+    Four sources, one list: this task's events (bounded backward scan of
+    events.jsonl), its harness_runs rows (with the transcript path to open),
+    its error_events rows with their fingerprints, and its evidence manifests.
+    Read-only, and every source is optional — a task that never ran has an
+    empty timeline, not an error.
+    """
+    import errors as _errors_mod
+    store = store if store is not None else Handler.store
+    ev = _timeline_events(tid)
+    entries = [_timeline_entry(e) for e in ev["events"]]
+    # harness_runs: rows for the task itself and each `<tid>-x<n>` attempt.
+    # harness_runs_prefix does the LIKE, so one query covers both shapes.
+    try:
+        runs = store.harness_runs_prefix(tid) if store else []
+    except Exception:
+        runs = []
+    runs = [r for r in runs if _timeline_id_matches(r.get("task_id"), tid)]
+    for r in runs:
+        tpath = r.get("transcript")
+        entries.append({
+            "kind": "run", "ts": _ts_of(r.get("created_at")), "type": "harness.run",
+            "task": r.get("task_id"), "harness": r.get("harness"),
+            "model": r.get("model"), "role": r.get("role"),
+            "attempt": r.get("attempt"), "exit_code": r.get("exit_code"),
+            "seconds": r.get("seconds"),
+            "verdict": (r.get("verdict") or "")[:400],
+            "transcript": str(tpath) if tpath else None,
+            "file": Path(str(tpath)).name if tpath else None,
+        })
+    # error_events: the fingerprint is the whole point of the table (Rule 7b),
+    # so it is carried through and the drawer highlights these rows.
+    errs = []
+    try:
+        errs = _errors_mod.recent(limit=200, task=tid, task_prefix=True)
+    except Exception:
+        errs = []
+    for r in errs:
+        entries.append({
+            "kind": "error", "ts": r.get("ts"), "type": "error",
+            "task": r.get("task"), "fingerprint": r.get("fingerprint"),
+            "error_kind": r.get("kind"), "message": r.get("message"),
+            "where": r.get("where_"), "model": r.get("model"),
+            "node": r.get("node"), "run_id": r.get("run_id"),
+            "traceback": (r.get("traceback") or "")[-4000:],
+        })
+    evidence = _timeline_evidence(tid)
+    for man in evidence:
+        entries.append({
+            "kind": "evidence", "ts": man.get("ts"), "type": "evidence.manifest",
+            "task": tid, "attempt": man["attempt"], "project": man["project"],
+            "manifest": man["manifest"], "shots": man["shots"],
+            "videos": man["videos"], "compare": man["compare"],
+            "coverage": man["coverage"], "godot_errors": man["godot_errors"],
+            "no_visible_change": man["no_visible_change"],
+            "warnings": man["warnings"], "seconds": man["seconds"],
+        })
+    # Time order, across all four sources. The keys mixed epochs (events) and
+    # ISO strings (harness_runs, error_events), which is why _ts_of normalises
+    # them first. An entry with no usable timestamp sorts FIRST rather than
+    # being dropped — an undated entry is still evidence — and the sort is
+    # stable, so equal stamps keep the order they were built in.
+    entries.sort(key=lambda x: _ts_of(x.get("ts"))
+                 if _ts_of(x.get("ts")) is not None else float("-inf"))
+    project = None
+    if taskfile:
+        try:
+            tf = Path(config.TASKS_DIR) / taskfile
+            project = json.loads(tf.read_text(encoding="utf-8",
+                                              errors="replace"))
+        except Exception:
+            project = None
+    status = None
+    try:
+        for row in (store.code_tasks_all(2000) if store else []):
+            if row.get("id") == tid and (not taskfile
+                                         or Path(str(row.get("taskfile") or "")).name == taskfile):
+                status = row.get("status")
+                break
+    except Exception:
+        status = None
+    return {"id": tid, "taskfile": taskfile, "status": status,
+            "title": (project or {}).get("title") if isinstance(project, dict) else None,
+            "entries": entries, "counts": {
+                "events": len(ev["events"]), "runs": len(runs),
+                "errors": len(errs), "evidence": len(evidence)},
+            "scanned": ev["scanned"], "truncated": ev["truncated"],
+            "scan_limit": TIMELINE_SCAN_LINES, "ts": time.time()}
+
 
 def _log_tail(log_name, n):
     """Last n lines of logs/<log_name>, [] if unreadable."""
@@ -4529,6 +4878,50 @@ class Handler(BaseHTTPRequestHandler):
                 # actually form, and what the engine can and cannot express.
                 import graph_shapes
                 return self._json(graph_shapes.describe())
+            if u.path == "/api/evidence-file":
+                # Read-only bytes of ONE evidence artifact, for the timeline
+                # drawer's thumbnails and video links. The path is confined to
+                # the evidence root by resolving it and testing containment —
+                # a ".." segment, an absolute path elsewhere, or a symlink out
+                # of the tree all resolve outside and are refused.
+                q = parse_qs(u.query, keep_blank_values=True)
+                rel = q.get("path", [""])[0]
+                root = _evidence_root()
+                bad = None
+                try:
+                    target = (root / rel).resolve()
+                except OSError:
+                    bad = "bad path"
+                    target = None
+                if target is None or rel.strip() == "" or Path(rel).is_absolute():
+                    bad = bad or "bad path"
+                elif target != root and root not in target.parents:
+                    bad = "path outside the evidence directory"
+                elif not target.is_file():
+                    bad = "not found"
+                if bad:
+                    return self._json({"error": bad},
+                                      404 if bad == "not found" else 400)
+                ctype = ("video/mp4" if target.suffix == ".mp4"
+                         else "image/gif" if target.suffix == ".gif"
+                         else "image/png" if target.suffix == ".png"
+                         else "application/json" if target.suffix == ".json"
+                         else "application/octet-stream")
+                return self._file(target, ctype)
+            if re.fullmatch(r"/api/tasks/[^/]+/timeline", u.path):
+                # Everything recorded about one task, in time order: its
+                # events, harness runs with transcript paths, error_events
+                # rows with fingerprints, and its evidence manifests. GET
+                # only, and the id is validated before it is used as a path
+                # segment or a LIKE prefix (Rule 6b).
+                tid = u.path[len("/api/tasks/"):-len("/timeline")]
+                if not _TASK_ID_RE.fullmatch(tid):
+                    return self._json({"error": "bad task id"}, 400)
+                q = parse_qs(u.query, keep_blank_values=True)
+                taskfile = q.get("taskfile", [""])[0] or None
+                if taskfile and not re.fullmatch(r"[\w.-]+\.json", taskfile):
+                    return self._json({"error": "bad file name"}, 400)
+                return self._json(_timeline(tid, taskfile, Handler.store))
             if u.path == "/api/pipeline":
                 import pipeline_doc
                 return self._json(pipeline_doc.describe(
