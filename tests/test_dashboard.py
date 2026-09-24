@@ -104,6 +104,34 @@ class InflightAttribution(unittest.TestCase):
         rows, _ = dashboard._collect_inflight(now, None)
         self.assertEqual(rows, [])
 
+    def test_a_usage_swap_settles_the_swapped_out_driver(self):
+        """The substitute is live; the model whose plan ran out is not."""
+        now = time.time()
+        orig = {"harness": "codex", "model": "GPT-6-Sol", "role": "reviewer",
+                "task": "t1-x1", "attempt": 1, "pid": os.getpid()}
+        sub = {"harness": "claude", "model": "Claude-Opus-5.5", "role": "reviewer",
+               "task": "t1-x1", "attempt": 1, "pid": os.getpid()}
+        self.write_events(
+            {"ts": now - 60, "type": "driver.start", **orig},
+            {"ts": now - 50, "type": "driver.usage_swap", "harness": "codex",
+             "model": "GPT-6-Sol", "role": "reviewer", "task": "t1-x1",
+             "to_model": "Claude-Opus-5.5", "to_harness": "claude"},
+            {"ts": now - 49, "type": "driver.start", **sub})
+        rows, _ = dashboard._collect_inflight(now, None)
+        self.assertEqual([r["model"] for r in rows], ["Claude-Opus-5.5"])
+
+    def test_a_usage_swap_on_another_task_settles_nothing(self):
+        now = time.time()
+        orig = {"harness": "codex", "model": "GPT-6-Sol", "role": "reviewer",
+                "task": "t1-x1", "attempt": 1, "pid": os.getpid()}
+        self.write_events(
+            {"ts": now - 60, "type": "driver.start", **orig},
+            {"ts": now - 50, "type": "driver.usage_swap", "harness": "codex",
+             "model": "GPT-6-Sol", "role": "reviewer", "task": "t2-x1",
+             "to_model": "Claude-Opus-5.5"})
+        rows, _ = dashboard._collect_inflight(now, None)
+        self.assertEqual([r["model"] for r in rows], ["GPT-6-Sol"])
+
     def test_a_stale_driver_start_is_pruned(self):
         now = time.time()
         self.write_events({"ts": now - dashboard.DRIVER_STALE_S - 60,
