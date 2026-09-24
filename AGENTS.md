@@ -866,7 +866,10 @@ no `planner` role and is refused);
 roster-driven enforcement as Rule 2). Default model `config.GH_MODEL`
 (`ARC_GH_MODEL` env), falling back to `config.PLANNER_MODEL` =
 GLM-5.3; each `gh` subprocess is bounded by
-`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 120 s).
+`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 120 s). Pipeline pushes and
+`gh pr create` retry NETWORK failures only (`gitstore.is_transient_network_error`)
+with backoff `ARC_NET_RETRY_DELAYS` (default `5,15,45,90,180` s, `git.retry`
+events); a lease, auth or no-commits refusal is never retried.
 
 **Preview by default.** `--apply-labels`, `--create`, and `--post` are the
 ONLY paths that write to GitHub; without them every command is read-only.
