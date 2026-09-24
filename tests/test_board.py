@@ -67,20 +67,15 @@ class BoardPostsAreReadableAndScoped(unittest.TestCase):
                    harness="codex", kind="error", body="crashed")
 
     def test_never_writes_into_the_orchestrator_checkout(self):
-        # The orchestrator keeps .arc/board.jsonl in this checkout for the
-        # shared board (Rule 4b: it is never harvested), so its ABSENCE is not
-        # the invariant. Asserting `not exists` made this test fail on every
-        # fleet run that had posted anything, blaming an unrelated diff — the
-        # real invariant is that post() itself adds nothing here.
+        # A task worktree is the checkout the gate runs in, and the orchestrator
+        # leaves .arc/board.jsonl there after each run. The guard is that post
+        # does not create or append that file, not that the tree is empty.
         path = Path(config.ROOT) / board.REL
-        before = path.read_bytes() if path.is_file() else None
-        post_id = board.post(config.ROOT, task="t", role="implementer",
-                             model="m", harness="codex", kind="note",
-                             body="from a test")
-        after = path.read_bytes() if path.is_file() else None
-        self.assertEqual(after, before)
-        if after is not None:
-            self.assertNotIn(post_id, after.decode("utf-8"))
+        before = path.read_bytes() if path.exists() else None
+        board.post(config.ROOT, task="t", role="implementer", model="m",
+                   harness="codex", kind="note", body="from a test")
+        after = path.read_bytes() if path.exists() else None
+        self.assertEqual(before, after)
 
     def test_empty_board_adds_nothing_to_the_prompt(self):
         self.assertEqual(board.prompt_block(self.wt, project="none", task="t"), "")
