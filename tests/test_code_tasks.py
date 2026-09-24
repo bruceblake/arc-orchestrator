@@ -1965,6 +1965,92 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
         self.assertEqual(len(set(models)), len(models), "reviewers must differ")
         self.assertTrue(all(i["pr"] == 42 for i in out.items))
 
+    def _retry_fanout(self, pool, tiers, prior, pressure, reviewers=1):
+        g = self._graph()
+        ctx = {"results": {"publish_t1": {"pr": 42},
+                           "pr_review_t1": prior}, "runs": {"pr_review_t1": 1}}
+        with (mock.patch.object(code_tasks.gitstore, "pr_diff", new=mock.AsyncMock(return_value="diff")),
+              mock.patch.object(code_tasks, "_eligible_pr_reviewers", return_value=pool),
+              mock.patch.object(code_tasks, "_reviewer_pressure",
+                                side_effect=lambda m, usage: pressure[m]),
+              mock.patch.dict(config.MODEL_TIER, tiers),
+              mock.patch.object(config, "PR_REVIEWERS", reviewers),
+              mock.patch.object(config, "PR_REVIEWERS_WANTED", 2),
+              capture_events() as ev):
+            out = asyncio.run(g.nodes["pr_fanout_t1"].fn(ctx))
+        selected = [fields for name, fields in ev.seen
+                    if name == "task.pr_review_selected"]
+        thin = [fields for name, fields in ev.seen
+                if name == "task.pr_review_thin"]
+        return out, selected[0], (thin[0] if thin else None)
+
+    def test_crashed_reviewer_loses_to_healthy_same_tier_even_when_idle(self):
+        prior = {"inconclusive": True, "crashed_models": ["failed-hard"]}
+        out, selection, thin = self._retry_fanout(
+            ["failed-hard", "healthy-medium", "healthy-hard"],
+            {"failed-hard": "hard", "healthy-medium": "medium",
+             "healthy-hard": "hard"}, prior,
+            {"failed-hard": 0, "healthy-medium": 0, "healthy-hard": 1})
+        self.assertEqual([item["model"] for item in out.items], ["healthy-hard"])
+        self.assertEqual(selection["reviewers"], ["healthy-hard"])
+        self.assertEqual(selection["reason"], "healthy_same_or_stronger_after_crash")
+        self.assertEqual(selection["crashed_before"], ["failed-hard"])
+        self.assertEqual(thin["got"], 1)
+
+    def test_crashed_reviewer_retries_when_only_alternative_is_weaker(self):
+        for pool in (["failed-hard"], ["failed-hard", "healthy-medium"]):
+            with self.subTest(pool=pool):
+                out, selection, _ = self._retry_fanout(
+                    pool, {"failed-hard": "hard", "healthy-medium": "medium"},
+                    {"inconclusive": True, "crashed": ["failed-hard"]},
+                    {"failed-hard": 0, "healthy-medium": 0})
+                self.assertEqual([item["model"] for item in out.items],
+                                 ["failed-hard"])
+                self.assertEqual(selection["reason"], "retry_crashed_reviewer")
+
+    def test_genuine_rejection_clears_crash_preference(self):
+        g = self._graph()
+        ctx = {"results": {
+            "pr_fanout_t1": {"pr": 42, "round": 1,
+                              "reviewers": ["failed-hard", "rejecting-hard"]},
+            "pr_reviewer_t1": [
+                {"model": "failed-hard", "crashed": True, "approve": False,
+                 "issues": ["unavailable"]},
+                {"model": "rejecting-hard", "approve": False,
+                 "issues": ["missing test"]}]}, "runs": {}}
+        with (mock.patch.object(code_tasks.gitstore, "_gh",
+                                new=mock.AsyncMock(return_value=(0, "", ""))),
+              capture_events()):
+            result = asyncio.run(g.nodes["pr_review_t1"].fn(ctx))
+        self.assertFalse(result["inconclusive"])
+        self.assertEqual(result["crashed_models"], [])
+        self.assertIn("[rejecting-hard] missing test", result["issues"])
+        out, selection, _ = self._retry_fanout(
+            ["failed-hard", "healthy-hard"],
+            {"failed-hard": "hard", "healthy-hard": "hard"}, result,
+            {"failed-hard": 0, "healthy-hard": 1})
+        self.assertEqual([item["model"] for item in out.items], ["failed-hard"])
+        self.assertEqual(selection["reason"], "least_loaded")
+
+    def test_mixed_tier_crashes_each_take_a_healthy_replacement(self):
+        prior = {"inconclusive": True,
+                 "crashed_models": ["failed-hard", "failed-medium"]}
+        out, selection, thin = self._retry_fanout(
+            ["failed-hard", "failed-medium", "healthy-medium", "healthy-hard"],
+            {"failed-hard": "hard", "failed-medium": "medium",
+             "healthy-medium": "medium", "healthy-hard": "hard"},
+            prior,
+            {"failed-hard": 0, "failed-medium": 0,
+             "healthy-medium": 0, "healthy-hard": 1},
+            reviewers=2)
+        self.assertEqual([item["model"] for item in out.items],
+                         ["healthy-hard", "healthy-medium"])
+        self.assertEqual(selection["reviewers"],
+                         ["healthy-hard", "healthy-medium"])
+        self.assertEqual(selection["reason"],
+                         "healthy_same_or_stronger_after_crash")
+        self.assertIsNone(thin)
+
     def test_no_pull_request_short_circuits_to_the_join(self):
         import asyncio as aio
         from graph import Spawn
@@ -2015,6 +2101,23 @@ class ReviewersAreRealGraphNodes(unittest.TestCase):
         self.assertTrue(out["inconclusive"])
         self.assertEqual(out["inconclusive_n"], 1)
         self.assertEqual(sorted(out["crashed"]), ["A", "B"])
+        self.assertEqual(out["crashed_models"], ["A", "B"])
+
+    def test_inconclusive_retries_remember_earlier_crashes(self):
+        g = self._graph()
+        ctx = {"results": {
+            "pr_review_t1": {"inconclusive": True, "inconclusive_n": 1,
+                              "crashed_models": ["A"]},
+            "pr_fanout_t1": {"pr": 7, "round": 2, "reviewers": ["B"]},
+            "pr_reviewer_t1": [{"model": "B", "approve": False,
+                                "crashed": True, "issues": ["unavailable"]}]},
+            "runs": {}}
+        with (mock.patch.object(code_tasks.gitstore, "_gh",
+                                new=mock.AsyncMock(return_value=(0, "", ""))),
+              capture_events()):
+            out = asyncio.run(g.nodes["pr_review_t1"].fn(ctx))
+        self.assertEqual(out["crashed_models"], ["A", "B"])
+        self.assertEqual(out["inconclusive_n"], 2)
 
     def test_the_pipeline_diagram_now_shows_the_fanout(self):
         import dashboard

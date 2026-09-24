@@ -2112,7 +2112,51 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             except Exception:
                 usage = {}
             pool.sort(key=lambda m: (_reviewer_pressure(m, usage), usage.get(m, 0)))
-            chosen = pool[:max(1, config.PR_REVIEWERS)]
+            crashed_before = set(prior_r.get("crashed_models") or prior_r.get("crashed") or []) \
+                if prior_r.get("inconclusive") else set()
+            if crashed_before:
+                def tier_rank(model):
+                    tier = config.MODEL_TIER.get(model)
+                    return config.TIER_ORDER.index(tier) if tier in config.TIER_ORDER else -1
+
+                # Each healthy reviewer replaces one crashed reviewer of equal
+                # or weaker tier. Strongest crashes are matched first, and the
+                # weakest sufficient healthy model is spent, so one hard crash
+                # does not keep a crashed medium reviewer ahead of a healthy
+                # medium reviewer that can fill the other slot.
+                slots = max(1, config.PR_REVIEWERS)
+                crashes = sorted((m for m in pool if m in crashed_before),
+                                 key=tier_rank, reverse=True)
+                free = [m for m in pool if m not in crashed_before]
+                replaced, unreplaced = [], []
+                for crash in crashes:
+                    fit = [m for m in free if tier_rank(m) >= tier_rank(crash)]
+                    if not fit:
+                        unreplaced.append(crash)
+                        continue
+                    pick = min(fit, key=lambda m: (tier_rank(m), free.index(m)))
+                    replaced.append(pick)
+                    free.remove(pick)
+                if not crashes:
+                    chosen = pool[:slots]
+                else:
+                    chosen = list(replaced)
+                    if len(chosen) < slots:
+                        chosen.extend(unreplaced[:slots - len(chosen)])
+                    if len(chosen) < slots:
+                        floor = min(tier_rank(m) for m in crashes)
+                        extra = [m for m in free if tier_rank(m) >= floor]
+                        chosen.extend(extra[:slots - len(chosen)])
+                    chosen = chosen[:slots]
+            else:
+                chosen = pool[:max(1, config.PR_REVIEWERS)]
+            healthy = [m for m in chosen if m not in crashed_before] if crashed_before else []
+            reason = ("healthy_same_or_stronger_after_crash" if healthy and crashed_before
+                      else "retry_crashed_reviewer" if crashed_before
+                      else "least_loaded")
+            events.emit("task.pr_review_selected", task=tid, pr=number,
+                        round=round_n, reviewers=chosen,
+                        crashed_before=sorted(crashed_before), reason=reason)
             if len(chosen) < config.PR_REVIEWERS_WANTED:
                 # The roster cannot field PR_REVIEWERS cross-family readers for
                 # this implementer — the two-model fleet of 2026-09-12 has two
@@ -2204,6 +2248,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             follow_ups = _collect_follow_ups(outcomes)
             prior_incon = (prior_r or {}).get("inconclusive_n", 0)
             inconclusive_n = prior_incon + 1 if inconclusive else prior_incon
+            crashed_models = sorted(set(prior_r.get("crashed_models") or [])
+                                    | set(crashed)) if inconclusive else []
             events.emit("task.pr_reviewed", task=tid, pr=number, round=round_n,
                         approved=approved, approvals=approvals,
                         reviewers=chosen, n_issues=len(issues),
@@ -2264,6 +2310,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     "follow_ups": follow_ups,
                     "approvals": approvals, "reviewers": chosen,
                     "crashed": crashed, "inconclusive": inconclusive,
+                    "crashed_models": crashed_models,
                     "inconclusive_n": inconclusive_n,
                     "pr": number, "round": round_n}
 
