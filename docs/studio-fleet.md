@@ -567,6 +567,10 @@ The Studio view has five sub-views per project:
 
 Every task shows its gauntlet trail: fix rounds, gate ✓/✗, critic ✓/✗, PR rounds, escalations and the manual decision.
 
+### Roadmap autopilot
+
+With `ARC_STUDIO_AUTOPILOT=1` the dashboard thread (`studio/autopilot.py`) fills idle implementer seats from the current phase only. It reads each studio project's phase and the game repo's `studio_roadmap.json`. A current-phase feature that no taskfile names is planned **one at a time** by the studio planner, into a stable taskfile (`studio-<project>-<feature>.json`) that is never overwritten. A cross-process claim protects planning; the generated file is checked for the selected feature and phase before it is published and queued. The planner seat check includes the harness cap and known spent usage windows. The run is enqueued on the captain queue (`main.py code run`), so verify, cross-family review, and the pull request still gate the merge. A future phase is not planned, and an existing taskfile for a later phase is not launched, before `studio promote`. An existing current-phase taskfile that has not finished is queued as a fresh run, or resumed within a fixed limit if its process died; a `run.stopped` event newer than the last dispatch (operator Stop or Ctrl-C) is left stopped, a task that exhausted escalation is left stopped, and a failed plan backs off instead of retrying every pass. Decisions are `studio.autopilot.plan`, `.queue`, `.dispatch`, and `.stop` events plus a board note. The deployment unit opts in; a dashboard without the variable does not.
+
 ### Manual PR review: your own agents as the last word
 
 You can put an agent you drive by hand on any PR, for example Gemini in the Antigravity IDE or Cursor. With `ARC_PR_MANUAL_REVIEW=1`, a PR the fleet's reviewers approved is **not merged** until someone labels it on GitHub:
@@ -609,6 +613,7 @@ Every route acts only on values the server listed: projects, builds, sessions, f
 | `ARC_FLEET` | local | `local` or `studio`; fatal on any other value |
 | `ARC_EXTERNAL_CONTEXT` | 262144 | context budget declared for OpenRouter-served models (the 64k `ARC_OPENCODE_CONTEXT` exists for an ARC pathology those models do not share) |
 | `ARC_STUDIO_DIR` | `logs/studio` | renders, verdicts, phase state, fuzz reports, spend ledger |
+| `ARC_STUDIO_AUTOPILOT` | (off) | `1` plans one current-phase roadmap feature at a time and enqueues its governed code run when a planner seat and an implementer seat are free |
 | `ARC_EVIDENCE` | required | visual evidence after every Godot gate (AGENTS.md Rule 7d): `required` fails a gate whose project will not render, `best-effort` only warns, `off` disables |
 | `ARC_EVIDENCE_DIR` | `logs/evidence` | captures: `<project>/<task>/x<attempt>/` plus `<project>/baseline/<sha>/` |
 | `ARC_EVIDENCE_BRANCH` | arc-evidence | orphan branch in the GAME repo that PR comments link images and videos from |
