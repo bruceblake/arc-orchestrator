@@ -184,6 +184,14 @@ CREATE TABLE IF NOT EXISTS plan_proposals(
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_plan_proposals_taskfile ON plan_proposals(taskfile);
+-- The task dossier (dossier.py): durable per-task handoff context.
+CREATE TABLE IF NOT EXISTS task_dossier(
+  project TEXT NOT NULL,
+  task TEXT NOT NULL,
+  updated_at REAL NOT NULL,
+  data TEXT NOT NULL,
+  PRIMARY KEY (project, task)
+);
 """
 
 

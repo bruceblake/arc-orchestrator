@@ -178,6 +178,8 @@ def cmd_code(args):
     if args.code_cmd == "list":
         cmd_code_list(args)
         return
+    if args.code_cmd == "context":
+        sys.exit(cmd_code_context(args))
 
     async def run():
         if args.code_cmd == "plan":
@@ -443,6 +445,26 @@ def cmd_code_dream(args):
         print(f"    {name:18s} {score:8.4f}{mark}")
     print(f"  selected policy: {result.selected}")
     print(f"  report: {path}")
+
+
+def cmd_code_context(args):
+    """Print a task's dossier (context OUT); --note injects context IN."""
+    import dossier
+    if args.db:
+        config.DB_PATH = args.db
+    if args.taskfile:
+        from code_tasks import load_taskfile
+        project = Path(load_taskfile(args.taskfile)["repo"]).name
+    else:
+        project = dossier.find_project(args.task)
+    if not project:
+        print(f"no dossier for task {args.task!r} (pass --taskfile)",
+              file=sys.stderr)
+        return 1
+    if args.note:
+        dossier.import_notes(project, args.task, args.note, args.author)
+    print(dossier.export(project, args.task, "json" if args.json else "md"))
+    return 0
 
 
 def cmd_code_list(args):
@@ -878,6 +900,16 @@ def main():
                       help="reconcile even while a code-run process is alive")
     crec.add_argument("--db", default=None, help="sqlite database path")
     crec.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    cx_p = code_sub.add_parser(
+        "context", help="print a task's durable dossier (handoff context)")
+    cx_p.add_argument("task", help="task id")
+    cx_p.add_argument("--taskfile", default=None,
+                      help="taskfile the task belongs to (default: newest dossier for the id)")
+    cx_p.add_argument("--json", action="store_true", help="emit the raw dossier JSON")
+    cx_p.add_argument("--note", default=None,
+                      help="inject an operator/captain note before printing")
+    cx_p.add_argument("--author", default="operator", help="author of --note")
+    cx_p.add_argument("--db", default=None, help="sqlite database path")
     cl_p = code_sub.add_parser("list", help="list every task file in the tasks dir")
     cl_p.add_argument("--json", action="store_true",
                       help="emit the same data as JSON instead of a table")
