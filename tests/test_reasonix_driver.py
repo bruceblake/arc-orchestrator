@@ -212,3 +212,15 @@ class Activity(unittest.TestCase):
         tail = drivers.activity_tail(STREAM, n=8)
         self.assertIn("tool_dispatch:read_file", tail)
         self.assertEqual(tail[-1], "result")
+
+
+class DeepSeekSeats(unittest.TestCase):
+    def test_all_ten_deepseek_sessions_are_usable(self):
+        """Operator directive 2026-09-24: the account's 10 DeepSeek sessions all run."""
+        import os
+        from unittest import mock
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in ("ARC_HARNESS_LIMIT_REASONIX", "ARC_DRIVER_LIMIT_DEEPSEEK"):
+                os.environ.pop(k, None)
+            self.assertEqual(config.harness_limit("reasonix"), 10)
+            self.assertEqual(config._SESSIONS_PER_PROCESS["reasonix"], 1)
