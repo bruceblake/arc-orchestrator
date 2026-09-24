@@ -2,7 +2,7 @@
 
 This package is what `ARC_FLEET=studio` is for. It adds a game-development
 workload on top of the orchestrator core the same way `code_tasks.py`,
-`work.py` and `build_work.py` do — it does NOT replace or fork any of it.
+`work.py` does — it does NOT replace or fork any of it.
 
 What lives here (and only here):
 

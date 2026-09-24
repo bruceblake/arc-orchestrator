@@ -10,6 +10,7 @@ ExecStart=/home/proxyie/arc-orchestrator/.venv/bin/python main.py serve
 Restart=always
 RestartSec=15
 Environment=PYTHONUNBUFFERED=1
+Environment=ARC_FLEET=studio
 
 [Install]
 WantedBy=default.target

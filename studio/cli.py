@@ -115,26 +115,25 @@ def cmd_status(args):
     return 0
 
 
-def _measure_first(repo, project=None):
-    """Refresh every piece of evidence a gate reads, on the repo's main.
-
-    Measurements, the scripted playtest and (from phase 3) the perf probe all
-    write gitignored reports into the game repo, so on main nothing produces
-    them unless the gate command does. Each failure is printed and left for
-    the gate to report as a failure — a broken measurer is a finding, not a
-    reason to skip the gate.
-    """
+def _measure_first(repo, project=None, phase=None):
+    """Refresh gate evidence on main; failed refreshes cannot use stale reports."""
     from studio.engine import godot, stage_manager
     from studio.schemas.task import phase_index
+    needs_perf = bool(project and phase_index(phase or stage_manager.current_phase(project)) >= 3)
+    needs_engine = (needs_perf or (Path(repo) / godot.MEASURER).exists()
+                    or (Path(repo) / godot.PLAYTEST).exists())
     if not godot.available():
-        print("  (godot not installed: gating on the last recorded evidence)")
-        return
+        if needs_engine:
+            print("  godot not installed: cannot refresh gate evidence")
+        return not needs_engine
+    fresh = True
     try:
         m = godot.measure(repo)
         if m is not None:
-            print(f"  measured {len(m)} dimension(s)")
-    except godot.GodotError as exc:
+            print(f"  measured {len(m)} dimension(s) on {repo}")
+    except (godot.GodotError, ValueError) as exc:
         print(f"  measurer FAILED — {str(exc).splitlines()[0]}")
+        fresh = False
     try:
         rep = godot.playtest(repo)
         if rep is not None:
@@ -143,20 +142,28 @@ def _measure_first(repo, project=None):
             print(f"  playtest: {ok}/{len(checks)} checks passed")
     except (godot.GodotError, ValueError) as exc:
         print(f"  playtest FAILED — {str(exc).splitlines()[0]}")
-    if project and phase_index(stage_manager.current_phase(project)) >= 3:
+        fresh = False
+    if needs_perf:
         try:
             rep = godot.perf(repo)
-            if rep is not None:
+            if rep is None:
+                print("  perf FAILED — tools/perf.gd is missing")
+                fresh = False
+            else:
                 print(f"  perf: {rep.get('fps_p5', rep.get('fps_avg'))} fps p5, "
                       f"{rep.get('shadow_lights')} shadow light(s)")
         except (godot.GodotError, ValueError) as exc:
             print(f"  perf FAILED — {str(exc).splitlines()[0]}")
+            fresh = False
+    return fresh
 
 
 def cmd_gate(args):
     from studio.engine import stage_manager
     repo = str(Path(args.repo).expanduser())
-    _measure_first(repo, args.project)
+    if not _measure_first(repo, args.project, args.phase):
+        print("phase gate failed: fresh evidence could not be obtained")
+        return 1
     result = stage_manager.check(args.project, repo, args.phase)
     print(f"phase {result['phase']}: {'PASS' if result['passed'] else 'FAIL'}")
     for f in result["failures"]:
@@ -166,7 +173,9 @@ def cmd_gate(args):
 
 def cmd_promote(args):
     from studio.engine import stage_manager
-    _measure_first(str(Path(args.repo).expanduser()), args.project)
+    if not _measure_first(str(Path(args.repo).expanduser()), args.project):
+        print("not promoted: fresh evidence could not be obtained")
+        return 1
     result = stage_manager.promote(args.project, str(Path(args.repo).expanduser()),
                                    force=args.force, reason=args.reason or "")
     if result["promoted"]:

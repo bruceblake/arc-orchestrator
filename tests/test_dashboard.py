@@ -973,6 +973,65 @@ class TheServerKnowsWhenItIsStale(unittest.TestCase):
         self.assertIn("served_head", h)
 
 
+class GracefulRestart(unittest.TestCase):
+    """Graceful restart endpoint /api/restart and re-exec behaviour."""
+
+    def setUp(self):
+        self._orig_reexec = dashboard._reexec_fn
+        self._orig_restarting = dashboard._restarting
+        self._orig_registry = dict(dashboard._launch_registry)
+        self.reexec_called = []
+        dashboard._reexec_fn = lambda: self.reexec_called.append(True)
+        dashboard._restarting = False
+        dashboard._launch_registry.clear()
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if dashboard._restart_timer:
+            try:
+                dashboard._restart_timer.cancel()
+            except Exception:
+                pass
+        dashboard._reexec_fn = self._orig_reexec
+        dashboard._restarting = self._orig_restarting
+        dashboard._launch_registry.clear()
+        dashboard._launch_registry.update(self._orig_registry)
+
+    def test_restart_rejects_non_dict_body(self):
+        resp, code = dashboard._restart("not a dict")
+        self.assertEqual(code, 400)
+        self.assertIn("error", resp)
+
+    def test_restart_triggers_reexec_timer(self):
+        resp, code = dashboard._restart({"force": False})
+        self.assertEqual(code, 200)
+        self.assertEqual(resp["status"], "restarting")
+        self.assertTrue(dashboard._restarting)
+
+    def test_restart_is_idempotent_when_already_restarting(self):
+        dashboard._restarting = True
+        resp, code = dashboard._restart({"force": False})
+        self.assertEqual(code, 200)
+        self.assertEqual(resp["status"], "already_restarting")
+
+    def test_restart_blocks_when_interactive_session_active(self):
+        dashboard._launch_registry["chat:sess-1"] = {"kind": "chat", "pid": 9999999}
+        orig_prune = dashboard._prune_registry
+        dashboard._prune_registry = lambda: None
+        try:
+            resp, code = dashboard._restart({"force": False})
+            self.assertEqual(code, 409)
+            self.assertTrue(resp.get("active"))
+            self.assertFalse(dashboard._restarting)
+
+            resp_force, code_force = dashboard._restart({"force": True})
+            self.assertEqual(code_force, 200)
+            self.assertEqual(resp_force["status"], "restarting")
+            self.assertTrue(dashboard._restarting)
+        finally:
+            dashboard._prune_registry = orig_prune
+
+
 class RetryActuallyRuns(unittest.TestCase):
     """Resetting a task to `pending` is not a retry unless something runs it.
 

@@ -311,6 +311,16 @@ async def diff_stat(wt):
     return "\n".join(parts) or "(clean)"
 
 
+# Paths `git add -A` must never stage, in publish() and in the review diff's
+# intent-to-add. The two .arc files are orchestrator<->agent channels; the
+# harness state dirs are written by the harnesses themselves inside the
+# worktree (reasonix keeps .reasonix/tasks/<run>/events.jsonl, snapshot.json
+# and a task.lock there). Thirty-three .reasonix files reached main this way
+# before this list existed, and a fleet PR carried three more.
+NEVER_STAGE = (":!.arc/plan_proposals.jsonl", ":!.arc/board.jsonl",
+               ":!.reasonix")
+
+
 async def diff_full(wt, base, max_chars=24000):
     """Working-tree diff vs the point this task branched from; untracked included.
 
@@ -324,7 +334,7 @@ async def diff_full(wt, base, max_chars=24000):
     """
     # Same `.arc` exclusion as publish(): a surviving proposals file must not
     # leak into the diff reviewers read either.
-    await _git(["add", "-A", "-N", "--", ".", ":!.arc/plan_proposals.jsonl"],
+    await _git(["add", "-A", "-N", "--", ".", *NEVER_STAGE],
                cwd=wt, check=False)  # intent-to-add
     rc, mb, _ = await _git(["merge-base", base, "HEAD"], cwd=wt, check=False)
     ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
@@ -345,7 +355,13 @@ async def publish(wt, message, trailers=None):
     # suspenders for the day a delete fails (plan.amend.channel_survives
     # events are the alarm). Verified against git 2.54: the exclusion leaves
     # the file unstaged even when present.
-    await _git(["add", "-A", "--", ".", ":!.arc/plan_proposals.jsonl"], cwd=wt)
+    await _git(["add", "-A", "--", ".", *NEVER_STAGE], cwd=wt)
+    # The board is excluded on purpose and is left in the worktree. If it is
+    # the only dirty path, commit would exit 1 with "nothing added to commit"
+    # and a resume that only posted to the board would fail publish.
+    _, staged, _ = await _git(["diff", "--cached", "--name-only"], cwd=wt, check=False)
+    if not staged.strip():
+        return None
     args = ["commit", "-q", "-m", message]
     if trailers:
         args += ["-m", "\n".join(f"{k}: {v}" for k, v in trailers.items())]
@@ -652,18 +668,55 @@ async def sync_with_base(wt, base=None, keep_conflicts=False):
                               if conflicts else f"merge failed: {err.strip()[:200]}")
 
 
+# Network weather, not a verdict on the work. One of these on a push used to
+# mark a finished, reviewed task FAILED on the first attempt — and a failed
+# row blocks every project chained after it (Rule 9): interactables-framework
+# died that way on "unable to access 'https://github.com/...'" (2026-09-23),
+# and the multiplayer batch waiting on it stopped with it.
+_TRANSIENT_NET = ("unable to access", "could not resolve host", "connection timed out",
+                  "connection reset", "operation timed out", "timed out after",
+                  "early eof", "rpc failed", "ssl", "tls", "temporary failure",
+                  "failed to connect", "http 502", "http 503", "http 504",
+                  "the remote end hung up", "connection refused", "error connecting")
+
+
+def is_transient_network_error(text):
+    low = (text or "").lower()
+    return any(m in low for m in _TRANSIENT_NET)
+
+
+async def _retry_transient(label, attempt_fn):
+    """Run attempt_fn() -> (ok, note); retry network failures with backoff.
+
+    A real refusal (a stale lease, auth, "no commits between") is returned
+    at once: retrying it only delays the same answer."""
+    ok, note = await attempt_fn()
+    for i, delay in enumerate(config.NET_RETRY_DELAYS):
+        if ok or not is_transient_network_error(note):
+            break
+        events.emit("git.retry", op=label, attempt=i + 2, wait_s=delay,
+                    error=(note or "")[:200])
+        await asyncio.sleep(delay)
+        ok, note = await attempt_fn()
+    return ok, note
+
+
 async def push_task_branch(repo, task_id):
     """Push task/<id> to origin. Returns (ok, note)."""
     repo = Path(repo).resolve()
     rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
     if not remotes.strip():
         return False, "no git remote configured"
-    try:
-        await _git(["push", "-u", "--force-with-lease", "origin",
-                    f"task/{task_id}"], cwd=repo)
-    except GitError as exc:
-        return False, f"push failed: {exc}"[:200]
-    return True, "pushed"
+
+    async def once():
+        try:
+            await _git(["push", "-u", "--force-with-lease", "origin",
+                        f"task/{task_id}"], cwd=repo)
+        except GitError as exc:
+            return False, f"push failed: {exc}"[:400]
+        return True, "pushed"
+    ok, note = await _retry_transient(f"push task/{task_id}", once)
+    return ok, note[:200]
 
 
 async def open_pr(repo, task_id, title, body, base=None):
@@ -680,11 +733,18 @@ async def open_pr(repo, task_id, title, body, base=None):
             existing = []
         if existing:
             return existing[0]["number"], existing[0]["url"], "already open"
-    rc, out, err = await _gh(
-        ["pr", "create", "--base", base, "--head", branch,
-         "--title", title, "--body", body], cwd=repo)
-    if rc != 0:
-        return None, None, f"gh pr create failed: {err.strip()[:200]}"
+    created = {}
+
+    async def once():
+        rc, out, err = await _gh(
+            ["pr", "create", "--base", base, "--head", branch,
+             "--title", title, "--body", body], cwd=repo)
+        created["out"] = out
+        return rc == 0, err.strip()
+    ok, err = await _retry_transient(f"pr create {branch}", once)
+    if not ok:
+        return None, None, f"gh pr create failed: {err[:200]}"
+    out = created.get("out") or ""
     url = out.strip().splitlines()[-1] if out.strip() else ""
     number = None
     m = re.search(r"/pull/(\d+)", url)

@@ -18,9 +18,11 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import board
 import config
 import errors
 import events
+import evidence
 import gitstore
 import graft
 import drivers
@@ -56,6 +58,10 @@ RETIRED_MODELS = {
     "Union-Alpha":       lambda: next((m for m in config.ESCALATION_PATH
                                        if m in config.IMPLEMENT_TIERS.get("medium", ())),
                                       config.ESCALATION_PATH[0]),
+    # Former hard-tier Studio subscription harnesses. Keep existing taskfiles
+    # runnable after the active Studio profile moved to Claude and Codex.
+    "Cursor-Grok-4.7":   lambda: config.ESCALATION_PATH[-1],
+    "Antigravity-Gemini": lambda: config.ESCALATION_PATH[-1],
 }
 
 
@@ -520,7 +526,7 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
-def _impl_prompt(t, feedback, hints="", roster=None):
+def _impl_prompt(t, feedback, hints="", roster=None, board=""):
     """The implementer's whole world: the task, where its code is, the rules.
 
     `hints` is graft.hints_block output — the file:line spans the code graph
@@ -573,6 +579,8 @@ def _impl_prompt(t, feedback, hints="", roster=None):
     )
     if feedback:
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"
+    if board:
+        p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
     return p
@@ -852,30 +860,55 @@ def _gate_full_list_block(lines):
     return _GATE_FULL_LIST_HEADER + "\n" + "\n".join(lines)
 
 
-def _resume_session(results, tid, model):
+def _resume_session(results, tid, model, harness=None):
     """The harness session to continue for this fix round, or None.
 
-    A rework is the SAME model mending the SAME worktree it just wrote, fed
-    the gate/review feedback: continuing its harness session keeps the
-    context it already paid for. Re-reading the repo is the dominant cost of
-    a hard task (measured 60–85 min before the first edit on GLM-5.3), and
-    every fix round re-paid it in full. A tier change starts fresh — the
-    escalating model has no stake in another model's session, and its
-    harness may not even read the previous harness's session files. A run
-    restart also starts fresh (the graph context is new and alloc may have
-    reset the branch), because there is no previous attempt in `results`.
+    A rework continues only when the SAME model on the SAME harness is
+    mending the worktree it just wrote. A session id is a file in that
+    harness's own store (a Codex rollout, a Cursor chat). Handing a Cursor
+    chat id to `codex exec resume` exits immediately with "no rollout found"
+    and burns the retry ladder. A usage swap records the harness that
+    actually ran; a mismatch starts fresh and the shared board carries what
+    the other harness did. A recorded session with no harness cannot be
+    proven to belong to this one, so it is not resumed either.
     """
     prev = (results or {}).get(f"implement_{tid}") or {}
-    if prev.get("model") == model and prev.get("session_id"):
-        # Both live drivers map a truthy session id to `-c` = "continue the
-        # newest session in the workspace", discarding the actual id — safe
-        # here because the only other writer (the reviewer) is always the
-        # OTHER harness with a session store the implementer's harness
-        # cannot read. A bench policy that puts implementer and reviewer on
-        # the same harness in one worktree (e.g. kimi-via-opencode) must NOT
-        # reuse sessions — the implementer would resume the reviewer's.
-        return prev["session_id"]
-    return None
+    if prev.get("model") != model or not prev.get("session_id"):
+        return None
+    prev_h = prev.get("harness")
+    if harness:
+        if not prev_h or prev_h != harness:
+            return None
+    return prev["session_id"]
+
+
+def wrote_the_code(ctx, tid, assigned, store=None):
+    """The model whose diff the reviewers must not share a family with.
+
+    cur_model is the assigned seat. A spent plan can move the attempt onto
+    another harness, and implement() records that model on its result. A
+    resume that starts at publish has no implement result in the graph, so
+    the last successful implementer row in harness_runs is the same fact.
+    Falling back to the assigned seat is only for a run that never recorded
+    one.
+    """
+    ran = ((ctx or {}).get("results", {}).get(f"implement_{tid}") or {}).get("model")
+    if ran in config.MODEL_FAMILY:
+        return ran
+    if store is not None:
+        try:
+            rows = store.harness_runs_prefix(tid)
+        except Exception:
+            rows = []
+        # harness_runs_prefix is a LIKE prefix, so "t1" also returns "t10".
+        # Only this task's own rows count.
+        wrote = [r for r in rows
+                 if r.get("task_id") == tid
+                 and r.get("role") == "implementer" and r.get("exit_code") == 0
+                 and r.get("model") in config.MODEL_FAMILY]
+        if wrote:
+            return wrote[-1]["model"]
+    return assigned
 
 
 def _rework_feedback(tid, results):
@@ -992,7 +1025,7 @@ def _scope_lock_prose(flag):
     )
 
 
-def _review_prompt(t, diff, impact="", roster=None):
+def _review_prompt(t, diff, impact="", roster=None, board=""):
     p = (
         f"You are reviewing an implementation produced by another AI agent.\n\n"
         f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
@@ -1005,6 +1038,8 @@ def _review_prompt(t, diff, impact="", roster=None):
     if config.REQUIRE_TESTS:
         p += ("A code change MUST come with tests that would FAIL without it. "
               "Documentation-only changes are exempt.\n")
+    if board:
+        p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
     p += "\n" + _scope_lock_prose("pass")
@@ -1076,7 +1111,7 @@ def _parse_verdict(text):
 
 
 def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
-                      roster=None):
+                      roster=None, board=""):
     """Prompt for a reviewer reading a real pull request.
 
     Deliberately different from the pre-PR review: this reviewer can BLOCK the
@@ -1112,6 +1147,8 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
           "Review independently: do not assume another reviewer checked "
           "something. Be specific — name the file and line, say what is wrong "
           "and what would fix it. Vague objections waste a whole round.\n\n")
+    if board:
+        p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
     p += _scope_lock_prose("approve")
@@ -1257,6 +1294,7 @@ def _amendment_validator(taskfile, pol):
 def build_code_graph(store, taskset, taskfile="", policy=None):
     repo = taskset["repo"]
     tasks = taskset["tasks"]
+    project_slug = Path(repo).name
     pol = policy if policy is not None else taskset.get("policy") or None
     mfr = (pol or {}).get("max_fix_rounds", config.MAX_FIX_ROUNDS)
     review_on = (pol or {}).get("review", True)
@@ -1574,10 +1612,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # this as `-c` (continue the newest session in the workspace, and
             # the worktree is per-task): drivers.py argv treats a truthy
             # session_id as exactly that flag.
-            resume = _resume_session(results, tid, model)
+            resume = _resume_session(results, tid, model, driver.harness)
+            thread = board.prompt_block(wt, project=project_slug, task=tid)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback, hints, roster), wt,
+                    _impl_prompt(t, feedback, hints, roster, thread), wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
                     avoid_families={reviewer_for(t, model)})
             except DriverError as exc:
@@ -1597,6 +1636,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             model=model, attempt=attempt,
                             error=str(exc)[:200], fingerprint=fp)
                 harvest_proposals(tid, wt, "implementer", model)
+                board.post(wt, task=tid, role="implementer", model=model,
+                           harness=driver.harness, kind="error",
+                           body=str(exc)[:400], project=project_slug)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
             # A spent plan window may have moved this attempt to another
@@ -1606,8 +1648,77 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, ran_harness, ran_model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
             harvest_proposals(tid, wt, "implementer", ran_model)
+            board.post(wt, task=tid, role="implementer", model=ran_model,
+                       harness=ran_harness, session_id=res.session_id,
+                       kind="result", body=(getattr(res, "text", "") or "")[:400],
+                       project=project_slug)
             return {"session_id": res.session_id, "harness": ran_harness,
                     "model": ran_model}
+
+        async def capture_evidence(wt, attempt):
+            """(manifest, gate_error). Rule 7d; see evidence.py.
+
+            A machine that cannot capture (no display/Godot/ffmpeg) never
+            fails the task. A project that will not render does, in the
+            default `required` mode. Anything else is a bug in the capture
+            itself: recorded with a fingerprint, never blamed on the task."""
+            from studio.engine import godot as _godot
+            out = evidence.run_dir(project_slug, tid, attempt)
+            try:
+                m = await asyncio.to_thread(evidence.capture, wt, out, repo=repo,
+                                            base=base, project=project_slug)
+            except evidence.EvidenceUnavailable as exc:
+                evidence.emit("unavailable", task=tid, reason=str(exc)[:300])
+                return None, None
+            except (evidence.EvidenceError, _godot.GodotError) as exc:
+                evidence.emit("failed", task=tid, attempt=attempt, error=str(exc)[:300])
+                if config.EVIDENCE_MODE == "required":
+                    return None, ("visual evidence: the project did not render "
+                                  f"for its screenshots/video:\n{str(exc)[:1500]}")
+                return None, None
+            except Exception as exc:                           # noqa: BLE001
+                fp = errors.capture(exc, task=tid, node=f"gate_{tid}")
+                evidence.emit("error", task=tid, error=str(exc)[:300], fingerprint=fp)
+                return None, None
+            m["attempt"] = attempt
+            evidence.emit("captured", task=tid, attempt=attempt,
+                          shots=len(m.get("shots") or []),
+                          videos=sorted(m.get("videos") or {}),
+                          warnings=len(m.get("warnings") or []), dir=str(out))
+            board.post(wt, task=tid, role="orchestrator", model="", harness="evidence",
+                       kind="evidence", body=evidence.board_body(m),
+                       project=project_slug)
+            return m, None
+
+        async def post_pr_evidence(ctx, number):
+            """Push this attempt's capture to the game repo's evidence branch
+            and comment it onto the PR. Never fails publish: a PR without its
+            evidence comment is still a PR, and the reviewers already had the
+            images attached."""
+            shown = gate_evidence(ctx)
+            if not shown or shown.get("posted_pr") == number:
+                return
+            try:
+                web = await asyncio.to_thread(evidence.publish, repo, project_slug,
+                                              tid, shown.get("attempt", 0), shown)
+                if not web:
+                    return
+                body = evidence.pr_markdown(shown, web, task_id=tid,
+                                            attempt=shown.get("attempt", 0))
+                rc, _out, err = await gitstore._gh(
+                    ["pr", "comment", str(number), "--body", body], cwd=repo)
+                if rc != 0:
+                    raise RuntimeError(f"gh pr comment: {err.strip()[:200]}")
+                shown["posted_pr"] = number
+                evidence.emit("posted", task=tid, pr=number, url=web)
+            except Exception as exc:                           # noqa: BLE001
+                fp = errors.capture(exc, task=tid, node=f"publish_{tid}")
+                evidence.emit("publish_failed", task=tid, pr=number,
+                              error=str(exc)[:300], fingerprint=fp)
+
+        def gate_evidence(ctx):
+            """The latest capture for this task in this graph run, or None."""
+            return (ctx.get("results", {}).get(f"gate_{tid}") or {}).get("evidence")
 
         async def gate(ctx):
             cmd = t["verify_cmd"]
@@ -1697,8 +1808,18 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 else:
                     store.set_code_task_verdict(taskfile, tid, verdict)
                     events.emit("task.verdict", task=tid, attempt=attempt, verdict=verdict)
+            shown = None
+            if passed and evidence.enabled_for(wt, t):
+                # Rule 7d: a game change is SEEN before anyone judges it. A
+                # project that will not render fails the gate like a test.
+                shown, eerr = await capture_evidence(wt, attempt)
+                if eerr:
+                    passed = False
+                    output = (eerr + "\n...\n" + output)[-2400:]
+                    events.emit("task.gate", task=tid, attempt=attempt, passed=False,
+                                log=log_path, cmd="visual evidence", tail=eerr[-400:])
             return {"passed": passed, "output": output, "log_path": log_path,
-                    "verdict": verdict}
+                    "verdict": verdict, "evidence": shown}
 
         async def review(ctx):
             if not review_on:
@@ -1708,12 +1829,21 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             wt = await worktree(ctx)
             diff = await gitstore.diff_full(wt, base)
             impact = await graft.blast(wt, task=tid)   # uncommitted: tree vs HEAD
-            rev_tok = reviewer_for(t, cur_model(ctx))
+            rev_tok = reviewer_for(t, wrote_the_code(
+                ctx, tid, cur_model(ctx), store))
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
+            shown = gate_evidence(ctx)
+            if shown:
+                driver.images = evidence.review_images(shown)
             try:
-                res = await driver.run(_review_prompt(t, diff, impact, roster), wt,
-                                       task_id=f"{tid}-x{attempt}")
+                res = await driver.run(
+                    _review_prompt(t, diff, impact, roster,
+                                   board.prompt_block(wt, project=project_slug, task=tid)
+                                   + evidence.prompt_block(shown)),
+                    wt, task_id=f"{tid}-x{attempt}",
+                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
+                        ctx, tid, cur_model(ctx), store)]})
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1753,6 +1883,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             error="review ended without a parseable verdict")
                 return {"pass": False, "crashed": True,
                         "issues": ["reviewer session ended without a verdict"]}
+            issues = verdict.get("issues") or []
+            board.post(wt, task=tid, role="reviewer", model=driver.model,
+                       harness=driver.harness, kind="note",
+                       body=("pass" if verdict.get("pass") else
+                             "reject: " + "; ".join(str(i) for i in issues)[:300]),
+                       project=project_slug)
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
                         reviewer=rev_tok,
                         # The reviewer's MODEL, not just its family token: the
@@ -1940,6 +2076,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    "in_review", branch=f"task/{tid}")
             events.emit("task.pr_opened", task=tid, url=url, number=number,
                         head=fresh_head, note=note)
+            await post_pr_evidence(ctx, number)
             return {"published": True, "pr": number, "url": url, "head": fresh_head}
 
         async def pr_fanout(ctx):
@@ -1965,7 +2102,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             diff = await gitstore.pr_diff(repo, number)
             # Reviewers differ from the implementer's family AND from each
             # other, so two approvals mean two genuinely separate readings.
-            impl_fam = config.MODEL_FAMILY.get(cur_model(ctx))
+            impl_fam = config.MODEL_FAMILY.get(
+                wrote_the_code(ctx, tid, cur_model(ctx), store))
             pool = _eligible_pr_reviewers(impl_fam, pol)
             # Least-contended first; contention is whichever ceiling binds
             # first, the model's own cap or its harness's (_reviewer_pressure).
@@ -2015,10 +2153,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 drv = _driver(model, "pr_reviewer", pol)
                 wt = await worktree(ctx)
                 impact = await graft.blast(wt, base, task=tid)
+                shown = gate_evidence(ctx)
+                if shown:
+                    drv.images = evidence.review_images(shown)
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
-                                      it["prior_issues"], impact, roster),
-                    wt, task_id=f"{tid}-pr{it['round']}")
+                                      it["prior_issues"], impact, roster,
+                                      board.prompt_block(wt, project=project_slug, task=tid)
+                                      + evidence.prompt_block(shown)),
+                    wt, task_id=f"{tid}-pr{it['round']}",
+                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
+                        ctx, tid, cur_model(ctx), store)]})
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather

@@ -399,7 +399,6 @@ SESSION_RETRIES = int(os.getenv("ARC_SESSION_RETRIES", "24"))
 SESSION_BACKOFF_CAP = float(os.getenv("ARC_SESSION_BACKOFF_CAP", "60"))
 
 EVENTS_LOG = os.getenv("ARC_EVENTS_LOG") or str(ROOT / "logs" / "events.jsonl")
-BUILD_OUTPUT_DIR = os.getenv("ARC_BUILD_OUTPUT_DIR") or str(ROOT / "production" / "minecraft")
 DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
 # --- dashboard exposure -----------------------------------------------------
 # The dashboard listens on every interface so a phone on the same wifi can
@@ -417,8 +416,6 @@ DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
 # glanced at from a phone without a login step.
 DASHBOARD_BIND = os.getenv("ARC_DASHBOARD_BIND", "0.0.0.0")
 DASHBOARD_TOKEN = os.getenv("ARC_DASHBOARD_TOKEN", "")
-MAX_MODULE_RETRIES = int(os.getenv("ARC_MAX_MODULE_RETRIES", "6"))
-MAX_INTEGRATION_ROUNDS = int(os.getenv("ARC_MAX_INTEGRATION_ROUNDS", "6"))
 REVIEW_PASS_SCORE = float(os.getenv("ARC_REVIEW_PASS_SCORE", "6.5"))
 
 
@@ -722,6 +719,11 @@ OPENCODE_SERVE_STARTUP_TIMEOUT = float(
 # withdrawn model the morning after it left. GH_MODEL itself is resolved
 # below, once PLANNER_MODEL exists.
 GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "120"))
+# Backoff (seconds) for pushes and `gh pr create` that fail on network
+# weather (gitstore._TRANSIENT_NET). A real refusal (lease, auth, no commits)
+# is never retried. Comma-separated; empty disables retries.
+NET_RETRY_DELAYS = [float(x) for x in os.getenv(
+    "ARC_NET_RETRY_DELAYS", "5,15,45,90,180").split(",") if x.strip()]
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of
@@ -1564,6 +1566,34 @@ def max_tasks_in_flight():
 # archive inside the worktree would land in a pull request (Rule 5 publishes
 # with `git add -A`).
 STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
+# Visual evidence (evidence.py, AGENTS.md Rule 7d): after a Godot task's gate
+# passes, screenshots from the fixed anchor cameras, a flythrough video, the
+# scripted playtest recorded, and before/after comparisons against the
+# task's branch point. Reviewers see them; the PR gets them inline.
+#   required     a project that will not render fails the gate (default)
+#   best-effort  capture failures are warnings only
+#   off          no capture
+# A machine with no display, Godot or ffmpeg never fails a task: that is an
+# infrastructure gap, reported as evidence.unavailable.
+EVIDENCE_MODE = os.getenv("ARC_EVIDENCE", "required").strip().lower()
+if EVIDENCE_MODE not in ("required", "best-effort", "off"):
+    raise SystemExit(f"ARC_EVIDENCE={EVIDENCE_MODE!r}: expected required, best-effort or off")
+EVIDENCE_DIR = Path(os.getenv("ARC_EVIDENCE_DIR") or ROOT / "logs" / "evidence")
+# The orphan branch in the GAME repo that PR comments link images from.
+EVIDENCE_BRANCH = os.getenv("ARC_EVIDENCE_BRANCH", "arc-evidence")
+EVIDENCE_PUBLISH = os.getenv("ARC_EVIDENCE_PUBLISH", "1").lower() not in ("0", "false", "no", "")
+EVIDENCE_SECONDS = float(os.getenv("ARC_EVIDENCE_SECONDS", "10"))
+EVIDENCE_GIF_SECONDS = float(os.getenv("ARC_EVIDENCE_GIF_SECONDS", "8"))
+EVIDENCE_FPS = int(os.getenv("ARC_EVIDENCE_FPS", "30"))
+EVIDENCE_RESOLUTION = os.getenv("ARC_EVIDENCE_RESOLUTION", "1280x720")
+EVIDENCE_TIMEOUT = float(os.getenv("ARC_EVIDENCE_TIMEOUT", "600"))
+# A screenshot this dominated by one colour is flagged as a blank render.
+EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
+
+# Project-wide agent board (board.py). Per-task threads live in the worktree
+# at .arc/board.jsonl and are excluded from publish; this directory is the
+# copy every task in a project can read. Outside every worktree on purpose.
+BOARD_DIR = Path(os.getenv("ARC_BOARD_DIR") or ROOT / "logs" / "boards")
 
 # The spend ceiling, in USD, for one studio run. The local fleet never needed
 # one: ARC is campus-served and effectively free, so the only cost of a task

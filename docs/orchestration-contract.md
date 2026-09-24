@@ -92,6 +92,10 @@ DeepSeek-V4.1-Flash-thinking-max's roles are
 
 ```
 alloc → implement → gate ──pass──▶ review ──pass──▶ publish(merge + PR hook)
+                      │ (Godot project: + visual evidence, Rule 7d —
+                      │  screenshots, flythrough + playtest video,
+                      │  before/after vs the merge base; shown to both
+                      │  reviews and commented onto the PR)
          ▲            │                │
          └──── fail ◀─┴───── fail ◀────┘   (≤ MAX_FIX_ROUNDS fix rounds per tier)
          │
@@ -121,7 +125,12 @@ agent run — on the crash path too (a reviewer that died may still have
 written a proposal) — plus one sweep in publish before `git add -A`, so the
 channel file is deleted before it can ever be committed (and publish's
 `git add -A` pathspec-excludes `.arc/plan_proposals.jsonl` anyway — same for
-the review diff's intent-to-add). Each proposal is
+the review diff's intent-to-add). The same pathspec excludes
+`.arc/board.jsonl`, the shared agent board (`board.py`): one JSON line per
+handoff, result or review, kept in the worktree so the next harness can
+read it, and copied to `logs/boards/<project>.jsonl` (`ARC_BOARD_DIR`) so
+sibling tasks see it. A session id on a post resumes only on the harness
+that wrote it. Each proposal is
 validated by the same loader the taskfile came from and applied by an atomic
 rewrite; the freeze boundary is the task's `code_tasks` status (only
 unstarted or failed/skipped tasks mutate), and the in-flight DAG never

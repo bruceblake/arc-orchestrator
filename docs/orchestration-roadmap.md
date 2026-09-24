@@ -120,11 +120,12 @@ while it is executing.
   re-validated through the real loader, only tasks with no row (or a
   `failed`/`skipped` one) may be mutated, the in-flight DAG never rewires, and
   amendments take effect on resume.
-- **Cross-agent messaging does not exist today.** Agents are isolated per node:
-  each harness runs in its own worktree and sees only its own prompt, the repo,
-  and its own transcript. The only information paths between agents are the fix
-  loop's feedback edge (gate/review failure text appended to the next implement
-  prompt) and the plan-proposal channel.
+- **A shared board exists** (`board.py`, `.arc/board.jsonl` plus
+  `logs/boards/<project>.jsonl`). It carries handoffs, results and review
+  notes across harnesses, which is what a usage swap needs when the next
+  model cannot resume the previous session. It is not addressed mail and
+  it does not spawn tasks. The fix loop's feedback edge and the
+  plan-proposal channel are still the other two paths.
 
 **This item is the follow-on**, in two pieces:
 
@@ -422,8 +423,7 @@ planner, before they become task files.
   discovering them. Graft is already wired into the pipeline (`graft build` /
   `ask` for implementers, `blast` for reviewers, `map` for the planner —
   see README § "Code-graph context"); the open question is where else the same
-  treatment applies (the research workload, chat, `gh_ops`, the Minecraft
-  build workload).
+  treatment applies (the research workload, chat, and `gh_ops`).
 - **Per-model max-context enforcement matching the ARC API docs.** The
   operator's question: should every model's max context come from the ARC
   docs? Today only some context values are recorded (the 2026-09-15 docs read

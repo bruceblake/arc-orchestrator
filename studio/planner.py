@@ -173,6 +173,21 @@ not plan modelling an organic character from nothing.
 - COMPLEX FEATURES get a short design note (docs/design/<feature>.md) as their \
 own first task: research the genre's conventions, then the rules.
 - A feature from studio_roadmap.json is named on the task as "feature".
+- A REFERENCE IMAGE FOR EVERY VISUAL FEATURE. A visual task names the target \
+image(s) it must match (studio_refs/<feature>.png, or add a task that produces \
+them first). The one feature built without a target in the reference build \
+came out worst.
+- PARTITION BIG SCENES. Environment work is planned per region (cell block, \
+yard, mess hall, city block...), one sub-task each, then an assembly task: \
+one agent across a whole map produces sporadic quality.
+- EVERY CHANGE IS SEEN. After the gate, the orchestrator captures screenshots, \
+a flythrough and the playtest as video, and compares them with the branch \
+point; reviewers see them. Plan so each task's result is visible from the \
+fixed cameras or the playtest route, and extend the playtest when a task adds \
+something a player does.
+- ANIMATION IS JUDGED ON VIDEO: paired clips in sync, weapons stay attached, no \
+pop or teleport at clip start/end, hit reactions exist, attacks can be \
+interrupted. Plan the lab scene that shows each of these.
 """
 
 

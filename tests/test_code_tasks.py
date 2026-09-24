@@ -479,9 +479,24 @@ class AFixRoundContinuesTheHarnessSession(unittest.TestCase):
     """
 
     def test_same_model_continues(self):
+        results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3",
+                                    "harness": "opencode"}}
+        self.assertEqual(
+            code_tasks._resume_session(results, "t1", "GLM-5.3", "opencode"),
+            "s-1")
+
+    def test_other_harness_session_is_not_resumed(self):
+        # The live failure: GPT-6-Sol's fix round ran `codex exec resume` on
+        # a Cursor chat id and exited with "no rollout found".
+        results = {"implement_t1": {"session_id": "ffc0a77b", "model": "GPT-6-Sol",
+                                    "harness": "cursor"}}
+        self.assertIsNone(
+            code_tasks._resume_session(results, "t1", "GPT-6-Sol", "codex"))
+
+    def test_session_without_a_harness_is_not_resumed(self):
         results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3"}}
-        self.assertEqual(code_tasks._resume_session(results, "t1", "GLM-5.3"),
-                         "s-1")
+        self.assertIsNone(
+            code_tasks._resume_session(results, "t1", "GLM-5.3", "opencode"))
 
     def test_escalation_starts_fresh(self):
         results = {"implement_t1": {"session_id": "s-1", "model": "GLM-5.3"}}
@@ -497,6 +512,57 @@ class AFixRoundContinuesTheHarnessSession(unittest.TestCase):
     def test_first_attempt_and_missing_results_start_fresh(self):
         self.assertIsNone(code_tasks._resume_session({}, "t1", "GLM-5.3"))
         self.assertIsNone(code_tasks._resume_session(None, "t1", "GLM-5.3"))
+
+
+class ReviewsAvoidTheModelThatWroteTheDiff(unittest.TestCase):
+    """A usage swap records a different author than the assigned seat.
+
+    Reviews that avoid only the assigned family can land on the harness
+    that actually wrote the code.
+    """
+
+    def _pair(self):
+        models = list(config.MODEL_FAMILY)
+        self.assertGreaterEqual(len(models), 2)
+        return models[0], models[1]
+
+    def test_the_implement_result_wins_over_the_assigned_seat(self):
+        wrote, assigned = self._pair()
+        ctx = {"results": {"implement_t1": {"model": wrote}}}
+        self.assertEqual(code_tasks.wrote_the_code(ctx, "t1", assigned), wrote)
+
+    def test_a_resume_reads_the_last_successful_implementer_row(self):
+        wrote, assigned = self._pair()
+        class Store:
+            def harness_runs_prefix(self, tid):
+                self.tid = tid
+                return [
+                    {"task_id": tid, "role": "implementer", "exit_code": 1,
+                     "model": assigned},
+                    {"task_id": tid, "role": "implementer", "exit_code": 0,
+                     "model": wrote},
+                    {"task_id": tid, "role": "reviewer", "exit_code": 0,
+                     "model": assigned},
+                    {"task_id": tid + "0", "role": "implementer", "exit_code": 0,
+                     "model": assigned},
+                ]
+        store = Store()
+        self.assertEqual(
+            code_tasks.wrote_the_code({"results": {}}, "t1", assigned, store), wrote)
+        self.assertEqual(store.tid, "t1")
+
+    def test_without_a_record_the_assigned_seat_stands(self):
+        _wrote, assigned = self._pair()
+        self.assertEqual(
+            code_tasks.wrote_the_code({"results": {}}, "t1", assigned), assigned)
+
+    def test_review_nodes_ask_who_wrote_the_diff(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        for fn in ("async def review(ctx):", "async def pr_fanout(ctx):",
+                   "async def pr_reviewer(ctx):"):
+            body = src[src.index(fn):]
+            body = body[:body.index("\n        async def ")]
+            self.assertIn("wrote_the_code(", body, fn)
 
     def test_implement_passes_the_session_through(self):
         src = pathlib.Path(code_tasks.__file__).read_text()
@@ -1984,6 +2050,19 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
             self.assertIn(dest, config.IMPLEMENTER_MODELS,
                           f"{name} remaps to {dest!r}, which is not live")
 
+    def test_retired_studio_subscription_models_keep_hard_tier_and_cross_review(self):
+        for old in ("Cursor-Grok-4.7", "Antigravity-Gemini"):
+            with self.subTest(model=old):
+                target = code_tasks.RETIRED_MODELS[old]()
+                self.assertIn(target, config.IMPLEMENT_TIERS["hard"])
+                same_family = config.MODEL_FAMILY[target]
+                with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+                    ts = code_tasks.load_taskfile(taskfile([
+                        {**BASIC, "model": old, "reviewer": same_family}]))
+                task = ts["tasks"]["t1"]
+                self.assertEqual(task["model"], target)
+                self.assertNotEqual(task["reviewer"], same_family)
+
 
 class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
     """A retired model's task lands on a live tier; if that tier's family is
@@ -2109,7 +2188,41 @@ class PlanAmendmentWiring(unittest.TestCase):
         # delete suspenders.
         import gitstore
         src = pathlib.Path(gitstore.__file__).read_text()
-        self.assertEqual(src.count('":!.arc/plan_proposals.jsonl"'), 2)
+        for path in (".arc/plan_proposals.jsonl", ".arc/board.jsonl", ".reasonix"):
+            self.assertIn(":!" + path, gitstore.NEVER_STAGE)
+        self.assertEqual(src.count("*NEVER_STAGE"), 2,
+                         "publish and the review diff must both exclude them")
+
+    def test_publish_never_commits_harness_state(self):
+        """A real repo: .reasonix state beside a real change stays unstaged."""
+        import asyncio, subprocess, tempfile
+        import gitstore
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+            run = lambda *a: subprocess.run(["git", "-C", d, *a], env=env,
+                                            check=True, capture_output=True)
+            run("init", "-q", "-b", "main")
+            pathlib.Path(d, "a.txt").write_text("1")
+            run("add", "a.txt"); run("commit", "-qm", "init")
+            pathlib.Path(d, "a.txt").write_text("2")
+            state = pathlib.Path(d, ".reasonix", "tasks", "run-1")
+            state.mkdir(parents=True)
+            (state / "events.jsonl").write_text("{}")
+            old = {k: os.environ.get(k) for k in env}
+            os.environ.update(env)
+            try:
+                head = asyncio.run(gitstore.publish(d, "task(t): x"))
+            finally:
+                for k, v in old.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+            self.assertTrue(head)
+            files = subprocess.run(["git", "-C", d, "show", "--name-only", "--format=", head],
+                                   capture_output=True, text=True).stdout.split()
+            self.assertEqual(files, ["a.txt"])
 
     def test_implement_harvests_on_success_and_crash(self):
         body = self._slice("async def implement(ctx):", "async def gate(ctx):")
@@ -2155,3 +2268,48 @@ class PlanAmendmentWiring(unittest.TestCase):
         self.assertIn(plan_amend.PROPOSALS_REL, pr)
         self.assertNotIn(plan_amend.PROPOSALS_REL,
                          code_tasks._review_prompt(self._task(), "diff"))
+
+
+class TransientNetworkRetries(unittest.TestCase):
+    """A network blip on push must not fail a finished, reviewed task."""
+
+    def setUp(self):
+        self._old = config.NET_RETRY_DELAYS
+        config.NET_RETRY_DELAYS = [0, 0, 0]
+        self.addCleanup(setattr, config, "NET_RETRY_DELAYS", self._old)
+
+    def test_classifier(self):
+        import gitstore
+        self.assertTrue(gitstore.is_transient_network_error(
+            "fatal: unable to access 'https://github.com/o/r.git/': SSL connection timeout"))
+        self.assertTrue(gitstore.is_transient_network_error("Could not resolve host: github.com"))
+        self.assertFalse(gitstore.is_transient_network_error(
+            "! [rejected] task/t -> task/t (stale info)"))
+        self.assertFalse(gitstore.is_transient_network_error(
+            "GraphQL: No commits between main and task/t"))
+
+    def test_network_failures_retry_until_success(self):
+        import gitstore
+        calls = []
+
+        async def once():
+            calls.append(1)
+            if len(calls) < 3:
+                return False, "fatal: unable to access 'https://github.com/o/r.git/'"
+            return True, "pushed"
+        with capture_events() as ev:
+            ok, _note = asyncio.run(gitstore._retry_transient("push", once))
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(ev.of("git.retry")), 2)
+
+    def test_real_refusals_are_not_retried(self):
+        import gitstore
+        calls = []
+
+        async def once():
+            calls.append(1)
+            return False, "! [rejected] (stale info)"
+        ok, _ = asyncio.run(gitstore._retry_transient("push", once))
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)

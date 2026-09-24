@@ -23,6 +23,7 @@ import signal
 import socket
 import sqlite3
 import subprocess
+import threading
 import time
 from collections import OrderedDict
 from datetime import date as _date, datetime, timedelta
@@ -3550,6 +3551,82 @@ def _stale_source(now=None):
     return files
 
 
+_httpd = None
+_restarting = False
+
+
+def _graceful_reexec():
+    global _httpd, _restarting
+    log.info("Graceful restart requested (PID %d); closing server and re-executing...", os.getpid())
+    if _httpd:
+        try:
+            _httpd.server_close()
+        except Exception as exc:
+            log.warning("error closing httpd socket: %s", exc)
+    try:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        logging.shutdown()
+    except Exception:
+        pass
+    if sys.argv and sys.argv[0].endswith(".py"):
+        script = str(Path(sys.argv[0]).resolve())
+        args = [sys.executable, script] + sys.argv[1:]
+    else:
+        args = [sys.executable] + sys.argv
+    os.execv(sys.executable, args)
+
+
+_reexec_fn = _graceful_reexec
+_restart_timer = None
+
+
+def _restart(body):
+    """POST /api/restart — graceful restart of the dashboard server.
+
+    Re-execs this process in-place using os.execv so fresh bytecode and static
+    files from the latest git HEAD are loaded. Preserves PID, file descriptors
+    (logs/server.log), and environment.
+    """
+    global _restarting, _restart_timer
+    if not isinstance(body, dict):
+        return {"error": "JSON body required"}, 400
+    if _restarting:
+        return {"ok": True, "status": "already_restarting"}, 200
+    _prune_registry()
+    active_interactive = [
+        k for k, v in _launch_registry.items()
+        if v.get("kind") in ("chat", "captain", "plan")
+    ]
+    force = bool(body.get("force"))
+    if active_interactive and not force:
+        return {
+            "error": "An interactive turn is in progress (chat/captain/plan); pass force: true to restart anyway",
+            "active": True,
+            "sessions": active_interactive,
+        }, 409
+
+    _restarting = True
+
+    def _trigger():
+        if _httpd:
+            try:
+                _httpd.shutdown()
+            except Exception:
+                pass
+        elif _reexec_fn != _graceful_reexec:
+            _reexec_fn()
+
+    if _restart_timer:
+        try:
+            _restart_timer.cancel()
+        except Exception:
+            pass
+    _restart_timer = threading.Timer(0.3, _trigger)
+    _restart_timer.start()
+    return {"ok": True, "status": "restarting", "pid": os.getpid()}, 200
+
+
 _arc_cache = {"key": 0.0, "value": None}
 
 
@@ -3945,10 +4022,7 @@ def _graph_topology(g):
 def _build_graph_topologies():
     """The shape of the pipeline the fleet ACTUALLY runs, derived from the code.
 
-    This used to render two other workloads — the research round and the
-    Minecraft build — as static diagrams, on the one page an operator watches.
-    Neither had run in days, and the code-tasks pipeline that had run all day
-    was not depicted at all.
+    This renders the governed code-task pipeline from its graph definition.
 
     The topology is built from code_tasks.build_code_graph on a one-task
     synthetic taskfile and the per-task suffix stripped, so the diagram is
@@ -4210,10 +4284,8 @@ class Handler(BaseHTTPRequestHandler):
                     "ts": time.time(),
                     "research": st.stats(),
                     "critique_matrix": st.critique_matrix(),
-                    "build": st.build_stats(),
                     "limits": {f: config.family_limit(f) for f in config.FAMILY_ORDER},
                     "event_log": str(config.EVENTS_LOG),
-                    "build_dir": str(config.BUILD_OUTPUT_DIR),
                 })
             if u.path == "/api/events":
                 q = parse_qs(u.query)
@@ -4326,14 +4398,6 @@ class Handler(BaseHTTPRequestHandler):
                     _build_graph_topologies()["code"]))
             if u.path == "/api/graphs":
                 return self._json(_build_graph_topologies())
-            if u.path == "/api/code":
-                q = parse_qs(u.query)
-                rel = q.get("file", [""])[0]
-                root = Path(config.BUILD_OUTPUT_DIR).resolve()
-                target = (root / rel).resolve()
-                if not target.is_relative_to(root) or not target.is_file():
-                    return self._json({"error": "not found"}, 404)
-                return self._json({"file": rel, "code": target.read_text(encoding="utf-8", errors="replace")})
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
             pass
@@ -4446,6 +4510,9 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/projects/escalate-task":
                 obj, code = _escalate_task(body)
                 return self._json(obj, code)
+            if u.path == "/api/restart":
+                obj, code = _restart(body)
+                return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
             pass
@@ -4492,6 +4559,7 @@ def _lan_addresses():
 
 
 def serve(port=None, db_path=None):
+    global _httpd
     port = port or config.DASHBOARD_PORT
     db_path = db_path or config.DB_PATH
     Handler.store = Store(db_path)
@@ -4504,6 +4572,7 @@ def serve(port=None, db_path=None):
             print(f"just open http://localhost:{port} in a browser (or run ./stop.sh, then start it again).")
             raise SystemExit(1)
         raise
+    _httpd = httpd
     log.info("dashboard on http://%s:%d (db=%s, events=%s)", bind, port, db_path, config.EVENTS_LOG)
     # The daily audit runs from here. WSL has no working cron and sleeps when
     # idle; this server is the process that is awake when the operator is.
@@ -4527,5 +4596,9 @@ def serve(port=None, db_path=None):
               "start and stop fleet runs. See README: Who can reach the dashboard.", flush=True)
     try:
         httpd.serve_forever()
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, OSError):
         pass
+    finally:
+        _httpd = None
+    if _restarting:
+        _graceful_reexec()

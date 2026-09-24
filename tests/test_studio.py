@@ -206,14 +206,17 @@ print(json.dumps(out))
             "print(json.dumps({'fresh': d.argv('fix the door', None),\n"
             " 'resume': d.argv('fix the door', 'conv-9')}))")
         argv = json.loads(out)
-        fresh = " ".join(argv["fresh"])
-        self.assertIn("--print", fresh)
-        self.assertIn("stream-json", fresh)
+        fresh = argv["fresh"]
+        # `--print` consumes the next argument. Flags before it, prompt after.
+        self.assertLess(fresh.index("--output-format"), fresh.index("--print"))
+        self.assertEqual(fresh[fresh.index("--print") + 1], "fix the door")
         self.assertIn("--dangerously-skip-permissions", fresh)
         self.assertNotIn("--sandbox", fresh)
         self.assertNotIn("--model", fresh)
-        resumed = " ".join(argv["resume"])
-        self.assertIn("--conversation conv-9", resumed)
+        resumed = argv["resume"]
+        self.assertEqual(resumed[resumed.index("--print") + 1], "fix the door")
+        self.assertLess(resumed.index("--conversation"), resumed.index("--print"))
+        self.assertEqual(resumed[resumed.index("--conversation") + 1], "conv-9")
 
     ROLE_PROBE = """
 import drivers

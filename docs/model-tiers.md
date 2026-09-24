@@ -223,7 +223,7 @@ DeepSeek-V4-Flash was retired on 2026-09-12 because the provider removed it
 from the API — a request today returns "Model not found". The replacement
 line is DeepSeek-V4.1-Flash; the code fleet runs its thinking-max variant,
 which the roster row above names (operator decision 2026-09-12). The
-research/build workloads address the family through
+research workload addresses the family through
 `config.FAMILIES["deepseek"]`: DeepSeek-V4.1-Flash (base),
 DeepSeek-V4.1-Flash-thinking-low, DeepSeek-V4.1-Flash-thinking-max, and the
 websearch name DeepSeek-V4.1-Flash-thinking-max-legacy-tool-calling.

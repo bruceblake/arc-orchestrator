@@ -299,20 +299,19 @@ def _tier_rank(model):
 
 def usage_substitute(model, harness, role="implementer", exclude=(),
                      avoid_families=()):
-    """An implementer on a harness that is not `harness` and not itself blocked.
+    """A same-or-stronger model on a harness that is not `harness` and not blocked.
 
     None when swapping is off, or no seat qualifies — the caller then parks
     until this harness's window resets, which is the old behaviour.
 
-    Only IMPLEMENTATION is swapped. A reviewer does not know whose work it is
-    judging, so a swapped reviewer could land in the implementer's own family
-    (Rule 2); reviewers, planners and judges park instead. A substitute must
-    hold the role on the roster, sit at the same tier or above (Rule 1: a
-    hard task never quietly drops to a free medium model), and come from none
-    of `avoid_families` — the caller passes the task's reviewer family, so
-    the cross-family review still holds after the swap.
+    Implementation, gate review and PR review all swap. A planner stays put:
+    the plan is one seat on purpose. A substitute must hold the role on the
+    roster, sit at the same tier or above (Rule 1: a hard task never quietly
+    drops to a free medium model), and come from none of `avoid_families`.
+    Review callers pass the implementer's family, so a swapped reviewer
+    cannot land in the family that wrote the code (Rule 2).
     """
-    if not config.USAGE_SWAP or role != "implementer":
+    if not config.USAGE_SWAP or role not in ("implementer", "reviewer", "pr_reviewer"):
         return None
     now = time.time()
     skip = set(exclude)
@@ -1381,6 +1380,15 @@ class Driver:
                     to_harness=config.MODEL_HARNESS.get(sub))
         log.warning("%s: plan usage limit reached; swapping this attempt to %s",
                     self.model, sub)
+        # The substitute must not resume this harness's session. The board
+        # is what it (and the next fix round) reads instead.
+        import board
+        to_h = config.MODEL_HARNESS.get(sub) or "?"
+        board.post(worktree, task=task_id or "", role=self.role, model=self.model,
+                   harness=self.harness, kind="handoff",
+                   body=(f"usage limit on {self.harness}/{self.model}; "
+                         f"this attempt continues on {to_h}/{sub}. "
+                         f"Do not resume a {self.harness} session there."))
         other = driver_for(sub, self.role,
                            interactive=getattr(self, "interactive", False))
         # A Codex session id is meaningless to `agent` or `claude`. The
@@ -1453,6 +1461,31 @@ class Driver:
                     events.emit("driver.vpn_down", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt)
                     await wait_for_arc(task_id)
+                    attempt -= 1
+                    continue
+                if sid and "no rollout found" in str(exc).lower():
+                    # The id belonged to another harness, or the rollout was
+                    # deleted. Retrying resume repeats the same instant exit
+                    # until MAX_RETRIES. Drop the id and continue from the
+                    # worktree and the shared board.
+                    events.emit("driver.resume_missing", harness=self.harness,
+                                model=self.model, task=task_id, attempt=attempt,
+                                session_id=sid)
+                    import board
+                    board.post(worktree, task=task_id or "", role=self.role,
+                               model=self.model, harness=self.harness,
+                               kind="handoff",
+                               body=(f"session {sid} is not a {self.harness} "
+                                     "rollout; continuing without resume."))
+                    sid = None
+                    # Keep the original prompt. `continuation` replaces it
+                    # entirely, and a one-line note would drop the task.
+                    continuation = (
+                        "The previous session id is not a rollout this harness "
+                        "can resume. Continue from the files already in this "
+                        "worktree and from the SHARED BOARD below. Do not "
+                        "assume a prior chat.\n\n" + prompt
+                    )
                     attempt -= 1
                     continue
                 if getattr(exc, "usage_limit", False) or is_usage_limit(str(exc)):
@@ -2600,14 +2633,17 @@ class AntigravityDriver(Driver):
             prompt = (prompt + "\n\nRead these image files before answering "
                       "(use your Read tool on each):\n"
                       + "\n".join(f"  {i}" for i in self.images))
-        # `-p` / `--print` is a boolean. The prompt is the positional argument.
-        a = [config.agy_bin(), "--print", "--output-format", "stream-json",
+        # `--print` takes the NEXT argument as the prompt. It is not a boolean
+        # like `agent --print`. It has to come last, immediately before the
+        # prompt: `agy --print --output-format ...` handed `--output-format`
+        # to `--print` and exited 2 on every review (measured 2026-09-23).
+        a = [config.agy_bin(), "--output-format", "stream-json",
              "--dangerously-skip-permissions"]
         if config.AGY_CLI_MODEL:
             a += ["--model", config.AGY_CLI_MODEL]
         if session_id:
             a += ["--conversation", session_id]
-        return a + [prompt]
+        return a + ["--print", prompt]
 
     def extra_env(self, worktree):
         return {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}

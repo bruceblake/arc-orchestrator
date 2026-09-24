@@ -27,3 +27,5 @@ logs/
 
 # Reasonix fleet permissions file: embeds live API keys in allow entries
 reasonix.toml
+.reasonix/
+.arc/
