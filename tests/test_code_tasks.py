@@ -4,6 +4,7 @@ import asyncio
 import time
 import shutil
 import os
+import subprocess
 import json
 import pathlib
 import tempfile
@@ -18,6 +19,7 @@ from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
 
 import code_tasks
 import config
+import gitstore
 
 
 def taskfile(tasks, repo="/tmp", title="t", after=None, pattern=None):
@@ -284,12 +286,52 @@ class ParseVerdict(unittest.TestCase):
 
 
 class CapabilityFailureClassification(unittest.TestCase):
-    """Only a real capability failure may burn a stronger model tier."""
+    """Only a real capability failure may burn a stronger model tier.
+
+    The strings here are the ones `fail()` and `publish` ACTUALLY store, copied
+    from those call sites, not the words one would guess. The list once held
+    "gate failed"/"review rejected" while fail() writes "verify gate still
+    failing after N attempt(s)" — so every gate- and review-rejected task was
+    read as infrastructure noise.
+    """
 
     def test_exhausted_rounds_is_a_capability_failure(self):
         self.assertTrue(code_tasks._is_capability_failure("exhausted fix rounds"))
         self.assertTrue(code_tasks._is_capability_failure(
             f"exhausted escalation up to {config.PLANNER_MODEL}"))
+
+    def test_the_gate_failure_fail_actually_writes(self):
+        # fail(): f"verify gate still failing after {attempts} attempt(s) on {last}"
+        self.assertTrue(code_tasks._is_capability_failure(
+            "verify gate still failing after 16 attempt(s) on GLM-5.3"))
+
+    def test_the_review_failure_fail_actually_writes(self):
+        # fail(): f"pre-merge review still rejecting after {attempts} attempt(s)"
+        self.assertTrue(code_tasks._is_capability_failure(
+            "pre-merge review still rejecting after 16 attempt(s)"))
+
+    def test_the_pr_rejection_fail_actually_writes(self):
+        # fail(): f"PR #{pr} rejected after {PR_MAX_ROUNDS} review round(s); …"
+        self.assertTrue(code_tasks._is_capability_failure(
+            "PR #50 rejected after 16 review round(s); last had 2 unresolved "
+            "issue(s)"))
+
+    def test_every_string_fail_can_store_classifies_the_same_way(self):
+        """A guard against this drifting again: build fail()'s reasons from the
+        same f-strings and assert each one is recognised. A token list that
+        stops matching the code is worse than no list — it silently reclassifies
+        a real rejection as infrastructure noise."""
+        attempts, last, rounds = 16, "GLM-5.3", config.PR_MAX_ROUNDS
+        written_by_fail = [
+            (f"PR #{50} rejected after {rounds} review round(s); last had "
+             f"{2} unresolved issue(s)", True),
+            (f"verify gate still failing after {attempts} attempt(s) on {last}",
+             True),
+            (f"pre-merge review still rejecting after {attempts} attempt(s)", True),
+            (f"exhausted escalation: {2} escalation(s), ended on {last}", True),
+        ]
+        for text, want in written_by_fail:
+            self.assertEqual(code_tasks._is_capability_failure(text), want, text)
 
     def test_killed_run_process_is_not(self):
         self.assertFalse(code_tasks._is_capability_failure(
@@ -300,6 +342,15 @@ class CapabilityFailureClassification(unittest.TestCase):
     def test_harness_crash_is_not(self):
         self.assertFalse(code_tasks._is_capability_failure(
             "run crashed: driver 400"))
+
+    def test_infrastructure_failures_stay_out(self):
+        """The other strings that reach a `failed` row without the model having
+        had a fair chance. Restoring is right for these."""
+        for text in ("push failed: could not read from remote repository",
+                     "could not open PR: gh not authenticated",
+                     "PR #7 conflicts with main: still conflicting after 12 "
+                     "resync(s)"):
+            self.assertFalse(code_tasks._is_capability_failure(text), text)
 
 
 class ResumePlanning(unittest.TestCase):
@@ -341,6 +392,279 @@ class ResumePlanning(unittest.TestCase):
         p = self.plan([{"id": "t1", "status": "failed", "model": top,
                         "error": "exhausted fix rounds"}])
         self.assertEqual(p["escalated_on_resume"], {})
+
+
+class ResumeRestoresAnInterruptedAttempt(unittest.TestCase):
+    """A worktree is state: an interrupted attempt's work is restored, not
+    discarded. A capability failure starts CLEAN — a gate or a reviewer
+    rejected that work, so re-applying it would re-submit what was refused.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        base = Path(self.dir)
+        self.repo = base / "proj"
+        self.repo.mkdir()
+        for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True,
+                           capture_output=True)
+        (self.repo / "calc.py").write_text("def add(a, b):\n    return a + b\n")
+        (self.repo / ".gitignore").write_text(".arc/\n.reasonix/\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "init"],
+                       check=True, capture_output=True)
+        self._orig = {k: getattr(config, k) for k in
+                      ("WORKTREE_ROOT", "CHECKPOINT_DIR", "BASE_BRANCH")}
+        config.WORKTREE_ROOT = str(base / "wts")
+        config.CHECKPOINT_DIR = base / "cps"
+        config.BASE_BRANCH = "main"
+        for k, v in self._orig.items():
+            self.addCleanup(setattr, config, k, v)
+
+    def alloc_node(self, prior_rows):
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "id": "t1"}],
+                                               repo=str(self.repo)))
+        store = FakeStore(prior_rows)
+        # Drive the node the way the engine does, with events captured around
+        # the run itself (build_code_graph only plans; the node does the work).
+        with capture_events() as ev:
+            g = code_tasks.build_code_graph(store, ts, taskfile="tf.json")
+            res = asyncio.run(g.nodes["alloc_t1"].fn({}))
+        return Path(res["worktree"]), ev
+
+    def _work(self, wt):
+        (wt / "calc.py").write_text("def add(a, b):\n    return a + b + 1\n")
+        (wt / "untracked.txt").write_text("attempt output\n")
+        assert asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+
+    def test_an_interrupted_row_restores_and_a_capability_failure_does_not(self):
+        first = asyncio.run(gitstore.alloc(self.repo, "t1", "main"))
+        self._work(first)
+        # The run process was killed: that row says nothing about the model, and
+        # the work it wrote is what the resume continues from.
+        wt, ev = self.alloc_node([
+            {"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
+             "error": "interrupted: run process exited before the task finished"}])
+        self.assertIn("return a + b + 1", (wt / "calc.py").read_text())
+        self.assertEqual((wt / "untracked.txt").read_text(), "attempt output\n")
+        restored = ev.first("task.checkpoint_restored")
+        self.assertIsNotNone(restored, "the resume must say what it restored")
+        self.assertEqual(restored["task"], "t1")
+        self.assertEqual(restored["files"], 2)
+
+    def test_a_capability_failure_starts_clean(self):
+        first = asyncio.run(gitstore.alloc(self.repo, "t1", "main"))
+        self._work(first)
+        wt, ev = self.alloc_node([
+            {"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
+             "error": "exhausted fix rounds"}])
+        self.assertFalse((wt / "untracked.txt").exists())
+        self.assertEqual((wt / "calc.py").read_text(),
+                         "def add(a, b):\n    return a + b\n")
+        self.assertIsNone(ev.first("task.checkpoint_restored"))
+
+    def test_no_rejected_attempt_is_ever_restored(self):
+        """One table over EVERY string that can reach a failed row's error.
+
+        A deny-everything case list rather than one test per string, because
+        that is the mistake being guarded here: the restore test used to be a
+        DENYLIST of capability words, so each new string publish() or fail()
+        grew defaulted to RESTORING — three separate review rounds each found
+        one more ("verify gate still failing…", "rework after PR rejection
+        produced no changes", …). The strings below are built the same way
+        their writers build them.
+        """
+        attempts, last, rounds = 16, config.ESCALATION_PATH[0], config.PR_MAX_ROUNDS
+        rejected = [
+            f"verify gate still failing after {attempts} attempt(s) on {last}",
+            f"pre-merge review still rejecting after {attempts} attempt(s)",
+            (f"PR #{50} rejected after {rounds} review round(s); last had 2 "
+             f"unresolved issue(s)"),
+            f"exhausted escalation: {2} escalation(s), ended on {last}",
+            f"no path forward on {last} after {attempts} attempt(s) "
+            f"(no escalation was taken)",
+            # publish()
+            "rework after PR rejection produced no changes",
+            "implementer produced no changes",
+            f"push failed: {'could not read from remote repository'}",
+            f"could not open PR: {'gh not authenticated'}",
+            # A reason nobody has written yet: the safe default is CLEAN.
+            "some failure mode a future version of this code introduces",
+        ]
+        first = asyncio.run(gitstore.alloc(self.repo, "t1", "main"))
+        self._work(first)
+        for error in rejected:
+            with self.subTest(error=error[:48]):
+                wt, ev = self.alloc_node([
+                    {"id": "t1", "status": "failed",
+                     "model": config.ESCALATION_PATH[0], "error": error}])
+                self.assertFalse((wt / "untracked.txt").exists(), error)
+                self.assertIsNone(ev.first("task.checkpoint_restored"), error)
+
+    def test_the_two_interruption_reasons_do_restore(self):
+        """The allowlist, built from the module constants that write them."""
+        import reconcile
+        from store import Store
+        for reason in (reconcile.INTERRUPTED_REASON, Store.STALE_REASON):
+            with self.subTest(reason=reason[:40]):
+                first = asyncio.run(gitstore.alloc(self.repo, "t1", "main"))
+                self._work(first)
+                wt, ev = self.alloc_node([
+                    {"id": "t1", "status": "failed",
+                     "model": config.ESCALATION_PATH[0], "error": reason}])
+                self.assertTrue((wt / "untracked.txt").exists(), reason)
+                self.assertIsNotNone(ev.first("task.checkpoint_restored"),
+                                     reason)
+
+    def test_a_merged_task_is_never_restored(self):
+        """A merged task has no alloc node at all: it becomes a skip stub, so
+        there is no reset to restore from and no chance of re-running it."""
+        first = asyncio.run(gitstore.alloc(self.repo, "t1", "main"))
+        self._work(first)
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "id": "t1"}],
+                                               repo=str(self.repo)))
+        with capture_events() as ev:
+            g = code_tasks.build_code_graph(
+                FakeStore([{"id": "t1", "status": "merged",
+                            "model": config.ESCALATION_PATH[0], "error": None}]),
+                ts, taskfile="tf.json")
+        self.assertNotIn("alloc_t1", g.nodes)
+        self.assertIsNone(ev.first("task.checkpoint_restored"))
+
+    def test_the_tail_checkpoints_only_its_own_task(self):
+        """A drain fires the tail while siblings are still being implemented.
+        A sweep over EVERY worktree would read (and, before the capture became
+        read-only, `git add -N`) a tree a live agent is writing to. One node per
+        task, each reading only its own worktree."""
+        ts = code_tasks.load_taskfile(taskfile(
+            [{**BASIC, "id": "a"}, {**BASIC, "id": "b", "deps": ["a"]}],
+            repo=str(self.repo)))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        self.assertIn("checkpoint_a", g.nodes)
+        self.assertIn("checkpoint_b", g.nodes)
+        # Each is fed by its OWN failure, never by a shared gather node.
+        self.assertTrue(any(e.src == "fail_a" and e.dst == "checkpoint_a"
+                            for e in g.edges))
+        self.assertTrue(any(e.src == "fail_b" and e.dst == "checkpoint_b"
+                            for e in g.edges))
+        self.assertFalse(any(e.src == "fail_b" and e.dst == "checkpoint_a"
+                             for e in g.edges))
+
+    def test_the_tail_hangs_off_failure_not_the_merge(self):
+        """pr_merge calls gitstore.cleanup before it returns — the worktree is
+        already gone, so a tail node downstream of it would save nothing. The
+        path where work actually survives is `fail`."""
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "id": "a"}],
+                                               repo=str(self.repo)))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        self.assertTrue(any(e.src == "fail_a" and e.dst == "checkpoint_a"
+                            for e in g.edges))
+        self.assertFalse(any(e.src == "pr_merge_a" and e.dst == "checkpoint_a"
+                             for e in g.edges))
+
+    def test_the_tail_node_reads_the_worktree_it_names(self):
+        """Driven directly: it checkpoints the alloc'd worktree and skips a task
+        that never allocated, instead of sweeping the whole fleet."""
+        ts = code_tasks.load_taskfile(taskfile(
+            [{**BASIC, "id": "a"}, {**BASIC, "id": "b", "deps": ["a"]}],
+            repo=str(self.repo)))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        wt = asyncio.run(gitstore.alloc(self.repo, "a", "main"))
+        (wt / "half-done.txt").write_text("still here\n")
+        # ctx as the engine builds it: only a's alloc ran. b was never reached,
+        # and must not be read or written by a's tail node.
+        ctx = {"results": {"alloc_a": {"worktree": str(wt)}}}
+        res = asyncio.run(g.nodes["checkpoint_a"].fn(ctx))
+        self.assertIn("half-done.txt", Path(res["saved"]).read_text())
+        self.assertEqual(gitstore.checkpoint_files(self.repo, "b"), [])
+
+    def test_a_missing_alloc_is_skipped_not_guessed(self):
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "id": "a"}],
+                                               repo=str(self.repo)))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        res = asyncio.run(g.nodes["checkpoint_a"].fn({"results": {}}))
+        self.assertEqual(res["saved"], None)
+
+    def test_a_resume_that_never_allocated_still_finds_its_worktree(self):
+        """A resume starting at publish never ran alloc in THIS graph, so the
+        results hold no worktree — the node must ask git, like every other node
+        does, instead of giving up and letting the next alloc reset the work."""
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "id": "a"}],
+                                               repo=str(self.repo)))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        wt = asyncio.run(gitstore.alloc(self.repo, "a", "main"))
+        (wt / "left-behind.txt").write_text("work survives\n")
+        res = asyncio.run(g.nodes["checkpoint_a"].fn({"results": {}}))
+        self.assertIn("left-behind.txt", Path(res["saved"]).read_text())
+
+    def test_a_crashed_attempt_still_checkpoints_what_it_wrote(self):
+        """The crash path RETURNS from its except, so a checkpoint placed after
+        the try never ran for it: an attempt that wrote files and then died
+        saved nothing, and a reboot — which runs no `finally` at all — lost the
+        work outright. The checkpoint belongs in a `finally`."""
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "id": "a"}],
+                                               repo=str(self.repo)))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        wt = asyncio.run(gitstore.alloc(self.repo, "a", "main"))
+        (wt / "half-written.txt").write_text("wrote this, then died\n")
+
+        class _Boom:
+            model, harness, images = BASIC["model"], "fake", None
+
+            async def run(self, prompt, cwd, task_id=None, **kw):
+                raise code_tasks.DriverError("harness fell over")
+
+        orig = code_tasks._driver
+        code_tasks._driver = lambda model, role, pol: _Boom()
+        try:
+            out = asyncio.run(g.nodes["implement_a"].fn(
+                {"results": {"alloc_a": {"worktree": str(wt)}}, "runs": {}}))
+        finally:
+            code_tasks._driver = orig
+        self.assertTrue(out["crashed"])
+        saved = gitstore.checkpoint_files(self.repo, "a")
+        self.assertEqual([m["label"] for _, m in saved], ["x1"],
+                         "a crashed attempt must still save what it wrote")
+        self.assertIn("half-written.txt", saved[0][1]["files"])
+        self.assertEqual(saved[0][1]["attempt"], 1)
+
+    def test_a_successful_attempt_checkpoints_too(self):
+        """The same finally covers the success path — one code path, not two."""
+        ts = code_tasks.load_taskfile(taskfile([{**BASIC, "id": "a"}],
+                                               repo=str(self.repo)))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore([]), ts, taskfile="tf.json")
+        wt = asyncio.run(gitstore.alloc(self.repo, "a", "main"))
+
+        class _Ok:
+            model, harness, images = BASIC["model"], "fake", None
+
+            async def run(self, prompt, cwd, task_id=None, **kw):
+                (Path(cwd) / "done.txt").write_text("attempt output\n")
+                return mock.Mock(session_id="s-1", text="ok", harness="fake",
+                                 model=BASIC["model"], exit_code=0,
+                                 transcript_path="", seconds=1.0)
+
+        orig = code_tasks._driver
+        code_tasks._driver = lambda model, role, pol: _Ok()
+        try:
+            out = asyncio.run(g.nodes["implement_a"].fn(
+                {"results": {"alloc_a": {"worktree": str(wt)}}, "runs": {}}))
+        finally:
+            code_tasks._driver = orig
+        self.assertEqual(out["session_id"], "s-1")
+        saved = gitstore.checkpoint_files(self.repo, "a")
+        self.assertEqual([m["label"] for _, m in saved], ["x1"])
+        self.assertIn("done.txt", saved[0][1]["files"])
 
 
 class ExtractPlanJson(unittest.TestCase):
