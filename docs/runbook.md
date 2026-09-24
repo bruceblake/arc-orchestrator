@@ -1049,3 +1049,26 @@ dashboard is the process that is awake whenever you are.
 - **Restoring:** `cp logs/db-backups/orchestrator-<stamp>.db orchestrator.db`
   with the dashboard and all runs stopped. Every backup was opened and
   `PRAGMA integrity_check`ed when it was made.
+
+## Unattended operation: the fleet watchdog
+
+`arc-watchdog.service` (user unit, from `deploy/`) runs `fleetwatch.py`
+every 5 minutes. It keeps every run it has seen alive until its taskfile is
+fully merged: a run that crashed, was SIGKILLed, or died with WSL is
+re-launched with the exact argv, cwd and environment it had (so the
+`ARC_FLEET` and checkout are preserved). Usage limits need nothing from it —
+drivers already sleep until `resets_at` — but a run that exits during an
+outage is picked up here.
+
+- Operator Stop is respected: a `run.stopped` event releases the taskfile.
+- Quick exits (< 5 min) back off 10 min → 2 h; six in a row park the taskfile
+  (`watchdog.parked` event). Fix it, then `fleetwatch.py --unpark <taskfile>`.
+- Chained taskfiles wait in the watchdog until `chain_status` is ready.
+- `fleetwatch.py --watch <taskfile> [--like <recorded taskfile>]` adds one
+  that is not running; `--ignore <taskfile>` stops watching one.
+- State: `logs/watchdog/status.json`, `watchdog.log`, per-launch logs in
+  `logs/watchdog/runs/`. `runs.json` holds run environments (mode 0600).
+
+Install: `cp deploy/arc-watchdog.service ~/.config/systemd/user/ &&
+systemctl --user enable --now arc-watchdog`. On WSL, run
+`sudo loginctl enable-linger $USER` once so it survives closed terminals.
