@@ -13,6 +13,7 @@ later test in the suite a different fleet.
 import json
 import os
 import re
+import time
 import socket
 import socketserver
 import subprocess
@@ -1514,6 +1515,161 @@ class TestScaffold(unittest.TestCase):
             marker.write_text("{}")
             self.assertEqual(scaffold.create(d), [])
             self.assertEqual(marker.read_text(), "{}")
+
+
+class TestRoadmapAutopilot(unittest.TestCase):
+    """No live models: the planner and the captain spawn are mocked."""
+
+    PHASE = "PHASE_1_GRAYBOX_PROTOTYPING"
+
+    def setUp(self):
+        from unittest import mock
+        self.mock = mock
+        self._dir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._dir.name)
+        self.tasks = self.tmp / "tasks"
+        self.tasks.mkdir()
+        self.studio = self.tmp / "studio"
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        self.cap = self.tmp / "captain"
+        self.cap.mkdir()
+        self._old = (config.TASKS_DIR, config.STUDIO_DIR, config.STUDIO_AUTOPILOT,
+                     os.environ.get("ARC_CAPTAIN_DIR"))
+        config.TASKS_DIR = str(self.tasks)
+        config.STUDIO_DIR = self.studio
+        config.STUDIO_AUTOPILOT = True
+        os.environ["ARC_CAPTAIN_DIR"] = str(self.cap)
+        self.project = "autopilot-game"
+        run = self.studio / self.project
+        run.mkdir(parents=True)
+        (run / "stage.json").write_text(json.dumps(
+            {"phase": self.PHASE, "repo": str(self.repo)}), encoding="utf-8")
+        self.plans = []
+        self.enqueued = []
+
+        def fake_plan(goal, repo, *, phase, project, out_path=None, **_kw):
+            self.plans.append(Path(out_path).name)
+            Path(out_path).write_text(json.dumps({
+                "project": {"name": project, "repo": str(repo), "tasks": [{
+                    "id": "t0", "title": "t", "prompt": "do",
+                    "model": sorted(config.IMPLEMENTER_MODELS)[0],
+                    "verify_cmd": "true", "feature": "doors"}]}}), encoding="utf-8")
+            return {"path": str(out_path), "tasks": 1}
+
+        self._plan_patch = mock.patch("studio.planner.plan", side_effect=fake_plan)
+        self._plan = self._plan_patch.start()
+        real_enqueue = __import__("captain").enqueue_run
+
+        def spy_enqueue(*args, **kwargs):
+            self.enqueued.append(args[1] if len(args) > 1 else kwargs.get("path"))
+            return real_enqueue(*args, **kwargs)
+
+        self._enq = mock.patch("captain.enqueue_run", side_effect=spy_enqueue)
+        self._enq.start()
+
+    def tearDown(self):
+        self._plan_patch.stop()
+        self._enq.stop()
+        config.TASKS_DIR, config.STUDIO_DIR, config.STUDIO_AUTOPILOT, old_cap = self._old
+        if old_cap is None:
+            os.environ.pop("ARC_CAPTAIN_DIR", None)
+        else:
+            os.environ["ARC_CAPTAIN_DIR"] = old_cap
+        self._dir.cleanup()
+
+    def _roadmap(self, features):
+        (self.repo / "studio_roadmap.json").write_text(
+            json.dumps({"features": features}), encoding="utf-8")
+
+    def _taskfile(self, feature="doors", name="studio-autopilot-game-doors.json"):
+        model = sorted(config.IMPLEMENTER_MODELS)[0]
+        doc = {"project": {"name": self.project, "repo": str(self.repo),
+                           "tasks": [{"id": "t0", "title": "t", "prompt": "do",
+                                      "model": model, "verify_cmd": "true",
+                                      "feature": feature}]}}
+        path = self.tasks / name
+        path.write_text(json.dumps(doc), encoding="utf-8")
+        return path
+
+    def test_plans_one_feature_and_does_not_repeat(self):
+        from studio import autopilot
+        self._roadmap([{"id": "doors", "title": "Cell doors", "phase": self.PHASE}])
+        first = autopilot.tick()
+        second = autopilot.tick()
+        self.assertEqual(self.plans, ["studio-autopilot-game-doors.json"])
+        self.assertTrue(first["planned"])
+        self.assertIsNone(second["planned"])
+        self.assertEqual(len(self.enqueued), 1)
+
+    def test_restart_does_not_plan_an_inflight_feature(self):
+        from studio import autopilot
+        self._roadmap([{"id": "doors", "title": "Cell doors", "phase": self.PHASE}])
+        autopilot._save_state({
+            "backoff": {}, "resumes": {}, "noted": {},
+            "inflight": {"project": self.project, "feature": "doors",
+                         "path": str(self.tasks / "studio-autopilot-game-doors.json"),
+                         "started": time.time()},
+        })
+        autopilot.tick()
+        self.assertEqual(self.plans, [])
+
+    def test_phase_filter_skips_future_features(self):
+        from studio import autopilot
+        self._roadmap([
+            {"id": "netcode", "title": "Net", "phase": "PHASE_4_NETWORKED_QA"},
+            {"id": "doors", "title": "Cell doors", "phase": self.PHASE},
+        ])
+        autopilot.tick()
+        self.assertEqual(self.plans, ["studio-autopilot-game-doors.json"])
+
+    def test_no_roadmap_does_not_plan(self):
+        from studio import autopilot
+        summary = autopilot.tick()
+        self.assertEqual(self.plans, [])
+        self.assertIsNone(summary["planned"])
+
+    def test_running_taskfile_is_not_queued_again(self):
+        from studio import autopilot
+        import captain
+        path = self._taskfile()
+        self._roadmap([{"id": "doors", "title": "Cell doors", "phase": self.PHASE}])
+        with self.mock.patch.object(captain, "_taskfile_live", return_value=True):
+            autopilot.tick()
+        self.assertEqual(self.enqueued, [])
+        self.assertEqual(self.plans, [])
+        self.assertTrue(path.is_file())
+
+    def test_plan_failure_backs_off(self):
+        from studio import autopilot
+        self._roadmap([{"id": "doors", "title": "Cell doors", "phase": self.PHASE}])
+        calls = []
+
+        def boom(*_a, **_k):
+            calls.append(1)
+            raise RuntimeError("planner down")
+
+        self._plan.side_effect = boom
+        autopilot.tick()
+        autopilot.tick()
+        self.assertEqual(calls, [1])
+        state = json.loads((self.studio / "autopilot-state.json").read_text())
+        self.assertGreater(state["backoff"]["plan:doors"]["until"], time.time())
+
+    def test_permanent_failure_is_not_resumed(self):
+        from studio import autopilot
+        from store import Store
+        path = self._taskfile()
+        self._roadmap([{"id": "doors", "title": "Cell doors", "phase": self.PHASE}])
+        store = Store(config.DB_PATH)
+        model = sorted(config.IMPLEMENTER_MODELS)[0]
+        store.upsert_code_task(str(path.resolve()), "t0", "t", model, "glm",
+                               "failed", error="exhausted escalation: 1 escalation(s)",
+                               finished=True)
+        autopilot.tick()
+        autopilot.tick()
+        self.assertEqual(self.enqueued, [])
+        self.assertEqual(self.plans, [])
 
 
 if __name__ == "__main__":

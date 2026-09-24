@@ -1572,6 +1572,11 @@ def max_tasks_in_flight():
 # archive inside the worktree would land in a pull request (Rule 5 publishes
 # with `git add -A`).
 STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
+# Dashboard background loop (studio/autopilot.py). Off unless the deployment
+# opts in: when set, the dashboard plans one current-phase roadmap feature at
+# a time and enqueues a governed `code run` through the captain queue.
+STUDIO_AUTOPILOT = os.getenv("ARC_STUDIO_AUTOPILOT", "").strip().lower() in (
+    "1", "true", "yes", "on")
 # Visual evidence (evidence.py, AGENTS.md Rule 7d): after a Godot task's gate
 # passes, screenshots from the fixed anchor cameras, a flythrough video, the
 # scripted playtest recorded, and before/after comparisons against the

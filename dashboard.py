@@ -4720,6 +4720,12 @@ def serve(port=None, db_path=None):
         log.info("captain queue drain armed")
     except Exception as exc:
         log.error("captain queue drain did not start: %s", exc)
+    try:
+        from studio import autopilot
+        armed = autopilot.start(db_path)
+        log.info("studio autopilot %s", "armed" if armed else "off")
+    except Exception as exc:
+        log.error("studio autopilot did not start: %s", exc)
     print(f"dashboard: http://localhost:{port}", flush=True)
     # Bound to one address: that is the only one worth printing. Bound to
     # all of them: list the LAN ones, which is what a phone needs.
