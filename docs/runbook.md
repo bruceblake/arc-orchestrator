@@ -643,6 +643,17 @@ a worktree like a long-running server process:
   untracked file is diffed against `/dev/null` instead. A failure is a
   `task.checkpoint_failed` event and a warning; `task.checkpointed` records
   every success.
+- **Paths are read with `-z` and never quoted.** git C-quotes any path that is
+  not plain ASCII (`core.quotePath`), so a listing yields `"caf\303\251.txt"` —
+  a string that names no file on disk. Handed to `diff --no-index` git exits 1
+  with EMPTY stdout, and 1 is also the exit code for "the files differ", so the
+  empty blob was appended and the quoted name recorded: **the checkpoint
+  reported success with a 0-byte patch and the file was gone.** Every listing
+  (`diff --name-only`, `ls-files --others`, `ls-files -u`) now uses `-z` and is
+  split on NUL, and a per-file diff that produced no patch is skipped with a
+  warning rather than recorded. Names are decoded with `os.fsdecode`, whose
+  surrogateescape round-trips a name holding raw non-UTF-8 bytes; `_git`'s
+  `errors="replace"` would rewrite it into a path that exists nowhere.
 
 **Resume restores it for you.** When a task restarts at `alloc` and its
 previous row failed for a reason that is *not* a capability failure — an

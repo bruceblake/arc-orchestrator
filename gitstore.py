@@ -8,6 +8,7 @@ import asyncio
 import fcntl
 import json
 import logging
+import os
 import re
 import shutil
 import time
@@ -58,6 +59,20 @@ class _RepoLock:
             self._fh = None
 
 
+def _null_split(raw):
+    """Split NUL-delimited git output (-z) into path strings.
+
+    fsdecode, not decode: a filename on this fleet can hold bytes that are not
+    valid UTF-8, and fsdecode's surrogateescape round-trips them, so the string
+    still names the real file when it is passed back to git. `errors="replace"`
+    would hand back a path that exists nowhere — the same class of bug as the
+    C-quoting this replaced.
+    """
+    if not raw:
+        return []
+    return [os.fsdecode(p) for p in raw.split(b"\0")]
+
+
 async def checkpoint(repo, task_id, wt, label, *, model=None, attempt=None):
     """Save the worktree's work as a patch; returns its Path, or None.
 
@@ -101,8 +116,20 @@ async def checkpoint(repo, task_id, wt, label, *, model=None, attempt=None):
         # treats as a new file and which touches nothing at all. Both halves
         # apply with `git apply --3way`.
         excl = [*(f":!{p}" for p in CHANNEL_FILES), *NEVER_STAGE]
-        _, files, _ = await _git(["diff", "--name-only", ref, "--", ".", *excl],
-                                 cwd=wt, check=False)
+        # -z, NOT newline-split. With core.quotePath on (the default) git
+        # C-quotes any path that is not plain ASCII, so `ls-files --others`
+        # yields `"caf\303\251.txt"` — and that QUOTED string names no file on
+        # disk. Fed to `diff --no-index` it makes git exit 1 with EMPTY stdout
+        # ("Could not access …"), and 1 is also the exit code for "the files
+        # differ", so the empty blob was appended and the quoted name recorded:
+        # a checkpoint that reported success while silently dropping the file.
+        # -z emits raw bytes and never quotes. _git_BYTES, not _git: the name is
+        # a path, and _git decodes with errors="replace", which rewrites a
+        # non-UTF-8 tracked name into a string that names no file on disk —
+        # the same defect one layer down.
+        _, files_raw, _ = await _git_bytes(
+            ["diff", "--name-only", "-z", ref, "--", ".", *excl],
+            cwd=wt, check=False)
         # BYTES, not text — see _git_bytes. A latin-1 or otherwise non-UTF-8
         # source file is not "binary" to git (it has no NUL byte), so --binary
         # alone does not protect it: decoding would rewrite 0xE9 into the three
@@ -110,19 +137,32 @@ async def checkpoint(repo, task_id, wt, label, *, model=None, attempt=None):
         # while still reporting success.
         rc, patch, _ = await _git_bytes(
             ["diff", "--binary", ref, "--", ".", *excl], cwd=wt, check=False)
-        _, others, _ = await _git(["ls-files", "--others", "--exclude-standard",
-                                   "--", ".", *excl], cwd=wt, check=False)
-        listed = [f for f in files.splitlines() if f.strip()]
-        for rel in (f for f in others.splitlines() if f.strip()):
-            listed.append(rel)
-            rc2, one, _ = await _git_bytes(
+        rc_others, others_raw, _ = await _git_bytes(
+            ["ls-files", "-z", "--others", "--exclude-standard", "--", ".",
+             *excl], cwd=wt, check=False)
+        if rc_others > 1:
+            return None
+        # Each -z field is a raw path; fsdecode round-trips ANY bytes
+        # (surrogateescape), so an undecodable name still names the real file.
+        listed = [f for f in _null_split(files_raw) if f]
+        for rel in _null_split(others_raw):
+            if not rel:
+                continue
+            rc2, one, err2 = await _git_bytes(
                 ["diff", "--no-index", "--binary", "--", "/dev/null", rel],
                 cwd=wt, check=False)
             # --no-index exits 1 when the files differ, which is the normal
-            # case here: only a real failure (2) discards the capture.
+            # case here; only a real failure (2) discards the capture. Exit 1
+            # with NO patch is the third case: git could not access the path it
+            # was handed. Trusting the exit code alone is what recorded it.
             if rc2 > 1:
                 return None
+            if rc2 == 1 and not one.strip():
+                log.warning("checkpoint %s: skipped unreadable untracked path "
+                            "%r (%s)", task_id, rel, err2.strip()[:120])
+                continue
             patch += one
+            listed.append(rel)
         if rc != 0 or (not listed and not patch.strip()):
             return None
         out = (Path(config.CHECKPOINT_DIR) / Path(repo).resolve().name
@@ -312,13 +352,17 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
     # conflicts"). Neither the exit code alone nor the message may be the test:
     # the index is the honest one, and `ls-files -u` prints a bare path per
     # stage — its `--name-only` is silently ignored.
-    _, unmerged, _ = await _git(["ls-files", "-u"], cwd=wt, check=False)
-    conflicts = sorted({line.split("\t")[-1] for line in unmerged.splitlines()
-                        if line.strip()})
-    _, applied, _ = await _git(
-        ["diff", "--name-only", config.BASE_BRANCH, "--", "."], cwd=wt, check=False)
-    files = sorted({p for p in applied.splitlines()
-                    if p.strip() and p not in conflicts})
+    # -z here too: the conflict list is what an operator reads and what the
+    # event records, and a C-quoted `"caf\303\251.txt"` names nothing.
+    _, unmerged_raw, _ = await _git_bytes(["ls-files", "-u", "-z"], cwd=wt,
+                                          check=False)
+    conflicts = sorted({f.split("\t")[-1]
+                        for f in _null_split(unmerged_raw) if f})
+    _, applied_raw, _ = await _git_bytes(
+        ["diff", "--name-only", "-z", config.BASE_BRANCH, "--", "."],
+        cwd=wt, check=False)
+    files = sorted({p for p in _null_split(applied_raw)
+                    if p and p not in conflicts})
     if conflicts or rc != 0:
         # Leave nothing half-applied: a tree carrying conflict markers, or one
         # where only part of the patch landed, would be published as though it

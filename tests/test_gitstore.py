@@ -1,6 +1,7 @@
 """Worktree/diff/merge behaviour against real temporary git repos."""
 import asyncio
 import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -341,6 +342,97 @@ class CheckpointingWorktreeWork(RepoFixture):
         self.assertNotIn(".arc/", patch)
         self.assertNotIn("board.jsonl", patch)
         self.assertNotIn(".reasonix", patch)
+
+    def test_non_ascii_paths_are_captured_not_silently_dropped(self):
+        """PR review: `ls-files` C-quotes a non-ASCII path by default, so it
+        yielded `"caf\\303\\251.txt"` — a string naming no file. Handed to
+        `diff --no-index` git exited 1 ("Could not access …") with EMPTY stdout,
+        and 1 is also the exit code for "the files differ", so the empty blob
+        was appended and the quoted name recorded: checkpoint reported SUCCESS
+        with a 0-byte patch and the file was gone. -z emits raw bytes, and a
+        file whose per-file diff produced nothing is skipped, not recorded.
+        """
+        wt = self.alloc("t1")
+        names = ["café.txt", "日本語.md", "sp ace.txt"]
+        for n in names:
+            (wt / n).write_text(f"content of {n}\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertEqual(sorted(meta["files"]), sorted(names))
+        for f in meta["files"]:
+            self.assertNotIn("\\303", f)
+            self.assertFalse(f.startswith('"'), f)
+        self.assertGreater(p.stat().st_size, 0)
+        git(wt, "reset", "-q", "--hard", "HEAD")
+        git(wt, "clean", "-qfd")
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt))
+        self.assertTrue(res["restored"], res)
+        for n in names:
+            self.assertEqual((wt / n).read_text(), f"content of {n}\n", n)
+
+    def test_a_non_utf8_path_round_trips(self):
+        """The same defect one layer down: `_git` decodes with errors="replace",
+        which turns a name holding a raw non-UTF-8 byte into a string that names
+        nowhere. fsdecode's surrogateescape round-trips it instead."""
+        raw = b"lat\xe9n1.txt"          # 0xE9 is not valid UTF-8
+        name = os.fsdecode(raw)
+        wt = self.alloc("t1")
+        # Do NOT chdir: the test process is shared, and leaving cwd inside a
+        # torn-down temp worktree breaks every later test (it showed up as an
+        # unrelated GitHubQuota error). A bytes path through builtin open()
+        # reaches the same file without touching the process cwd.
+        with open(os.path.join(os.fsencode(wt), raw), "wb") as fh:
+            fh.write(b"latin1 name\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertEqual(meta["files"], [name])
+        self.assertEqual(os.fsencode(meta["files"][0]), raw)
+        git(wt, "reset", "-q", "--hard", "HEAD")
+        git(wt, "clean", "-qfd")
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt))
+        self.assertTrue(res["restored"], res)
+        self.assertEqual((wt / name).read_text(), "latin1 name\n")
+
+    def test_a_modified_tracked_non_ascii_path_is_listed(self):
+        """The tracked half uses `diff --name-only`, which C-quotes too — and it
+        is that listing which feeds meta["files"] and the list an operator
+        reads. A trace-only fix would leave the record wrong."""
+        wt = self.alloc("t1")
+        (wt / "café.txt").write_text("base\n")
+        git(wt, "add", "-A", "--", ".")
+        git(wt, "commit", "-qm", "add accented file")
+        (wt / "café.txt").write_text("base\nmodified\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertEqual(meta["files"], ["café.txt"])
+        # The commit is checkpointed too, so a reset that keeps HEAD would
+        # apply the patch onto a tree that already contains it and conflict.
+        # alloc resets to the BASE — reproduce that, which is the real case.
+        git(wt, "reset", "-q", "--hard", meta["merge_base"])
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt))
+        self.assertTrue(res["restored"], res)
+        self.assertEqual((wt / "café.txt").read_text(), "base\nmodified\n")
+
+    def test_a_file_git_cannot_read_is_skipped_not_faked(self):
+        """The guard behind both: a per-file diff that produced no patch must
+        never be recorded as captured. A path that cannot be read is the honest
+        way to drive that branch."""
+        wt = self.alloc("t1")
+        (wt / "real.txt").write_text("kept\n")
+        orig = gitstore._git_bytes
+
+        async def flaky(args, cwd, check=True):
+            if "--no-index" in args and args[-1] == "ghost.txt":
+                return 1, b"", "error: could not access 'ghost.txt'"
+            return await orig(args, cwd, check=check)
+
+        gitstore._git_bytes = flaky
+        self.addCleanup(setattr, gitstore, "_git_bytes", orig)
+        (wt / "ghost.txt").write_text("here at listing time\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertNotIn("ghost.txt", meta["files"])
+        self.assertIn("real.txt", meta["files"])
 
     def test_restore_after_a_reset_recovers_the_files(self):
         wt = self.alloc("t1")
