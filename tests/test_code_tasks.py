@@ -2182,16 +2182,16 @@ class PlanAmendmentWiring(unittest.TestCase):
         self.assertIn("not Path(taskfile).is_file()", src[hp:hp + 900])
 
     def test_adds_never_stage_the_channel_file(self):
-        # publish() and diff_full()'s intent-to-add both use `git add -A`;
-        # a surviving proposals file must not land in the PR or the review
-        # diff even then. The pathspec exclusion is the belt to harvest's
-        # delete suspenders.
+        # publish() and diff_full()'s intent-to-add both stage then unstage
+        # the channel files. Ignored .arc paths cannot be named in git add's
+        # exclusion pathspec (Git 2.55 errors), so they are reset afterwards.
         import gitstore
         src = pathlib.Path(gitstore.__file__).read_text()
-        for path in (".arc/plan_proposals.jsonl", ".arc/board.jsonl", ".reasonix"):
-            self.assertIn(":!" + path, gitstore.NEVER_STAGE)
-        self.assertEqual(src.count("*NEVER_STAGE"), 2,
-                         "publish and the review diff must both exclude them")
+        self.assertEqual(set(gitstore.CHANNEL_FILES),
+                         {".arc/plan_proposals.jsonl", ".arc/board.jsonl"})
+        self.assertIn(":!.reasonix", gitstore.NEVER_STAGE)
+        self.assertIn("await _stage_without_runtime_files(wt, intent=True)", src)
+        self.assertIn("await _stage_without_runtime_files(wt)", src)
 
     def test_publish_never_commits_harness_state(self):
         """A real repo: .reasonix state beside a real change stays unstaged."""

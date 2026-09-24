@@ -53,6 +53,40 @@ class RepoFixture(unittest.TestCase):
 
 
 class ReviewDiff(RepoFixture):
+    def _channels(self, wt):
+        channel = wt / ".arc"
+        channel.mkdir()
+        (channel / "board.jsonl").write_text('{"message":"runtime"}\n')
+        (channel / "plan_proposals.jsonl").write_text('{"kind":"note"}\n')
+
+    def _assert_channels_stay_out(self, wt):
+        diff = self.diff(wt)
+        self.assertIn("return a + b + 1", diff)
+        self.assertNotIn("runtime", diff)
+        self.assertNotIn('"kind":"note"', diff)
+        head = asyncio.run(gitstore.publish(wt, "task(t1): fix"))
+        files = git(wt, "show", "--name-only", "--format=", head).split()
+        self.assertNotIn(".arc/board.jsonl", files)
+        self.assertNotIn(".arc/plan_proposals.jsonl", files)
+        return files
+
+    def test_ignored_agent_channels_do_not_break_review_or_publish(self):
+        """Git 2.55 rejects an explicit add pathspec for an ignored .arc file."""
+        wt = self.alloc("t1")
+        (wt / ".gitignore").write_text(".arc/\n")
+        (wt / "calc.py").write_text("def add(a, b):\n    return a + b + 1\n")
+        self._channels(wt)
+        files = self._assert_channels_stay_out(wt)
+        self.assertEqual(files, [".gitignore", "calc.py"])
+
+    def test_unignored_agent_channels_stay_out_of_review_and_publish(self):
+        """A project that does not ignore .arc still must not publish channels."""
+        wt = self.alloc("t1")
+        (wt / "calc.py").write_text("def add(a, b):\n    return a + b + 1\n")
+        self._channels(wt)
+        files = self._assert_channels_stay_out(wt)
+        self.assertEqual(files, ["calc.py"])
+
     def test_shows_this_tasks_own_changes(self):
         wt = self.alloc("t1")
         (wt / "calc.py").write_text("def add(a, b):\n    return a + b\n\n"
