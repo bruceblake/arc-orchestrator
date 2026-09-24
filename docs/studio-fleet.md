@@ -502,6 +502,42 @@ framework). Each practice below is enforced by code, not left to a prompt:
 | Lighting as presets (day / night / emergency / blackout) | phase-3 planner guidance |
 | Shadows halved one build's frame rate | phase-3 perf gate (`tools/perf.gd`): fps floor + shadow-caster cap |
 | The last check is a human | promotions are manual (`studio promote`); optional manual PR gate below |
+| **Every change is seen**: screenshots and video for testing, regressions and trying things out | `evidence.py` after every Godot gate (AGENTS.md Rule 7d): fixed-camera screenshots, flythrough + playtest video, before/after/diff vs the merge base; attached to both reviews, commented onto the PR, posted to the agent board |
+| A **reference image for every visual feature** — the one feature built without an image target came out worst | planner method block: a visual task names its target image(s) in `studio_refs/`; the judge scores against them |
+| Judge at **two scales**: the scene (macro) and each asset (micro) | scene: the visual judge loop over the anchor/adversarial cameras; asset: Workbench renders + sign-off (phase 2) |
+| **Context-free, rotating judges**; fixed cameras first, **adversarial cameras from round 3** | `judge_loop.JUDGE_ROTATION` (blind to prompts and commits), `ARC_STUDIO_ADVERSARIAL_ROUND=3` |
+| Two target **buckets**: exact replication vs atmosphere | `studio_target.json` `bucket_a` / `bucket_b` |
+| **Partition a large scene**: one region per sub-agent, or quality turns sporadic | planner method block: environment work is planned per region (cell block, yard, mess hall, city block…) |
+| Keep the judge's image context small: past rounds compressed to 4 angles, or a new baseline | `studio/memory/compactor.py` baseline + latest-round archive |
+| **Judges contradicting each other** or saturating: a human breaks the tie | `studio/evaluation` arbitration halts the loop and flags it on the Studio view |
+| Props from image-to-3D at low poly; characters high-detail, retopologised (~50k tris; only the hero higher), auto-rigged | phase-2 planner guidance + triangle budgets in mesh reports (gate) |
+| **Characters and armour in separate parts**, weights transferred per part (a fused mesh warps) | planner method block (CHARACTERS AND CREATURES) |
+| **Animation checklist**: paired clips in sync, weapons attached, no pop at clip start/end, hit reactions exist, attacks interruptible | phase-2 planner guidance; `sync_target_clip` pairs; the playtest/flythrough videos make pops and teleports visible to reviewers |
+| Cheaper orchestration for graybox, the strongest models for later stages | studio routing: medium tier for mechanical/graybox work, hard tier and escalation for the rest |
+| Gameplay QA needs a human: models do not play like players | human playtest sign-off at milestones; the recorded playtest video is what the human reviews first |
+
+### Visual evidence on every change
+
+Every task in a Godot repo leaves screenshots and video (AGENTS.md Rule 7d),
+captured after its gate passes and shown to its reviewers:
+
+```
+logs/evidence/<project>/<task>/x<attempt>/
+  shots/<camera>.png         fixed anchor cameras (studio_cameras.json)
+  compare/<camera>.png       before | after | difference vs the merge base
+  flythrough.mp4 / .gif      camera flown through the anchors
+  playtest.mp4 / .gif        tools/playtest.gd, recorded
+  playtest_shots/*.png       the screenshots the playtest took on its route
+  manifest.json
+```
+
+The pull request gets the same set inline, from the game repo's
+`arc-evidence` branch. To capture by hand (for trying things out, or to see
+a branch before it is a task):
+
+```bash
+.venv/bin/python evidence.py ~/repos/<game> /tmp/evidence --base main
+```
 
 ### Scripted playtest contract
 
@@ -553,6 +589,16 @@ This writes a paste-ready review: instructions, the task spec (found through the
 | `ARC_FLEET` | local | `local` or `studio`; fatal on any other value |
 | `ARC_EXTERNAL_CONTEXT` | 262144 | context budget declared for OpenRouter-served models (the 64k `ARC_OPENCODE_CONTEXT` exists for an ARC pathology those models do not share) |
 | `ARC_STUDIO_DIR` | `logs/studio` | renders, verdicts, phase state, fuzz reports, spend ledger |
+| `ARC_EVIDENCE` | required | visual evidence after every Godot gate (AGENTS.md Rule 7d): `required` fails a gate whose project will not render, `best-effort` only warns, `off` disables |
+| `ARC_EVIDENCE_DIR` | `logs/evidence` | captures: `<project>/<task>/x<attempt>/` plus `<project>/baseline/<sha>/` |
+| `ARC_EVIDENCE_BRANCH` | arc-evidence | orphan branch in the GAME repo that PR comments link images and videos from |
+| `ARC_EVIDENCE_PUBLISH` | 1 | `0` keeps evidence local (reviewers still see it) and posts no PR comment |
+| `ARC_EVIDENCE_SECONDS` | 10 | flythrough length |
+| `ARC_EVIDENCE_GIF_SECONDS` | 8 | length of the inline `.gif` preview of each video |
+| `ARC_EVIDENCE_FPS` | 30 | movie-writer frame rate |
+| `ARC_EVIDENCE_RESOLUTION` | 1280x720 | render size for screenshots and videos |
+| `ARC_EVIDENCE_TIMEOUT` | 600 | seconds per Godot run inside one capture |
+| `ARC_EVIDENCE_BLANK_SHARE` | 0.97 | a screenshot this dominated by one colour is flagged as a blank render |
 | `ARC_BOARD_DIR` | `logs/boards` | project-wide agent board (`board.py`); per-task threads stay in the worktree at `.arc/board.jsonl` and are not committed |
 | `ARC_STUDIO_BUDGET_USD` | 25 | ceiling for direct studio calls; 0 disables |
 | `ARC_STUDIO_JUDGE_PASS` | 75 | judge score (0–100) a phase must reach to promote |

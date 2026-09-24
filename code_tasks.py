@@ -22,6 +22,7 @@ import board
 import config
 import errors
 import events
+import evidence
 import gitstore
 import graft
 import drivers
@@ -1654,6 +1655,71 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             return {"session_id": res.session_id, "harness": ran_harness,
                     "model": ran_model}
 
+        async def capture_evidence(wt, attempt):
+            """(manifest, gate_error). Rule 7d; see evidence.py.
+
+            A machine that cannot capture (no display/Godot/ffmpeg) never
+            fails the task. A project that will not render does, in the
+            default `required` mode. Anything else is a bug in the capture
+            itself: recorded with a fingerprint, never blamed on the task."""
+            from studio.engine import godot as _godot
+            out = evidence.run_dir(project_slug, tid, attempt)
+            try:
+                m = await asyncio.to_thread(evidence.capture, wt, out, repo=repo,
+                                            base=base, project=project_slug)
+            except evidence.EvidenceUnavailable as exc:
+                evidence.emit("unavailable", task=tid, reason=str(exc)[:300])
+                return None, None
+            except (evidence.EvidenceError, _godot.GodotError) as exc:
+                evidence.emit("failed", task=tid, attempt=attempt, error=str(exc)[:300])
+                if config.EVIDENCE_MODE == "required":
+                    return None, ("visual evidence: the project did not render "
+                                  f"for its screenshots/video:\n{str(exc)[:1500]}")
+                return None, None
+            except Exception as exc:                           # noqa: BLE001
+                fp = errors.capture(exc, task=tid, node=f"gate_{tid}")
+                evidence.emit("error", task=tid, error=str(exc)[:300], fingerprint=fp)
+                return None, None
+            m["attempt"] = attempt
+            evidence.emit("captured", task=tid, attempt=attempt,
+                          shots=len(m.get("shots") or []),
+                          videos=sorted(m.get("videos") or {}),
+                          warnings=len(m.get("warnings") or []), dir=str(out))
+            board.post(wt, task=tid, role="orchestrator", model="", harness="evidence",
+                       kind="evidence", body=evidence.board_body(m),
+                       project=project_slug)
+            return m, None
+
+        async def post_pr_evidence(ctx, number):
+            """Push this attempt's capture to the game repo's evidence branch
+            and comment it onto the PR. Never fails publish: a PR without its
+            evidence comment is still a PR, and the reviewers already had the
+            images attached."""
+            shown = gate_evidence(ctx)
+            if not shown or shown.get("posted_pr") == number:
+                return
+            try:
+                web = await asyncio.to_thread(evidence.publish, repo, project_slug,
+                                              tid, shown.get("attempt", 0), shown)
+                if not web:
+                    return
+                body = evidence.pr_markdown(shown, web, task_id=tid,
+                                            attempt=shown.get("attempt", 0))
+                rc, _out, err = await gitstore._gh(
+                    ["pr", "comment", str(number), "--body", body], cwd=repo)
+                if rc != 0:
+                    raise RuntimeError(f"gh pr comment: {err.strip()[:200]}")
+                shown["posted_pr"] = number
+                evidence.emit("posted", task=tid, pr=number, url=web)
+            except Exception as exc:                           # noqa: BLE001
+                fp = errors.capture(exc, task=tid, node=f"publish_{tid}")
+                evidence.emit("publish_failed", task=tid, pr=number,
+                              error=str(exc)[:300], fingerprint=fp)
+
+        def gate_evidence(ctx):
+            """The latest capture for this task in this graph run, or None."""
+            return (ctx.get("results", {}).get(f"gate_{tid}") or {}).get("evidence")
+
         async def gate(ctx):
             cmd = t["verify_cmd"]
             prev = ctx.get("results", {}).get(f"implement_{tid}", {})
@@ -1742,8 +1808,18 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 else:
                     store.set_code_task_verdict(taskfile, tid, verdict)
                     events.emit("task.verdict", task=tid, attempt=attempt, verdict=verdict)
+            shown = None
+            if passed and evidence.enabled_for(wt, t):
+                # Rule 7d: a game change is SEEN before anyone judges it. A
+                # project that will not render fails the gate like a test.
+                shown, eerr = await capture_evidence(wt, attempt)
+                if eerr:
+                    passed = False
+                    output = (eerr + "\n...\n" + output)[-2400:]
+                    events.emit("task.gate", task=tid, attempt=attempt, passed=False,
+                                log=log_path, cmd="visual evidence", tail=eerr[-400:])
             return {"passed": passed, "output": output, "log_path": log_path,
-                    "verdict": verdict}
+                    "verdict": verdict, "evidence": shown}
 
         async def review(ctx):
             if not review_on:
@@ -1757,10 +1833,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 ctx, tid, cur_model(ctx), store))
             driver = _reviewer_driver({"reviewer": rev_tok}, pol)
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
+            shown = gate_evidence(ctx)
+            if shown:
+                driver.images = evidence.review_images(shown)
             try:
                 res = await driver.run(
                     _review_prompt(t, diff, impact, roster,
-                                   board.prompt_block(wt, project=project_slug, task=tid)),
+                                   board.prompt_block(wt, project=project_slug, task=tid)
+                                   + evidence.prompt_block(shown)),
                     wt, task_id=f"{tid}-x{attempt}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
@@ -1996,6 +2076,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    "in_review", branch=f"task/{tid}")
             events.emit("task.pr_opened", task=tid, url=url, number=number,
                         head=fresh_head, note=note)
+            await post_pr_evidence(ctx, number)
             return {"published": True, "pr": number, "url": url, "head": fresh_head}
 
         async def pr_fanout(ctx):
@@ -2072,10 +2153,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 drv = _driver(model, "pr_reviewer", pol)
                 wt = await worktree(ctx)
                 impact = await graft.blast(wt, base, task=tid)
+                shown = gate_evidence(ctx)
+                if shown:
+                    drv.images = evidence.review_images(shown)
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
                                       it["prior_issues"], impact, roster,
-                                      board.prompt_block(wt, project=project_slug, task=tid)),
+                                      board.prompt_block(wt, project=project_slug, task=tid)
+                                      + evidence.prompt_block(shown)),
                     wt, task_id=f"{tid}-pr{it['round']}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})

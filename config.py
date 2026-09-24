@@ -1561,6 +1561,30 @@ def max_tasks_in_flight():
 # archive inside the worktree would land in a pull request (Rule 5 publishes
 # with `git add -A`).
 STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
+# Visual evidence (evidence.py, AGENTS.md Rule 7d): after a Godot task's gate
+# passes, screenshots from the fixed anchor cameras, a flythrough video, the
+# scripted playtest recorded, and before/after comparisons against the
+# task's branch point. Reviewers see them; the PR gets them inline.
+#   required     a project that will not render fails the gate (default)
+#   best-effort  capture failures are warnings only
+#   off          no capture
+# A machine with no display, Godot or ffmpeg never fails a task: that is an
+# infrastructure gap, reported as evidence.unavailable.
+EVIDENCE_MODE = os.getenv("ARC_EVIDENCE", "required").strip().lower()
+if EVIDENCE_MODE not in ("required", "best-effort", "off"):
+    raise SystemExit(f"ARC_EVIDENCE={EVIDENCE_MODE!r}: expected required, best-effort or off")
+EVIDENCE_DIR = Path(os.getenv("ARC_EVIDENCE_DIR") or ROOT / "logs" / "evidence")
+# The orphan branch in the GAME repo that PR comments link images from.
+EVIDENCE_BRANCH = os.getenv("ARC_EVIDENCE_BRANCH", "arc-evidence")
+EVIDENCE_PUBLISH = os.getenv("ARC_EVIDENCE_PUBLISH", "1").lower() not in ("0", "false", "no", "")
+EVIDENCE_SECONDS = float(os.getenv("ARC_EVIDENCE_SECONDS", "10"))
+EVIDENCE_GIF_SECONDS = float(os.getenv("ARC_EVIDENCE_GIF_SECONDS", "8"))
+EVIDENCE_FPS = int(os.getenv("ARC_EVIDENCE_FPS", "30"))
+EVIDENCE_RESOLUTION = os.getenv("ARC_EVIDENCE_RESOLUTION", "1280x720")
+EVIDENCE_TIMEOUT = float(os.getenv("ARC_EVIDENCE_TIMEOUT", "600"))
+# A screenshot this dominated by one colour is flagged as a blank render.
+EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
+
 # Project-wide agent board (board.py). Per-task threads live in the worktree
 # at .arc/board.jsonl and are excluded from publish; this directory is the
 # copy every task in a project can read. Outside every worktree on purpose.
