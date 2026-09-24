@@ -719,6 +719,11 @@ OPENCODE_SERVE_STARTUP_TIMEOUT = float(
 # withdrawn model the morning after it left. GH_MODEL itself is resolved
 # below, once PLANNER_MODEL exists.
 GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "120"))
+# Backoff (seconds) for pushes and `gh pr create` that fail on network
+# weather (gitstore._TRANSIENT_NET). A real refusal (lease, auth, no commits)
+# is never retried. Comma-separated; empty disables retries.
+NET_RETRY_DELAYS = [float(x) for x in os.getenv(
+    "ARC_NET_RETRY_DELAYS", "5,15,45,90,180").split(",") if x.strip()]
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of
