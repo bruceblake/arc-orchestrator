@@ -7,6 +7,7 @@ failure the lease table exists to prevent.
 """
 import pathlib
 import os
+import sys
 import unittest
 
 from helpers import capture_events, ENTRY, STRONGEST  # noqa: F401  (sys.path)
@@ -607,3 +608,72 @@ class InteractiveWorkGetsAReservedSlot(unittest.TestCase):
     def test_batch_never_drops_below_the_floor(self):
         for m in config.IMPLEMENTER_MODELS:
             self.assertGreaterEqual(config.driver_limit(m), 1)
+
+
+class MainCheckoutEnv(unittest.TestCase):
+    """A worktree has no .env — config must find the MAIN checkout's.
+
+    The file is gitignored, so `git worktree add` never creates one. A process
+    started from a worktree or from ~/repos/arc-orchestrator (a blessed clone)
+    therefore loaded an EMPTY ARC_API_KEY while the operator's key sat in the
+    main checkout's .env one directory away — which reasonix reported as
+    `missing env ARC_API_KEY` 437 times on 2026-09-23.
+    """
+
+    def test_the_fallback_actually_loads_the_key(self):
+        """End-to-end: config.py running inside a linked worktree with NO .env
+        of its own, whose main checkout holds one, must end up with the key."""
+        import subprocess
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmp:
+            main = Path(tmp) / "main"
+            main.mkdir()
+            subprocess.run(["git", "init", "-q", str(main)], check=True)
+            (main / ".env").write_text("ARC_API_KEY=sk-from-the-main-checkout\n")
+            subprocess.run(["git", "-C", str(main), "-c", "user.email=a@b",
+                            "-c", "user.name=a", "commit", "-q",
+                            "--allow-empty", "-m", "init"], check=True)
+            wt = Path(tmp) / "wt"
+            subprocess.run(["git", "-C", str(main), "worktree", "add", "-q",
+                            str(wt)], check=True)
+            self.assertFalse((wt / ".env").exists(), "a worktree has no .env")
+            # Only config.py is needed to prove the lookup; it imports dotenv.
+            (wt / "config.py").write_text(
+                (config.ROOT / "config.py").read_text())
+            # A CLEAN environment: load_dotenv in THIS process put the real
+            # key into os.environ, and a subprocess would inherit it — the
+            # fallback would then never be exercised.
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("ARC_API_KEY", "ARC_BASE_URL")}
+            out = subprocess.run(
+                [sys.executable, "-c",
+                 "import config; print(config.API_KEY or 'EMPTY')"],
+                cwd=str(wt), capture_output=True, text=True, env=env)
+            self.assertEqual(out.returncode, 0, out.stderr[-500:])
+            self.assertEqual(out.stdout.strip(), "sk-from-the-main-checkout",
+                             "the main checkout's .env was not loaded")
+
+    def test_never_returns_the_file_we_already_loaded(self):
+        """config.py loads ROOT/.env first; the fallback must not re-load it
+        (it would report the same path twice and cannot help)."""
+        found = config._main_checkout_env()
+        if found is not None:
+            self.assertNotEqual(found, config.ROOT / ".env")
+
+    def test_require_api_key_names_the_file_and_the_fix(self):
+        saved = config.API_KEY
+        try:
+            config.API_KEY = ""
+            with self.assertRaises(config.ConfigError) as ctx:
+                config.require_api_key("the reasonix harness")
+            msg = str(ctx.exception)
+            self.assertIn("ARC_API_KEY is not set (empty)", msg)
+            self.assertIn(str(config.ROOT / ".env"), msg,
+                          "the error must name the file to edit")
+            self.assertIn("not retried", msg,
+                          "the error must say it is not a retryable crash")
+            config.API_KEY = "sk-live"
+            self.assertEqual(config.require_api_key(), "sk-live")
+        finally:
+            config.API_KEY = saved
