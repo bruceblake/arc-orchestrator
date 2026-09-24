@@ -33,6 +33,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -374,6 +375,204 @@ def _enqueue(entry):
         f.write(json.dumps(entry) + "\n")
 
 
+# Durable delivery of capacity-queued run/resume. The JSONL file stays as the
+# historical log the queue view already knew; the work itself lives in the
+# shared workqueue so a killed dashboard does not drop it.
+RUN_TOPIC = "captain.run"
+DRAIN_INTERVAL_S = 20.0
+DRAIN_LEASE_S = 120.0
+_drain_started = False
+_drain_lock = threading.Lock()
+_run_queues = {}
+_run_queues_lock = threading.Lock()
+
+
+def _run_queue(db_path=None):
+    import workqueue
+    path = str(db_path or config.DB_PATH)
+    with _run_queues_lock:
+        q = _run_queues.get(path)
+        if q is None:
+            q = workqueue.Queue(path)
+            _run_queues[path] = q
+        return q
+
+
+def enqueue_run(kind, path, repo, reason, models, dry_run=False, db_path=None):
+    """Queue one taskfile run. Keyed on the canonical path, so a second
+    enqueue while the first is still live is a no-op.
+
+    Returns (item_id, created). ``created`` is False when live work for this
+    path already exists. The JSONL line is the historical record; ``durable``
+    marks lines the live view should not repeat once the queue row is gone.
+    """
+    canonical = str(Path(path).resolve())
+    entry = {"ts": time.time(), "kind": kind, "taskfile": Path(path).name,
+             "path": canonical, "repo": repo,
+             "queue_until": "a driver slot frees", "reason": reason,
+             "models": models, "dry_run": bool(dry_run)}
+    try:
+        item_id, created = _run_queue(db_path).enqueue(
+            RUN_TOPIC, canonical, payload=entry)
+        entry["durable"] = True
+    except Exception as exc:
+        errors.capture(exc, node="captain.enqueue")
+        item_id, created = None, False
+    _enqueue(entry)
+    return item_id, created
+
+
+def _jsonl_entries():
+    try:
+        lines = _queue_path().read_text(
+            encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out
+
+
+def queue_view(db_path=None):
+    """What GET /api/captain/queue shows.
+
+    Live pending/claimed rows are the queue. JSONL lines written before the
+    durable queue (no ``durable`` flag) stay visible. Lines this module wrote
+    are hidden once their row leaves the live set, so a delivered run does not
+    keep looking queued. Never raises; a database that will not open falls
+    back to the JSONL log.
+    """
+    try:
+        items = _run_queue(db_path).active(RUN_TOPIC, limit=100)
+    except Exception as exc:
+        errors.capture(exc, node="captain.queue_view")
+        return {"queued": list(reversed(_jsonl_entries()[-100:]))}
+    live = []
+    for it in items:
+        payload = it.get("payload") if isinstance(it.get("payload"), dict) else {}
+        row = dict(payload)
+        row.setdefault("taskfile", Path(it.get("dedupe_key") or "").name)
+        row["state"] = it.get("state")
+        live.append(row)
+    legacy = [e for e in _jsonl_entries() if not e.get("durable")]
+    return {"queued": (live + list(reversed(legacy)))[:100]}
+
+
+def _taskfile_live(path):
+    """True when a `main.py code run` of this taskfile is already alive."""
+    import reconcile
+    want = Path(path).resolve()
+    try:
+        runs = reconcile.live_runs()
+    except Exception as exc:
+        errors.capture(exc, node="captain.drain")
+        return False
+    for run in runs:
+        tf = run.get("taskfile")
+        if not tf:
+            continue
+        other = Path(tf)
+        if other.name != want.name:
+            continue
+        if not other.is_absolute():
+            return True
+        try:
+            if other.resolve() == want:
+                return True
+        except OSError:
+            if str(other) == str(want):
+                return True
+    return False
+
+
+def _deliver(q, item, db_path=None):
+    """Recheck one claimed run and launch, drop, or put it back.
+
+    Order is file validity, then a live duplicate, then capacity. A blocked
+    plan goes back to pending for a later pass — the caller does not claim
+    again in this pass, so a full fleet does not spin.
+    """
+    payload = item.get("payload") if isinstance(item.get("payload"), dict) else {}
+    name = payload.get("taskfile") or Path(item.get("dedupe_key") or "").name
+    kind = payload.get("kind") if payload.get("kind") in ("run", "resume") else "run"
+    path = _taskfile_path(name)
+    if path is None or not path.is_file():
+        q.fail(item["id"], error=f"no such taskfile: {name}", retry=False)
+        events.emit("captain.drain", action=kind, taskfile=name, dropped="missing")
+        return {"taskfile": name, "result": "missing"}
+    if _taskfile_live(path):
+        q.complete(item["id"], {"skipped": "live"})
+        events.emit("captain.drain", action=kind, taskfile=path.name,
+                    skipped="live")
+        return {"taskfile": path.name, "result": "live"}
+    pressure = plan_pressure(str(path), db_path=db_path)
+    if not pressure["admit"]:
+        q.fail(item["id"], error=pressure["reason"], retry=True)
+        return {"taskfile": path.name, "result": "retained",
+                "reason": pressure["reason"]}
+    argv = [_python(), "main.py", "code", "run", str(path)]
+    if payload.get("dry_run"):
+        argv.append("--dry-run")
+    try:
+        proc = _spawn_detached(argv, f"captain-run-{path.stem}.log")
+    except Exception as exc:
+        errors.capture(exc, node="captain.drain")
+        q.fail(item["id"], error=str(exc), retry=True)
+        return {"taskfile": path.name, "result": "retained", "reason": str(exc)}
+    q.complete(item["id"], {"pid": proc.pid})
+    events.emit("captain.action", action=kind, taskfile=path.name,
+                pid=proc.pid, drained=True)
+    return {"taskfile": path.name, "result": "launched", "pid": proc.pid}
+
+
+def drain_once(db_path=None, limit=100):
+    """Reclaim expired claims, then deliver one batch.
+
+    Claiming the batch up front is what keeps a still-blocked head from being
+    claimed again the moment it is put back. A worker that dies mid-batch
+    leaves a lease; the next pass's reclaim returns that work to pending.
+    """
+    q = _run_queue(db_path)
+    q.reclaim(RUN_TOPIC)
+    claimed = []
+    for _ in range(max(1, int(limit))):
+        item = q.claim(RUN_TOPIC, worker=f"captain-drain:{os.getpid()}",
+                       lease_s=DRAIN_LEASE_S)
+        if item is None:
+            break
+        claimed.append(item)
+    return [_deliver(q, item, db_path=db_path) for item in claimed]
+
+
+def start_drain(db_path=None, interval=DRAIN_INTERVAL_S):
+    """Daemon thread the dashboard starts. One pass, then sleep — never a
+    tight loop while capacity is still blocked."""
+    global _drain_started
+    with _drain_lock:
+        if _drain_started:
+            return None
+        _drain_started = True
+
+    def loop():
+        while True:
+            try:
+                drain_once(db_path=db_path)
+            except Exception as exc:
+                errors.capture(exc, node="captain.drain")
+            time.sleep(interval)
+
+    t = threading.Thread(target=loop, name="captain-drain", daemon=True)
+    t.start()
+    return t
+
+
 def _python():
     return str(Path(config.ROOT) / ".venv" / "bin" / "python")
 
@@ -394,9 +593,10 @@ def execute_actions(actions, repo, db_path=None):
     """Run the validated actions against the allowlists; return their results.
 
     Each action is a FIXED argv. `run`/`resume` are capacity-gated: a plan
-    that cannot be admitted is queued (logs/captain/queue.jsonl) with the
-    reason, never launched into a capacity wall. Results are recorded in the
-    turn so the operator sees exactly what the captain did and why.
+    that cannot be admitted is queued (workqueue topic ``captain.run``, keyed
+    by canonical path, plus a JSONL line) with the reason, never launched
+    into a capacity wall. Results are recorded in the turn so the operator
+    sees exactly what the captain did and why.
     """
     results = []
     for act in actions:
@@ -423,12 +623,9 @@ def execute_actions(actions, repo, db_path=None):
                 continue
             pressure = plan_pressure(str(path), db_path=db_path)
             if not pressure["admit"]:
-                entry = {"ts": time.time(), "kind": kind,
-                         "taskfile": path.name, "repo": repo,
-                         "queue_until": "a driver slot frees",
-                         "reason": pressure["reason"],
-                         "models": pressure["models"]}
-                _enqueue(entry)
+                enqueue_run(kind, path, repo, pressure["reason"],
+                            pressure["models"], dry_run=bool(act.get("dry_run")),
+                            db_path=db_path)
                 events.emit("captain.action", action=kind, taskfile=path.name,
                             queued=True, reason=pressure["reason"])
                 results.append({"kind": kind, "ok": False, "queued": True,

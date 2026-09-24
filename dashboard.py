@@ -3847,26 +3847,16 @@ def _captain_poll(session, since):
 
 
 def _captain_queue():
-    """GET /api/captain/queue — entries the captain queued for capacity.
+    """GET /api/captain/queue — runs waiting on capacity.
 
-    Read-only view of logs/captain/queue.jsonl; the last 100 entries, newest
-    first. Never raises.
+    Live rows come from the durable workqueue. JSONL lines that predate it
+    still show. Never raises.
     """
     try:
-        lines = (_captain_dir() / "queue.jsonl").read_text(
-            encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+        import captain
+        return captain.queue_view()
+    except Exception:
         return {"queued": []}
-    out = []
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except ValueError:
-            continue
-    return {"queued": list(reversed(out[-100:]))}
 
 
 _HEALTH_PROBLEMS = ("driver.error", "driver.stalled", "driver.timeout",
@@ -5117,6 +5107,12 @@ def serve(port=None, db_path=None):
                  time.strftime("%Y-%m-%d %H:%M", time.localtime(nxt)) if nxt else "never — will run now")
     except Exception as exc:
         log.error("daily audit scheduler did not start: %s", exc)
+    try:
+        import captain
+        captain.start_drain(db_path)
+        log.info("captain queue drain armed")
+    except Exception as exc:
+        log.error("captain queue drain did not start: %s", exc)
     print(f"dashboard: http://localhost:{port}", flush=True)
     # Bound to one address: that is the only one worth printing. Bound to
     # all of them: list the LAN ones, which is what a phone needs.

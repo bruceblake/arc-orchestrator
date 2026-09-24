@@ -456,17 +456,40 @@ def gate_phase_4(project, project_dir):
             "(studio.qa.deepseek_fuzzer), not by the absence of complaints")
         return failures, detail
     detail["report"] = {k: report.get(k) for k in
-                        ("bots", "seconds", "authority_violations",
+                        ("bots", "seconds", "messages_sent", "replies_seen",
+                         "server_unreachable", "authority_violations",
                          "desyncs", "crashes", "tick_p95_ms")}
-    if report.get("authority_violations"):
+    if report.get("project") != str(project):
+        failures.append("fuzz report belongs to a different project")
+    if report.get("server_unreachable"):
         failures.append(
-            f"{report['authority_violations']} client actions were accepted "
-            "that the server should have rejected — the server is not "
-            "authoritative")
-    if report.get("desyncs"):
-        failures.append(f"{report['desyncs']} state desyncs observed")
-    if report.get("crashes"):
-        failures.append(f"the server crashed {report['crashes']} time(s) under fuzz")
+            "fuzz report says the server was unreachable — the swarm measured "
+            "the harness, not the game")
+    for key in ("bots", "messages_sent", "replies_seen"):
+        value = report.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            failures.append(
+                f"fuzz report shows no successful {key} ({value!r}) — an "
+                "empty or malformed swarm is not evidence")
+    # A count must be PRESENT and an honest integer: an absent key is not a
+    # zero, and a negative count is a broken report. Only once the count is
+    # trusted does a non-zero value become the finding it describes.
+    nonzero = {
+        "authority_violations": (
+            "{n} client actions were accepted that the server should have "
+            "rejected — the server is not authoritative"),
+        "desyncs": "{n} state desyncs observed",
+        "crashes": "the server crashed {n} time(s) under fuzz",
+    }
+    for key, message in nonzero.items():
+        value = report.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            failures.append(
+                f"fuzz report has no explicit {key} count ({value!r})")
+        elif value < 0:
+            failures.append(f"fuzz report has a negative {key} count ({value})")
+        elif value > 0:
+            failures.append(message.format(n=value))
     return failures, detail
 
 

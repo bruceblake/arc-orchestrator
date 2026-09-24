@@ -230,6 +230,14 @@ class Queue:
                 " ORDER BY priority DESC, id LIMIT ?", (topic, limit)).fetchall()
         return [_as_item(r) for r in rows]
 
+    def active(self, topic, limit=100):
+        """Pending and claimed items, newest id first. The live queue."""
+        with self.lock:
+            rows = self.conn.execute(
+                "SELECT * FROM queue_items WHERE topic=? AND state IN ('pending','claimed')"
+                " ORDER BY id DESC LIMIT ?", (topic, limit)).fetchall()
+        return [_as_item(r) for r in rows]
+
     # ---- push notification ----------------------------------------------
 
     def notify(self, topic):
