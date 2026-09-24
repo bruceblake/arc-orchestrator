@@ -221,10 +221,13 @@ class SwapsOffASpentPlan(unittest.TestCase):
         drivers._usage_blocked_until["cursor"] = NOW + 1000
         self.assertEqual(self._sub("Sol", "codex"), "Antigravity-Gemini")
         drivers._usage_blocked_until["agy"] = NOW + 1000
-        self.assertEqual(self._sub("Sol", "codex"), "Opus")
+        # GLM-5.3 on ARC has no plan window: it is spent before Claude's
+        # small plan (operator directive 2026-09-24).
+        self.assertEqual(self._sub("Sol", "codex"), "GLM-5.3")
+        self.assertEqual(self._sub("Sol", "codex", avoid_families={"glm"}), "Opus")
         drivers._usage_blocked_until["claude"] = NOW + 1000
         # Another model on the spent harness is the same plan; Zen is medium.
-        self.assertEqual(self._sub("Sol", "codex"), "GLM-5.3")
+        self.assertIsNone(self._sub("Sol", "codex", avoid_families={"glm"}))
 
     def test_reviews_swap_but_not_onto_the_implementer_family(self):
         """A spent review seat moves, and never into the family that wrote the code."""
