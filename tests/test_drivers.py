@@ -471,6 +471,136 @@ class CapacityClassification(unittest.TestCase):
             self.assertFalse(Driver.is_capacity_error(msg), msg)
 
 
+class ConfigClassification(unittest.TestCase):
+    """A missing key is a DEPLOYMENT fault, not a run of one.
+
+    On 2026-09-23 the reasonix harness failed 437 times with `missing env
+    ARC_API_KEY` and every one was retried as an ordinary crash: MAX_RETRIES
+    attempts, then a fix round, then a tier escalation — on a pool of 10
+    unlimited sessions that could never have succeeded. The key is read at
+    process start, so nothing the ladder does can change it.
+    """
+
+    def test_the_live_output_is_classified(self):
+        # Verbatim from the 437 exits: reasonix names the ARC provider slug
+        # and the env var its config asked for, then exits 1.
+        live = ('reasonix exited 1: provider "arc-deepseek-v4-1-flash-'
+                'thinking-max/DeepSeek-V4.1-Flash-thinking-max": '
+                'missing env ARC_API_KEY')
+        self.assertTrue(Driver.is_config_error(live))
+        # Our own config error, and a key that is present but dead — the same
+        # class of fault: retrying neither of them can help.
+        self.assertTrue(Driver.is_config_error(
+            "ARC_API_KEY is not set (empty): the reasonix harness cannot run"))
+        self.assertTrue(Driver.is_config_error(
+            'provider.auth_error: 403: ARC_API_KEY is invalid or expired'))
+        self.assertTrue(Driver.is_config_error("missing env OPENROUTER_API_KEY"))
+
+    def test_not_confused_with_capacity_or_a_real_crash(self):
+        for msg in ("provider.api_error: 400 status code (no body)",
+                    'opencode exited 1: {"detail":"backend queue is full"}',
+                    "opencode exited 2: SyntaxError in world.js",
+                    "kimi stalled after 300.0s idle",
+                    ""):
+            self.assertFalse(Driver.is_config_error(msg), msg)
+            self.assertFalse(DriverError(msg).config_error, msg)
+        # ...and a config text is not capacity either, so the two ladders
+        # cannot both claim it.
+        self.assertFalse(Driver.is_capacity_error("missing env ARC_API_KEY"))
+
+    def test_the_flag_survives_the_300_character_message_tail(self):
+        """The exit site judges the WHOLE transcript because the message keeps
+        only its last 300 characters; a long log could push the provider line
+        out of the tail. Driver.run must read the FLAG, not re-sniff prose."""
+        exc = DriverError("opencode exited 1: " + "x" * 400,
+                          config_error=True)
+        self.assertTrue(exc.config_error)
+        self.assertEqual(exc.kind, "config")
+
+
+class ConfigErrorIsNotRetried(unittest.TestCase):
+    """One attempt, one driver.error, no ladder — the whole point of (2)."""
+
+    def _drive(self, exc):
+        backoffs = []
+        attempts = []
+
+        async def fake_sleep(d):
+            backoffs.append(d)
+
+        async def go():
+            drv = FakeDriver(exc)
+            drivers._semaphores.pop(drv.model, None)
+            orig_sleep = drivers.asyncio.sleep
+            drivers.asyncio.sleep = fake_sleep
+            try:
+                with capture_events() as ev:
+                    with self.assertRaises(config.ConfigError):
+                        await drv.run("p", Path("."), task_id="t1")
+            finally:
+                drivers.asyncio.sleep = orig_sleep
+            attempts.append(drv.calls)
+            return ev
+
+        with TempLeaseDB():
+            ev = asyncio.run(go())
+        return attempts[0], backoffs, ev
+
+    def test_a_config_exit_is_tried_once_and_raises_config_error(self):
+        exc = DriverError('reasonix exited 1: provider "arc-x/y": '
+                          'missing env ARC_API_KEY', config_error=True)
+        calls, backoffs, _ev = self._drive(exc)
+        self.assertEqual(calls, 1,
+                         "a missing key was retried; nothing will have changed")
+        self.assertEqual(backoffs, [], "no backoff ladder may run")
+        # NOT a DriverError: code_tasks catches DriverError around implement
+        # and review to keep a crashed harness inside the fix loop. A missing
+        # key must escape that loop entirely and stop the run, so it must not
+        # be catchable as one — this type relationship IS the mechanism behind
+        # "no fix round, no escalation", which is why it is asserted here.
+        self.assertFalse(issubclass(config.ConfigError, DriverError))
+        self.assertTrue(issubclass(config.ConfigError, RuntimeError))
+
+    def test_one_driver_error_carries_kind_config(self):
+        exc = DriverError("reasonix exited 1: missing env ARC_API_KEY")
+        _calls, _backoffs, ev = self._drive(exc)
+        errs = ev.of("driver.error")
+        self.assertEqual(len(errs), 1, f"expected one driver.error, got {errs}")
+        self.assertEqual(errs[0].get("kind"), "config")
+        self.assertFalse(errs[0].get("capacity"),
+                         "a config fault is not capacity")
+        self.assertFalse(errs[0].get("will_resume"))
+
+    def test_an_empty_key_never_spawns_a_harness(self):
+        """require_api_key raises inside extra_env, before the spawn: the
+        attempt is reported once as a config fault and nothing is retried."""
+        async def go():
+            drv = drivers.ReasonixDriver(
+                "DeepSeek-V4.1-Flash-thinking-max", "implementer")
+            drivers._semaphores.pop(drv.model, None)
+            with capture_events() as ev:
+                with self.assertRaises(config.ConfigError):
+                    await drv.run("p", Path("."), task_id="t1")
+            return ev
+
+        saved = config.API_KEY
+        config.API_KEY = ""
+        try:
+            with TempLeaseDB():
+                ev = asyncio.run(go())
+        finally:
+            config.API_KEY = saved
+        errs = ev.of("driver.error")
+        self.assertEqual(len(errs), 1, f"expected one driver.error, got {errs}")
+        self.assertEqual(errs[0].get("kind"), "config")
+        self.assertFalse(errs[0].get("capacity"),
+                         "a config fault must not be filed as capacity")
+        self.assertFalse(ev.of("driver.done"), "no harness may have run")
+        # The retry ladder never re-enters: one queued attempt, never two.
+        self.assertEqual(len(ev.of("driver.queued")), 1,
+                         "the attempt was retried after a config fault")
+
+
 class TranscriptParsing(unittest.TestCase):
     def test_sums_opencode_step_tokens(self):
         raw = "\n".join([
