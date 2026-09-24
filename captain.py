@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 
 import config
+import project_contract
 import errors
 import events
 import orchchat
@@ -298,6 +299,8 @@ def _state_block(state):
 def build_prompt(repo, state, turns):
     return (CAPTAIN_PERSONA
             + f"\n\nTARGET REPO: {repo}\n\n"
+            + project_contract.captain_block(repo)
+            + "\n"
             + _state_block(state)
             + "\n\nCONVERSATION WITH THE OPERATOR (oldest first). Reply as "
               "the captain:\n\n"
