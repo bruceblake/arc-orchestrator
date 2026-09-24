@@ -10,7 +10,7 @@
 //   Projects  every taskfile, pull requests, the pipeline diagram
 //   Activity  the full event log
 const TABS = {
-  overview: ["summary-panel", "errs-panel", "agents-panel", "slots-panel", "health-panel"],
+  overview: ["summary-panel", "work-panel", "errs-panel", "agents-panel", "slots-panel", "health-panel"],
   studio:   ["studio-panel"],
   projects: ["projects-panel", "gh-panel", "topo-panel"],
   activity: ["activity-panel"],
@@ -18,7 +18,7 @@ const TABS = {
 // The panel each tab exists to show. The summary tier's auto-fold must never
 // close it, or switching to a tab would reveal a collapsed header and nothing
 // else — the original clutter problem in a new place.
-const TAB_PRIMARY = new Set(["agents-panel", "studio-panel", "projects-panel", "activity-panel"]);
+const TAB_PRIMARY = new Set(["work-panel", "agents-panel", "studio-panel", "projects-panel", "activity-panel"]);
 const TAB_KEY = "arc.tab";
 let TAB = "";
 

@@ -88,6 +88,9 @@ function taskDag(dag, opts) {
     const ttip = topo ? [n.id, n.gather ? "gather — joins parallel branches" : (dag.starts || []).includes(n.id) ? "start" : ""].filter(Boolean).join("\n")
       : [n.title || n.id,
       `status: ${n.status}${n.live ? " (live)" : ""}`,
+      n.stage ? `stage: ${typeof workStage === "function" ? workStage(n.stage) : n.stage}` : "",
+      n.activity ? `activity: ${n.activity}` : "",
+      n.reason ? `reason: ${n.reason}` : "",
       `impl: ${short(n.model)} · review: ${revShort(n.reviewer)}`,
       att > 1 || escn ? `fix loop: implement attempt ${att}${escn ? `, escalated x${escn}` : ""}` : "",
       bncText,
@@ -105,8 +108,11 @@ function taskDag(dag, opts) {
          (mini && !labFs ? "" :
          `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 12.5 : 17)}" font-size="${mini ? labFs : 11}" fill="#c9d1d9">${esc(n.id.slice(0, mini ? Math.max(6, Math.floor((NW - 12) / 6)) : 26))}${mini ? (STATUSG[n.status] || "") : ""}</text>` +
          `<text x="${p.x + (mini ? 6 : 10)}" y="${p.y + (mini ? 24.5 : 33)}" font-size="${mini ? labFs : 9}" fill="#8b949e">${esc(short(n.model))} → ${esc(revShort(n.reviewer))}${att > 1 ? ` · x${att}` : ""}${escn ? ` ⬆${escn}` : ""}</text>`);
-    if (!topo && !mini)
-      s += `<text x="${p.x + 10}" y="${p.y + 45}" font-size="9" fill="${c}">${esc(n.status)}${n.live ? " · live" : ""}</text>`;
+    if (!topo && !mini) {
+      const liveStage = n.stage ? ` · ${n.stage}` : "";
+      const liveActivity = n.activity ? ` · ${n.activity}` : (n.live ? " · live" : "");
+      s += `<text x="${p.x + 10}" y="${p.y + 45}" font-size="9" fill="${c}">${esc((n.status + liveStage + liveActivity).slice(0, 32))}</text>`;
+    }
     if (!topo && !mini && (att > 1 || escn > 0)) {
       // Third line: the fix loop is VISIBLE — attempt count, escalations, and
       // what last sent this node back to code (amber while in flight, muted
@@ -591,4 +597,3 @@ $("#projects").onclick = ev => {
   const p = el && PROJECTS[+el.dataset.i];
   if (p && p.file) { if (EXPANDED === p.file) closeDetail(); else openDetail(p.file); }
 };
-

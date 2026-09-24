@@ -190,6 +190,9 @@ PYEOF
     if ! node tests/projects_ui.test.mjs; then
         echo "FAIL: projects-list UI misbehaves"; rc=1
     fi
+    if ! node tests/work_status_ui.test.mjs; then
+        echo "FAIL: live task map misbehaves"; rc=1
+    fi
     # The fleet activity feed: newest first, the type badges, relative
     # timestamps and the click-through to a project. Same explicit list — a
     # suite that is not named here does not run.

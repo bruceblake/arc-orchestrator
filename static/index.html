@@ -31,6 +31,31 @@ main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
 .panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .grid { display: grid; gap: 10px; }
 .projgrid { grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); }
+/* Live work board: status has words and symbols so colour is never the only cue. */
+.work-toolbar { display:flex; gap:8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+.work-totals { display:flex; gap:6px; flex-wrap:wrap; }
+.work-filter { margin-left:auto; }
+.work-project { border:1px solid var(--border); border-radius:8px; padding:10px; margin:0 0 10px; background:var(--bg); }
+.work-project.attention { border-color:var(--err); }
+.work-project.paused { border-color:var(--warn); }
+.work-head { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+.work-head button { text-align:left; flex:1; min-width:180px; }
+.work-chain { margin:6px 0; color:var(--dim); font-size:11px; }
+.work-chain button { color:var(--accent); border:0; background:none; font:inherit; cursor:pointer; text-decoration:underline; }
+.work-dag { overflow:auto; max-height:330px; margin:8px 0; }
+.work-tasks { display:grid; gap:5px; }
+.work-task { display:grid; grid-template-columns:minmax(130px,1.1fr) minmax(80px,.65fr) minmax(100px,.8fr) minmax(180px,2fr); gap:8px; align-items:start; width:100%; text-align:left; padding:7px 9px; border:1px solid var(--border); border-radius:6px; background:var(--panel); color:var(--text); cursor:pointer; font:inherit; }
+.work-task:hover, .work-task:focus-visible { border-color:var(--accent); outline:none; }
+.work-task.working { border-left:3px solid var(--ok); }
+.work-task.queued, .work-task.waiting, .work-task.usage_wait { border-left:3px solid var(--warn); }
+.work-task.stalled, .work-task.blocked { border-left:3px solid var(--err); }
+.work-task.done { opacity:.72; }
+.work-task .title { color:var(--dim); font-size:11px; display:block; }
+.work-task .reason { color:var(--dim); font-size:11px; white-space:normal; overflow-wrap:anywhere; }
+.work-task.stalled .reason, .work-task.blocked .reason { color:var(--err); }
+.work-task.usage_wait .reason, .work-task.queued .reason { color:var(--warn); }
+.work-empty { color:var(--dim); padding:10px 0; }
+@media (max-width:720px) { .work-task { grid-template-columns:1fr 1fr; } .work-task .reason { grid-column:1 / -1; } }
 .card { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: #0d1117; cursor: pointer; }
 .card:hover { border-color: var(--accent); }
 .prow { display: flex; gap: 10px; align-items: center; padding: 4px 8px; margin: 4px 0; border: 1px solid var(--border); border-radius: 6px; background: #0d1117; cursor: pointer; }
@@ -518,6 +543,18 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       <div class="hint" id="summary-line">waiting for fleet data…</div>
       <div class="grid summary" id="summary"></div>
     </div>
+    <div class="panel" id="work-panel">
+      <h2>Live task map <span class="hint" id="work-meta">loading…</span></h2>
+      <div class="work-toolbar">
+        <div class="work-totals" id="work-totals"></div>
+        <select class="fsel work-filter" id="work-filter" aria-label="Filter live task map">
+          <option value="active" selected>Unfinished tasks</option>
+          <option value="all">All tasks</option>
+          <option value="attention">Needs attention</option>
+        </select>
+      </div>
+      <div id="work-map"><div class="work-empty">Loading task map…</div></div>
+    </div>
     <div class="panel" id="health-panel">
       <h2>Fleet <span class="hint" id="health-meta"></span>
         <span style="flex:1"></span>
@@ -729,6 +766,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/github.js"></script>
 <script src="/panels/projects.js"></script>
 <script src="/panels/detail.js"></script>
+<script src="/panels/work_status.js"></script>
 <script src="/panels/chat.js"></script>
 <script src="/panels/captain.js"></script>
 <script src="/panels/transcript.js"></script>
@@ -741,6 +779,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 // ---- boot: staggered polls so nothing fires all at once ----
 loadHash(); syncFilterControls();
 pollProjects();
+setTimeout(() => { pollWorkStatus(); setInterval(pollWorkStatus, 5000); }, 600);
 initEvents();
 setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
 setTimeout(() => { pollSlots(); setInterval(pollSlots, 3000); }, 400);
@@ -749,7 +788,6 @@ setTimeout(() => { pollActivity(); setInterval(pollActivity, 10000); }, 2200);
 setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
 setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
 setTimeout(() => setInterval(pollEvents, 8000), 1200);
-setInterval(pollProjects, 5000);
 setInterval(pollGithub, 20000);
 setTimeout(() => { pollTopos(); setInterval(pollTopos, 30000); }, 2000);
 // Studio: poll fast only while its tab is showing; the snapshot runs gate
