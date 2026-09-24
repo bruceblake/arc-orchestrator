@@ -11,8 +11,14 @@ which launches `main.py code run` — the same governed pipeline as a hand launc
 from __future__ import annotations
 
 import json
+import hashlib
+import fcntl
+import os
+import re
+import tempfile
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import config
@@ -21,8 +27,8 @@ import events
 INTERVAL_S = 20.0
 BACKOFF_S = 300.0
 MAX_RESUMES = 4
-# A plan interrupted by a dashboard restart is not started again until this
-# age, so two processes cannot both be writing the same taskfile.
+# A plan interrupted by a dashboard restart is not retried immediately.
+# The file lock below closes the concurrent-process race.
 PLAN_STALE_S = 3600.0
 _TERMINAL_OK = ("merged", "done", "skipped")
 _PERMANENT = "exhausted escalation"
@@ -47,24 +53,53 @@ def _load_state():
     doc.setdefault("backoff", {})
     doc.setdefault("resumes", {})
     doc.setdefault("noted", {})
+    doc.setdefault("dispatched", {})
     return doc
 
 
 def _save_state(doc):
     path = _state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+    with path.with_suffix(".lock").open("a+b") as claim:
+        fcntl.flock(claim, fcntl.LOCK_EX)
+        previous = _load_state()
+        for key in ("backoff", "resumes"):
+            current = doc.setdefault(key, {})
+            for name, record in previous[key].items():
+                metric = "until" if key == "backoff" else "n"
+                if record.get(metric, 0) > current.get(name, {}).get(metric, 0):
+                    current[name] = record
+        doc["noted"] = {**previous["noted"], **doc.get("noted", {})}
+        dispatched = doc.setdefault("dispatched", {})
+        for name, ts in (previous.get("dispatched") or {}).items():
+            if float(ts or 0) > float(dispatched.get(name) or 0):
+                dispatched[name] = ts
+        fd, temp_name = tempfile.mkstemp(prefix=".autopilot-state-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                json.dump(doc, stream, indent=2)
+            os.replace(temp_name, path)
+        finally:
+            Path(temp_name).unlink(missing_ok=True)
 
 
 def _slug(text):
-    raw = "".join(c if c.isalnum() or c in "-_" else "-" for c in str(text))
-    return raw.strip("-")[:80] or "feature"
+    source = str(text)
+    raw = "".join(c if c.isalnum() or c in "-_" else "-" for c in source)
+    stem = raw.strip("-")[:80] or "feature"
+    if stem != source:
+        stem += "-" + hashlib.sha256(source.encode()).hexdigest()[:8]
+    return stem
 
 
 def taskfile_path(project, feature_id):
     """Stable path for one roadmap feature. Never the phase-wide default."""
     name = f"studio-{_slug(project)}-{_slug(feature_id)}.json"
     return Path(config.TASKS_DIR) / name
+
+
+def _plan_key(project, feature_id):
+    return f"plan:{project}:{feature_id}"
 
 
 def _note(doc, kind, body, **fields):
@@ -150,11 +185,40 @@ def _idle_implementers(cap):
     return idle
 
 
-def _planner_free(cap):
+def _planner_free(cap, db_path=None, now=None):
     model = config.PLANNER_MODEL
     if not model:
         return False
-    return cap.get(model, {}).get("batch_headroom", 0) > 0
+    seat = cap.get(model, {})
+    if seat.get("batch_headroom", 0) <= 0:
+        return False
+    harness = seat.get("harness")
+    if harness:
+        import captain
+        import drivers
+        used = captain._live_lease_counts(db_path).get(f"harness:{harness}", 0)
+        if used >= (seat.get("harness_cap") or 0):
+            return False
+        if drivers._usage_blocked_until.get(harness, 0) > (now or time.time()):
+            return False
+        if harness == "claude":
+            from studio import status
+            window = status.plan_windows() or {}
+            if window.get("as_of", 0) > (now or time.time()) - 5 * 3600:
+                windows = list(window.get("windows", {}).values())
+                active = [v for v in windows if _reset_future(
+                    v.get("resets_at"), now or time.time())]
+                rejected = window.get("overage") == "rejected" and (not windows or active)
+                if rejected or any((v.get("used") or 0) >= 1 for v in active):
+                    return False
+    return True
+
+
+def _reset_future(value, now):
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() > now
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _queued(path, db_path):
@@ -189,11 +253,38 @@ def _named_features(project):
     return named
 
 
-def _dispatch_existing(project, repo, cap, idle, doc, store, db_path, now):
+def _taskfile_phase(path, proj):
+    """Phase named in a task prompt, else the phase encoded in the filename."""
+    from studio import status
+    from studio.schemas.task import phase_index
+    found = []
+    for task in proj.get("tasks") or []:
+        if isinstance(task, dict):
+            found.extend(re.findall(
+                r"(?m)^PHASE: (PHASE_[A-Z0-9_]+)\s*$", task.get("prompt") or ""))
+    if not found:
+        return status._phase_of_taskfile(path)
+    return max(found, key=lambda p: phase_index(p))
+
+
+def _operator_stopped(path_key, doc):
+    """True when `run.stopped` for this taskfile is newer than our last dispatch."""
+    import fleetwatch
+    since = float((doc.get("dispatched") or {}).get(path_key) or 0)
+    try:
+        stopped = fleetwatch._stopped_since(since)
+    except Exception:                                          # noqa: BLE001
+        return False
+    return path_key in stopped
+
+
+def _dispatch_existing(project, repo, phase, cap, idle, doc, store, db_path, now):
     """Enqueue unstarted runs and bounded resumes. Returns how many queued."""
     from studio import status
+    from studio.schemas.task import phase_index
     import captain
     n = 0
+    current_i = phase_index(phase)
     for path, proj in status._taskfiles_for(project):
         tasks = [t for t in (proj.get("tasks") or []) if isinstance(t, dict)]
         models = {t.get("model") for t in tasks if t.get("model")}
@@ -201,6 +292,13 @@ def _dispatch_existing(project, repo, cap, idle, doc, store, db_path, now):
         key = str(path.resolve())
         name = path.name
         if _complete(tasks, rows):
+            continue
+        tf_phase = _taskfile_phase(path, proj)
+        tf_i = phase_index(tf_phase)
+        if current_i >= 0 and tf_i > current_i:
+            _note(doc, "stop",
+                  f"not launching {name}; phase {tf_phase} is ahead of {phase}",
+                  project=project, taskfile=name, reason="future-phase")
             continue
         if captain._taskfile_live(path) or _queued(path, db_path):
             _note(doc, "stop", f"leave {name} alone; a run is already live or queued",
@@ -222,11 +320,16 @@ def _dispatch_existing(project, repo, cap, idle, doc, store, db_path, now):
                   project=project, taskfile=name, reason="capacity")
             continue
         kind = "run" if not rows else "resume"
+        if kind == "resume" and _operator_stopped(key, doc):
+            _note(doc, "stop", f"stop {name}: operator ended the run",
+                  project=project, taskfile=name, reason="operator-stop")
+            continue
         if kind == "resume":
             rec = doc["resumes"].setdefault(key, {"n": 0})
             rec["n"] = int(rec.get("n") or 0) + 1
         if not _enqueue(kind, path, repo, "studio autopilot", models, db_path):
             continue
+        doc.setdefault("dispatched", {})[key] = now
         _backoff(doc, "task:" + key, kind, now)
         _note(doc, "dispatch", f"{kind} {name}", project=project,
               taskfile=name, reason=kind)
@@ -258,7 +361,7 @@ def _candidate(project, phase, repo, doc, now):
             _note(doc, "stop", f"not planning {fid}; {path.name} already exists",
                   project=project, feature=fid, reason="exists")
             continue
-        if _backing_off(doc, "plan:" + fid, now):
+        if _backing_off(doc, _plan_key(project, fid), now):
             _note(doc, "stop", f"backoff planning {fid}",
                   project=project, feature=fid, reason="backoff")
             continue
@@ -274,11 +377,44 @@ def _candidate(project, phase, repo, doc, now):
 
 
 def _plan_one(project, phase, repo, feat, doc, db_path, now):
-    from studio import planner
     fid = feat["id"]
     path = taskfile_path(project, fid)
-    if path.exists():
-        return None
+    lock_path = Path(config.STUDIO_DIR) / "autopilot-plan.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+b") as claim:
+        try:
+            fcntl.flock(claim, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            _note(doc, "stop", f"plan of {fid} already claimed",
+                  project=project, feature=fid, reason="claimed")
+            return None
+        if path.exists() or _backing_off(_load_state(), _plan_key(project, fid), now):
+            return None
+        return _plan_claimed(project, phase, repo, feat, doc, db_path, now, path)
+
+
+def _validate_plan(path, project, repo, phase, fid):
+    data = json.loads(path.read_text(encoding="utf-8"))
+    body = data.get("project") or {}
+    tasks = body.get("tasks") or []
+    if (body.get("name") != project or
+            Path(body.get("repo") or "").resolve() != Path(repo).resolve() or
+            not tasks):
+        raise ValueError("planned project, repo, or task list does not match")
+    for task in tasks:
+        prompt = task.get("prompt") or ""
+        phases = re.findall(r"(?m)^PHASE: (PHASE_[A-Z0-9_]+)$", prompt)
+        if task.get("feature") != fid or phases != [phase]:
+            raise ValueError("planned task has a different feature or phase")
+
+
+def _plan_claimed(project, phase, repo, feat, doc, db_path, now, path):
+    from studio import planner
+    fid = feat["id"]
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=".studio-plan-", suffix=".tmp", dir=path.parent)
+    os.close(fd)
+    temp = Path(temp_name)
     doc["inflight"] = {"project": project, "feature": fid,
                        "path": str(path), "started": now}
     _save_state(doc)
@@ -287,22 +423,24 @@ def _plan_one(project, phase, repo, feat, doc, db_path, now):
             f"Set \"feature\" to {fid!r} on every task. "
             f"Stay in {phase}. Do not plan a later phase.")
     try:
-        result = planner.plan(goal, repo, phase=phase, project=project,
-                              out_path=path)
+        planner.plan(goal, repo, phase=phase, project=project, out_path=temp)
+        _validate_plan(temp, project, repo, phase, fid)
+        os.link(temp, path)  # Fails if another process published this feature.
     except Exception as exc:                                  # noqa: BLE001
         doc["inflight"] = None
-        _backoff(doc, "plan:" + fid, str(exc), now)
+        _backoff(doc, _plan_key(project, fid), str(exc), now)
         _note(doc, "stop", f"plan {fid} failed: {exc}", project=project,
               feature=fid, reason="plan-failed")
         _save_state(doc)
         return None
+    finally:
+        temp.unlink(missing_ok=True)
     doc["inflight"] = None
-    written = Path(result.get("path") or path)
+    written = path
     _note(doc, "plan", f"planned {fid} -> {written.name}", project=project,
           feature=fid, taskfile=written.name, reason="planned")
-    if written.is_file():
-        _enqueue("run", written, repo, f"studio autopilot planned {fid}",
-                 set(), db_path)
+    if written.is_file() and _enqueue("run", written, repo,
+                                      f"studio autopilot planned {fid}", set(), db_path):
         events.emit("studio.autopilot.queue", project=project,
                     taskfile=written.name, feature=fid, kind="run")
     _save_state(doc)
@@ -365,14 +503,14 @@ def _scan(doc, cap, idle, store, db_path, now):
                   project=project, reason="no-repo")
             continue
         dispatched += _dispatch_existing(
-            project, repo, cap, idle, doc, store, db_path, now)
+            project, repo, phase, cap, idle, doc, store, db_path, now)
         if planned is not None:
             continue
         if not status.roadmap(repo):
             _note(doc, "stop", f"{project} has no studio_roadmap.json features",
                   project=project, reason="no-roadmap")
             continue
-        if not _planner_free(cap):
+        if not _planner_free(cap, db_path, now):
             _note(doc, "stop", "planner seat spent or blocked; not planning",
                   project=project, reason="planner-capacity")
             continue
