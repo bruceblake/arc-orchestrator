@@ -1614,6 +1614,10 @@ EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
 # copy every task in a project can read. Outside every worktree on purpose.
 BOARD_DIR = Path(os.getenv("ARC_BOARD_DIR") or ROOT / "logs" / "boards")
 
+# The agent coordination board (agentboard.py, docs/agent-board.md): the cap
+# on one message body. board.py's JSONL lines keep their 400-character cap.
+BOARD_BODY_MAX = int(os.getenv("ARC_BOARD_BODY_MAX", "4000"))
+
 # The spend ceiling, in USD, for one studio run. The local fleet never needed
 # one: ARC is campus-served and effectively free, so the only cost of a task
 # looping sixteen times was time. The studio roster is billed per token at up

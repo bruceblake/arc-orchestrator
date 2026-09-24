@@ -823,6 +823,47 @@ def cmd_doctor(args):
         sys.exit(1)
 
 
+def cmd_board(args):
+    """`main.py board post|read|claims` — the agent coordination board."""
+    import agentboard
+    project = args.project or agentboard.infer_project()[0]
+    if not project:
+        print("board: --project is required outside ~/worktrees/<project>/<task>",
+              file=sys.stderr)
+        return 2
+    if args.board_cmd == "post":
+        if args.kind not in agentboard.KINDS:
+            print(f"board: unknown kind {args.kind!r}; one of {', '.join(agentboard.KINDS)}",
+                  file=sys.stderr)
+            return 2
+        if not agentboard.valid_channel(args.channel):
+            print(f"board: invalid channel {args.channel!r}", file=sys.stderr)
+            return 2
+        print(agentboard.post(project, author=args.author, channel=args.channel,
+                              kind=args.kind, body=args.body, mentions=args.mention,
+                              reply_to=args.reply_to))
+        return 0
+    if args.board_cmd == "claims":
+        for c in agentboard.claims(project):
+            left = int(c["expires_at"] - time.time())
+            print(f"{c['author']}  {', '.join(c['paths'])}  ({left}s left){'  ' + c['note'] if c['note'] else ''}")
+        return 0
+    if args.reader:
+        rows = agentboard.inbox(project, args.reader, since_ts=args.since)
+    else:
+        rows = agentboard.thread(project, channel=args.channel, since_ts=args.since)
+
+    def show(m, depth=0):
+        print(f"{'  ' * depth}[{m['kind']} #{m['id']} {m['channel']} "
+              f"{time.strftime('%m-%d %H:%M', time.localtime(m['ts']))}] "
+              f"{m['author']}: {m['body']}")
+        for r in m.get("replies", ()):
+            show(r, depth + 1)
+    for m in rows:
+        show(m)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="24/7 multi-model graph orchestrator for https://llm-api.arc.vt.edu"
@@ -1091,6 +1132,27 @@ def main():
                        help="absolute repo path under ARC_REPO_ROOT (default: your home)")
     cap_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
+    board_p = sub.add_parser(
+        "board", help="agent coordination board: post, read, claims (docs/agent-board.md)")
+    board_sub = board_p.add_subparsers(dest="board_cmd", required=True)
+    bpo = board_sub.add_parser("post", help="post one message to the board")
+    bpo.add_argument("--project", help="default: inferred from a ~/worktrees/<project>/<task> cwd")
+    bpo.add_argument("--as", dest="author", required=True,
+                     help="'<task_id>/<role>' or a bare role (captain, operator, planner)")
+    bpo.add_argument("--channel", default="project",
+                     help="project | task:<id> | dm:<agent> | captain | operator")
+    bpo.add_argument("--kind", default="note", help="one of agentboard.KINDS")
+    bpo.add_argument("--mention", action="append", default=[], help="repeatable")
+    bpo.add_argument("--reply-to", dest="reply_to")
+    bpo.add_argument("body")
+    brd = board_sub.add_parser("read", help="print a channel thread or an agent's inbox")
+    brd.add_argument("--project")
+    brd.add_argument("--channel")
+    brd.add_argument("--for", dest="reader", help="an agent: print its inbox instead")
+    brd.add_argument("--since", type=float)
+    bcl = board_sub.add_parser("claims", help="list live path claims")
+    bcl.add_argument("--project")
+
     args = ap.parse_args()
     setup_logging(getattr(args, "verbose", False))
 
@@ -1122,6 +1184,8 @@ def main():
     elif args.cmd == "chat":
         import orchchat
         sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))
+    elif args.cmd == "board":
+        sys.exit(cmd_board(args))
     elif args.cmd == "captain":
         import captain
         sys.exit(asyncio.run(captain.run_turn(args.session, args.repo)))
