@@ -311,6 +311,16 @@ async def diff_stat(wt):
     return "\n".join(parts) or "(clean)"
 
 
+# Paths `git add -A` must never stage, in publish() and in the review diff's
+# intent-to-add. The two .arc files are orchestrator<->agent channels; the
+# harness state dirs are written by the harnesses themselves inside the
+# worktree (reasonix keeps .reasonix/tasks/<run>/events.jsonl, snapshot.json
+# and a task.lock there). Thirty-three .reasonix files reached main this way
+# before this list existed, and a fleet PR carried three more.
+NEVER_STAGE = (":!.arc/plan_proposals.jsonl", ":!.arc/board.jsonl",
+               ":!.reasonix")
+
+
 async def diff_full(wt, base, max_chars=24000):
     """Working-tree diff vs the point this task branched from; untracked included.
 
@@ -324,8 +334,7 @@ async def diff_full(wt, base, max_chars=24000):
     """
     # Same `.arc` exclusion as publish(): a surviving proposals file must not
     # leak into the diff reviewers read either.
-    await _git(["add", "-A", "-N", "--", ".", ":!.arc/plan_proposals.jsonl",
-                ":!.arc/board.jsonl"],
+    await _git(["add", "-A", "-N", "--", ".", *NEVER_STAGE],
                cwd=wt, check=False)  # intent-to-add
     rc, mb, _ = await _git(["merge-base", base, "HEAD"], cwd=wt, check=False)
     ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
@@ -346,8 +355,7 @@ async def publish(wt, message, trailers=None):
     # suspenders for the day a delete fails (plan.amend.channel_survives
     # events are the alarm). Verified against git 2.54: the exclusion leaves
     # the file unstaged even when present.
-    await _git(["add", "-A", "--", ".", ":!.arc/plan_proposals.jsonl",
-                ":!.arc/board.jsonl"], cwd=wt)
+    await _git(["add", "-A", "--", ".", *NEVER_STAGE], cwd=wt)
     # The board is excluded on purpose and is left in the worktree. If it is
     # the only dirty path, commit would exit 1 with "nothing added to commit"
     # and a resume that only posted to the board would fail publish.
