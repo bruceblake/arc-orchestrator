@@ -476,8 +476,54 @@ async def cleanup(repo, task_id, delete_branch=True):
 # once every reviewer approves. Nothing is merged locally, so "send it back"
 # actually withholds the change instead of commenting on history.
 
-async def _gh(args, cwd, timeout=180):
-    """Run gh; returns (rc, stdout, stderr). Never raises."""
+_RATE_LIMITED = ("rate limit", "secondary rate", "abuse detection")
+
+
+def is_rate_limited(text):
+    """GitHub refused for API quota, not for anything about the request."""
+    low = (text or "").lower()
+    return any(m in low for m in _RATE_LIMITED)
+
+
+async def _quota_reset_in(cwd):
+    """Seconds until the exhausted GitHub quota resets; 60 when unknown.
+
+    `gh api rate_limit` is free: it does not count against either quota."""
+    import time
+    rc, out, _ = await _gh_raw(["api", "rate_limit"], cwd, timeout=30)
+    if rc != 0:
+        return 60.0
+    try:
+        res = json.loads(out).get("resources") or {}
+    except ValueError:
+        return 60.0
+    now = time.time()
+    waits = [float(r.get("reset", now)) - now for r in res.values()
+             if isinstance(r, dict) and r.get("remaining", 1) == 0]
+    return max(5.0, min(max(waits), 3600.0)) if waits else 60.0
+
+
+async def _gh(args, cwd, timeout=180, wait_quota=True):
+    """Run gh; returns (rc, stdout, stderr). Never raises.
+
+    A refusal for GitHub API quota waits for the reset and retries, bounded
+    by config.GH_QUOTA_MAX_WAIT, so parallel runs that drain the shared
+    5000/h GraphQL quota stall briefly instead of failing reviewed tasks at
+    `gh pr create` (three did on 2026-09-24)."""
+    rc, out, err = await _gh_raw(args, cwd, timeout)
+    budget = config.GH_QUOTA_MAX_WAIT if wait_quota else 0
+    while rc != 0 and budget > 0 and is_rate_limited(err + out):
+        wait = min(await _quota_reset_in(cwd) + 5, budget)
+        budget -= wait
+        events.emit("git.quota_wait", op=" ".join(args[:2]), wait_s=round(wait),
+                    error=(err or out).strip()[:200])
+        await asyncio.sleep(wait)
+        rc, out, err = await _gh_raw(args, cwd, timeout)
+    return rc, out, err
+
+
+async def _gh_raw(args, cwd, timeout=180):
+    """Run gh once; returns (rc, stdout, stderr). Never raises."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "gh", *args, cwd=str(cwd),
@@ -741,8 +787,14 @@ async def open_pr(repo, task_id, title, body, base=None):
     repo = Path(repo).resolve()
     base = base or config.BASE_BRANCH
     branch = f"task/{task_id}"
-    rc, out, _ = await _gh(["pr", "list", "--head", branch, "--state", "open",
-                            "--json", "number,url"], cwd=repo)
+    rc, out, err = await _gh(["pr", "list", "--head", branch, "--state", "open",
+                              "--json", "number,url"], cwd=repo, wait_quota=False)
+    if rc != 0 and is_rate_limited(err + out):
+        # GraphQL is spent; REST has its own quota. Same question, asked there.
+        rc, out, _ = await _gh(
+            ["api", f"repos/{{owner}}/{{repo}}/pulls?head={{owner}}:{branch}&state=open",
+             "--jq", "[.[] | {number: .number, url: .html_url}]"],
+            cwd=repo, wait_quota=False)
     if rc == 0 and out.strip():
         try:
             existing = json.loads(out)
@@ -755,7 +807,16 @@ async def open_pr(repo, task_id, title, body, base=None):
     async def once():
         rc, out, err = await _gh(
             ["pr", "create", "--base", base, "--head", branch,
-             "--title", title, "--body", body], cwd=repo)
+             "--title", title, "--body", body], cwd=repo, wait_quota=False)
+        if rc != 0 and is_rate_limited(err + out):
+            # Open it through REST instead of waiting out the GraphQL reset;
+            # only if REST is spent too does the quota wait apply.
+            rc, out, err = await _gh(
+                ["api", "repos/{owner}/{repo}/pulls", "-f", f"title={title}",
+                 "-f", f"head={branch}", "-f", f"base={base}", "-f", f"body={body}",
+                 "--jq", ".html_url"], cwd=repo)
+            if rc == 0:
+                events.emit("git.rest_fallback", op="pr create", branch=branch)
         created["out"] = out
         return rc == 0, err.strip()
     ok, err = await _retry_transient(f"pr create {branch}", once)
