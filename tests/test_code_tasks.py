@@ -1403,6 +1403,173 @@ class EveryTaskEventNamesItsTask(unittest.TestCase):
                          f"emitted without a task= field: {missing}")
 
 
+class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
+    """The planned pre-merge reviewer waits only when nothing eligible is free.
+
+    Game tasks pinned to GLM sat at 4/4 while stronger cross-family seats
+    were idle. Fallback is capacity, tier, and family — the taskfile token
+    does not change, and a review is never skipped.
+    """
+
+    def _full(self, *models):
+        usage = {}
+        for m in models:
+            usage[m] = config.driver_limit(m)
+            h = config.MODEL_HARNESS[m]
+            usage[f"harness:{h}"] = max(usage.get(f"harness:{h}", 0),
+                                        config.harness_limit(h))
+        return usage
+
+    def _stand_in(self, patch_driver=True):
+        """An idle hard-tier reviewer on its own harness.
+
+        ARC_FLEET=local has two families, so the only cross-family seat for a
+        GLM implementer is DeepSeek — weaker than a hard plan and the same
+        family once DeepSeek implemented. The rule is about capacity, not
+        which names happen to be live, so the stand-in is patched in beside
+        the real roster.
+        """
+        alt, top = "Idle-Strong", config.TIER_ORDER[-1]
+        real_dl, real_hl = config.driver_limit, config.harness_limit
+        patches = [
+            mock.patch.dict(config.MODEL_ROLES,
+                            {alt: {"reviewer", "pr_reviewer"}}),
+            mock.patch.dict(config.MODEL_FAMILY, {alt: "standin"}),
+            mock.patch.dict(config.MODEL_TIER, {alt: top}),
+            mock.patch.dict(config.MODEL_HARNESS, {alt: "standin-h"}),
+            mock.patch.object(
+                config, "driver_limit",
+                lambda m, interactive=False: 8 if m == alt
+                else real_dl(m, interactive)),
+            mock.patch.object(
+                config, "harness_limit",
+                lambda h: 8 if h == "standin-h" else real_hl(h)),
+        ]
+        if patch_driver:
+            real = code_tasks._driver
+
+            def _drv(m, role, pol):
+                if m == alt:
+                    return mock.Mock(model=m, harness="standin-h", images=None)
+                return real(m, role, pol)
+
+            patches.append(mock.patch.object(code_tasks, "_driver", _drv))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return alt
+
+    def test_a_saturated_planned_reviewer_yields_to_an_idle_stronger_one(self):
+        self._stand_in()
+        planned = config.REVIEW_FAMILIES["deepseek"]
+        impl = "GLM-5.3"
+        usage = self._full(planned)
+        model, reason = code_tasks._select_reviewer("deepseek", impl, None, usage)
+        self.assertEqual(reason, "planned_full_fallback")
+        self.assertGreater(code_tasks._tier_rank(model),
+                           code_tasks._tier_rank(planned))
+        self.assertNotEqual(config.MODEL_FAMILY[model], config.MODEL_FAMILY[impl])
+        self.assertNotEqual(config.MODEL_FAMILY[model], "deepseek")
+        self.assertLess(code_tasks._reviewer_pressure(model, usage), 1.0)
+
+    def test_a_full_harness_counts_as_no_headroom(self):
+        self._stand_in()
+        planned = config.REVIEW_FAMILIES["glm"]
+        usage = {"harness:opencode": config.harness_limit("opencode")}
+        model, reason = code_tasks._select_reviewer(
+            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+        self.assertEqual(reason, "planned_full_fallback")
+        self.assertNotEqual(model, planned)
+        self.assertGreaterEqual(code_tasks._tier_rank(model),
+                                code_tasks._tier_rank(planned))
+        self.assertNotEqual(config.MODEL_HARNESS[model], "opencode")
+
+    def test_when_every_eligible_reviewer_is_full_the_planned_one_is_kept(self):
+        planned = config.REVIEW_FAMILIES["glm"]
+        usage = self._full(*config.REVIEW_FAMILIES.values())
+        model, reason = code_tasks._select_reviewer(
+            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+        self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
+
+    def test_an_idle_same_family_model_is_never_the_fallback(self):
+        impl = "Claude-Opus-5.5"
+        planned = config.REVIEW_FAMILIES["glm"]
+        others = [m for fam, m in config.REVIEW_FAMILIES.items()
+                  if fam != "anthropic"]
+        model, reason = code_tasks._select_reviewer(
+            "glm", impl, None, self._full(*others))
+        self.assertEqual(model, planned)
+        self.assertNotEqual(config.MODEL_FAMILY.get(model), "anthropic")
+        self.assertEqual(reason, "planned_full_no_alternative")
+
+    def test_an_idle_weaker_reviewer_is_not_chosen(self):
+        planned = config.REVIEW_FAMILIES["glm"]
+        weaker = config.REVIEW_FAMILIES["deepseek"]
+        busy = [m for m in config.REVIEW_FAMILIES.values() if m != weaker]
+        model, reason = code_tasks._select_reviewer(
+            "glm", "Claude-Opus-5.5", None, self._full(*busy))
+        self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
+        self.assertLess(code_tasks._tier_rank(weaker), code_tasks._tier_rank(planned))
+
+    def test_a_crashed_fallback_reviewer_is_recorded_and_is_not_a_rejection(self):
+        self._stand_in(patch_driver=False)
+        planned = config.REVIEW_FAMILIES["deepseek"]
+        store = FakeStore()
+        store.lease_usage = lambda: self._full(planned)
+        seen = {}
+
+        class _Boom:
+            def __init__(self, model):
+                self.model, self.harness, self.images = model, "fake", None
+                seen["model"] = model
+
+            async def run(self, prompt, cwd, task_id=None, **kw):
+                seen["avoid"] = kw.get("avoid_families")
+                raise code_tasks.DriverError("reviewer backend down")
+
+        ts = code_tasks.load_taskfile(taskfile([{
+            "id": "t1", "title": "T1", "prompt": "do it", "verify_cmd": "true",
+            "model": "GLM-5.3", "reviewer": "deepseek"}]))
+        orig = code_tasks._driver
+        code_tasks._driver = lambda model, role, pol: _Boom(model)
+        wt = tempfile.mkdtemp(prefix="arc-rev-fallback-")
+        self.addCleanup(shutil.rmtree, wt, ignore_errors=True)
+        try:
+            with capture_events() as ev:
+                g = code_tasks.build_code_graph(store, ts, taskfile="tf.json")
+
+                async def diff_full(path, base):
+                    return "DIFF"
+
+                async def blast(path, base=None, **kw):
+                    return ""
+
+                g_diff, g_blast = code_tasks.gitstore.diff_full, code_tasks.graft.blast
+                code_tasks.gitstore.diff_full, code_tasks.graft.blast = diff_full, blast
+                try:
+                    out = asyncio.run(g.nodes["review_t1"].fn(
+                        {"results": {"alloc_t1": {"worktree": wt},
+                                     "implement_t1": {"model": "GLM-5.3"}},
+                         "runs": {}}))
+                finally:
+                    code_tasks.gitstore.diff_full, code_tasks.graft.blast = g_diff, g_blast
+        finally:
+            code_tasks._driver = orig
+        self.assertTrue(out["crashed"])
+        self.assertFalse(out["pass"])
+        self.assertNotEqual(out["reviewer_model"], planned)
+        self.assertGreater(code_tasks._tier_rank(out["reviewer_model"]),
+                           code_tasks._tier_rank(planned))
+        self.assertNotEqual(config.MODEL_FAMILY[out["reviewer_model"]], "glm")
+        self.assertEqual(seen["model"], out["reviewer_model"])
+        self.assertEqual(store.harness_runs[0][0][2], out["reviewer_model"])
+        self.assertEqual(seen["avoid"], {"glm"})
+        selected = ev.first("task.reviewer_selected")
+        self.assertEqual(selected["reason"], "planned_full_fallback")
+        self.assertEqual(selected["model"], out["reviewer_model"])
+        self.assertEqual(selected["planned_token"], "deepseek")
+
+
 class AReviewerThatCrashedDidNotReview(unittest.TestCase):
     """A crashed reviewer is an inconclusive round, not a rejection.
 

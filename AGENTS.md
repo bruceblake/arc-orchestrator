@@ -190,12 +190,23 @@ on `reasonix`).
   is exact: **GLM-5.3 work is reviewed by deepseek; DeepSeek-V4.1-Flash-thinking-max
   work is reviewed by glm** (`config.cross_family_reviewer`: the strongest
   review-capable family that is not the implementer's).
-- The review node resolves the token through `config.REVIEW_FAMILIES`
-  (glm → GLM-5.3, deepseek → DeepSeek-V4.1-Flash-thinking-max) and
-  instantiates `OpencodeDriver(<model>, "reviewer")` or
-  `DeepseekDriver(<model>, "reviewer")` accordingly, sending the full
-  diff (`gitstore.diff_full`) with the original spec; the verdict must be
-  JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
+- The taskfile `reviewer` token stays the deterministic plan. The review
+  node resolves it through `config.REVIEW_FAMILIES` and, **before**
+  instantiating a driver, asks `code_tasks._select_reviewer` whether that
+  model has driver or harness headroom (`_reviewer_pressure` < 1). When it
+  does, that model reviews. When it does not, the node picks another model
+  whose driver can be constructed for `reviewer`, from a family other than
+  the model that **actually implemented** (`wrote_the_code`), at the same or
+  a stronger tier, and with real headroom right now — least contended, then
+  stronger. Otherwise it keeps the planned reviewer and waits. It never
+  allows a same-family review, never drops to a weaker tier, and never skips
+  the review. A bench `policy` and `ARC_ALLOW_SAME_FAMILY_REVIEW` do not
+  swap: those runs measure or replace the named reviewer on purpose. A
+  usage-window substitution inside `driver.run` is unchanged
+  (`avoid_families` is still the implementer's family); the harness run,
+  `task.reviewer_selected` / `task.reviewed`, the review result, and the PR
+  trailer record the model and family that actually read the diff. The
+  verdict must be JSON: `{"pass": true}` or `{"pass": false, "issues": [...]}`.
 - **Cross-family review is the default and only relaxed by one documented
   escape hatch.** A same-family review is a second pass by the same model,
   NOT an independent reading, so the loader rejects it — except under the
