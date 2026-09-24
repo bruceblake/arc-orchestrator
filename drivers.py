@@ -286,10 +286,14 @@ _usage_blocked_until = {}
 # so it is tried before Claude: a Codex refusal should not spend the planner's
 # Claude plan while `agent` still has quota. Same-harness models are never
 # substitutes — another GPT on Codex is the same ChatGPT window.
-# Cursor's Grok first, then Antigravity, then the other plan seats, then
-# OpenCode Zen free implementers (preference 4), then billed API models (5).
-_SWAP_PREFERENCE = {"cursor": 0, "agy": 1, "claude": 2, "codex": 3}
-_ZEN_SWAP_RANK = 4
+# Cursor's Grok first, then Antigravity, then GLM-5.3 on ARC (unlimited
+# usage, operator directive 2026-09-24: spend free seats before the smallest
+# plan), then Claude and Codex, then OpenCode Zen free implementers
+# (preference 5), then billed API models (6). The tier floor still applies,
+# so DeepSeek (medium) only substitutes for medium work.
+_SWAP_PREFERENCE = {"cursor": 0, "agy": 1, "reasonix": 2, "opencode": 2,
+                    "claude": 3, "codex": 4}
+_ZEN_SWAP_RANK = 5
 
 
 def _tier_rank(model):
@@ -333,7 +337,7 @@ def usage_substitute(model, harness, role="implementer", exclude=(),
         if candidate.startswith("Zen-"):
             rank = _ZEN_SWAP_RANK
         else:
-            rank = _SWAP_PREFERENCE.get(cand_harness, 5)
+            rank = _SWAP_PREFERENCE.get(cand_harness, 6)
         ranked.append((rank, candidate))
     if not ranked:
         return None

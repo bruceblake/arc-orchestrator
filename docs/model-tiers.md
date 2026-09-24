@@ -15,7 +15,7 @@ Two models, two harnesses (operator decision 2026-09-12):
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
 | GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
-| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 5 |
+| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 10 |
 
 Context windows and defaults per the official ARC docs
 (https://www.docs.arc.vt.edu/ai/011_llm_api_arc_vt_edu.html, checked
