@@ -1209,6 +1209,90 @@ def _reviewer_driver(t, policy):
     return _driver(model, "reviewer", policy)
 
 
+def _tier_rank(model):
+    """Position in config.TIER_ORDER (weakest 0); -1 for an unknown model."""
+    tier = config.MODEL_TIER.get(model)
+    return config.TIER_ORDER.index(tier) if tier in config.TIER_ORDER else -1
+
+
+def _select_reviewer(planned_tok, impl_model, pol, usage):
+    """(model, reason) for the pre-merge review — capacity-aware, never weaker.
+
+    The taskfile's reviewer token stays the deterministic plan. Only when its
+    model has no driver or harness headroom (`_reviewer_pressure` >= 1) is
+    another review family considered: never the implementer's family, never a
+    weaker tier than the planned reviewer, and only one whose driver can be
+    CONSTRUCTED for the role (Rule 2: no second list of who may review) and
+    that has real headroom right now. Otherwise the planned reviewer is kept
+    and the review waits for it — a review is never skipped. Under the
+    ARC_ALLOW_SAME_FAMILY_REVIEW hatch the cross-family backend is the thing
+    that is down, so no fallback is attempted.
+    """
+    planned = config.REVIEW_FAMILIES.get(planned_tok, planned_tok)
+    if _reviewer_pressure(planned, usage) < 1.0:
+        return planned, "planned"
+    if config.ALLOW_SAME_FAMILY_REVIEW:
+        return planned, "planned_full_hatch"
+    if pol:
+        # A bench variant measures the reviewer it names; never swap it.
+        return planned, "planned_full_bench"
+    impl_fam = config.MODEL_FAMILY.get(impl_model)
+    floor = _tier_rank(planned)
+    fit = []
+    # Every review-capable model, not the one name REVIEW_FAMILIES pins per
+    # family: a local two-family roster still yields to a stronger seat that
+    # the taskfile did not name, and a same-family model is never that seat.
+    for m in config.MODEL_ROLES:
+        if m == planned or config.MODEL_FAMILY.get(m) == impl_fam:
+            continue
+        if not config.model_may(m, "reviewer") or _tier_rank(m) < floor:
+            continue
+        try:
+            if config.driver_limit(m) <= 0:
+                continue
+        except (KeyError, ValueError):
+            continue
+        if _reviewer_pressure(m, usage) >= 1.0:
+            continue
+        try:
+            _driver(m, "reviewer", pol)
+        except ValueError:
+            continue
+        fit.append(m)
+    if not fit:
+        return planned, "planned_full_no_alternative"
+    # Least contended first; on a tie the stronger reviewer.
+    fit.sort(key=lambda m: (_reviewer_pressure(m, usage), -_tier_rank(m)))
+    return fit[0], "planned_full_fallback"
+
+
+def _reviewer_that_ran(ctx, tid, store, fallback):
+    """(model or None, family token) of the pre-merge review that passed.
+
+    The taskfile token stays the plan. This is who actually read the diff:
+    this graph's review result, or on a publish resume the last successful
+    reviewer harness run. `fallback` is the planned family token.
+    """
+    reviewed = ((ctx or {}).get("results", {}).get(f"review_{tid}") or {})
+    model = reviewed.get("reviewer_model")
+    fam = reviewed.get("reviewer_family")
+    if model or fam:
+        return model, fam or fallback
+    if store is not None:
+        try:
+            rows = store.harness_runs_prefix(tid)
+        except Exception:
+            rows = []
+        did = [r for r in rows
+               if r.get("task_id") == tid and r.get("role") == "reviewer"
+               and r.get("exit_code") == 0
+               and r.get("model") in config.MODEL_FAMILY]
+        if did:
+            model = did[-1]["model"]
+            return model, config.MODEL_FAMILY.get(model) or fallback
+    return None, fallback
+
+
 # Failure reasons that mean "this model could not do the task" and so justify
 # resuming one tier higher. Anything else (a killed run process, a cancelled
 # graph, a harness crash, a merge conflict) is infrastructure noise: the task
@@ -1831,8 +1915,22 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             impact = await graft.blast(wt, task=tid)   # uncommitted: tree vs HEAD
             rev_tok = reviewer_for(t, wrote_the_code(
                 ctx, tid, cur_model(ctx), store))
-            driver = _reviewer_driver({"reviewer": rev_tok}, pol)
+            impl_now = wrote_the_code(ctx, tid, cur_model(ctx), store)
+            try:
+                usage = store.lease_usage()
+            except Exception:
+                usage = {}
+            planned_rev = config.REVIEW_FAMILIES.get(rev_tok, rev_tok)
+            rev_model, rev_reason = _select_reviewer(rev_tok, impl_now, pol, usage)
+            driver = (_reviewer_driver({"reviewer": rev_tok}, pol)
+                      if rev_model == planned_rev
+                      else _driver(rev_model, "reviewer", pol))
             attempt = ctx.get("runs", {}).get(f"review_{tid}", 0) + 1
+            events.emit("task.reviewer_selected", task=tid, round=attempt,
+                        planned=planned_rev, planned_token=rev_tok,
+                        model=rev_model,
+                        family=config.MODEL_FAMILY.get(rev_model),
+                        implementer=impl_now, reason=rev_reason)
             shown = gate_evidence(ctx)
             if shown:
                 driver.images = evidence.review_images(shown)
@@ -1866,12 +1964,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # makes — the diff has not been read, so retry the REVIEW.
                 harvest_proposals(tid, wt, "reviewer", driver.model)
                 return {"pass": False, "crashed": True,
+                        "reviewer_model": driver.model,
                         "issues": [f"reviewer crashed: {exc}"[:200]]}
             verdict = _parse_verdict(res.text)
-            store.save_harness_run(tid, driver.harness, driver.model, "reviewer",
+            # A usage-window swap moves the attempt onto another harness.
+            # Record the model that RAN, the same way implement does.
+            ran_model = getattr(res, "model", None) or driver.model
+            ran_harness = getattr(res, "harness", None) or driver.harness
+            store.save_harness_run(tid, ran_harness, ran_model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
-            harvest_proposals(tid, wt, "reviewer", driver.model)
+            harvest_proposals(tid, wt, "reviewer", ran_model)
             if verdict.get("truncated"):
                 # The session ended without a verdict (e.g. stopped mid-analysis
                 # with a question). Same rule as a crash: the diff was never
@@ -1879,23 +1982,29 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # fix issues that were never delivered.
                 events.emit("driver.error", task=tid, role="reviewer",
                             fingerprint="reviewer.no_verdict",
-                            model=driver.model,
+                            model=ran_model,
                             error="review ended without a parseable verdict")
                 return {"pass": False, "crashed": True,
+                        "reviewer_model": ran_model,
+                        "reviewer_family": config.MODEL_FAMILY.get(ran_model),
                         "issues": ["reviewer session ended without a verdict"]}
             issues = verdict.get("issues") or []
-            board.post(wt, task=tid, role="reviewer", model=driver.model,
-                       harness=driver.harness, kind="note",
+            board.post(wt, task=tid, role="reviewer", model=ran_model,
+                       harness=ran_harness, kind="note",
                        body=("pass" if verdict.get("pass") else
                              "reject: " + "; ".join(str(i) for i in issues)[:300]),
                        project=project_slug)
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
-                        reviewer=rev_tok,
+                        # The family that ACTUALLY reviewed; the planned
+                        # token rides beside it when capacity moved the review.
+                        reviewer=config.MODEL_FAMILY.get(ran_model, rev_tok),
+                        planned_reviewer=rev_tok,
+                        selection=rev_reason,
                         # The reviewer's MODEL, not just its family token: the
                         # activity feed names who read the diff, and the token
                         # ("glm") is not a model name.
-                        model=driver.model,
-                        harness=driver.harness,
+                        model=ran_model,
+                        harness=ran_harness,
                         # The fix-loop round this verdict belongs to, so the
                         # feed can say "round 3" instead of a bare timestamp.
                         round=attempt,
@@ -1911,6 +2020,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         # the merge or cost the implementer a fix round.
                         follow_ups=(verdict.get("follow_ups") or [])[:10],
                         n_follow_ups=len(verdict.get("follow_ups") or []))
+            verdict["reviewer_model"] = ran_model
+            verdict["reviewer_family"] = config.MODEL_FAMILY.get(ran_model)
             return verdict
 
         async def escalate(ctx):
@@ -1975,7 +2086,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # land in the PR. Also catches proposals from PR-review rework.
             harvest_proposals(tid, wt, "publish-sweep", "")
             impl = results.get(f"implement_{tid}", {})
-            model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
+            model = cur_model(ctx)
+            # The row and the PR name who read the diff. The taskfile token
+            # stays the plan; `rev` is that reader's family.
+            rev_model, rev = _reviewer_that_ran(
+                ctx, tid, store, reviewer_for(t, model))
             # COMMIT FIRST, then sync. `git merge` refuses to run over local
             # modifications it would overwrite, and at this point the agent's
             # entire output is uncommitted in the worktree.
@@ -1983,7 +2098,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 wt, f"task({tid}): {t['title']}",
                 {"Harness": impl.get("harness", "?"),
                  "Model": impl.get("model") or model,
-                 "Reviewer": rev, "Task-Id": tid})
+                 "Reviewer": rev_model or rev, "Task-Id": tid})
 
             # Sync with the base on EVERY publish, not only on a resume.
             #
@@ -2060,7 +2175,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return {"published": False, "reason": note}
             body = (f"Task `{tid}` from `{Path(taskfile).name if taskfile else '?'}`\n\n"
                     f"{t['prompt'][:1500]}\n\n---\n"
-                    f"Implemented by **{model}**, pre-review by **{rev}**.\n"
+                    f"Implemented by **{model}**, pre-review by **{rev_model or rev}**.\n"
                     f"Verify gate: `{t['verify_cmd'] or '(none)'}`\n\n"
                     f"{config.PR_REVIEWERS} independent reviewers must approve "
                     f"before this merges.")
@@ -2154,9 +2269,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             reason = ("healthy_same_or_stronger_after_crash" if healthy and crashed_before
                       else "retry_crashed_reviewer" if crashed_before
                       else "least_loaded")
+            pre_model, pre_fam = _reviewer_that_ran(
+                ctx, tid, store, reviewer_for(t, cur_model(ctx)))
             events.emit("task.pr_review_selected", task=tid, pr=number,
                         round=round_n, reviewers=chosen,
-                        crashed_before=sorted(crashed_before), reason=reason)
+                        crashed_before=sorted(crashed_before), reason=reason,
+                        pre_reviewer=pre_model, pre_reviewer_family=pre_fam)
             if len(chosen) < config.PR_REVIEWERS_WANTED:
                 # The roster cannot field PR_REVIEWERS cross-family readers for
                 # this implementer — the two-model fleet of 2026-09-12 has two
