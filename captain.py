@@ -94,7 +94,10 @@ def _live_lease_counts(db_path=None):
     """{model: count} of leases whose owner process is still alive."""
     try:
         store = Store(db_path or config.DB_PATH)
-        return store.lease_usage()
+        try:
+            return store.lease_usage()
+        finally:
+            store.conn.close()
     except Exception as exc:            # a locked/absent db must not kill a turn
         errors.capture(exc, node="captain.leases")
         return {}
