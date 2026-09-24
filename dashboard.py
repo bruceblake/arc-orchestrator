@@ -162,6 +162,7 @@ ACTIVITY_TYPES = frozenset((
     "task.reviewed", "task.failed", "task.escalated", "task.merged",
     "task.pr_opened", "task.pr_reviewed", "task.resynced",
     "task.review_degraded", "driver.stalled",
+    "driver.usage_limit", "driver.usage_swap",
     "chain.wait", "chain.ready", "chain.blocked",
 ))
 # A feed is a window, not a log download: the page asks for 50, and a
@@ -4168,6 +4169,7 @@ def _health(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
     import reconcile
+    import drivers
 
     # Two different caps govern the same model and must not be conflated:
     #   driver_cap  — how many harness instances THIS fleet may run
@@ -4250,6 +4252,7 @@ def _health(store):
             # idle rather than broken: every driver waits for ARC, nothing runs,
             # nothing errors. An operator staring at zeros needs to be told why.
             "arc": _arc_status(now),
+            "plans": drivers.active_plan_windows(_load_event_lines(), now),
             "served_head": (_SERVED_HEAD or "")[:12], "served_at": _SERVED_AT}
 
 

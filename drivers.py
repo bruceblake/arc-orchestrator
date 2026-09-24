@@ -256,7 +256,8 @@ def usage_reset_at(text, now=None):
                     for n, u in re.findall(r"(\d+)\s*([a-z]+)", m.group(1), re.I))
         if total:
             return now + total
-    m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
+    m = re.search(r"(?:resets?\s+(?:at\s+)?|try again at\s+)"
+                  r"(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
                   r"(?:\s*\(([A-Za-z_]+/[A-Za-z_/]+)\))?", text, re.I)
     if m:
         import datetime
@@ -275,6 +276,80 @@ def usage_reset_at(text, now=None):
             at += datetime.timedelta(days=1)
         return at.timestamp()
     return None
+
+
+# A refusal that names no reset (Codex's "try again at 3:39 PM" used to miss
+# the parser) must stay visible. Six hours covers a 5-hour Claude window
+# without leaving yesterday's refusal on the board all week.
+_PLAN_UNKNOWN_HOLD_S = 6 * 3600
+_PLAN_LABEL = {"claude": "Claude", "codex": "Codex", "cursor": "Cursor",
+               "agy": "Antigravity"}
+
+
+def active_plan_windows(lines, now=None):
+    """Subscription plans that are spent right now, one row per harness.
+
+    Read from the event log, not from a run process's memory: the dashboard
+    and the captain are other processes, and a swap onto another seat used
+    to make the spent plan disappear. A later `driver.done` on the same
+    harness means a request got through, so the window is clear. A stated
+    `resets_at` in the future stays up even when the run has moved on.
+    """
+    now = time.time() if now is None else now
+    limits, swaps, dones = {}, {}, {}
+    for line in lines or []:
+        if isinstance(line, dict):
+            e = line
+        else:
+            if '"driver.usage_limit"' not in line and '"driver.usage_swap"' not in line \
+                    and '"driver.done"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+        kind = e.get("type")
+        harness = e.get("harness")
+        ts = e.get("ts") or 0
+        if not harness or kind not in ("driver.usage_limit", "driver.usage_swap",
+                                       "driver.done"):
+            continue
+        if kind == "driver.done":
+            dones[harness] = max(dones.get(harness, 0), ts)
+        elif kind == "driver.usage_swap":
+            prev = swaps.get(harness)
+            if prev is None or ts >= prev.get("ts", 0):
+                swaps[harness] = e
+        else:
+            prev = limits.get(harness)
+            if prev is None or ts >= prev.get("ts", 0):
+                limits[harness] = e
+    out = []
+    for harness, rec in limits.items():
+        ts = rec.get("ts") or 0
+        if dones.get(harness, 0) > ts:
+            continue
+        stated = rec.get("resets_at")
+        if not isinstance(stated, (int, float)) or stated <= 0:
+            stated = usage_reset_at(rec.get("error") or "", ts)
+        future = stated if isinstance(stated, (int, float)) and stated > now else None
+        if future is None and ts + _PLAN_UNKNOWN_HOLD_S <= now:
+            continue
+        swap = swaps.get(harness)
+        swapped = None
+        if swap and (swap.get("ts") or 0) >= ts:
+            swapped = swap.get("to_model")
+        out.append({
+            "harness": harness,
+            "label": _PLAN_LABEL.get(harness, harness),
+            "model": rec.get("model"),
+            "since": ts,
+            "resets_at": future,
+            "swapped_to": swapped,
+            "task": rec.get("task"),
+        })
+    out.sort(key=lambda r: r["label"])
+    return out
 
 
 # harness -> epoch its plan's usage window resets. Shared by every driver in
