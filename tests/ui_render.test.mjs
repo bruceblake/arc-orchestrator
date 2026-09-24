@@ -56,7 +56,7 @@ const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setGH = v => { GH = v; };"
   + "\nglobalThis.__setSlots = v => { SLOTS = v; };"
   + "\nglobalThis.__setProjects = v => { PROJECTS = v; };"
-  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY,"
+  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY, boardPaint, boardMarkRead, showTab,"
   + " tlGist, tlEntry, renderTimeline, openTaskTimeline, closeTimeline, tlWhen, pollTimeline,"
   + " openTranscript, __gen: () => timelineGen, __task: () => timelineTask};");
 const api = mod();
@@ -407,6 +407,48 @@ ok(clean(document.querySelector("#drv-events").innerHTML), "usage: driver-event 
   globalThis.prompt = () => { prompted++; return "x"; };
   const r3 = await api.jpost("/api/promote", {});
   ok(r3.code === 200 && prompted === 0, "jpost: no prompt when the server does not ask for a token");
+}
+
+// ---- Messages tab: mounts, escapes a mention, flags a claim overlap --------
+api.showTab("messages");
+ok(!document.querySelector("#messages-panel").className.includes("tab-hidden"),
+   "messages: tab mounts the messages panel");
+ok(document.querySelector("#activity-panel").className.includes("tab-hidden"),
+   "messages: other tabs are hidden");
+api.boardPaint({
+  project: "demo", channel: "project",
+  projects: [{project: "demo"}],
+  channels: [{channel: "project", unread: 1}, {channel: "task:locks", status: "running", unread: 0}],
+  messages: [{
+    id: "m1", author: "doors/implementer", author_model: "GLM-5.3", kind: "question",
+    body: "@locks look at " + EVIL, ts: Date.now() / 1000 - 30, state: "open", mentions: ["locks"],
+    refs: {pr: "https://github.com/acme/widgets/pull/4", files: ["static/panels/board.js"]},
+    replies: [],
+  }],
+  claims: [{
+    id: "c1", task: "locks", author: "locks/implementer", paths: ["static/panels/board.js"],
+    ts: Date.now() / 1000 - 10, expires_at: Date.now() / 1000 + 3600,
+    overlaps: ["doors/implementer"], conflict: true,
+  }],
+  expertise: {"locks/implementer": {paths: ["static/panels/board.js"], topics: [], results: 1}},
+  questions: [],
+});
+const threadHtml = document.querySelector("#bd-thread").innerHTML;
+ok(threadHtml.includes("bd-mention") && threadHtml.includes("@locks"), "messages: mention is highlighted");
+ok(clean(threadHtml) && threadHtml.includes("&lt;img"), "messages: author text is escaped");
+ok(threadHtml.includes("bd-kind-question"), "messages: question kind stands out");
+ok(threadHtml.includes("https://github.com/acme/widgets/pull/4"), "messages: PR ref is linked");
+ok(document.querySelector("#bd-rail").innerHTML.includes("bd-dot"), "messages: a task channel shows a status dot");
+ok(document.querySelector("#bd-side").innerHTML.includes("bd-conflict"), "messages: overlapping claim is flagged");
+ok(clean(document.querySelector("#bd-side").innerHTML), "messages: claim authors are escaped");
+
+{
+  let prompted = 0;
+  globalThis.prompt = () => { prompted++; return "tok"; };
+  globalThis.fetch = async () => ({status: 401, json: async () => ({error: "token"})});
+  api.boardPaint({project: "demo", channel: "project", since: 10, messages: []});
+  const code = await api.boardMarkRead();
+  ok(code === 401 && prompted === 0, "messages: a 401 on read does not prompt for a token");
 }
 
 // ---- task timeline drawer --------------------------------------------------

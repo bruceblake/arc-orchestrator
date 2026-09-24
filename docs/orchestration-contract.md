@@ -129,7 +129,8 @@ the review diff's intent-to-add). The same pathspec excludes
 `.arc/board.jsonl`, the shared agent board (`board.py`): one JSON line per
 handoff, result or review, kept in the worktree so the next harness can
 read it, and copied to `logs/boards/<project>.jsonl` (`ARC_BOARD_DIR`) so
-sibling tasks see it. A session id on a post resumes only on the harness
+sibling tasks see it. A structured-board body is capped by
+`ARC_BOARD_BODY_MAX` (default 4000). A session id on a post resumes only on the harness
 that wrote it. Each proposal is
 validated by the same loader the taskfile came from and applied by an atomic
 rewrite; the freeze boundary is the task's `code_tasks` status (only
