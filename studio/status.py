@@ -480,6 +480,14 @@ def project_snapshot(project, store=None, live_tasks=()):
         for t in b["tasks"]:
             t["gauntlet"] = trail.get(t["id"])
     feats = roadmap(repo) if repo else []
+    try:
+        # Human playtesting (studio/playtest.py). Its snapshot already never
+        # raises; the guard is for the import, so a broken module costs the
+        # Playtest tab and not the whole Studio view.
+        from studio import playtest
+        human = playtest.snapshot(project)
+    except Exception as exc:                                 # noqa: BLE001
+        human = {"error": f"{type(exc).__name__}: {exc}"[:500]}
     return {
         "name": project, "repo": repo, "phase": phase,
         "phase_label": PHASE_LABELS.get(phase, phase),
@@ -496,6 +504,7 @@ def project_snapshot(project, store=None, live_tasks=()):
                                             "crashes", "tick_p50_ms", "tick_p95_ms",
                                             "server_unreachable", "ts")}
                  if fuzz else None),
+        "playtest": human,
     }
 
 

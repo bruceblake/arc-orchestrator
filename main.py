@@ -1048,6 +1048,17 @@ def main():
     spt.add_argument("project")
     spt.add_argument("repo")
 
+    spp = ss.add_parser("play", help="launch a build for a HUMAN playtest (F8 = finding)")
+    spp.add_argument("project")
+    spp.add_argument("--build", default="",
+                     help="main (default) or task/<id>, as the dashboard lists them")
+
+    sfi = ss.add_parser("findings", help="human playtest findings for a project")
+    sfi.add_argument("project")
+    sfi.add_argument("--state", default="", choices=("", "new", "accepted", "wontfix",
+                                                      "duplicate", "fixed", "verified",
+                                                      "reopened"))
+
     sap = ss.add_parser("approve", help="approve (or --reject) a workbench asset")
     sap.add_argument("project")
     sap.add_argument("asset", help="asset file name, as the workbench lists it")

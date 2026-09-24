@@ -358,6 +358,23 @@ def _full_reply(res):
     return final if final and len(final) > len(text) else text
 
 
+def _playtest_findings(project):
+    """The operator's ACCEPTED (and reopened) human-playtest findings, as a
+    block for the goal — the one path by which a playtest reaches the fleet
+    (studio/playtest.py). Guarded: a broken findings store must never stop a
+    plan, so any error hands back nothing."""
+    try:
+        from studio import playtest
+        return playtest.planner_block(project)
+    except Exception as exc:                                 # noqa: BLE001
+        try:
+            import errors
+            errors.capture(exc, node="studio.plan.playtest", project=project)
+        except Exception:                                    # noqa: BLE001
+            pass
+        return ""
+
+
 def plan(goal, repo, *, phase, project="prison-escape", model=None,
          out_path=None, pattern=""):
     """Ask the planner for a taskfile, validate it, and write it.
@@ -374,6 +391,7 @@ def plan(goal, repo, *, phase, project="prison-escape", model=None,
             f"(fleet={config.FLEET}); planner is {config.PLANNER_MODEL}")
     if phase not in PHASES:
         raise ValueError(f"unknown phase {phase!r}")
+    goal = goal + _playtest_findings(project)
     if config.STUDIO_API:
         msg, usage = openrouter.chat(
             model,

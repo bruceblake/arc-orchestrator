@@ -2353,6 +2353,131 @@ def _studio_approve(body):
             **approvals.decide(project, asset, state, note=note, by="dashboard")}, 200
 
 
+# --- human playtesting (studio/playtest.py) -----------------------------------
+# Rule 6b, strictly: every value these routes act on must be BYTE-IDENTICAL to
+# a member of a list the server computes — the studio projects, that project's
+# builds, its sessions, its findings. No path comes from a body, and the one
+# process launched (Godot on a build snapshot) has a fixed argv.
+def _pt_project(body):
+    from studio import status as studio_status
+    project = (body or {}).get("project")
+    if not isinstance(project, str) or project not in studio_status.projects():
+        return None
+    return project
+
+
+def _pt_session(project, body, required=True):
+    from studio import playtest
+    sid = (body or {}).get("session")
+    if not required and sid in (None, ""):
+        return ""
+    if not isinstance(sid, str) or sid not in playtest.session_ids(project):
+        return None
+    return sid
+
+
+def _playtest_launch(body):
+    """Launch one build of a studio game for a human to play."""
+    from studio import playtest
+    project = _pt_project(body)
+    if project is None:
+        return {"error": "unknown studio project"}, 404
+    build = (body or {}).get("build")
+    if not isinstance(build, str) or build not in [b["id"] for b in playtest.builds(project)]:
+        return {"error": "unknown build for this project"}, 404
+    try:
+        return {"ok": True, "session": playtest.launch(project, build, wait=False)}, 200
+    except playtest.Unavailable as exc:
+        return {"error": str(exc)}, 409
+    except KeyError:
+        return {"error": "unknown build for this project"}, 404
+
+
+def _playtest_stop(body):
+    from studio import playtest
+    project = _pt_project(body)
+    if project is None:
+        return {"error": "unknown studio project"}, 404
+    sid = _pt_session(project, body)
+    if sid is None:
+        return {"error": "unknown session"}, 404
+    playtest.stop(project, sid)
+    return {"ok": True}, 200
+
+
+def _playtest_finding(body):
+    """A finding typed in the dashboard, optionally tied to a session."""
+    from studio import playtest
+    project = _pt_project(body)
+    if project is None:
+        return {"error": "unknown studio project"}, 404
+    sid = _pt_session(project, body, required=False)
+    if sid is None:
+        return {"error": "unknown session"}, 404
+    note = (body or {}).get("note")
+    if not isinstance(note, str):
+        return {"error": "note must be a string"}, 400
+    try:
+        f = playtest.add_finding(project, category=(body or {}).get("category"),
+                                 severity=(body or {}).get("severity"),
+                                 note=note[:playtest.MAX_NOTE], session=sid or None)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    return {"ok": True, "finding": f}, 200
+
+
+def _playtest_triage(body):
+    from studio import playtest
+    project = _pt_project(body)
+    if project is None:
+        return {"error": "unknown studio project"}, 404
+    fid = (body or {}).get("finding")
+    if not isinstance(fid, str) or fid not in playtest.load_findings(project):
+        return {"error": "unknown finding"}, 404
+    state = (body or {}).get("state")
+    if not isinstance(state, str) or state not in playtest.STATES:
+        return {"error": f"state must be one of {list(playtest.STATES[1:])}"}, 400
+    note, link = (body or {}).get("note") or "", (body or {}).get("link") or ""
+    if not isinstance(note, str) or not isinstance(link, str):
+        return {"error": "note and link must be strings"}, 400
+    try:
+        f = playtest.triage(project, fid, state, note=note, link=link)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    except KeyError:
+        return {"error": "unknown finding"}, 404
+    return {"ok": True, "finding": f}, 200
+
+
+def _playtest_survey(body):
+    from studio import playtest
+    project = _pt_project(body)
+    if project is None:
+        return {"error": "unknown studio project"}, 404
+    sid = _pt_session(project, body)
+    if sid is None:
+        return {"error": "unknown session"}, 404
+    note = (body or {}).get("note") or ""
+    if not isinstance(note, str):
+        return {"error": "note must be a string"}, 400
+    try:
+        playtest.survey(project, sid, fun=(body or {}).get("fun"),
+                        clarity=(body or {}).get("clarity"),
+                        difficulty=(body or {}).get("difficulty"), note=note)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+    return {"ok": True}, 200
+
+
+_PLAYTEST_POSTS = {
+    "/api/studio/playtest/launch": _playtest_launch,
+    "/api/studio/playtest/stop": _playtest_stop,
+    "/api/studio/playtest/finding": _playtest_finding,
+    "/api/studio/playtest/triage": _playtest_triage,
+    "/api/studio/playtest/survey": _playtest_survey,
+}
+
+
 def _live_task_ids():
     """{task id: role} for every task with a harness running right now.
 
@@ -4187,6 +4312,18 @@ class Handler(BaseHTTPRequestHandler):
                 ctype = {".png": "image/png", ".webp": "image/webp"}.get(
                     img.suffix.lower(), "image/jpeg")
                 return self._file(img, ctype)
+            if u.path == "/api/studio/playtest/shot":
+                # A playtest screenshot: project, session and file name are
+                # each allowlisted and the resolved path must stay inside that
+                # session's directory (studio.playtest.shot_path).
+                from studio import playtest
+                q = parse_qs(u.query)
+                img = playtest.shot_path(q.get("project", [""])[0],
+                                         q.get("session", [""])[0],
+                                         q.get("file", [""])[0])
+                if img is None:
+                    return self._json({"error": "not found"}, 404)
+                return self._file(img, "image/png")
             if u.path == "/api/project":
                 q = parse_qs(u.query)
                 obj, code = _project_detail(Handler.store, q.get("file", [""])[0])
@@ -4465,6 +4602,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": f"invalid JSON: {exc}"}, 400)
             if u.path == "/api/studio/approve":
                 obj, code = _studio_approve(body)
+                return self._json(obj, code)
+            if u.path in _PLAYTEST_POSTS:
+                obj, code = _PLAYTEST_POSTS[u.path](body)
                 return self._json(obj, code)
             if u.path == "/api/projects/create":
                 obj, code = _create_project(body)

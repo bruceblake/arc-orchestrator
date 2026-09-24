@@ -345,6 +345,53 @@ def cmd_review_pack(args):
     return 0
 
 
+def cmd_play(args):
+    """Launch a build for a HUMAN to play (the dashboard's ▶ Play, from a shell)."""
+    from studio import playtest
+    rows = playtest.builds(args.project)
+    if not rows:
+        print(f"{args.project}: no builds (is its game repo known and on disk?)",
+              file=sys.stderr)
+        return 1
+    build = args.build or rows[0]["id"]
+    try:
+        s = playtest.launch(args.project, build)
+    except KeyError:
+        print(f"unknown build {build!r}; known: {', '.join(b['id'] for b in rows)}",
+              file=sys.stderr)
+        return 2
+    except playtest.Unavailable as exc:
+        print(f"cannot play here: {exc}", file=sys.stderr)
+        return 1
+    snap = playtest.ensure_snapshot(args.project, build, do_import=False)
+    sess = config.studio_run_dir(args.project) / "playtest" / "sessions" / s["id"]
+    print(f"session:  {s['id']}  (pid {s['pid']})")
+    print(f"build:    {build} @ {s['sha'][:12]}")
+    print(f"snapshot: {snap}")
+    print(f"session:  {sess}")
+    print("F8 in game = log a finding with a screenshot; triage in the "
+          "dashboard (Studio → Playtest) or with `studio findings`.")
+    return 0
+
+
+def cmd_findings(args):
+    from studio import playtest
+    rows = sorted(playtest.load_findings(args.project).values(),
+                  key=lambda f: (f.get("severity") or 4, -(f.get("ts") or 0)))
+    if args.state:
+        rows = [f for f in rows if f.get("state") == args.state]
+    if not rows:
+        print("no findings" + (f" in state {args.state}" if args.state else ""))
+        return 0
+    print(f"{'id':11s} {'state':9s} sev {'category':8s} {'build':7s}  note")
+    for f in rows:
+        note = " ".join(str(f.get("note", "")).split())
+        print(f"{f['id']:11s} {f.get('state', ''):9s} {f.get('severity')!s:3s} "
+              f"{f.get('category', ''):8s} {(f.get('sha') or '')[:7]:7s}  "
+              f"{note[:70]}{'…' if len(note) > 70 else ''}")
+    return 0
+
+
 def cmd_budget(args):
     from studio import budget
     _print(budget.summary())
@@ -371,6 +418,7 @@ def run(args):
         "render": cmd_render, "judge": cmd_judge, "fuzz": cmd_fuzz,
         "astra": cmd_astra, "budget": cmd_budget, "scaffold": cmd_scaffold,
         "playtest": cmd_playtest, "approve": cmd_approve,
-        "review-pack": cmd_review_pack,
+        "review-pack": cmd_review_pack, "play": cmd_play,
+        "findings": cmd_findings,
     }
     return table[args.studio_cmd](args)
