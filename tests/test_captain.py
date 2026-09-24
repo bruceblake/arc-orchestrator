@@ -206,6 +206,7 @@ class CaptainExecuteActions(unittest.TestCase):
         else:
             os.environ["ARC_CAPTAIN_DIR"] = self._old_cap
         self._dir.cleanup()
+        _clear_run_queue()
 
     def _spawn(self, argv, log_name):
         self.spawned.append((list(argv), log_name))
@@ -487,6 +488,145 @@ class CaptainLiveThinking(unittest.TestCase):
         os.utime(p2, (time.time() + 10, time.time() + 10))
         self.assertEqual(dashboard._captain_running_transcript("captain-x"),
                          "captain-captain-x-planner-2.jsonl")
+
+
+def _clear_run_queue():
+    try:
+        q = captain._run_queue()
+        with q.lock:
+            q.conn.execute(
+                "DELETE FROM queue_items WHERE topic=?", (captain.RUN_TOPIC,))
+            q.conn.commit()
+    except Exception:
+        pass
+
+
+def _blocked(model):
+    return {"admit": False, "reason": f"no free slot for {model} (+1)",
+            "models": {model: 1}, "deficit": {model: 1}}
+
+
+def _free():
+    return {"admit": True, "reason": "capacity free", "models": {}, "deficit": {}}
+
+
+class CaptainQueueDrain(unittest.TestCase):
+    """Saturation queues one durable run; a later drain launches it once."""
+
+    def setUp(self):
+        self._dir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._dir.name)
+        self._tasks = self.tmp / "tasks"
+        self._tasks.mkdir()
+        self._capdir = self.tmp / "captain"
+        self._old_tasks = config.TASKS_DIR
+        self._old_cap = os.environ.get("ARC_CAPTAIN_DIR")
+        config.TASKS_DIR = str(self._tasks)
+        os.environ["ARC_CAPTAIN_DIR"] = str(self._capdir)
+        self.spawned = []
+        self._spawn_patch = mock.patch.object(
+            captain, "_spawn_detached", side_effect=self._spawn)
+        self._spawn_patch.start()
+        _clear_run_queue()
+
+    def tearDown(self):
+        self._spawn_patch.stop()
+        _clear_run_queue()
+        config.TASKS_DIR = self._old_tasks
+        if self._old_cap is None:
+            os.environ.pop("ARC_CAPTAIN_DIR", None)
+        else:
+            os.environ["ARC_CAPTAIN_DIR"] = self._old_cap
+        self._dir.cleanup()
+
+    def _spawn(self, argv, log_name):
+        self.spawned.append((list(argv), log_name))
+        return mock.Mock(pid=999)
+
+    def _write_taskfile(self, name, model):
+        doc = {"project": {"repo": str(self.tmp / "repo"), "title": "t",
+                           "tasks": [{"id": "t0", "prompt": "do", "model": model,
+                                      "reviewer": config.cross_family_reviewer(model),
+                                      "verify_cmd": "true"}]}}
+        (self._tasks / name).write_text(json.dumps(doc), encoding="utf-8")
+        return self._tasks / name
+
+    def _queue_run(self, name, model):
+        with mock.patch.object(captain, "plan_pressure", return_value=_blocked(model)):
+            return captain.execute_actions(
+                [{"kind": "run", "taskfile": name}], "/repo")
+
+    def test_saturation_queues_then_one_launch_on_release(self):
+        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        self._write_taskfile("busy.json", m)
+        with mock.patch.object(captain, "plan_pressure", return_value=_blocked(m)):
+            res = captain.execute_actions(
+                [{"kind": "run", "taskfile": "busy.json"}], "/repo")
+            self.assertTrue(res[0]["queued"])
+            self.assertEqual(self.spawned, [])
+            held = captain.drain_once()
+        self.assertEqual(held[0]["result"], "retained")
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(len(captain._run_queue().pending(captain.RUN_TOPIC)), 1)
+        with mock.patch.object(captain, "plan_pressure", return_value=_free()):
+            launched = captain.drain_once()
+            again = captain.drain_once()
+        self.assertEqual([r["result"] for r in launched], ["launched"])
+        self.assertEqual(again, [])
+        self.assertEqual(len(self.spawned), 1)
+        self.assertEqual(self.spawned[0][0][1:4], ["main.py", "code", "run"])
+        self.assertEqual(captain.queue_view()["queued"], [])
+
+    def test_duplicate_enqueue_launches_once(self):
+        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        self._write_taskfile("twice.json", m)
+        self._queue_run("twice.json", m)
+        self._queue_run("twice.json", m)
+        self.assertEqual(len(captain._run_queue().pending(captain.RUN_TOPIC)), 1)
+        with mock.patch.object(captain, "plan_pressure", return_value=_free()):
+            captain.drain_once()
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_expired_claim_is_reclaimed_and_launched_once(self):
+        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        self._write_taskfile("reclaim.json", m)
+        self._queue_run("reclaim.json", m)
+        abandoned = captain._run_queue().claim(captain.RUN_TOPIC, lease_s=-1)
+        self.assertIsNotNone(abandoned)
+        with mock.patch.object(captain, "plan_pressure", return_value=_free()):
+            out = captain.drain_once()
+            captain.drain_once()
+        self.assertEqual([r["result"] for r in out], ["launched"])
+        self.assertEqual(len(self.spawned), 1)
+
+    def test_missing_taskfile_is_dropped(self):
+        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        path = self._write_taskfile("gone.json", m)
+        self._queue_run("gone.json", m)
+        path.unlink()
+        out = captain.drain_once()
+        self.assertEqual(out[0]["result"], "missing")
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(captain._run_queue().pending(captain.RUN_TOPIC), [])
+
+    def test_live_run_is_not_launched_again(self):
+        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        self._write_taskfile("live.json", m)
+        self._queue_run("live.json", m)
+        with mock.patch.object(captain, "plan_pressure", return_value=_free()), \
+                mock.patch("reconcile.live_runs",
+                           return_value=[{"pid": 42, "taskfile": "live.json"}]):
+            out = captain.drain_once()
+        self.assertEqual(out[0]["result"], "live")
+        self.assertEqual(self.spawned, [])
+        self.assertEqual(captain._run_queue().pending(captain.RUN_TOPIC), [])
+
+    def test_legacy_jsonl_entry_still_shows(self):
+        captain._enqueue({"ts": 1, "kind": "run", "taskfile": "old.json",
+                          "reason": "historical"})
+        queued = captain.queue_view()["queued"]
+        self.assertEqual(queued[0]["taskfile"], "old.json")
+        self.assertIn("historical", queued[0]["reason"])
 
 
 if __name__ == "__main__":
