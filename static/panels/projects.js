@@ -125,10 +125,23 @@ function taskDag(dag, opts) {
   return `<svg viewBox="0 0 ${W} ${H}" style="display:block;${wide ? `width:${W}px;max-width:none` : "width:100%"}" preserveAspectRatio="xMinYMid meet">${s}</svg>`;
 }
 function bindDagClicks(sel, runsCache) {
-  document.querySelectorAll(sel + " g.node").forEach(g => g.onclick = ev => {
-    ev.stopPropagation();
-    if (g.dataset.kind === "chain") { if (g.dataset.file) openDetail(g.dataset.file); return; }
-    openTaskTranscript(g.dataset.f, g.dataset.t, runsCache || null);
+  document.querySelectorAll(sel + " g.node").forEach(g => {
+    g.onclick = ev => {
+      ev.stopPropagation();
+      if (g.dataset.kind === "chain") { if (g.dataset.file) openDetail(g.dataset.file); return; }
+      // A task node opens the TIMELINE: what happened to this task, in order,
+      // is the question a click on a task asks. The transcript is not lost —
+      // every run entry in the timeline carries its own transcript button, so
+      // the old view is one click deeper rather than gone.
+      openTaskTimeline(g.dataset.f, g.dataset.t);
+    };
+    // Right-click keeps the transcript one gesture away for anyone who came
+    // for it directly.
+    g.oncontextmenu = ev => {
+      if (g.dataset.kind === "chain") return;
+      ev.preventDefault();
+      openTaskTranscript(g.dataset.f, g.dataset.t, runsCache || null);
+    };
   });
 }
 
@@ -223,6 +236,7 @@ function liveBadge(p) {
 
 async function showGateLog(fn) {
   const d = await jget(`/api/gate-log?file=${encodeURIComponent(fn)}`);
+  closeTimeline();                            // the drawer changes hands
   $("#drawer").classList.add("open");
   $("#drawer-title").textContent = "verify gate output";
   $("#drawer-sub").textContent = d.error ? "" : `${fn} · ${d.total_lines} lines`;
