@@ -1373,7 +1373,12 @@ def kimi_plan_mode_on():
 # The subscription CLIs each hold ONE upstream session per process: they are
 # single-agent terminal tools, not fleets, and none of them fans out into
 # parallel sub-sessions the way opencode does.
-_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 2,
+# reasonix is 1 (operator directive 2026-09-24): the account grants 10
+# DeepSeek sessions and the fleet was held to 5 on the unmeasured assumption
+# that a reasonix process holds two — while GLM queued 201 times. The load
+# test (above _HARNESS_CAP) saw no capacity rejections, and a real 400 still
+# surfaces as a capacity wait, so the assumption only threw seats away.
+_SESSIONS_PER_PROCESS = {"opencode": 2, "kimi": 1, "dsh": 2, "reasonix": 1,
                          "claude": 1, "codex": 1, "cursor": 1, "agy": 1,
                          "gemini": 1}
 
@@ -1467,7 +1472,10 @@ _MODEL_DRIVER_CAP = {
 # another harness is free, otherwise waited out, not failed — is the real
 # limit. gemini keeps 2: no live roster row uses the old Gemini CLI.
 # cursor and agy are subscription CLIs and share the same cap knob.
-_HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 7,
+# reasonix goes to 10, the account's DeepSeek ceiling (operator directive
+# 2026-09-24: 10 unlimited sessions, use them all). ARC_HARNESS_LIMIT_REASONIX
+# is still the first knob if 400s appear under a full pool.
+_HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 10,
                 "claude": SUBSCRIPTION_SESSION_CAP,
                 "codex": SUBSCRIPTION_SESSION_CAP,
                 "cursor": SUBSCRIPTION_SESSION_CAP,
