@@ -22,6 +22,7 @@ import time
 import uuid
 from pathlib import Path
 
+import agentboard
 import events
 import config
 
@@ -63,6 +64,19 @@ def post(worktree, *, task, role, model, harness, kind="note", body="",
     if session_id:
         # Named so a later prompt can say which harness may resume it.
         rec["session_id"] = str(session_id)
+    # The structured board (agentboard.py) gets the same post, same id, in
+    # the task's channel, with the full body rather than the 400-char line.
+    # agentboard.post never raises. Before the JSONL write: the one-time
+    # legacy import must not see this line first and keep its short body.
+    board_project = project or agentboard.infer_project(worktree)[0]
+    if board_project:
+        agentboard.post(board_project, author=f"{rec['task']}/{rec['role']}",
+                        channel=f"task:{rec['task']}" if rec["task"] else "project",
+                        kind=kind if kind in agentboard.KINDS else "note",
+                        body=body or "", author_model=rec["model"],
+                        author_role=rec["role"], author_task=rec["task"],
+                        refs={k: rec[k] for k in ("harness", "session_id") if rec.get(k)},
+                        msg_id=rec["id"], ts=rec["ts"])
     line = json.dumps(rec, ensure_ascii=False) + "\n"
     try:
         # Inside the try: a worktree removed mid-run must not turn a board
