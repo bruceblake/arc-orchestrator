@@ -11,7 +11,7 @@ let STUDIO_OPEN = "";            // project whose section is expanded
 // Which view of the open project: its sub-tabs. Remembered per browser.
 let STUDIO_VIEW = (() => { try { return localStorage.getItem("arc.studio.view") || "overview"; } catch (e) { return "overview"; } })();
 const STUDIO_VIEWS = [["overview", "Overview"], ["board", "Board"], ["changelog", "Changelog"],
-                      ["evidence", "Evidence"], ["workbench", "Workbench"]];
+                      ["evidence", "Evidence"], ["workbench", "Workbench"], ["playtest", "Playtest"]];
 
 // The gauntlet a task has been through, as compact badges: every angle it was
 // checked from (fix rounds, the gate's measurements, the independent critic,
@@ -31,6 +31,12 @@ function gauntletBadges(g) {
 async function pollStudio() {
   try { STUDIO = await jget("/api/studio"); markFail("studio", false); }
   catch (e) { markFail("studio", true); return; }
+  // The panel is rebuilt from markup every poll. While the operator is typing
+  // into a playtest form, rebuilding would drop focus and the caret, so the
+  // render is deferred until the field loses focus (the data is kept; the next
+  // poll draws it). Typed values also survive a later render: they are drafted
+  // into PT_DRAFT and written back into the markup.
+  if (studioEditing()) return;
   renderStudio();
 }
 
@@ -242,6 +248,177 @@ function studioExtras(p) {
   return out;
 }
 
+// ---- Human playtest -----------------------------------------------------------
+// Builds to launch on the desktop, sessions (stop / post-session survey) and the
+// findings a human logged (F8 in game, or the "+ Finding" form), with triage.
+// Everything here comes from p.playtest (studio/status.py); actions POST to
+// /api/studio/playtest/* and re-poll.
+const PT_FILTERS = [["open", "Open"], ["new", "New"], ["accepted", "Accepted"], ["reopened", "Reopened"],
+                    ["fixed", "Fixed"], ["verified", "Verified"], ["wontfix", "Won't fix"],
+                    ["duplicate", "Duplicate"], ["all", "All"]];
+const PT_OPEN = ["new", "accepted", "reopened"];
+let PT_FILTER = (() => { try { return localStorage.getItem("arc.studio.pt.filter") || "open"; } catch (e) { return "open"; } })();
+// Legal next states per state. The server decides; this only offers them.
+const PT_TRIAGE = {new: ["accepted", "wontfix", "duplicate", "fixed"],
+                   accepted: ["fixed", "wontfix", "duplicate"],
+                   fixed: ["verified", "reopened"], verified: ["reopened"],
+                   wontfix: ["reopened"], duplicate: ["reopened"],
+                   reopened: ["accepted", "fixed", "wontfix"]};
+const PT_TRIAGE_LABEL = {accepted: "Accept", wontfix: "Won't fix", duplicate: "Duplicate",
+                         fixed: "Fixed", verified: "Verified", reopened: "Reopen"};
+const PT_SEV = {1: "blocker", 2: "major", 3: "minor", 4: "polish"};
+const PT_CATS = ["bug", "feel", "balance", "ux", "visual", "perf", "other"];
+// Unsent form values, keyed "<project>|<field key>": every render writes them
+// back into the markup, so a 5 s poll never wipes what was typed.
+const PT_DRAFT = {};
+
+// True while focus sits in a playtest form field (pollStudio defers then).
+function studioEditing() {
+  const a = document.activeElement;
+  return !!(a && a.closest && a.closest("[data-pt-form]") && /^(INPUT|SELECT|TEXTAREA)$/.test(a.tagName || ""));
+}
+function ptDraft(key, dflt) {
+  const v = PT_DRAFT[STUDIO_OPEN + "|" + key];
+  return v == null ? dflt : v;
+}
+// Timestamps may be epoch seconds or ISO strings.
+function ptWhen(ts) {
+  if (ts == null || ts === "") return "";
+  return typeof ts === "number" ? AGO(ts) + " ago" : fmtT(ts);
+}
+function ptSelect(key, name, label, opts, dflt) {
+  const cur = String(ptDraft(key, dflt));
+  return `<select name="${attr(name)}" data-pt-key="${attr(key)}" aria-label="${attr(label)}">${opts.map(([v, l]) =>
+    `<option value="${attr(v)}"${String(v) === cur ? " selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+}
+
+function ptSurvey(s) {
+  const k = f => `survey:${s.id}:${f}`;
+  const five = [["", "—"], ["1", "1"], ["2", "2"], ["3", "3"], ["4", "4"], ["5", "5"]];
+  return `<div class="pt-survey" data-pt-form="survey">
+    <span class="hint">survey</span>
+    <label>fun ${ptSelect(k("fun"), "fun", "fun, 1 to 5", five, "")}</label>
+    <label>clarity ${ptSelect(k("clarity"), "clarity", "clarity, 1 to 5", five, "")}</label>
+    <label>difficulty ${ptSelect(k("difficulty"), "difficulty", "difficulty, 1 to 5", five, "")}</label>
+    <input type="text" name="note" data-pt-key="${attr(k("note"))}" aria-label="survey note" placeholder="note (optional)" maxlength="2000" value="${attr(ptDraft(k("note"), ""))}">
+    <button class="pill" data-pt-survey="${attr(s.id)}">Save</button>
+  </div>`;
+}
+
+function ptFinding(f) {
+  const sev = PT_SEV[f.severity] ? +f.severity : 4;
+  // The server says which moves are legal (f.next); the table is the fallback.
+  const moves = Array.isArray(f.next) ? f.next : (PT_TRIAGE[f.state] || []);
+  const buttons = moves.filter(st => PT_TRIAGE_LABEL[st]).map(st =>
+    `<button class="pill" data-pt-triage="${attr(f.id)}" data-pt-state="${st}">${PT_TRIAGE_LABEL[st]}</button>`).join("");
+  const shot = f.screenshot_url
+    ? `<a class="pt-thumb" href="${attr(f.screenshot_url)}" target="_blank" rel="noopener"><img loading="lazy" src="${attr(f.screenshot_url)}" alt="${attr("screenshot " + (f.screenshot || ""))}"></a>` : "";
+  const link = f.link ? (/^https?:\/\//.test(f.link)
+    ? `<a class="tag" href="${attr(f.link)}" target="_blank" rel="noopener">${esc(f.link)}</a>`
+    : `<span class="tag">${esc(f.link)}</span>`) : "";
+  return `<div class="pt-finding ${attr(f.state)}">
+    ${shot}
+    <div class="pt-body">
+      <div class="pt-meta">
+        <span class="pt-sev s${sev}" title="severity ${sev}">${sev} ${PT_SEV[sev]}</span>
+        <span class="tag">${esc(f.category || "other")}</span>
+        <span class="chip pt-state ${attr(f.state)}">${esc(f.state)}</span>
+        <span class="hint">${esc(f.build || "")}${f.sha ? " @ " + esc(String(f.sha).slice(0, 7)) : ""}${f.scene ? " · " + esc(f.scene) : ""} · ${esc(f.source || "")} ${esc(ptWhen(f.ts))}</span>
+        ${link}
+      </div>
+      <div class="pt-note">${esc(f.note || "")}</div>
+      ${f.triage_note ? `<div class="hint">triage: ${esc(f.triage_note)}</div>` : ""}
+      ${f.fixed_in ? `<div class="hint">fixed in ${esc(String(f.fixed_in).slice(0, 7))}</div>` : ""}
+      ${buttons ? `<div class="pt-actions">${buttons}</div>` : ""}
+    </div>
+  </div>`;
+}
+
+function studioPlaytestView(p) {
+  const pt = p.playtest;
+  if (!pt) return '<div class="empty">No playtest data for this project (the dashboard server predates human playtesting).</div>';
+  if (pt.error) return `<div class="empty bad">Playtest data unavailable: ${esc(pt.error)}</div>`;
+  const reason = !pt.godot ? "Godot is not installed on this machine"
+    : !pt.display ? "no display is configured (STUDIO_DISPLAY)" : "";
+  const head = `<div class="pt-head">
+    <span class="pill ${pt.godot ? "good" : "bad"}">godot <b>${pt.godot ? "yes" : "no"}</b></span>
+    <span class="pill ${pt.display ? "good" : "bad"}">display <b>${esc(pt.display || "none")}</b></span>
+    ${reason ? `<span class="bad">Cannot launch: ${esc(reason)}.</span>` : ""}
+  </div>
+  <div class="hint">F8 in game = log a finding with screenshot. Accepted findings are handed to the planner on the next <code>studio plan</code>.</div>`;
+
+  const builds = (pt.builds || []).map(b => `<tr>
+      <td>${esc(b.id)}</td><td><code>${esc(String(b.sha || "").slice(0, 7))}</code></td>
+      <td>${esc(b.subject || "")}</td><td class="hint">${esc(ptWhen(b.ts))}</td>
+      <td><button class="pill" data-pt-launch="${attr(b.id)}"${reason ? ` disabled title="${attr(reason)}"` : ""}>▶ Play</button></td></tr>`).join("");
+  const buildsHtml = builds
+    ? `<table class="st-metrics"><thead><tr><th>build</th><th>sha</th><th>subject</th><th>age</th><th></th></tr></thead><tbody>${builds}</tbody></table>`
+    : '<div class="empty">No playable builds (no <code>main</code> or <code>task/*</code> branch found).</div>';
+
+  const sessions = (pt.sessions || []).map(s => `<div class="pt-session ${attr(s.status)}">
+      <div class="pt-meta">
+        <b>${esc(s.id)}</b> <span class="tag">${esc(s.build || "")}</span>
+        <code>${esc(String(s.sha || "").slice(0, 7))}</code>
+        <span class="chip ${s.status === "running" || s.status === "preparing" ? "running" : s.status === "failed" ? "failed" : "merged"}">${esc(s.status)}</span>
+        ${s.status === "preparing" ? `<span class="hint">first play of this build: cloning + importing, Godot opens when ready</span>` : ""}
+        ${s.error ? `<span class="hint">${esc(s.error)}</span>` : ""}
+        <span class="hint">started ${esc(ptWhen(s.started))} · ${esc(s.findings || 0)} finding${s.findings === 1 ? "" : "s"}</span>
+        ${s.status === "running" ? `<button class="pill" data-pt-stop="${attr(s.id)}">■ Stop</button>` : ""}
+        ${s.survey ? `<span class="hint">fun ${esc(s.survey.fun)} · clarity ${esc(s.survey.clarity)} · difficulty ${esc(s.survey.difficulty)}${s.survey.note ? " — " + esc(s.survey.note) : ""}</span>` : ""}
+      </div>
+      ${s.status !== "running" && s.status !== "preparing" && !s.survey ? ptSurvey(s) : ""}
+    </div>`).join("");
+
+  const all = pt.findings || [];
+  const counts = pt.counts || {};
+  const inFilter = (f, v) => v === "all" || (v === "open" ? PT_OPEN.includes(f.state) : f.state === v);
+  const shown = all.filter(f => inFilter(f, PT_FILTER));
+  const chips = PT_FILTERS.map(([v, l]) => {
+    const n = v !== "all" && counts[v] != null ? counts[v] : all.filter(f => inFilter(f, v)).length;
+    return `<button class="st-view" data-pt-filter="${v}" aria-pressed="${PT_FILTER === v}">${l} <span class="hint">${esc(n)}</span></button>`;
+  }).join("");
+
+  const add = `<details class="pt-add"${ptDraft("add:open", "") ? " open" : ""}><summary>+ Finding</summary>
+    <div class="pt-form" data-pt-form="add">
+      ${ptSelect("add:category", "category", "category", PT_CATS.map(c => [c, c]), "bug")}
+      ${ptSelect("add:severity", "severity", "severity", [1, 2, 3, 4].map(n => [String(n), `${n} ${PT_SEV[n]}`]), "3")}
+      <input type="text" name="note" data-pt-key="add:note" aria-label="finding note" placeholder="what happened?" maxlength="2000" value="${attr(ptDraft("add:note", ""))}">
+      <button class="pill" data-pt-add="1">Add</button>
+    </div></details>`;
+
+  return `${head}
+    <h3>Builds</h3>${buildsHtml}
+    <h3>Sessions</h3>${sessions || '<div class="empty">No playtest sessions yet — press ▶ Play on a build.</div>'}
+    <h3>Findings</h3>
+    <div class="st-views pt-filters">${chips}</div>
+    ${add}
+    ${shown.length ? `<div class="pt-findings">${shown.map(ptFinding).join("")}</div>` : '<div class="empty">No findings in this filter.</div>'}`;
+}
+
+// Draft every keystroke / selection so a later render can restore it.
+function ptRemember(e) {
+  const t = e.target;
+  const k = t && t.getAttribute && t.getAttribute("data-pt-key");
+  if (k) PT_DRAFT[STUDIO_OPEN + "|" + k] = t.value;
+}
+document.addEventListener("input", ptRemember);
+document.addEventListener("change", ptRemember);
+// <details> toggle does not bubble; capture it so the "+ Finding" form stays open.
+document.addEventListener("toggle", e => {
+  const t = e.target;
+  if (t && t.classList && t.classList.contains("pt-add")) PT_DRAFT[STUDIO_OPEN + "|add:open"] = t.open ? "1" : "";
+}, true);
+function ptClear(prefix) {
+  for (const k of Object.keys(PT_DRAFT)) if (k.startsWith(STUDIO_OPEN + "|" + prefix)) delete PT_DRAFT[k];
+}
+async function ptPost(path, body) {
+  let res;
+  try { res = await jpost("/api/studio/playtest/" + path, {project: STUDIO_OPEN, ...body}); }
+  catch (err) { alert(`playtest ${path} failed: ${err}`); return false; }
+  if (res.code !== 200) { alert(`playtest ${path} failed: ${(res.body && res.body.error) || res.code}`); return false; }
+  return true;
+}
+
 function renderStudio() {
   const el = $("#studio");
   if (!el) return;
@@ -274,6 +451,7 @@ function renderStudio() {
         : STUDIO_VIEW === "changelog" ? studioChangelog(p)
         : STUDIO_VIEW === "evidence" ? studioEvidence(p)
         : STUDIO_VIEW === "workbench" ? studioWorkbenchView(p)
+        : STUDIO_VIEW === "playtest" ? studioPlaytestView(p)
         : `<div class="st-grid">
             <div class="st-col"><h3>Phase gate</h3>${studioGate(p)}</div>
             <div class="st-col"><h3>Phase tasks</h3>${studioBoards(p)}</div>
@@ -304,5 +482,59 @@ document.addEventListener("click", async (e) => {
       {project: STUDIO_OPEN, asset: a.getAttribute("data-approve"), state, note});
     if (code !== 200) alert(`not recorded: ${body.error || code}`);
     pollStudio();
+    return;
+  }
+  const pf = e.target.closest("[data-pt-filter]");
+  if (pf) {
+    PT_FILTER = pf.getAttribute("data-pt-filter");
+    try { localStorage.setItem("arc.studio.pt.filter", PT_FILTER); } catch (err) {}
+    renderStudio(); return;
+  }
+  const pl = e.target.closest("[data-pt-launch]");
+  if (pl) {
+    if (pl.disabled) return;
+    await ptPost("launch", {build: pl.getAttribute("data-pt-launch")});
+    pollStudio(); return;
+  }
+  const ps = e.target.closest("[data-pt-stop]");
+  if (ps) {
+    await ptPost("stop", {session: ps.getAttribute("data-pt-stop")});
+    pollStudio(); return;
+  }
+  const tr = e.target.closest("[data-pt-triage]");
+  if (tr) {
+    const state = tr.getAttribute("data-pt-state");
+    const body = {finding: tr.getAttribute("data-pt-triage"), state};
+    if (state === "wontfix" || state === "duplicate" || state === "reopened") {
+      const note = prompt(state === "duplicate" ? "Duplicate of which finding?"
+        : state === "reopened" ? "Why is this reopened?" : "Why won't this be fixed?", "");
+      if (note == null) return;          // cancelled: record nothing
+      body.note = note;
+    } else if (state === "accepted") {
+      const link = prompt("Link a task id or PR url (optional):", "");
+      if (link == null) return;
+      if (link.trim()) body.link = link.trim();
+    }
+    await ptPost("triage", body);
+    pollStudio(); return;
+  }
+  const sv = e.target.closest("[data-pt-survey]");
+  if (sv) {
+    const sid = sv.getAttribute("data-pt-survey");
+    const form = sv.closest("[data-pt-form]");
+    const val = n => { const x = form && form.querySelector(`[name="${n}"]`); return x ? x.value : ""; };
+    const fun = +val("fun"), clarity = +val("clarity"), difficulty = +val("difficulty");
+    if (!fun || !clarity || !difficulty) { alert("Rate fun, clarity and difficulty (1–5) first."); return; }
+    if (await ptPost("survey", {session: sid, fun, clarity, difficulty, note: val("note")})) ptClear(`survey:${sid}:`);
+    pollStudio(); return;
+  }
+  const ad = e.target.closest("[data-pt-add]");
+  if (ad) {
+    const form = ad.closest("[data-pt-form]");
+    const val = n => { const x = form && form.querySelector(`[name="${n}"]`); return x ? x.value : ""; };
+    const note = val("note").trim();
+    if (!note) { alert("Describe the finding first."); return; }
+    if (await ptPost("finding", {category: val("category") || "other", severity: +val("severity") || 3, note})) ptClear("add:");
+    pollStudio(); return;
   }
 });

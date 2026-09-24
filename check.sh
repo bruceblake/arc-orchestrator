@@ -182,6 +182,11 @@ PYEOF
     # trip, and the workload DAGs. This file landed with the feature (#10)
     # and was never added here, so it passed on the author's machine and
     # guarded nothing after that.
+    # The Studio panel's human-playtest view: Play buttons, sessions + survey,
+    # findings filter and triage, and typed text surviving the 5 s poll.
+    if ! node tests/studio_playtest_ui.test.mjs; then
+        echo "FAIL: studio playtest view misbehaves"; rc=1
+    fi
     if ! node tests/projects_ui.test.mjs; then
         echo "FAIL: projects-list UI misbehaves"; rc=1
     fi

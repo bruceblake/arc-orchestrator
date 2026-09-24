@@ -501,7 +501,7 @@ framework). Each practice below is enforced by code, not left to a prompt:
 | Characters from low-poly parts, rigged and animated from reference clips | planner method block; the operator's prompt refuses to model organic characters from nothing |
 | Lighting as presets (day / night / emergency / blackout) | phase-3 planner guidance |
 | Shadows halved one build's frame rate | phase-3 perf gate (`tools/perf.gd`): fps floor + shadow-caster cap |
-| The last check is a human | promotions are manual (`studio promote`); optional manual PR gate below |
+| The last check is a human | promotions are manual (`studio promote`); optional manual PR gate below; a human **plays** any build from the dashboard and triages what they find (Human playtesting, below) |
 
 ### Scripted playtest contract
 
@@ -545,6 +545,26 @@ The wait polls GitHub and uses no model time. A timeout, if you set one, rejects
 ```
 
 This writes a paste-ready review: instructions, the task spec (found through the commit's `Task-Id`), the gate, what the fleet's reviewers said, the full diff, and the exact label commands. It also creates the two labels on the repo.
+
+### Human playtesting (dashboard)
+
+The scripted playtest measures; the judge looks at screenshots. Neither can tell you the jump feels floaty. **Studio → Playtest** lets a human play any build and log what they find (`studio/playtest.py`):
+
+1. **Pick a build.** The list is the game repo's base branch (`ARC_BASE_BRANCH`, else `main`) and every in-flight `task/<id>` branch, newest first. **▶ Play** launches it on the desktop (`STUDIO_DISPLAY`). The CLI does the same: `main.py studio play <project> [--build task/<id>]`.
+2. **Press F8 in game.** The frame is captured first, then the game pauses and a small panel asks for a note, a category (bug, feel, balance, ux, visual, perf, other) and a severity (1 blocker … 4 polish). Enter saves, Esc cancels. A corner label shows `PLAYTEST <sha> · F8 = report`, and the overlay logs scene/fps telemetry every 5 s.
+3. **Answer the survey.** When the session ends, the view asks three 1–5 questions (fun, clarity, difficulty) and a note.
+4. **Triage.** Every finding starts `new`. Accept, won't fix, duplicate and fixed are always allowed. Verified is allowed only from fixed. Reopen is allowed from fixed, verified or won't fix. `fixed` records the base branch's sha at that moment. You can also type a finding directly in the view (`+ Finding`), and list findings with `main.py studio findings <project> [--state accepted]`.
+
+**Isolation.** A build is a **snapshot**: `git clone --local --no-checkout` of the blessed repo, checked out detached at the build's sha, under `logs/studio/<project>/playtest/builds/<sha12>`. It is made once per sha and reused. The F8 overlay (`studio/playtest_overlay.gd`) is copied into the snapshot and registered as an autoload in the *snapshot's* `project.godot`, never in the game repo. Two paths are deliberately avoided:
+
+- **Not `git worktree add` on the blessed clone.** A second worktree holding `task/<id>` makes `gitstore.alloc`'s `checkout -B` fail for that task.
+- **Not under `~/worktrees`.** `reconcile --apply` reaps what it finds there as orphaned.
+
+The blessed clone is only read. Each session lives in `logs/studio/<project>/playtest/sessions/<id>/`: `session.json`, `findings.jsonl`, `telemetry.jsonl`, the screenshots, `godot.log`. The game's `user://` data goes to that session's `userdata/`, so a playtest never touches your own saves.
+
+**How findings reach the fleet.** In exactly one way, and only after a human decides. Findings you **accept** (or reopen) are appended to the goal the next time `studio plan` runs, under `--- OPEN HUMAN PLAYTEST FINDINGS ---`, most severe first. `new`, `wontfix`, `duplicate`, `fixed` and `verified` findings are never sent. Nothing in the playtest flow starts work, creates a branch or edits a taskfile.
+
+Every route acts only on values the server listed: projects, builds, sessions, findings and screenshot names (AGENTS.md Rule 6b). Godot is launched with a fixed argv. Launch refuses with 409 when Godot or a display is missing.
 
 ## 10. Environment
 
