@@ -26,7 +26,8 @@ import events
 import config
 
 REL = ".arc/board.jsonl"
-KINDS = ("note", "handoff", "result", "error")
+# "evidence": a capture of screenshots/video (evidence.py, Rule 7d).
+KINDS = ("note", "handoff", "result", "error", "evidence")
 _BODY_MAX = 400
 
 
@@ -66,9 +67,13 @@ def post(worktree, *, task, role, model, harness, kind="note", body="",
     try:
         # Inside the try: a worktree removed mid-run must not turn a board
         # post into an exception (post is called from except/crash paths).
-        task_path(worktree).parent.mkdir(parents=True, exist_ok=True)
-        with task_path(worktree).open("a", encoding="utf-8") as f:
-            f.write(line)
+        # Never the orchestrator's own checkout: task worktrees live under
+        # WORKTREE_ROOT, and a post aimed here (tests driving a harness with
+        # Path(".")) put .arc/board.jsonl into two commits on main.
+        if Path(worktree).resolve() != Path(config.ROOT).resolve():
+            task_path(worktree).parent.mkdir(parents=True, exist_ok=True)
+            with task_path(worktree).open("a", encoding="utf-8") as f:
+                f.write(line)
         if project:
             with project_path(project, create=True).open("a", encoding="utf-8") as f:
                 f.write(line)

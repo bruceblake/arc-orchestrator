@@ -92,6 +92,10 @@ DeepSeek-V4.1-Flash-thinking-max's roles are
 
 ```
 alloc → implement → gate ──pass──▶ review ──pass──▶ publish(merge + PR hook)
+                      │ (Godot project: + visual evidence, Rule 7d —
+                      │  screenshots, flythrough + playtest video,
+                      │  before/after vs the merge base; shown to both
+                      │  reviews and commented onto the PR)
          ▲            │                │
          └──── fail ◀─┴───── fail ◀────┘   (≤ MAX_FIX_ROUNDS fix rounds per tier)
          │

@@ -66,5 +66,10 @@ class BoardPostsAreReadableAndScoped(unittest.TestCase):
         board.post(gone, task="t", role="implementer", model="m",
                    harness="codex", kind="error", body="crashed")
 
+    def test_never_writes_into_the_orchestrator_checkout(self):
+        board.post(config.ROOT, task="t", role="implementer", model="m",
+                   harness="codex", kind="note", body="from a test")
+        self.assertFalse((Path(config.ROOT) / board.REL).exists())
+
     def test_empty_board_adds_nothing_to_the_prompt(self):
         self.assertEqual(board.prompt_block(self.wt, project="none", task="t"), "")
