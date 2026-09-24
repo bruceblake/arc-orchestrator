@@ -148,6 +148,24 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .drawer.open { transform: none; }
 .drawer header { position: static; }
 .drawer pre { flex: 1; overflow: auto; margin: 0; padding: 10px 12px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+/* Task timeline drawer: an entry per thing that happened, in time order.
+   Errors and evidence are the two the eye must not miss, so they carry a
+   left rule in the status colours — the same visual grammar as the panels.
+   #drawer-body is a <pre> (white-space: pre-wrap) because it renders
+   transcripts as text; the timeline puts MARKUP there, so the template's own
+   newlines would render as gaps and the rows reset the whitespace model. */
+.tl-row { padding: 6px 12px; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; white-space: normal; }
+.tl-row.error { border-left-color: var(--err); background: rgba(248,81,73,.07); }
+.tl-row.evidence { border-left-color: var(--purple); background: rgba(188,140,255,.06); }
+.tl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tl-type { font-size: 11px; color: var(--text); font-weight: 600; }
+.tl-gist { font-size: 11px; color: var(--dim); margin-top: 2px; word-break: break-word; }
+.tl-body { font-size: 10.5px; color: var(--dim); margin: 4px 0 0; padding: 6px 8px; background: #0d1117; border-radius: 4px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.tl-cut { padding: 6px 12px; font-size: 11px; }
+.tl-shots { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tl-shot { display: block; text-align: center; font-size: 10px; color: var(--dim); text-decoration: none; }
+.tl-shot img { display: block; width: 116px; height: 65px; object-fit: cover; border: 1px solid var(--border); border-radius: 4px; }
+.tl-shot:hover img { border-color: var(--accent); }
 .subrow td { background: #0d1117; font-size: 11px; }
 .repohead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 14px 0 8px; }
 .repohead h3 { margin: 0; font-size: 13px; color: var(--purple); }
@@ -760,6 +778,8 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/chat.js"></script>
 <script src="/panels/captain.js"></script>
 <script src="/panels/transcript.js"></script>
+<!-- timeline.js AFTER transcript.js: its run entries call openTranscript. -->
+<script src="/panels/timeline.js"></script>
 <script src="/panels/summary.js"></script>
 <script src="/panels/keyboard.js"></script>
 <script src="/panels/studio.js"></script>

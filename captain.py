@@ -38,6 +38,7 @@ import time
 from pathlib import Path
 
 import config
+import project_contract
 import errors
 import events
 import orchchat
@@ -93,7 +94,10 @@ def _live_lease_counts(db_path=None):
     """{model: count} of leases whose owner process is still alive."""
     try:
         store = Store(db_path or config.DB_PATH)
-        return store.lease_usage()
+        try:
+            return store.lease_usage()
+        finally:
+            store.conn.close()
     except Exception as exc:            # a locked/absent db must not kill a turn
         errors.capture(exc, node="captain.leases")
         return {}
@@ -298,6 +302,8 @@ def _state_block(state):
 def build_prompt(repo, state, turns):
     return (CAPTAIN_PERSONA
             + f"\n\nTARGET REPO: {repo}\n\n"
+            + project_contract.captain_block(repo)
+            + "\n"
             + _state_block(state)
             + "\n\nCONVERSATION WITH THE OPERATOR (oldest first). Reply as "
               "the captain:\n\n"

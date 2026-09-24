@@ -139,6 +139,41 @@ rewires — amendments take effect on resume, for tasks with no row yet, and
 for downstream chain gates. Kinds, boundary and trail:
 [taskfile-schema.md](taskfile-schema.md) § "The plan is a living document".
 
+### The task dossier: durable handoff in and out of every run (`dossier`)
+
+A restart (reboot, watchdog relaunch), a plan-window usage swap, or a tier
+escalation hands the task to a fresh session — often a different model. What
+that session knows comes from one durable record per task, not from a chat
+summary: `dossier.py`, table `task_dossier(project, task, updated_at, data)`
+in `config.DB_PATH` (`project` is the repo directory name).
+
+- **Out of every run.** After every agent run — implement, gate review, PR
+  review, crash paths included, next to the plan-proposal harvest — the node
+  calls `dossier.harvest_handoff`, which reads `.arc/handoff.md` from the
+  worktree and deletes it. Its sections are `## Done`, `## Remaining`,
+  `## Decisions` (with reasons), `## Dead ends` (what failed and why),
+  `## Gotchas`, `## Next step`: the newest wins per section, Decisions and
+  Dead ends accumulate deduplicated, and free-form text is kept under
+  `notes`. The orchestrator records each outcome with
+  `dossier.record_attempt` (`gate_failed`, `review_rejected`, `crashed`,
+  `usage_swap`, `passed`, `merged`) — the gate records the implementer's
+  attempt with the files it changed; the last 20 attempts are kept plus a
+  rolled-up count. Escalations and usage swaps add a line saying why the
+  model changed; publish records the open PR.
+- **In to every run ("boot injection").** Every implement, review and
+  PR-review prompt starts with `dossier.render(...)` (capped at 4000 chars)
+  once the task has any history, the first attempt included: current state
+  and model/tier history, operator/captain notes, Remaining and Next step,
+  Decisions (do not relitigate), Dead ends (do not retry), Gotchas, the last
+  three outcomes with failure excerpts, files touched, the open PR. A
+  reviewer also sees what the implementer claims was Done.
+- **Never committed.** `.arc/handoff.md` is in `gitstore.CHANNEL_FILES`, so
+  publish unstages it and the review diff excludes it, and publish sweeps it
+  once more before committing.
+- **Operator surface.** `main.py code context <task> [--taskfile F]
+  [--json]` prints the dossier (context OUT); `--note "<text>"` injects an
+  operator/captain note (`dossier.import_notes`, context IN).
+
 ## Project chains (before the per-task pipeline)
 
 A taskfile with `project.after` prefixes the whole shape above with one
