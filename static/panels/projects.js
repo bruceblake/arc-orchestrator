@@ -236,6 +236,7 @@ function liveBadge(p) {
 
 async function showGateLog(fn) {
   const d = await jget(`/api/gate-log?file=${encodeURIComponent(fn)}`);
+  closeTimeline();                            // the drawer changes hands
   $("#drawer").classList.add("open");
   $("#drawer-title").textContent = "verify gate output";
   $("#drawer-sub").textContent = d.error ? "" : `${fn} · ${d.total_lines} lines`;

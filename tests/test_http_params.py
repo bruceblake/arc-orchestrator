@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -749,6 +750,29 @@ class HttpParamsTimeline(EndpointCase):
         self.assertTrue(urls[0].startswith("/api/evidence-file?path="))
         self.assertNotIn("passwd", urls[0])
 
+    def test_evidence_is_found_in_a_project_past_the_old_64_dir_cap(self):
+        """Every project directory is searched, not the first 64 by name.
+
+        The walk used to stop at 64 directories, so a task whose project sorts
+        later (here `zzz-late`) had no manifests — and an absent manifest is
+        indistinguishable from a run that captured none, so the drawer said
+        "no evidence" for a task that had some."""
+        self._events([])
+        for i in range(70):                    # all sort before zzz-late
+            (self.evidence / f"aaa-{i:03d}").mkdir(parents=True, exist_ok=True)
+        late = self.evidence / "zzz-late" / "t1" / "x7"
+        late.mkdir(parents=True, exist_ok=True)
+        (late / "late.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (late / "manifest.json").write_text(
+            json.dumps({"shots": [str(late / "late.png")]}), encoding="utf-8")
+        entries = self.get("/api/tasks/t1/timeline").json()["entries"]
+        ev = [e for e in entries if e["kind"] == "evidence"]
+        self.assertIn("zzz-late", [e["project"] for e in ev],
+                      "a project sorting past 64 other directories was skipped")
+        late_shots = [s for e in ev if e["project"] == "zzz-late"
+                      for s in e["shots"]]
+        self.assertEqual([s["name"] for s in late_shots], ["late.png"])
+
     def test_evidence_file_serves_a_shot(self):
         """The thumbnail the drawer renders is one GET away."""
         req = self.get("/api/evidence-file?path=proj/t1/x2/shot.png")
@@ -855,3 +879,62 @@ class HttpParamsTimeline(EndpointCase):
         self.assertLessEqual(out["scanned"], 50)
         self.assertTrue(out["truncated"])
         self.assertGreater(len(out["events"]), 0)
+
+    def test_the_cache_pair_is_read_and_written_under_a_lock(self):
+        """key and value must be read/written as ONE snapshot.
+
+        Dashboard.Handler runs on a ThreadingHTTPServer, so an unlocked
+        check-then-read let two overlapping GETs interleave as "key matches
+        for task A, value already replaced by task B" — one task's timeline
+        came back holding another task's events.
+
+        Asserted by recording the lock state at every cache access rather
+        than by racing threads: a timing-based version of this test PASSED
+        against the unlocked code, so it proved nothing."""
+        self._events([{"type": "driver.start", "task": "ta", "ts": 1.0, "note": "A"}])
+        accesses = []
+        real = dashboard._timeline_cache
+
+        class Watched(dict):
+            def __getitem__(self, k):
+                accesses.append(("read", dashboard._timeline_cache_lock.locked()))
+                return super().__getitem__(k)
+
+            def __setitem__(self, k, v):
+                accesses.append(("write", dashboard._timeline_cache_lock.locked()))
+                super().__setitem__(k, v)
+
+        watched = Watched(real)
+        dashboard._timeline_cache = watched
+        try:
+            dashboard._timeline_events("ta")      # miss: scans, then publishes
+            dashboard._timeline_events("ta")      # hit: reads the pair back
+        finally:
+            dashboard._timeline_cache = real
+        self.assertTrue(accesses, "the cache was never touched")
+        unlocked = [op for op, held in accesses if not held]
+        self.assertEqual(
+            unlocked, [],
+            f"cache {unlocked} happened outside the lock — key/value is not atomic")
+
+    def test_a_cache_hit_returns_this_tasks_value_not_the_last_one(self):
+        """A hit is answered from the value belonging to the key it matched."""
+        self._events([{"type": "driver.start", "task": "ta", "ts": 1.0, "note": "A"}])
+        first = dashboard._timeline_events("ta")
+        self.assertEqual([e["note"] for e in first["events"]], ["A"])
+        hit = dashboard._timeline_events("ta")
+        self.assertEqual([e["note"] for e in hit["events"]], ["A"])
+        self.assertIs(hit, first, "the hit must be the value stored for this key")
+        # A DIFFERENT task must never be answered from the previous key's value.
+        self._events([{"type": "driver.start", "task": "tb", "ts": 1.0, "note": "B"}])
+        self.assertEqual([e["note"] for e in
+                          dashboard._timeline_events("tb")["events"]], ["B"])
+
+    def test_the_cache_holds_key_and_value_from_the_same_scan(self):
+        """A hit returns the value belonging to the key it matched."""
+        self._events([{"type": "driver.start", "task": "ta", "ts": 1.0, "note": "A"}])
+        first = dashboard._timeline_events("ta")
+        self.assertEqual(first["events"][0]["note"], "A")
+        hit = dashboard._timeline_events("ta")            # served from cache
+        self.assertEqual(hit["events"][0]["note"], "A")
+        self.assertIs(hit, first, "the cached value must be the one stored for this key")

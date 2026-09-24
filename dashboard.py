@@ -3166,16 +3166,22 @@ def _evidence_url(root, p):
 def _timeline_evidence(tid):
     """Evidence manifests under logs/evidence/<project>/<tid>/x*/manifest.json.
 
-    Bounded twice: the project directories listed and the attempt directories
-    walked. Each manifest's shots become /api/evidence-file URLs, but only for
-    files that resolve inside the evidence root.
+    EVERY project directory is walked, because the previous cap of the first
+    64 (alphabetically) silently dropped the evidence of any task whose
+    project sorts later — and an absent manifest is indistinguishable from a
+    run that captured none, so the drawer reported it as "no evidence" rather
+    than as a missing lookup. The walk is a readdir plus a stat per candidate;
+    only a directory that actually has a `<tid>/x*` subtree costs anything.
+
+    Each manifest's shots become /api/evidence-file URLs, but only for files
+    that resolve inside the evidence root.
     """
     root = _evidence_root()
     out = []
     if not root.is_dir():
         return out
     try:
-        projects = sorted(p for p in root.iterdir() if p.is_dir())[:64]
+        projects = sorted(p for p in root.iterdir() if p.is_dir())
     except OSError:
         return out
     for proj in projects:
@@ -3254,8 +3260,15 @@ def _timeline_events(tid, max_events=None, scan_lines=None):
     # every 3 s is the same waste twice.
     key = (str(path), st.st_size, st.st_mtime_ns, tid,
            int(max_events), int(scan_lines))
-    if _timeline_cache["key"] == key:
-        return _timeline_cache["value"]
+    # The check-and-read is ONE critical section. This server is a
+    # ThreadingHTTPServer, so two overlapping GETs used to interleave as
+    # "key matches for task A, value already replaced by task B" and one
+    # task's timeline came back holding another task's events. The lock is
+    # held across the hit test and the publish only — never across the scan —
+    # so it serialises a dict lookup, not the work.
+    with _timeline_cache_lock:
+        if _timeline_cache["key"] == key:
+            return _timeline_cache["value"]
     lines, window_is_partial = [], False
     try:
         with path.open("r", encoding="utf-8", errors="replace") as fh:
@@ -3287,13 +3300,19 @@ def _timeline_events(tid, max_events=None, scan_lines=None):
         if _timeline_owns(e.get("type")) and _timeline_id_matches(e.get("task"), tid):
             events.append(e)
     events.reverse()                        # the scan walked backwards
+    # This call's OWN value is what it returns — never a re-read of the
+    # shared dict, which another thread may have replaced while the scan ran.
     value = {"events": events, "scanned": scanned,
              "truncated": bool(hit_bound or window_is_partial)}
-    _timeline_cache.update(key=key, value=value)
+    with _timeline_cache_lock:
+        _timeline_cache["key"], _timeline_cache["value"] = key, value
     return value
 
 
 _timeline_cache = {"key": None, "value": None}
+# Guards the key/value pair above as ONE snapshot. Dashboard.Handler runs on a
+# ThreadingHTTPServer, so the pair is read and written from several threads.
+_timeline_cache_lock = threading.Lock()
 
 
 def _ts_of(v):

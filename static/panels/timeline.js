@@ -11,6 +11,10 @@
 
 let timelineFile = null;        // the taskfile the open timeline belongs to
 let timelineTask = null;        // and the task id, for polling
+// Bumped every time the drawer changes hands. A poll that resolves after the
+// drawer was closed, or taken over by another view, compares this and drops
+// its response instead of overwriting the newer content.
+let timelineGen = 0;
 
 // Entry kinds the eye must not miss, mapped to their row class. An error is
 // the reason the drawer was opened at all, and evidence is the only entry
@@ -159,21 +163,37 @@ function renderTimeline(d) {
 
 async function pollTimeline() {
   if (!timelineTask) return;
+  // The view this poll belongs to. Anything else that takes the drawer over
+  // (a transcript, a gate log, a diff) calls closeTimeline or openTaskTimeline
+  // and bumps the generation, so a response that arrives afterwards is
+  // discarded instead of overwriting the newer view's content.
+  const gen = timelineGen;
+  const task = timelineTask;
   const body = $("#drawer-body");
   const atBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 40;
-  const url = `/api/tasks/${encodeURIComponent(timelineTask)}/timeline` +
+  const scroll = body.scrollTop;
+  const url = `/api/tasks/${encodeURIComponent(task)}/timeline` +
     (timelineFile ? `?taskfile=${encodeURIComponent(timelineFile)}` : "");
   let d;
   try { d = await jget(url); }
   catch (e) { return; }            // keep the last good view; next tick retries
+  // Re-check AFTER the await: the drawer may have been closed, or another
+  // view may have taken it over, while this request was in flight. Writing
+  // now would replace that view's content with a timeline nobody asked for.
+  if (gen !== timelineGen || timelineTask !== task) return;
   if (d.error) { body.textContent = d.error; return; }
   renderTimeline(d);
+  // Restore the reader's position. Snapping to the bottom only when they were
+  // already there, and otherwise putting them back exactly where they were —
+  // a poll must not scroll the view out from under someone mid-read.
   if (atBottom) body.scrollTop = body.scrollHeight;
+  else body.scrollTop = scroll;
 }
 
 // A task node in a DAG opens its timeline. The transcript drawer stays
 // reachable: every run entry in the timeline has its own transcript button.
 function openTaskTimeline(file, taskId) {
+  timelineGen++;                   // this view now owns the drawer
   $("#drawer").classList.add("open");
   $("#drawer-title").textContent = `${taskId} — timeline`;
   $("#drawer-sub").textContent = "loading…";
@@ -185,7 +205,16 @@ function openTaskTimeline(file, taskId) {
   pollTimeline();
 }
 
-function closeTimeline() { timelineTask = null; timelineFile = null; }
+// Called by EVERY other writer of #drawer-body (the transcript view, gate
+// logs, run logs, the diff drawer, the no-transcript message). Without it the
+// 5 s interval kept polling and a timeline response would land on top of
+// whatever was on screen — the reader's gate output replaced by a timeline.
+// The generation bump also invalidates a poll already in flight.
+function closeTimeline() {
+  timelineGen++;
+  timelineTask = null;
+  timelineFile = null;
+}
 
 setInterval(() => {
   if (timelineTask && $("#drawer").classList.contains("open")) pollTimeline();

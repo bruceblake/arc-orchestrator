@@ -57,7 +57,8 @@ const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setSlots = v => { SLOTS = v; };"
   + "\nglobalThis.__setProjects = v => { PROJECTS = v; };"
   + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY,"
-  + " tlGist, tlEntry, renderTimeline, openTaskTimeline, closeTimeline, tlWhen};");
+  + " tlGist, tlEntry, renderTimeline, openTaskTimeline, closeTimeline, tlWhen, pollTimeline,"
+  + " openTranscript, __gen: () => timelineGen, __task: () => timelineTask};");
 const api = mod();
 
 let n = 0;
@@ -473,6 +474,62 @@ ok(clean(document.querySelector("#drv-events").innerHTML), "usage: driver-event 
      "timeline: an escalation shows the tier move");
   ok(api.tlWhen(1700000000).length > 5, "timeline: an entry is timestamped");
   ok(api.tlWhen(null) === "—", "timeline: a missing timestamp degrades to a dash");
+}
+
+// ---- the poller must not clobber another drawer view -----------------------
+// The drawer is shared by the timeline, the transcript, gate logs, run logs
+// and the diff. A 5 s timeline poll that resolves AFTER another view has taken
+// the drawer over used to render its own content on top of that view — the
+// reader's gate output replaced by a timeline. The poll now re-checks after
+// its await, and every other drawer writer calls closeTimeline().
+{
+  // A fetch we resolve by hand, so "the response arrives late" is
+  // deterministic rather than a race.
+  const pending = [];
+  globalThis.fetch = (url) => new Promise(res => {
+    pending.push({ url, res: () => res({ json: async () => ({
+      entries: [{kind: "event", type: "driver.start", ts: 1, task: "t1"}],
+      counts: {events: 1, runs: 0, errors: 0, evidence: 0}, id: "t1"}) }) });
+  });
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  const body = document.querySelector("#drawer-body");
+
+  // A poll in flight, then the drawer changes hands before it resolves.
+  api.openTaskTimeline("p.json", "t1");
+  const genAtOpen = api.__gen();
+  ok(api.__task() === "t1", "poller: opening a timeline sets the polled task");
+  ok(pending.length === 1, "poller: opening sends exactly one request");
+  api.closeTimeline();                       // e.g. showGateLog took the drawer
+  ok(api.__gen() > genAtOpen, "poller: closeTimeline invalidates the in-flight view");
+  body.innerHTML = "GATE OUTPUT";
+  pending[0].res();                          // the late response arrives
+  await flush();
+  ok(body.innerHTML === "GATE OUTPUT",
+     "poller: a response arriving after the drawer changed hands is discarded");
+
+  // A poll for a *different* task must not write either: the reader clicked
+  // another node while the first request was still in flight.
+  pending.length = 0;
+  api.openTaskTimeline("p.json", "tA");
+  api.openTaskTimeline("p.json", "tB");
+  body.innerHTML = "LATER VIEW";
+  pending[0].res();                          // tA's response lands now
+  await flush();
+  ok(body.innerHTML === "LATER VIEW",
+     "poller: a stale task's response is discarded");
+  ok(api.__task() === "tB", "poller: the newest open wins");
+  api.closeTimeline();
+
+  // openTranscript takes the drawer too, so it must stop the timeline poller.
+  pending.length = 0;
+  api.openTaskTimeline("p.json", "t1");
+  ok(api.__task() === "t1", "poller: armed by openTaskTimeline");
+  api.openTranscript("t.jsonl", "title", "sub");
+  ok(api.__task() === null, "poller: openTranscript stops the timeline poller");
+
+  api.closeTimeline();
+  ok(api.__task() === null, "poller: closeTimeline clears the polled task");
+  globalThis.fetch = async () => ({ json: async () => ({}), status: 200 });
 }
 
 if (failures.length) {

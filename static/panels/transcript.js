@@ -48,6 +48,10 @@ async function openTaskTranscript(file, taskId, cachedRuns) {
   if (last) openTranscript(String(last.transcript).split("/").pop(),
     `${short(last.model)} ${last.role || ""}`, `${taskId} · attempt ${last.attempt}`);
   else {
+    // No transcript to show, but this branch still takes the drawer: stop the
+    // timeline poller, or the "no transcript" message is replaced by a
+    // timeline a few seconds later.
+    if (typeof closeTimeline === "function") closeTimeline();
     $("#drawer").classList.add("open");
     $("#drawer-title").textContent = taskId;
     $("#drawer-sub").textContent = "no transcript";
