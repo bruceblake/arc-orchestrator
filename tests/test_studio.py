@@ -669,6 +669,76 @@ class TestStudioStatus(unittest.TestCase):
         for bad_project in ("../game", "", "a/b", "x" * 200):
             self.assertIsNone(status.image_path(bad_project, "round_1/shot.png"))
 
+    def _with_board(self):
+        old = config.BOARD_DIR
+        config.BOARD_DIR = self.studio / "boards"
+        return old
+
+    def test_thread_is_empty_when_there_is_no_board(self):
+        from studio import status
+        old = self._with_board()
+        try:
+            (p,) = status.snapshot(None)["projects"]
+        finally:
+            config.BOARD_DIR = old
+        self.assertEqual(p["thread"], [])
+        self.assertEqual(list(p["kanban"]),
+                         ["backlog", "planned", "building", "review", "done", "blocked"])
+
+    def test_thread_lists_recent_posts_without_session_ids(self):
+        import board
+        from studio import status
+        old = self._with_board()
+        try:
+            name = Path(self.repo).name
+            wt = self.studio / "wt"
+            wt.mkdir()
+            board.post(wt, task="doors", role="implementer", model="GLM-5.3",
+                       harness="opencode", kind="handoff",
+                       body="toggle(id) is the door api",
+                       session_id="secret-session", project=name)
+            board.post(wt, task="hud", role="reviewer", model="DeepSeek",
+                       harness="reasonix", kind="note", body="looks fine",
+                       project=name)
+            (p,) = status.snapshot(None)["projects"]
+        finally:
+            config.BOARD_DIR = old
+        self.assertEqual(len(p["thread"]), 2)
+        first, second = p["thread"]
+        self.assertEqual(first["task"], "doors")
+        self.assertEqual(first["role"], "implementer")
+        self.assertEqual(first["model"], "GLM-5.3")
+        self.assertEqual(first["harness"], "opencode")
+        self.assertEqual(first["kind"], "handoff")
+        self.assertEqual(first["body"], "toggle(id) is the door api")
+        self.assertIsInstance(first["timestamp"], float)
+        self.assertEqual(first["session_owner"], "opencode")
+        self.assertNotIn("session_id", first)
+        self.assertNotIn("secret-session", json.dumps(p["thread"]))
+        self.assertNotIn("session_owner", second)
+        self.assertEqual(list(p["kanban"]),
+                         ["backlog", "planned", "building", "review", "done", "blocked"])
+
+    def test_thread_keeps_agent_markup_for_the_panel_to_escape(self):
+        import board
+        from studio import status
+        old = self._with_board()
+        body = '<img src=x onerror=alert(1)> & <b>'
+        try:
+            wt = self.studio / "wt"
+            wt.mkdir()
+            board.post(wt, task="<script>", role="implementer", model="m",
+                       harness="cursor", kind="note", body=body,
+                       session_id="sid-99", project=Path(self.repo).name)
+            (p,) = status.snapshot(None)["projects"]
+        finally:
+            config.BOARD_DIR = old
+        (row,) = p["thread"]
+        self.assertEqual(row["body"], body)
+        self.assertEqual(row["task"], "<script>")
+        self.assertEqual(row["session_owner"], "cursor")
+        self.assertNotIn("sid-99", json.dumps(row))
+
 
 class TestCameras(unittest.TestCase):
     def test_anchors_only_before_the_adversarial_round(self):

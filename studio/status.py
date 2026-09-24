@@ -453,6 +453,42 @@ def _roster():
     return out
 
 
+def _agent_thread(repo, limit=8):
+    """Recent shared-board posts for this game repo.
+
+    The name is the repo directory only — never a path — and session ids stay
+    out of the payload. Ownership is the harness that may resume, when a post
+    recorded one.
+    """
+    if not repo:
+        return []
+    name = Path(repo).name
+    if not name or name in (".", ".."):
+        return []
+    try:
+        import board
+        rows = board.project_recent(name, limit)
+    except Exception:                                        # noqa: BLE001
+        return []
+    out = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        item = {
+            "task": str(row.get("task") or ""),
+            "role": str(row.get("role") or ""),
+            "model": str(row.get("model") or ""),
+            "harness": str(row.get("harness") or ""),
+            "kind": str(row.get("kind") or ""),
+            "body": str(row.get("body") or ""),
+            "timestamp": row.get("ts"),
+        }
+        if row.get("session_id"):
+            item["session_owner"] = item["harness"]
+        out.append(item)
+    return out
+
+
 # --- the snapshot -------------------------------------------------------------
 def project_snapshot(project, store=None, live_tasks=()):
     from studio.engine import stage_manager
@@ -494,7 +530,7 @@ def project_snapshot(project, store=None, live_tasks=()):
         "phases": _phases(phase), "entered_ts": state.get("entered_ts"),
         "history": state.get("history") or [],
         "gate": gate, "metrics": _metrics(repo),
-        "boards": boards,
+        "boards": boards, "thread": _agent_thread(repo),
         "kanban": kanban(boards, feats), "roadmap": feats,
         "changelog": changelog(repo), "evidence": evidence(project, repo),
         "rounds": _rounds(project), "baseline": compactor.baseline(project),
