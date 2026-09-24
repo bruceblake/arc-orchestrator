@@ -70,7 +70,7 @@ const externals = [...src.matchAll(/<script[^>]+src="([^"]+)"/g)]
 const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setStudio = (v, view, open) => { STUDIO = v; STUDIO_VIEW = view; STUDIO_OPEN = open; };"
   + "\nglobalThis.__ptFilter = v => { if (v !== undefined) PT_FILTER = v; return PT_FILTER; };"
-  + "\nreturn {studioPlaytestView, renderStudio, pollStudio, STUDIO_VIEWS};");
+  + "\nreturn {studioPlaytestView, studioBoard, renderStudio, pollStudio, STUDIO_VIEWS};");
 const api = mod();
 
 let n = 0;
@@ -279,6 +279,24 @@ ok(el.innerHTML === "SENTINEL", "poll skips re-render while typing in a playtest
 document.activeElement = null;
 await api.pollStudio();
 ok(el.innerHTML.includes("data-pt-launch"), "poll renders the playtest view once focus leaves");
+
+// ---- agent thread on the Board ---------------------------------------------
+const EVIL_THREAD = '<img src=x onerror=alert(1)>';
+const boardHtml = api.studioBoard({
+  kanban: {backlog: [], planned: [], building: [], review: [], done: [], blocked: []},
+  thread: [{task: EVIL_THREAD, role: "implementer", model: "m <x>", harness: "cursor",
+            kind: "note", body: EVIL_THREAD + " & more", timestamp: 1.5,
+            session_owner: "cursor"}],
+});
+for (const col of ["backlog", "planned", "building", "review", "done", "blocked"])
+  ok(boardHtml.includes(`kb-${col}`), `kanban column ${col} stays`);
+ok(boardHtml.includes("Agent thread"), "board shows the agent thread");
+ok(boardHtml.includes("&lt;img src=x onerror=alert(1)&gt;") && !boardHtml.includes(EVIL_THREAD),
+   "agent-authored thread strings are escaped");
+ok(boardHtml.includes(" &amp; more"), "ampersand in a post body is escaped");
+ok(boardHtml.includes("session on cursor") && !boardHtml.includes("session_id"),
+   "session ownership names the harness, not an id");
+ok(api.studioBoard({kanban: {}}).includes("No agent handoffs"), "empty thread is explicit");
 
 // ---- report ----------------------------------------------------------------
 if (failures.length) {

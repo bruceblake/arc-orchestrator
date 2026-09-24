@@ -171,7 +171,22 @@ function studioBoard(p) {
       </div>`).join("") || '<div class="hint kb-empty">—</div>'}</div>`;
   };
   return `<div class="kb">${["backlog", "planned", "building", "review", "done", "blocked"].map(col).join("")}</div>
-    <div class="hint">Backlog is <code>studio_roadmap.json</code> in the game repo: features not yet in any plan. A planned task that names a feature moves it onto the board.</div>`;
+    <div class="hint">Backlog is <code>studio_roadmap.json</code> in the game repo: features not yet in any plan. A planned task that names a feature moves it onto the board.</div>
+    ${studioThread(p)}`;
+}
+
+function studioThread(p) {
+  const rows = p.thread || [];
+  const head = `<h3>Agent thread</h3>`;
+  if (!rows.length) return head + `<div class="empty">No agent handoffs on this project's board yet.</div>`;
+  const items = rows.map(r => `<div class="st-task">
+      <span class="tag">${esc(r.kind)}</span>
+      <span class="id">${esc(r.task)}</span>
+      <span class="hint">${esc(r.role)} · ${esc(short(r.model))} via ${esc(r.harness)}${r.session_owner ? ` · session on ${esc(r.session_owner)}` : ""}</span>
+      <span class="hint">${esc(r.timestamp)}</span>
+      <div class="st-err">${esc(r.body)}</div>
+    </div>`).join("");
+  return `${head}<div class="st-board">${items}</div>`;
 }
 
 function studioChangelog(p) {
