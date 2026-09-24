@@ -54,6 +54,7 @@ HISTORY_CHARS = orchchat.HISTORY_CHARS
 EVENTS_TAIL = 40          # recent event lines shown to the captain
 EVENTS_TAIL_BYTES = 2 * 1024 * 1024
 EVENTS_KEEP = ("task.", "chain.", "driver.cap_wait", "driver.error",
+               "driver.usage_limit", "driver.usage_swap",
                "run.", "graph.", "plan.", "promotion.", "dream.")
 
 
@@ -247,6 +248,26 @@ def _recent_events(path=None, n=EVENTS_TAIL, keep=EVENTS_KEEP):
     return list(reversed(out))
 
 
+def _plan_windows():
+    """Spent subscription plans, from the event log. Never raises."""
+    path = Path(config.EVENTS_LOG)
+    try:
+        with path.open("rb") as fh:
+            size = fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, size - 8 * 1024 * 1024))
+            tail = fh.read().decode("utf-8", errors="replace").splitlines()
+        if size > 8 * 1024 * 1024:
+            tail = tail[1:]
+    except OSError:
+        return []
+    try:
+        import drivers
+        return drivers.active_plan_windows(tail)
+    except Exception as exc:
+        errors.capture(exc, node="captain.plan_windows")
+        return []
+
+
 def fleet_state(store=None, db_path=None):
     """The compact snapshot the captain reasons over, as a dict."""
     store = store or Store(db_path or config.DB_PATH)
@@ -263,6 +284,7 @@ def fleet_state(store=None, db_path=None):
         "task_status_counts": {k: len(v) for k, v in by_status.items()},
         "needs_attention": attention[:20],
         "recent_events": _recent_events(),
+        "plan_windows": _plan_windows(),
         "tasks_dir": str(config.TASKS_DIR),
         "planner_model": config.PLANNER_MODEL,
     }
@@ -289,6 +311,16 @@ def _state_block(state):
                          f"{r.get('error') or ''}".rstrip())
     else:
         lines.append("needs attention: none")
+    windows = state.get("plan_windows") or []
+    if windows:
+        lines.append("subscription plans spent (work has moved to other seats):")
+        for w in windows:
+            when = (f"resets at epoch {int(w['resets_at'])}" if w.get("resets_at")
+                    else "reset time not stated")
+            moved = f", last attempt moved to {w['swapped_to']}" if w.get("swapped_to") else ""
+            lines.append(f"  {w.get('label')} ({w.get('model')}): {when}{moved}")
+    else:
+        lines.append("subscription plans spent: none")
     evs = state.get("recent_events") or []
     if evs:
         lines.append("recent events (oldest first):")
