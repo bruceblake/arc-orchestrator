@@ -232,12 +232,29 @@ def groups(since=None, limit=50):
     return out
 
 
-def recent(limit=100, since=None, task=None):
+def recent(limit=100, since=None, task=None, task_prefix=False):
+    """Recent defects, newest first; optionally those of one task.
+
+    `task_prefix` widens `task=` to the task AND its attempts: a fix round or
+    PR round records `<tid>-x2` / `<tid>-pr1`, so an exact match would hide the
+    errors of every attempt but the first — which is what the task timeline
+    needs to show, and exactly why the prefix form exists.
+
+    The attempt suffix is matched EXPLICITLY (`-x`, `-pr`), not as a bare `-`:
+    a sibling task whose id merely starts with this one (`evidence` and
+    `evidence-scene-stats` are both real ids) is a different task, and its
+    defects must not be reported as this one's."""
     sql = "SELECT * FROM error_events WHERE ts >= ?"
     args = [since if since is not None else 0]
     if task:
-        sql += " AND task=?"
-        args.append(task)
+        if task_prefix:
+            sql += (" AND (task = ? OR task LIKE ? ESCAPE '\\'"
+                    " OR task LIKE ? ESCAPE '\\')")
+            escaped = task.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            args += [task, escaped + "-x%", escaped + "-pr%"]
+        else:
+            sql += " AND task=?"
+            args.append(task)
     sql += " ORDER BY ts DESC LIMIT ?"
     args.append(limit)
     with _lock:

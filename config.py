@@ -451,7 +451,7 @@ TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 # reads. Defaulting here and there must agree: logs/captain.
 CAPTAIN_DIR = os.getenv("ARC_CAPTAIN_DIR") or str(ROOT / "logs" / "captain")
 # Captain autopilot (`main.py captain --autopilot`, captain_autopilot.py,
-# AGENTS.md Rule 10): seconds between ticks, the most actions one tick may
+# AGENTS.md Rule 11): seconds between ticks, the most actions one tick may
 # take, how often each active project gets a standup on the board, and how
 # long the captain leaves one target (a task, a PR, a question) alone after
 # acting on it.
@@ -1589,6 +1589,11 @@ def max_tasks_in_flight():
 # archive inside the worktree would land in a pull request (Rule 5 publishes
 # with `git add -A`).
 STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
+# Dashboard background loop (studio/autopilot.py). Off unless the deployment
+# opts in: when set, the dashboard plans one current-phase roadmap feature at
+# a time and enqueues a governed `code run` through the captain queue.
+STUDIO_AUTOPILOT = os.getenv("ARC_STUDIO_AUTOPILOT", "").strip().lower() in (
+    "1", "true", "yes", "on")
 # Visual evidence (evidence.py, AGENTS.md Rule 7d): after a Godot task's gate
 # passes, screenshots from the fixed anchor cameras, a flythrough video, the
 # scripted playtest recorded, and before/after comparisons against the
@@ -1617,6 +1622,10 @@ EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
 # at .arc/board.jsonl and are excluded from publish; this directory is the
 # copy every task in a project can read. Outside every worktree on purpose.
 BOARD_DIR = Path(os.getenv("ARC_BOARD_DIR") or ROOT / "logs" / "boards")
+
+# The agent coordination board (agentboard.py, docs/agent-board.md): the cap
+# on one message body. board.py's JSONL lines keep their 400-character cap.
+BOARD_BODY_MAX = int(os.getenv("ARC_BOARD_BODY_MAX", "4000"))
 
 # The spend ceiling, in USD, for one studio run. The local fleet never needed
 # one: ARC is campus-served and effectively free, so the only cost of a task

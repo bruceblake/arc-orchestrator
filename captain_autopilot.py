@@ -20,7 +20,7 @@ docs/agent-board.md). One tick is four stages:
    run/status/amend through ``captain.execute_actions``.
 
 It NEVER runs git, kills a process, edits code or merges a PR (AGENTS.md
-Rule 10). Guardrails: at most ``MAX_ACTIONS`` actions a tick, a per-target
+Rule 11). Guardrails: at most ``MAX_ACTIONS`` actions a tick, a per-target
 cooldown, ``--dry-run``, the pause file ``logs/captain/autopilot.pause``, and
 every decision recorded as a ``captain.auto.*`` event plus a line in
 ``logs/captain/autopilot.jsonl``.

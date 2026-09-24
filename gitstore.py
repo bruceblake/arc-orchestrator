@@ -318,7 +318,7 @@ async def diff_stat(wt):
 # that exist or are already indexed are reset. Reasonix state
 # (.reasonix/tasks/<run>/events.jsonl, snapshot.json, task.lock) must never
 # be published: thirty-three such files reached main before this exclusion.
-CHANNEL_FILES = (".arc/plan_proposals.jsonl", ".arc/board.jsonl")
+CHANNEL_FILES = (".arc/plan_proposals.jsonl", ".arc/board.jsonl", ".arc/handoff.md")
 NEVER_STAGE = (":!.reasonix",)
 
 

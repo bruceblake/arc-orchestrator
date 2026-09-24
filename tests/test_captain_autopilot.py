@@ -1,4 +1,4 @@
-"""Tests for the captain autopilot (captain_autopilot.py, AGENTS.md Rule 10).
+"""Tests for the captain autopilot (captain_autopilot.py, AGENTS.md Rule 11).
 
 No model is ever called and no process ever starts: the LLM is
 `captain_autopilot._llm_call` (patched), the board is a fake injected into

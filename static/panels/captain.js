@@ -107,7 +107,7 @@ function capRenderState() {
     + `<div class="cap-auto">${capAutopilotHTML()}</div>`;
 }
 
-// ---- autopilot (captain_autopilot.py, AGENTS.md Rule 10) ----
+// ---- autopilot (captain_autopilot.py, AGENTS.md Rule 11) ----
 let CAP_AUTO = null;
 
 function capAgo(ts) {
