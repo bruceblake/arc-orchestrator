@@ -27,6 +27,7 @@ import gitstore
 import graft
 import drivers
 import plan_amend
+import dossier as dossier_mod
 import project_contract
 from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
                      ReasonixDriver,
@@ -528,7 +529,8 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
-def _impl_prompt(t, feedback, hints="", roster=None, board="", contract=""):
+def _impl_prompt(t, feedback, hints="", roster=None, board="", contract="",
+                 dossier=""):
     """The implementer's whole world: the task, where its code is, the rules.
 
     `hints` is graft.hints_block output — the file:line spans the code graph
@@ -537,9 +539,11 @@ def _impl_prompt(t, feedback, hints="", roster=None, board="", contract=""):
     which is what it would do anyway, just more expensively. `roster` (every
     task id + title in the plan) turns the plan-amendment channel on: without
     the real ids a proposal can only guess dep targets, and a guess costs a
-    rejection.
+    rejection. `dossier` (dossier.render) is the task's durable history; it
+    leads the prompt so a restarted or swapped-in model boots from it.
     """
     p = (
+        (dossier + "\n" if dossier else "") +
         f"You are implementing one task in this repository.\n\n"
         f"TASK {t['id']}: {t['title']}\n\n{t['prompt']}\n"
     )
@@ -583,11 +587,28 @@ def _impl_prompt(t, feedback, hints="", roster=None, board="", contract=""):
     )
     if feedback:
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"
+    p += dossier_mod.HANDOFF_PROMPT
     if board:
         p += "\n" + board
     if roster:
         p += plan_amend.prompt_block(roster)
     return p
+
+
+async def _changed_files(wt, base):
+    """Paths this task changed vs its merge base, untracked included."""
+    try:
+        rc, mb, _ = await gitstore._git(["merge-base", base, "HEAD"], cwd=wt,
+                                        check=False)
+        ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
+        _, diff, _ = await gitstore._git(["diff", "--name-only", ref], cwd=wt,
+                                         check=False)
+        _, new, _ = await gitstore._git(
+            ["ls-files", "--others", "--exclude-standard"], cwd=wt, check=False)
+    except Exception:
+        return []
+    return sorted({p for p in (diff + "\n" + new).splitlines()
+                   if p and not p.startswith((".arc/", ".reasonix/"))})
 
 
 def _harness_of(model):
@@ -1029,8 +1050,10 @@ def _scope_lock_prose(flag):
     )
 
 
-def _review_prompt(t, diff, impact="", roster=None, board="", contract=""):
+def _review_prompt(t, diff, impact="", roster=None, board="", contract="",
+                   dossier=""):
     p = (
+        (dossier + "\n" if dossier else "") +
         f"You are reviewing an implementation produced by another AI agent.\n\n"
         f"TASK {t['id']}: {t['title']}\n\nSPEC:\n{t['prompt']}\n\n"
         f"The implementation already passed its automated verify gate "
@@ -1117,7 +1140,7 @@ def _parse_verdict(text):
 
 
 def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
-                      roster=None, board="", contract=""):
+                      roster=None, board="", contract="", dossier=""):
     """Prompt for a reviewer reading a real pull request.
 
     Deliberately different from the pre-PR review: this reviewer can BLOCK the
@@ -1125,6 +1148,7 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
     deferring to a colleague is not its job.
     """
     p = (
+        (dossier + "\n" if dossier else "") +
         f"You are one of {n_reviewers} independent reviewers on a PULL REQUEST "
         f"opened by another AI agent. Your approval is REQUIRED to merge — "
         f"nothing has landed yet, and if you reject it, it goes back to the "
@@ -1305,8 +1329,40 @@ def _reviewer_that_ran(ctx, tid, store, fallback):
 # resuming one tier higher. Anything else (a killed run process, a cancelled
 # graph, a harness crash, a merge conflict) is infrastructure noise: the task
 # resumes at the SAME tier, because escalating on it wastes the scarcest models.
-_CAPABILITY_FAILURES = ("exhausted escalation", "exhausted fix rounds",
-                        "review rejected", "gate failed")
+_CAPABILITY_FAILURES = (
+    "exhausted escalation",
+    # fail()'s real wording. The list used to hold "gate failed" and
+    # "review rejected" — words fail() NEVER writes — so a gate- or
+    # review-rejected task was classified as infrastructure noise.
+    "verify gate still failing",         # "verify gate still failing after N…"
+    "pre-merge review still rejecting",  # "pre-merge review still rejecting…"
+    "rejected after",                    # "PR #N rejected after M round(s)…"
+    # publish(): a rework told to fix rejected issues produced nothing. The
+    # SIBLING string ("implementer produced no changes", the first publish) is
+    # deliberately NOT here: the runbook's plan-mode failure produces the same
+    # words from an infrastructure cause, so it is not reliably a capability
+    # signal.
+    "rework after pr rejection produced no changes",
+    # Legacy / hand-written rows.
+    "exhausted fix rounds",
+    "review rejected",
+    "gate failed",
+)
+
+# The reasons that POSITIVELY say the run was interrupted before the model
+# could finish — the only ones a checkpoint may be restored on. An ALLOWLIST,
+# deliberately, and the difference matters: the restore test used to be
+# `not _is_capability_failure(...)`, a denylist, so every new string publish()
+# or fail() grew defaulted to RESTORING. Restoring a refused diff re-submits
+# exactly what a gate or a reviewer rejected, and three review rounds each
+# found one more string leaking through ("verify gate still failing…",
+# "rework after PR rejection produced no changes", …). Unknown reasons now
+# start CLEAN. Both entries are the module constants that write them
+# (reconcile.INTERRUPTED_REASON, store.STALE_REASON); a test asserts that.
+_INTERRUPTION_REASONS = (
+    "interrupted: run process exited before the task finished",
+    "reset-stale: owning run process died",
+)
 
 
 def _is_capability_failure(error):
@@ -1316,6 +1372,19 @@ def _is_capability_failure(error):
         # unexplained failure as a capability signal, matching the old behaviour.
         return True
     return any(m in low for m in _CAPABILITY_FAILURES)
+
+
+def _was_interrupted(error):
+    """True only for the reasons that say the run was cut off mid-flight.
+
+    The allowlist half of the pair above, and the one a checkpoint RESTORE is
+    decided on. An unrecognised reason is False: starting clean is the safe
+    error, because restoring work a gate or a reviewer refused re-submits it.
+    """
+    low = (error or "").lower()
+    if not low:
+        return False
+    return any(m in low for m in _INTERRUPTION_REASONS)
 
 
 async def _run_probe(cmd, wt):
@@ -1428,6 +1497,41 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                 node=f"plan_amend_{tid}", role=role)
             log.warning("plan-amendment harvest failed for %s (%s): %s",
                         tid, fp, exc)
+
+    # The task dossier (dossier.py): durable handoff OUT of every agent run
+    # (recorded outcome + the agent's .arc/handoff.md) and IN to every prompt
+    # (render). Like the proposal harvest, it must never take a node down.
+    def dossier_block(tid, role):
+        try:
+            return dossier_mod.render(project_slug, tid, role=role)
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"dossier_{tid}", role=role)
+            return ""
+
+    def dossier_after(tid, wt, *, attempt, model, role, outcome=None,
+                      harness="", summary="", failure_excerpt="", files=(),
+                      session_id=None):
+        """Harvest the handoff file (if wt) and record the outcome (if any)."""
+        try:
+            if wt is not None:
+                dossier_mod.harvest_handoff(project_slug, tid, wt,
+                                            attempt=attempt, model=model,
+                                            role=role)
+            if outcome:
+                dossier_mod.record_attempt(
+                    project_slug, tid, attempt=attempt, model=model,
+                    harness=harness, role=role, outcome=outcome,
+                    summary=summary, failure_excerpt=failure_excerpt,
+                    files_changed=files, session_id=session_id)
+        except Exception as exc:
+            errors.capture(exc, task=tid, model=model, node=f"dossier_{tid}",
+                           role=role)
+
+    def dossier_call(tid, fn, *args):
+        try:
+            fn(project_slug, tid, *args)
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"dossier_{tid}")
 
     # --- resume: statuses recorded by earlier runs of THIS taskfile ----------
     # Re-running `code run <taskfile>` is a resume of the same project: merged
@@ -1669,6 +1773,51 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             sum(r.get("seconds") or 0.0 for r in rows), 1),
                         total_tokens=toks)
 
+        async def restore_interrupted(tid, wt):
+            """Continue an interrupted attempt instead of restarting it.
+
+            alloc has just reset task/<id> to base. The previous row says WHY
+            the task ended: "interrupted: run process exited before the task
+            finished" (main.py on SIGTERM/Ctrl-C, reconcile on a dead pid) or a
+            cancelled graph — the reasons Rule 4 already treats as NOT a
+            capability failure, because the model was never given a chance to
+            fail. The work it wrote is the work to continue from, so its latest
+            checkpoint is applied back onto the fresh worktree and the board is
+            told, in the same words the implementer reads.
+
+            A genuine capability failure starts CLEAN on purpose: a gate or a
+            reviewer rejected that work, and restoring it would re-submit the
+            very thing that was refused.
+
+            Which is which is an ALLOWLIST (`_INTERRUPTION_REASONS`), not
+            "not a capability failure". The old test was a DENYLIST, so every
+            failure string publish() or fail() grew later defaulted to
+            RESTORING — three review rounds each found one more leaking through
+            ("verify gate still failing…", "rework after PR rejection produced
+            no changes", …). An unrecognised reason is not evidence the model
+            was interrupted; it starts clean.
+            """
+            row = prior.get(tid) or {}
+            if row.get("status") != "failed":
+                return
+            if not _was_interrupted(row.get("error")):
+                return
+            res = await gitstore.restore_checkpoint(repo, tid, wt)
+            if not res.get("restored"):
+                return
+            files = res.get("files") or []
+            events.emit("task.checkpoint_restored", task=tid,
+                        path=res.get("path"), files=len(files),
+                        previous_failure=row.get("error"),
+                        attempt=(res.get("meta") or {}).get("attempt"))
+            board.post(wt, task=tid, role="orchestrator", model="",
+                       harness="checkpoint", kind="note", project=project_slug,
+                       body=(f"restored {len(files)} file(s) from checkpoint "
+                             f"{Path(str(res.get('path') or '')).name}: the "
+                             f"previous attempt was interrupted, not rejected — "
+                             f"continue it instead of starting over: "
+                             f"{', '.join(files[:12])}"))
+
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
             store.upsert_code_task(taskfile, tid, t["title"], model0,
@@ -1676,6 +1825,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    branch=f"task/{tid}", worktree=str(wt))
             events.set_context(module=tid)
             events.emit("worktree.alloc", path=str(wt), base=base)
+            await restore_interrupted(tid, wt)
             return {"worktree": str(wt)}
 
         async def implement(ctx):
@@ -1706,12 +1856,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # session_id as exactly that flag.
             resume = _resume_session(results, tid, model, driver.harness)
             thread = board.prompt_block(wt, project=project_slug, task=tid)
+            # Which model this attempt actually RAN on. A spent plan window can
+            # substitute another driver (drivers.usage_substitute), and the
+            # checkpoint written in the `finally` below must name the model
+            # that ran — on the crash path exactly as on the success path.
+            ran = {"model": model}
             try:
                 res = await driver.run(
                     _impl_prompt(t, feedback, hints, roster, thread,
-                                 project_contract.role_block(wt, "implementer")), wt,
+                                 project_contract.role_block(wt, "implementer"),
+                                 dossier=dossier_block(tid, "implementer")), wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
                     avoid_families={reviewer_for(t, model)})
+                ran["model"] = getattr(res, "model", None) or model
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1729,18 +1886,46 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             model=model, attempt=attempt,
                             error=str(exc)[:200], fingerprint=fp)
                 harvest_proposals(tid, wt, "implementer", model)
+                dossier_after(tid, wt, attempt=attempt, model=model,
+                              role="implementer", outcome="crashed",
+                              harness=driver.harness,
+                              failure_excerpt=str(exc)[:600])
                 board.post(wt, task=tid, role="implementer", model=model,
                            harness=driver.harness, kind="error",
                            body=str(exc)[:400], project=project_slug)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
+            finally:
+                # A worktree is state: save what this attempt produced before
+                # anything — a reset, a cancel, a reboot — can discard it.
+                # A `finally`, not a line after the try, because the CRASH path
+                # returns from its except and used to skip the checkpoint
+                # entirely: an attempt that wrote three files and then died
+                # saved nothing, and a reboot loses it — there is no fail tail
+                # to fall back on when the process is gone. Never raises.
+                await gitstore.checkpoint(repo, tid, wt, f"x{attempt}",
+                                          model=ran["model"], attempt=attempt)
             # A spent plan window may have moved this attempt to another
             # model (drivers.usage_substitute): record the one that RAN.
-            ran_model = getattr(res, "model", None) or model
+            ran_model = ran["model"]
             ran_harness = getattr(res, "harness", None) or driver.harness
             store.save_harness_run(tid, ran_harness, ran_model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
             harvest_proposals(tid, wt, "implementer", ran_model)
+            # The outcome of this attempt is the gate's to record; here only
+            # the agent's handoff is harvested — and a plan-window swap is
+            # written down, so the next model knows why it changed.
+            dossier_after(tid, wt, attempt=attempt, model=ran_model,
+                          role="implementer")
+            if ran_model != model:
+                dossier_call(tid, dossier_mod.note_model_change,
+                             f"attempt {attempt}: usage swap {model} -> "
+                             f"{ran_model} (plan window spent)")
+                dossier_after(tid, None, attempt=attempt, model=ran_model,
+                              role="implementer", outcome="usage_swap",
+                              harness=ran_harness,
+                              summary=f"plan window moved {model} -> {ran_model}",
+                              session_id=res.session_id)
             board.post(wt, task=tid, role="implementer", model=ran_model,
                        harness=ran_harness, session_id=res.session_id,
                        kind="result", body=(getattr(res, "text", "") or "")[:400],
@@ -1820,6 +2005,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return {"passed": False,
                         "output": f"implementer crashed: {prev.get('error', '')}"}
             if not cmd:
+                try:
+                    files = await _changed_files(str(await worktree(ctx)), base)
+                except Exception:
+                    files = []
+                dossier_after(tid, None,
+                              attempt=ctx.get("runs", {}).get(f"implement_{tid}", 0),
+                              model=prev.get("model") or cur_model(ctx),
+                              role="implementer", outcome="passed",
+                              harness=prev.get("harness", ""),
+                              summary="no verify gate (passes trivially)",
+                              files=files, session_id=prev.get("session_id"))
                 return {"passed": True, "output": ""}
             wt = str(await worktree(ctx))
             # The gate is a shell pipeline (`./check.sh && ...`), and the
@@ -1835,6 +2031,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 out, _ = await asyncio.wait_for(proc.communicate(), config.GATE_TIMEOUT)
             except asyncio.TimeoutError:
                 await drivers._terminate(proc)
+                dossier_after(tid, None,
+                              attempt=ctx.get("runs", {}).get(f"implement_{tid}", 0),
+                              model=prev.get("model") or cur_model(ctx),
+                              role="implementer", outcome="gate_failed",
+                              harness=prev.get("harness", ""),
+                              summary=f"gate timed out after {config.GATE_TIMEOUT}s")
                 return {"passed": False, "output": f"gate timed out after {config.GATE_TIMEOUT}s",
                         "log_path": None}
             full = out.decode(errors="replace")
@@ -1911,6 +2113,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     output = (eerr + "\n...\n" + output)[-2400:]
                     events.emit("task.gate", task=tid, attempt=attempt, passed=False,
                                 log=log_path, cmd="visual evidence", tail=eerr[-400:])
+            dossier_after(tid, None, attempt=attempt,
+                          model=prev.get("model") or cur_model(ctx),
+                          role="implementer", harness=prev.get("harness", ""),
+                          outcome="passed" if passed else "gate_failed",
+                          summary=("gate passed" if passed else
+                                   f"gate failed: {cmd[:120]}"),
+                          failure_excerpt="" if passed else (tail or output)[-1200:],
+                          files=await _changed_files(wt, base),
+                          session_id=prev.get("session_id"))
             return {"passed": passed, "output": output, "log_path": log_path,
                     "verdict": verdict, "evidence": shown}
 
@@ -1948,7 +2159,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     _review_prompt(t, diff, impact, roster,
                                    board.prompt_block(wt, project=project_slug, task=tid)
                                    + evidence.prompt_block(shown),
-                                   project_contract.role_block(wt, "reviewer")),
+                                   project_contract.role_block(wt, "reviewer"),
+                                   dossier=dossier_block(tid, "reviewer")),
                     wt, task_id=f"{tid}-x{attempt}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
@@ -1973,6 +2185,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # that was never rejected. Same distinction pr_review already
                 # makes — the diff has not been read, so retry the REVIEW.
                 harvest_proposals(tid, wt, "reviewer", driver.model)
+                dossier_after(tid, wt, attempt=attempt, model=driver.model,
+                              role="reviewer", outcome="crashed",
+                              harness=driver.harness,
+                              failure_excerpt=str(exc)[:600])
                 return {"pass": False, "crashed": True,
                         "reviewer_model": driver.model,
                         "issues": [f"reviewer crashed: {exc}"[:200]]}
@@ -1985,6 +2201,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
             harvest_proposals(tid, wt, "reviewer", ran_model)
+            if ran_model != driver.model:
+                dossier_call(tid, dossier_mod.note_model_change,
+                             f"review round {attempt}: usage swap "
+                             f"{driver.model} -> {ran_model} (plan window spent)")
+            dossier_after(
+                tid, wt, attempt=attempt, model=ran_model, role="reviewer",
+                harness=ran_harness,
+                outcome=("crashed" if verdict.get("truncated") else
+                         "passed" if verdict.get("pass") else "review_rejected"),
+                summary=("review ended without a verdict"
+                         if verdict.get("truncated") else ""),
+                failure_excerpt=("" if verdict.get("pass") else "\n".join(
+                    f"- {i}" for i in verdict.get("issues") or [])[:1200]))
             if verdict.get("truncated"):
                 # The session ended without a verdict (e.g. stopped mid-analysis
                 # with a question). Same rule as a crash: the diff was never
@@ -2041,6 +2270,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.upsert_code_task(taskfile, tid, t["title"], nxt, rev, "running")
             events.emit("task.escalated", task=tid, from_model=src, to_model=nxt,
                         n=esc_n(ctx) + 1)
+            dossier_call(tid, dossier_mod.note_model_change,
+                         f"escalation {esc_n(ctx) + 1}: {src} -> {nxt} "
+                         f"(fix rounds exhausted on {src})")
             return {"from_model": src, "to_model": nxt, "n": esc_n(ctx) + 1}
 
         async def publish(ctx):
@@ -2095,6 +2327,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # does `git add -A`, so without this sweep the channel file would
             # land in the PR. Also catches proposals from PR-review rework.
             harvest_proposals(tid, wt, "publish-sweep", "")
+            dossier_after(tid, wt, attempt=0, model="", role="publish-sweep")
             impl = results.get(f"implement_{tid}", {})
             model = cur_model(ctx)
             # The row and the PR name who read the diff. The taskfile token
@@ -2164,6 +2397,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                            "in_review", branch=f"task/{tid}")
                     events.emit("task.pr_reattached", task=tid, pr=number,
                                 url=url, note=note)
+                    dossier_call(tid, dossier_mod.set_pr, number, url)
                     return {"published": True, "pr": number, "url": url,
                             "head": None, "reattached": True}
                 store.upsert_code_task(
@@ -2201,6 +2435,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    "in_review", branch=f"task/{tid}")
             events.emit("task.pr_opened", task=tid, url=url, number=number,
                         head=fresh_head, note=note)
+            dossier_call(tid, dossier_mod.set_pr, number, url)
             await post_pr_evidence(ctx, number)
             return {"published": True, "pr": number, "url": url, "head": fresh_head}
 
@@ -2333,7 +2568,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                       it["prior_issues"], impact, roster,
                                       board.prompt_block(wt, project=project_slug, task=tid)
                                       + evidence.prompt_block(shown),
-                                      project_contract.role_block(wt, "reviewer")),
+                                      project_contract.role_block(wt, "reviewer"),
+                                      dossier=dossier_block(tid, "pr-reviewer")),
                     wt, task_id=f"{tid}-pr{it['round']}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
@@ -2343,6 +2579,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # than sending the implementer to fix nothing.
                 if wt is not None:
                     harvest_proposals(tid, wt, "pr-reviewer", model)
+                dossier_after(tid, wt, attempt=it["round"], model=model,
+                              role="pr-reviewer", outcome="crashed",
+                              failure_excerpt=str(exc)[:600])
                 return {"model": model, "approve": False, "crashed": True,
                         "issues": [f"reviewer {model} crashed: {exc}"[:200]]}
             verdict = _parse_approval(res.text)
@@ -2350,6 +2589,20 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    it["round"], res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
             harvest_proposals(tid, wt, "pr-reviewer", model)
+            ran_model = getattr(res, "model", None) or model
+            ran_harness = getattr(res, "harness", None) or drv.harness
+            if ran_model != model:
+                dossier_call(tid, dossier_mod.note_model_change,
+                             f"PR review round {it['round']}: usage swap "
+                             f"{model} -> {ran_model} (plan window spent)")
+            dossier_after(
+                tid, wt, attempt=it["round"], model=ran_model, role="pr-reviewer",
+                harness=ran_harness,
+                outcome=("crashed" if verdict.get("truncated") else
+                         "passed" if verdict.get("approve") else "review_rejected"),
+                summary=f"PR #{it.get('pr')} round {it['round']}",
+                failure_excerpt=("" if verdict.get("approve") else "\n".join(
+                    f"- {i}" for i in verdict.get("issues") or [])[:1200]))
             if verdict.get("truncated"):
                 # Session ended without a verdict — a reviewer that never
                 # reviewed. Crashed, not a rejection: the join retries the
@@ -2509,6 +2762,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    "merged", finished=True)
             events.emit("task.merged", task=tid, pr=number,
                         approvals=rv.get("approvals"))
+            dossier_after(tid, None, attempt=0, model=model, role="orchestrator",
+                          outcome="merged", summary=f"PR #{number} merged")
+            dossier_call(tid, dossier_mod.set_pr, None)
             gate_res = ctx.get("results", {}).get(f"gate_{tid}") or {}
             return {"merged": True, "pr": number, "verdict": gate_res.get("verdict")}
 
@@ -2727,7 +2983,57 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     else:
         for h in heads:
             g.start(h)
+    for tid in tasks:
+        # ONE tail node PER TASK, edged from that task's FAILURE, not its
+        # merge. The merge path is useless for this: pr_merge calls
+        # gitstore.cleanup(repo, tid) before it returns, so by the time a node
+        # downstream of it runs the worktree is already gone and there is
+        # nothing left to save. `fail` is where work actually survives — the
+        # task stopped mid-flight with its worktree intact, which is exactly
+        # the state the next alloc would reset. Not a gathered sweep either: a
+        # task still mid-pipeline when a sibling drains never reaches fail at
+        # all, so a gather waiting on it hangs the drain ("unreachable
+        # sources"), and reading a tree somebody is writing is wrong anyway.
+        # A merged task has only a skip stub, so neither node exists for it.
+        if f"fail_{tid}" in g.nodes:
+            g.node(f"checkpoint_{tid}", _make_checkpoint_one(tid, repo))
+            g.edge(f"fail_{tid}", f"checkpoint_{tid}", on_drain=True)
     return g
+
+
+def _make_checkpoint_one(tid, repo):
+    """Checkpoint THIS task's worktree, the moment the task fails.
+
+    The implement node checkpoints after every attempt already; this is the
+    second belt for the path BETWEEN attempts — a task that died during a gate,
+    a review or a PR round left work in its worktree that the next alloc would
+    reset, and nothing else saves it before the run ends. Only ever this one
+    worktree, so a drain never touches a sibling that is still running. Never
+    raises.
+    """
+
+    async def checkpoint_one(ctx):
+        results = ctx.get("results", {})
+        wt = (results.get(f"alloc_{tid}") or {}).get("worktree")
+        if not wt:
+            # A resume that started at publish never ran alloc in THIS graph,
+            # so the worktree is not in the results — ask git for it, the same
+            # way every other node does.
+            try:
+                found = await gitstore.existing_worktree(repo, tid)
+            except Exception:                                   # noqa: BLE001
+                found = None
+            if found is None:
+                return {"saved": None}
+            wt = str(found)
+        try:
+            p = await gitstore.checkpoint(repo, tid, Path(wt), "interrupted")
+        except Exception as exc:                                # noqa: BLE001
+            errors.capture(exc, task=tid, node=f"checkpoint_{tid}")
+            return {"saved": None}
+        return {"saved": str(p) if p else None}
+
+    return checkpoint_one
 
 
 def _routing_tiers_prose():

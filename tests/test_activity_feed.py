@@ -97,6 +97,7 @@ class ActivityFeed(unittest.TestCase):
         curated = ["task.reviewed", "task.failed", "task.escalated",
                    "task.merged", "task.pr_opened", "task.pr_reviewed",
                    "task.resynced", "task.review_degraded", "driver.stalled",
+                   "driver.usage_limit", "driver.usage_swap",
                    "chain.wait", "chain.ready", "chain.blocked"]
         self._write(*[self._ev(t, 100.0 + i, task=f"t{i}") for i, t in
                       enumerate(curated)])

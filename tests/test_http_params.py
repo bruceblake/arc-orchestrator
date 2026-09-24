@@ -543,6 +543,151 @@ class HttpParamsPlanProposals(EndpointCase):
         self.assertEqual(len(self.get(q + "bogus").json()["proposals"]), 3)  # →100
 
 
+class BoardRequest(dashboard.Handler):
+    """Socket-less POST/GET for the board routes. do_POST reads Content-Type
+    and, when ARC_DASHBOARD_TOKEN is set, Authorization, before the body."""
+
+    def __init__(self, path, body=b"", headers=None):
+        self.path = path
+        self.status = None
+        self.chunks = []
+        self.wfile = self
+        self.rfile = self
+        self._pending = body if isinstance(body, bytes) else body.encode()
+        self.headers = {
+            "Content-Length": str(len(self._pending)),
+            "Content-Type": "application/json",
+            "Host": "localhost:8787",
+        }
+        if headers:
+            self.headers.update(headers)
+
+    def send_response(self, code, message=None):
+        self.status = code
+
+    def send_header(self, name, value):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def read(self, n):
+        data, self._pending = self._pending[:n], self._pending[n:]
+        return data
+
+    def write(self, chunk):
+        self.chunks.append(chunk)
+
+    def json(self):
+        return json.loads(b"".join(self.chunks).decode("utf-8"))
+
+
+class HttpParamsBoard(EndpointCase):
+    """The Messages tab reads and posts through /api/board/*. Names are
+    validated and never opened as paths; the operator is the only author a
+    POST may record; the token guard on every POST still applies."""
+
+    def setUp(self):
+        super().setUp()
+        import agentboard
+        self.agentboard = agentboard
+        self._db = self.tmp / "board.db"
+        self._saved_db = config.DB_PATH
+        config.DB_PATH = str(self._db)
+        agentboard._conns.pop(str(self._db), None)
+
+    def tearDown(self):
+        conn = self.agentboard._conns.pop(str(self._db), None)
+        if conn is not None:
+            conn.close()
+        config.DB_PATH = self._saved_db
+        super().tearDown()
+
+    def get(self, path):
+        req = BoardRequest(path)
+        req.do_GET()
+        return req
+
+    def post(self, obj, headers=None, path="/api/board/post"):
+        req = BoardRequest(path, json.dumps(obj).encode(), headers)
+        req.do_POST()
+        return req
+
+    def test_bad_project_and_traversal_are_rejected(self):
+        self.assert_error(self.get("/api/board/thread"), 400)
+        self.assert_error(self.get("/api/board/thread?project=bad name"), 400)
+        for name in TRAVERSALS:
+            with self.subTest(name=name):
+                self.assert_error(self.get(f"/api/board/channels?project={name}"), 400)
+                self.assert_error(self.get(f"/api/board/thread?project=ok&channel={name}"), 400)
+                req = self.post({"project": name, "channel": "project", "kind": "note", "body": "x"})
+                self.assert_error(req, 400)
+                self.assertNotIn(b"root:", b"".join(req.chunks))
+
+    def test_kind_must_be_a_board_kind(self):
+        req = self.post({"project": "demo", "channel": "project", "kind": "shell", "body": "rm -rf /"})
+        self.assert_error(req, 400)
+        self.assertEqual(self.agentboard.thread("demo"), [])
+
+    def test_token_guard_blocks_a_post(self):
+        orig = config.DASHBOARD_TOKEN
+        config.DASHBOARD_TOKEN = "s3cret"
+        self.addCleanup(setattr, config, "DASHBOARD_TOKEN", orig)
+        req = self.post({"project": "demo", "channel": "project", "kind": "note", "body": "secret"})
+        self.assert_error(req, 401)
+        self.assertIn("ARC_DASHBOARD_TOKEN", req.json()["error"])
+        self.assertEqual(self.agentboard.thread("demo"), [])
+        ok = self.post(
+            {"project": "demo", "channel": "project", "kind": "note", "body": "hello"},
+            headers={"Authorization": "Bearer s3cret"})
+        self.assertEqual(ok.status, 200)
+        self.assertEqual(self.agentboard.thread("demo")[0]["body"], "hello")
+
+    def test_post_persists_as_operator_and_ignores_path_command_refs(self):
+        long_body = "x" * (config.BOARD_BODY_MAX + 25)
+        req = self.post({
+            "project": "demo", "channel": "task:locks", "kind": "question",
+            "body": long_body, "mentions": ["locks", "all"], "reply_to": None,
+            "author": "root", "path": "/etc/passwd", "command": "id",
+            "refs": {"files": ["/etc/passwd"]}, "verify_cmd": "echo pwned",
+        })
+        self.assertEqual(req.status, 200)
+        self.assertEqual(req.json()["author"], "operator")
+        rows = self.agentboard.thread("demo", "task:locks")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["author"], "operator")
+        self.assertEqual(rows[0]["kind"], "question")
+        self.assertEqual(len(rows[0]["body"]), config.BOARD_BODY_MAX)
+        self.assertEqual(rows[0]["mentions"], ["locks", "all"])
+        self.assertEqual(rows[0]["refs"], {})
+        self.assertFalse((self.tmp / "passwd").exists())
+        listed = self.get("/api/board/projects").json()["projects"]
+        self.assertEqual(listed[0]["project"], "demo")
+        chans = self.get("/api/board/channels?project=demo").json()["channels"]
+        self.assertIn("task:locks", [c["channel"] for c in chans])
+
+    def test_read_drops_unread_to_zero(self):
+        """Opening a channel marks it read for the operator, so the badge
+        counts messages newer than that cursor, not every message ever."""
+        self.agentboard.post("demo", author="locks/implementer", channel="project",
+                             kind="note", body="please look")
+        def unread():
+            chans = self.get("/api/board/channels?project=demo").json()["channels"]
+            return next(c["unread"] for c in chans if c["channel"] == "project")
+        self.assertGreater(unread(), 0)
+        ts = self.agentboard.thread("demo", "project")[-1]["ts"]
+        bad = self.post({"project": "../../etc/passwd", "channel": "project", "ts": ts},
+                        path="/api/board/read")
+        self.assert_error(bad, 400)
+        self.assertGreater(unread(), 0)
+        ok = self.post({"project": "demo", "channel": "project", "ts": ts,
+                        "path": "/etc/passwd", "command": "id"},
+                       path="/api/board/read")
+        self.assertEqual(ok.status, 200)
+        self.assertEqual(ok.json()["reader"], "operator")
+        self.assertEqual(unread(), 0)
+
+
 class HttpParamsTimeline(EndpointCase):
     """/api/tasks/<id>/timeline is the one place the events, harness runs,
     errors and evidence of a task are gathered. The id comes straight from

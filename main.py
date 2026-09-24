@@ -178,6 +178,11 @@ def cmd_code(args):
     if args.code_cmd == "list":
         cmd_code_list(args)
         return
+    if args.code_cmd in ("checkpoints", "restore"):
+        asyncio.run(cmd_code_checkpoints(args))
+        return
+    if args.code_cmd == "context":
+        sys.exit(cmd_code_context(args))
 
     async def run():
         if args.code_cmd == "plan":
@@ -363,6 +368,27 @@ def cmd_code(args):
             freed = store.release_leases_for_pid(os.getpid())
             if freed:
                 log.info("released %d driver lease(s)", freed)
+            # Drain or cancel — this is the moment, whatever ended the run.
+            # A worktree is state: the NEXT alloc resets task/<id> to base, so
+            # whatever the attempts left in theirs is checkpointed here, before
+            # anything can discard it. AWAITED, not asyncio.run: this finally is
+            # still inside async def run(), and asyncio.run raises RuntimeError
+            # on a live loop — which the except below would swallow into a log
+            # line, losing the very checkpoint a cancel exists to write.
+            # The TASK IDS, not the row dicts: `leaked` holds dicts (the log
+            # line above reads r["id"]), and checkpoint_stopping resolves each
+            # entry to WORKTREE_ROOT/<repo>/<id>. Passing the dicts made every
+            # lookup miss, so a cancel saved nothing and said nothing — a
+            # non-existent directory is an ordinary skip in the sweep.
+            try:
+                import gitstore as _gs
+                n = await _gs.checkpoint_stopping(
+                    taskset["repo"], [r["id"] for r in leaked])
+                if n:
+                    log.info("checkpointed %d interrupted worktree(s)", n)
+            except Exception as exc:                           # noqa: BLE001
+                import errors as _errors
+                _errors.capture(exc, node="checkpoint_stopping")
         results = final.get("results", {})
         merged = sorted(k for k, v in results.items()
                         if k.startswith("publish_") and isinstance(v, dict) and v.get("merged"))
@@ -443,6 +469,110 @@ def cmd_code_dream(args):
         print(f"    {name:18s} {score:8.4f}{mark}")
     print(f"  selected policy: {result.selected}")
     print(f"  report: {path}")
+
+
+async def cmd_code_checkpoints(args):
+    """`code checkpoints` / `code restore`: inspect and apply an attempt's work.
+
+    A worktree is state (gitstore.checkpoint): every implement attempt, every
+    reset that would discard work, and every drain is checkpointed. These are
+    the operator's handles on them — list what exists, and put one back.
+    """
+    import json
+
+    import gitstore
+    from store import Store
+
+    store = Store(args.db or config.DB_PATH)
+    repo, tf = _resolve_task_repo(args, store)
+    tid = args.task
+    rows = gitstore.checkpoint_files(repo, tid)
+    if args.code_cmd == "checkpoints":
+        if args.json:
+            print(json.dumps([{"path": str(p), **m} for p, m in rows],
+                             indent=2, default=str))
+            return
+        if not rows:
+            print(f"no checkpoints for {tid} in {repo}")
+            return
+        print(f"{len(rows)} checkpoint(s) for {tid} in {repo}:")
+        for p, m in rows:
+            print(f"  {p.name:44} {str(m.get('label') or '?'):12} "
+                  f"{len(m.get('files') or []):3} file(s)  "
+                  f"{m.get('commits') if m.get('commits') is not None else '?'}"
+                  f" commit(s)  {m.get('model') or ''}")
+            files = m.get("files") or []
+            if files:
+                print(f"      {', '.join(files[:8])}"
+                      + (" ..." if len(files) > 8 else ""))
+        print(f"\nrestore with: main.py code restore {tid} "
+              f"[--checkpoint PATH]")
+        return
+
+    wt = gitstore.worktree_for(repo, tid)
+    if not (wt / ".git").exists():
+        print(f"no worktree at {wt}. Run the task's alloc first "
+              f"(`main.py code run <taskfile>`), then restore.")
+        sys.exit(1)
+    res = await gitstore.restore_checkpoint(repo, tid, wt, path=args.checkpoint)
+    if res.get("restored"):
+        print(f"restored {len(res.get('files') or [])} file(s) from "
+              f"{res.get('path')} into {wt}")
+        for f in res.get("files") or []:
+            print(f"  {f}")
+        return
+    print(f"not restored: {res.get('reason')}")
+    for f in res.get("conflicts") or []:
+        print(f"  conflict: {f}")
+    sys.exit(1)
+
+
+def _resolve_task_repo(args, store):
+    """(repo, taskfile) for a checkpoint command.
+
+    `--taskfile` names the project outright. Without it the task id is looked
+    up in the recorded rows, because an operator restoring work at 3am should
+    not have to remember which file planned it. What the lookup finds is the
+    REPO the row recorded, never a path from the command line.
+    """
+    from code_tasks import load_taskfile
+
+    tf = getattr(args, "taskfile", None)
+    if tf:
+        return Path(load_taskfile(tf)["repo"]).resolve(), str(tf)
+    try:
+        rows = [r for r in store.code_tasks_all() if r.get("id") == args.task]
+    except Exception:                                          # noqa: BLE001
+        rows = []
+    for r in sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True):
+        raw = r.get("taskfile") or ""
+        if raw and Path(raw).is_file():
+            try:
+                return Path(load_taskfile(raw)["repo"]).resolve(), raw
+            except Exception:                                  # noqa: BLE001
+                continue
+    sys.exit(f"cannot tell which repo task {args.task!r} belongs to — "
+             f"pass --taskfile <taskfile>")
+
+
+def cmd_code_context(args):
+    """Print a task's dossier (context OUT); --note injects context IN."""
+    import dossier
+    if args.db:
+        config.DB_PATH = args.db
+    if args.taskfile:
+        from code_tasks import load_taskfile
+        project = Path(load_taskfile(args.taskfile)["repo"]).name
+    else:
+        project = dossier.find_project(args.task)
+    if not project:
+        print(f"no dossier for task {args.task!r} (pass --taskfile)",
+              file=sys.stderr)
+        return 1
+    if args.note:
+        dossier.import_notes(project, args.task, args.note, args.author)
+    print(dossier.export(project, args.task, "json" if args.json else "md"))
+    return 0
 
 
 def cmd_code_list(args):
@@ -823,6 +953,47 @@ def cmd_doctor(args):
         sys.exit(1)
 
 
+def cmd_board(args):
+    """`main.py board post|read|claims` — the agent coordination board."""
+    import agentboard
+    project = args.project or agentboard.infer_project()[0]
+    if not project:
+        print("board: --project is required outside ~/worktrees/<project>/<task>",
+              file=sys.stderr)
+        return 2
+    if args.board_cmd == "post":
+        if args.kind not in agentboard.KINDS:
+            print(f"board: unknown kind {args.kind!r}; one of {', '.join(agentboard.KINDS)}",
+                  file=sys.stderr)
+            return 2
+        if not agentboard.valid_channel(args.channel):
+            print(f"board: invalid channel {args.channel!r}", file=sys.stderr)
+            return 2
+        print(agentboard.post(project, author=args.author, channel=args.channel,
+                              kind=args.kind, body=args.body, mentions=args.mention,
+                              reply_to=args.reply_to))
+        return 0
+    if args.board_cmd == "claims":
+        for c in agentboard.claims(project):
+            left = int(c["expires_at"] - time.time())
+            print(f"{c['author']}  {', '.join(c['paths'])}  ({left}s left){'  ' + c['note'] if c['note'] else ''}")
+        return 0
+    if args.reader:
+        rows = agentboard.inbox(project, args.reader, since_ts=args.since)
+    else:
+        rows = agentboard.thread(project, channel=args.channel, since_ts=args.since)
+
+    def show(m, depth=0):
+        print(f"{'  ' * depth}[{m['kind']} #{m['id']} {m['channel']} "
+              f"{time.strftime('%m-%d %H:%M', time.localtime(m['ts']))}] "
+              f"{m['author']}: {m['body']}")
+        for r in m.get("replies", ()):
+            show(r, depth + 1)
+    for m in rows:
+        show(m)
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="24/7 multi-model graph orchestrator for https://llm-api.arc.vt.edu"
@@ -864,6 +1035,23 @@ def main():
     cs_p.add_argument("--reset-stale", action="store_true",
                       help="mark 'running' tasks 'failed' when their taskfile "
                            "has no live run (concurrent runs are left alone)")
+    cck = code_sub.add_parser(
+        "checkpoints", help="list a task's worktree checkpoints (attempt work saved on reset/drain)")
+    cck.add_argument("task", help="task id")
+    cck.add_argument("--taskfile", default=None,
+                     help="the taskfile that planned it (default: look the id up in the database)")
+    cck.add_argument("--json", action="store_true", help="emit the list as JSON")
+    cck.add_argument("--db", default=None, help="sqlite database path")
+    cck.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    crs = code_sub.add_parser(
+        "restore", help="apply a task's latest (or named) checkpoint into its worktree")
+    crs.add_argument("task", help="task id")
+    crs.add_argument("--checkpoint", default=None,
+                     help="a specific checkpoint .patch (default: the latest)")
+    crs.add_argument("--taskfile", default=None,
+                     help="the taskfile that planned it (default: look the id up in the database)")
+    crs.add_argument("--db", default=None, help="sqlite database path")
+    crs.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cpr = code_sub.add_parser(
         "promote",
         help=f"open a {config.BASE_BRANCH} -> {config.PROD_BRANCH} PR for you to merge")
@@ -878,6 +1066,16 @@ def main():
                       help="reconcile even while a code-run process is alive")
     crec.add_argument("--db", default=None, help="sqlite database path")
     crec.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    cx_p = code_sub.add_parser(
+        "context", help="print a task's durable dossier (handoff context)")
+    cx_p.add_argument("task", help="task id")
+    cx_p.add_argument("--taskfile", default=None,
+                      help="taskfile the task belongs to (default: newest dossier for the id)")
+    cx_p.add_argument("--json", action="store_true", help="emit the raw dossier JSON")
+    cx_p.add_argument("--note", default=None,
+                      help="inject an operator/captain note before printing")
+    cx_p.add_argument("--author", default="operator", help="author of --note")
+    cx_p.add_argument("--db", default=None, help="sqlite database path")
     cl_p = code_sub.add_parser("list", help="list every task file in the tasks dir")
     cl_p.add_argument("--json", action="store_true",
                       help="emit the same data as JSON instead of a table")
@@ -1085,11 +1283,41 @@ def main():
 
     cap_p = sub.add_parser(
         "captain", help="supervise the fleet conversationally (state-aware, bounded actions)")
-    cap_p.add_argument("--session", required=True,
-                       help="session id, ^[a-z0-9][a-z0-9-]{0,39}$")
-    cap_p.add_argument("--repo", required=True,
+    cap_p.add_argument("--session",
+                       help="session id, ^[a-z0-9][a-z0-9-]{0,39}$ (conversational turn)")
+    cap_p.add_argument("--repo",
                        help="absolute repo path under ARC_REPO_ROOT (default: your home)")
+    cap_p.add_argument("--autopilot", action="store_true",
+                       help="run the autonomous project manager (captain_autopilot.py)")
+    cap_p.add_argument("--interval", type=int, default=None,
+                       help="autopilot: seconds between ticks (default ARC_CAPTAIN_INTERVAL=600)")
+    cap_p.add_argument("--once", action="store_true", help="autopilot: one tick, then exit")
+    cap_p.add_argument("--dry-run", action="store_true",
+                       help="autopilot: log decisions without acting")
+    cap_p.add_argument("--no-llm", action="store_true",
+                       help="autopilot: playbooks only, never call the model")
     cap_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+
+    board_p = sub.add_parser(
+        "board", help="agent coordination board: post, read, claims (docs/agent-board.md)")
+    board_sub = board_p.add_subparsers(dest="board_cmd", required=True)
+    bpo = board_sub.add_parser("post", help="post one message to the board")
+    bpo.add_argument("--project", help="default: inferred from a ~/worktrees/<project>/<task> cwd")
+    bpo.add_argument("--as", dest="author", required=True,
+                     help="'<task_id>/<role>' or a bare role (captain, operator, planner)")
+    bpo.add_argument("--channel", default="project",
+                     help="project | task:<id> | dm:<agent> | captain | operator")
+    bpo.add_argument("--kind", default="note", help="one of agentboard.KINDS")
+    bpo.add_argument("--mention", action="append", default=[], help="repeatable")
+    bpo.add_argument("--reply-to", dest="reply_to")
+    bpo.add_argument("body")
+    brd = board_sub.add_parser("read", help="print a channel thread or an agent's inbox")
+    brd.add_argument("--project")
+    brd.add_argument("--channel")
+    brd.add_argument("--for", dest="reader", help="an agent: print its inbox instead")
+    brd.add_argument("--since", type=float)
+    bcl = board_sub.add_parser("claims", help="list live path claims")
+    bcl.add_argument("--project")
 
     args = ap.parse_args()
     setup_logging(getattr(args, "verbose", False))
@@ -1122,7 +1350,16 @@ def main():
     elif args.cmd == "chat":
         import orchchat
         sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))
+    elif args.cmd == "board":
+        sys.exit(cmd_board(args))
     elif args.cmd == "captain":
+        if args.autopilot:
+            import captain_autopilot
+            sys.exit(captain_autopilot.run(
+                interval=args.interval or captain_autopilot.INTERVAL_S,
+                once=args.once, dry_run=args.dry_run, llm=not args.no_llm))
+        if not args.session or not args.repo:
+            ap.error("captain: --session and --repo are required without --autopilot")
         import captain
         sys.exit(asyncio.run(captain.run_turn(args.session, args.repo)))
 

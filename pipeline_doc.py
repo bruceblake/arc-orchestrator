@@ -179,6 +179,22 @@ NODES = {
         "watch": "Multi-dependency tasks used to wait on the LAST dependency only — "
                  "a race dressed as a dependency.",
     },
+    "checkpoint": {
+        "title": "checkpoint — keep the attempt's work",
+        "what": "A tail node per task, fired when that task FAILS: saves its "
+                "worktree as a patch under logs/checkpoints/ — commits, "
+                "uncommitted edits and untracked files, against its merge base.",
+        "why": "A worktree is state. alloc resets task/<id> to base on every "
+               "(re)alloc, and on 2026-09-24 a reboot-resume discarded the reviewed "
+               "work of three tasks that way.",
+        "watch": "Hangs off failure, not the merge: pr_merge calls gitstore.cleanup "
+                 "and the worktree is gone before any node after it runs. It reads "
+                 "its OWN worktree and nothing else, so a drain never touches a "
+                 "sibling still being implemented. A restore that conflicts is "
+                 "rolled back in full — conflict markers must never be published as "
+                 "the attempt's own work. A cancel, where no node fires, is swept by "
+                 "the run's own shutdown path instead.",
+    },
 }
 
 OVERVIEW = {

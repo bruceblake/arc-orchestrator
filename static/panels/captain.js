@@ -8,6 +8,9 @@
 //   GET  /api/captain/poll     turns for one session (since=)
 //   GET  /api/captain/queue    work the captain queued for capacity
 //   POST /api/captain/start    append the operator turn + spawn one turn
+//   GET  /api/captain/autopilot           autopilot state, findings, actions, escalations
+//   POST /api/captain/autopilot/pause     {paused: bool} — the pause switch
+//   POST /api/captain/autopilot/ack       {id} — acknowledge an escalation
 // It reuses the chat panel's repo/session helpers (chatLoadRepos,
 // chatSessionFor, chatFreshSession) — one allowlist, one slug rule.
 
@@ -100,14 +103,84 @@ function capRenderState() {
     + `<span class="hint">${esc((CAP_STATE && CAP_STATE.planner_model) || "")}</span></div>`
     + `<div class="cap-chips">${capCountsHTML()}</div>`
     + `<div class="cap-caps">${capCapacityHTML()}</div>`
-    + `<div class="cap-att-wrap">${capAttentionHTML()}</div>`;
+    + `<div class="cap-att-wrap">${capAttentionHTML()}</div>`
+    + `<div class="cap-auto">${capAutopilotHTML()}</div>`;
+}
+
+// ---- autopilot (captain_autopilot.py, AGENTS.md Rule 11) ----
+let CAP_AUTO = null;
+
+function capAgo(ts) {
+  if (!ts) return "never";
+  const d = Math.round(Date.now() / 1000 - ts);
+  const a = Math.abs(d);
+  const txt = a < 90 ? `${a}s` : a < 5400 ? `${Math.round(a / 60)}m` : `${(a / 3600).toFixed(1)}h`;
+  return d >= 0 ? `${txt} ago` : `in ${txt}`;
+}
+
+function capAutopilotHTML() {
+  const ap = CAP_AUTO || (CAP_STATE && CAP_STATE.autopilot);
+  if (!ap) return `<div class="cap-empty">autopilot: no data</div>`;
+  const mode = ap.paused ? "paused" : ap.running ? "running" : "not running";
+  const head = `<div class="cap-row-head"><span class="cap-title">autopilot</span>`
+    + `<span class="chip ${ap.paused ? "failed" : ap.running ? "running" : "pending"}">${esc(mode)}</span>`
+    + (ap.dry_run ? ` <span class="hint">dry-run</span>` : "")
+    + ` <span class="hint">last tick ${esc(capAgo(ap.last_tick))} · next ${esc(capAgo(ap.next_tick))}</span>`
+    + ` <button class="act" data-cap-pause="${ap.paused ? "0" : "1"}">${ap.paused ? "Resume" : "Pause"}</button></div>`;
+  const escs = (ap.escalations || []).map(e => `<div class="cap-att">`
+    + `<span class="cap-att-status ${esc(e.severity === "critical" ? "failed" : "conflict")}">${esc(e.severity || "")}</span> `
+    + `<b>${esc(e.project || "")}</b> ${esc(e.body || "")} <span class="hint">${esc(capAgo(e.ts))}</span> `
+    + `<button class="act" data-cap-ack="${attr(e.id || "")}">Acknowledge</button></div>`).join("");
+  const finds = (ap.findings || []).slice(0, 12).map(f => `<div class="cap-att">`
+    + `<span class="cap-att-status ${esc(f.severity === "critical" ? "failed" : f.severity === "warn" ? "conflict" : "")}">${esc(f.severity || "")}</span> `
+    + `${esc(f.summary || f.rule || "")}</div>`).join("");
+  const acts = (ap.actions || []).slice(0, 12).map(a => `<div class="cap-att">`
+    + `<b>${esc(a.kind || "")}</b> <span class="hint">${esc(a.target || "")}</span> `
+    + `${esc(a.reason || "")} <span class="hint">${esc(capAgo(a.ts))}${a.dry_run ? " · dry-run" : ""}`
+    + `${a.result && a.result.ok === false ? " · failed" : ""}</span></div>`).join("");
+  return head
+    + `<div class="cap-title">escalations</div>${escs || `<div class="cap-ok">✓ none unacknowledged</div>`}`
+    + `<div class="cap-title">latest findings</div>${finds || `<div class="cap-ok">✓ nothing found</div>`}`
+    + `<div class="cap-title">recent actions</div>${acts || `<div class="cap-empty">no actions yet</div>`}`;
+}
+
+function capBadge() {
+  const btn = $("#btn-captain");
+  const ap = CAP_AUTO || (CAP_STATE && CAP_STATE.autopilot);
+  if (!btn || !ap) return;
+  const n = (ap.escalations || []).length;
+  btn.textContent = n ? `🧭 Captain (${n})` : "🧭 Captain";
+  btn.classList.toggle("alert", n > 0);
+  btn.title = n ? `${n} unacknowledged captain escalation(s)` : "";
+}
+
+async function capLoadAutopilot() {
+  try { CAP_AUTO = await jget("/api/captain/autopilot"); } catch (e) { return; }
+  capBadge();
+}
+
+async function capAutoClick(ev) {
+  const t = ev.target;
+  if (!t || !t.dataset) return;
+  let r = null;
+  if (t.dataset.capPause != null) {
+    r = await jpost("/api/captain/autopilot/pause", { paused: t.dataset.capPause === "1" });
+  } else if (t.dataset.capAck) {
+    r = await jpost("/api/captain/autopilot/ack", { id: t.dataset.capAck });
+  } else return;
+  const msg = $("#k-msg");
+  if (r && r.code !== 200 && msg) { msg.className = "err"; msg.textContent = (r.body && r.body.error) || "failed"; }
+  await capLoadAutopilot();
+  capRenderState();
 }
 
 async function capLoadState() {
   try {
     CAP_STATE = await jget("/api/captain/state");
   } catch (e) { return; }
+  if (CAP_STATE && CAP_STATE.autopilot) CAP_AUTO = CAP_STATE.autopilot;
   capRenderState();
+  capBadge();
   const sessions = (CAP_STATE && CAP_STATE.sessions) || [];
   CAP_SESSIONS = sessions;
   const sel = $("#k-sessions");
@@ -303,4 +376,8 @@ function capClose() {
   const text = $("#k-text");
   if (text) text.onkeydown = ev => { if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); capSend(); } };
   if (modal) modal.onclick = ev => { if (ev.target === modal) capClose(); };
+  const st = $("#k-state");
+  if (st) st.onclick = capAutoClick;
 })();
+// The escalation badge on the Captain button is live even with the panel shut.
+setTimeout(() => { capLoadAutopilot(); setInterval(capLoadAutopilot, 30000); }, 3000);

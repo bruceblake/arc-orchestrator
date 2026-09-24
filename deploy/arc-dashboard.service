@@ -11,6 +11,7 @@ Restart=always
 RestartSec=15
 Environment=PYTHONUNBUFFERED=1
 Environment=ARC_FLEET=studio
+Environment=ARC_STUDIO_AUTOPILOT=1
 
 [Install]
 WantedBy=default.target

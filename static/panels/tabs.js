@@ -14,11 +14,12 @@ const TABS = {
   studio:   ["studio-panel"],
   projects: ["projects-panel", "gh-panel", "topo-panel"],
   activity: ["activity-panel"],
+  messages: ["messages-panel"],
 };
 // The panel each tab exists to show. The summary tier's auto-fold must never
 // close it, or switching to a tab would reveal a collapsed header and nothing
 // else — the original clutter problem in a new place.
-const TAB_PRIMARY = new Set(["work-panel", "agents-panel", "studio-panel", "projects-panel", "activity-panel"]);
+const TAB_PRIMARY = new Set(["work-panel", "agents-panel", "studio-panel", "projects-panel", "activity-panel", "messages-panel"]);
 const TAB_KEY = "arc.tab";
 let TAB = "";
 
@@ -55,6 +56,8 @@ function showTab(name, remember) {
   }
   if (remember) { try { localStorage.setItem(TAB_KEY, name); } catch (e) {} }
   if (name === "studio" && typeof pollStudio === "function") pollStudio();
+  if (name === "messages" && typeof boardOnTab === "function") boardOnTab();
+  else if (typeof boardLeaveTab === "function") boardLeaveTab();
 }
 
 // Used by summary.js: clicking a summary figure goes to its panel's tab first.

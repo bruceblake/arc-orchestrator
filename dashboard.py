@@ -162,6 +162,7 @@ ACTIVITY_TYPES = frozenset((
     "task.reviewed", "task.failed", "task.escalated", "task.merged",
     "task.pr_opened", "task.pr_reviewed", "task.resynced",
     "task.review_degraded", "driver.stalled",
+    "driver.usage_limit", "driver.usage_swap",
     "chain.wait", "chain.ready", "chain.blocked",
 ))
 # A feed is a window, not a log download: the page asks for 50, and a
@@ -3927,7 +3928,37 @@ def _captain_state():
         sessions = _captain_sessions()["sessions"]
     except Exception:
         sessions = []
-    return {"state": state, "sessions": sessions}
+    return {"state": state, "sessions": sessions, "autopilot": _autopilot_view()}
+
+
+def _autopilot_view():
+    """GET /api/captain/autopilot — the autopilot's state, latest findings,
+    recent actions and unacknowledged escalations. Never raises."""
+    try:
+        import captain_autopilot
+        return captain_autopilot.view()
+    except Exception:
+        return {"paused": False, "running": False, "findings": [], "actions": [],
+                "escalations": []}
+
+
+def _autopilot_pause(body):
+    """POST /api/captain/autopilot/pause {"paused": bool} — toggles the pause
+    file. Guarded like every POST (_refuse_post: JSON, same origin, and
+    ARC_DASHBOARD_TOKEN when set)."""
+    if not isinstance(body, dict) or not isinstance(body.get("paused"), bool):
+        return {"error": "body must be {\"paused\": true|false}"}, 400
+    import captain_autopilot
+    return {"paused": captain_autopilot.set_paused(body["paused"], by="dashboard")}, 200
+
+
+def _autopilot_ack(body):
+    """POST /api/captain/autopilot/ack {"id": "<escalation id>"}."""
+    esc = body.get("id") if isinstance(body, dict) else None
+    import captain_autopilot
+    if not captain_autopilot.ack_escalation(esc, by="dashboard"):
+        return {"error": "no such escalation"}, 404
+    return {"ok": True, "id": esc}, 200
 
 
 def _captain_sessions():
@@ -4339,6 +4370,7 @@ def _health(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
     import reconcile
+    import drivers
 
     # Two different caps govern the same model and must not be conflated:
     #   driver_cap  — how many harness instances THIS fleet may run
@@ -4421,6 +4453,7 @@ def _health(store):
             # idle rather than broken: every driver waits for ARC, nothing runs,
             # nothing errors. An operator staring at zeros needs to be told why.
             "arc": _arc_status(now),
+            "plans": drivers.active_plan_windows(_load_event_lines(), now),
             "served_head": (_SERVED_HEAD or "")[:12], "served_at": _SERVED_AT}
 
 
@@ -4746,6 +4779,206 @@ def _build_graph_topologies():
     return {"code": topo}
 
 
+_BOARD_TOKEN = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+_BOARD_REPLY = re.compile(r"^[A-Za-z0-9]{1,32}$")
+
+
+def _board_token(value):
+    """A project or channel name: the allowed alphabet, and no path escape.
+
+    The alphabet includes ``/`` and ``.`` because channels look like
+    ``task:<id>`` and ``dm:<task>/<role>``. ``..`` and a leading slash are
+    still a traversal, so they are rejected even though the class allows
+    those characters. Nothing here is ever opened as a path (Rule 6b).
+    """
+    if not isinstance(value, str) or not _BOARD_TOKEN.fullmatch(value):
+        return None
+    if value.startswith("/") or "\\" in value:
+        return None
+    if any(part == ".." for part in value.split("/")):
+        return None
+    return value
+
+
+def _board_projects():
+    import agentboard
+    with agentboard._lock:
+        rows = agentboard._conn().execute(
+            "SELECT project, COUNT(*) AS n, MAX(ts) AS last_ts "
+            "FROM board_messages GROUP BY project ORDER BY last_ts DESC"
+        ).fetchall()
+    return [{"project": r["project"], "count": r["n"], "last_ts": r["last_ts"]}
+            for r in rows]
+
+
+def _board_task_rows(store, project):
+    """code_tasks rows whose worktree (or taskfile stem) is this board project."""
+    root = Path(config.WORKTREE_ROOT)
+    out = []
+    for row in store.code_tasks_all(2000):
+        wt = row.get("worktree") or ""
+        proj = ""
+        if wt:
+            try:
+                rel = Path(wt).resolve().relative_to(root.resolve())
+                proj = rel.parts[0] if rel.parts else ""
+            except (ValueError, OSError):
+                if project in Path(wt).parts:
+                    proj = project
+        stem = Path(row.get("taskfile") or "").stem
+        if proj == project or stem == project:
+            out.append(row)
+    return out
+
+
+def _board_channels(store, project):
+    import agentboard
+    tasks = _board_task_rows(store, project)
+    by_id = {r["id"]: r for r in tasks}
+    seen = {}
+    for c in agentboard.channels(project, reader="operator"):
+        seen[c["channel"]] = {
+            "channel": c["channel"], "last_ts": c["last_ts"], "count": c["count"],
+            "unread": c.get("unread_for") or 0,
+        }
+    for name in ("project", "captain", "operator"):
+        seen.setdefault(name, {"channel": name, "last_ts": None, "count": 0, "unread": 0})
+    for tid, row in by_id.items():
+        name = f"task:{tid}"
+        slot = seen.setdefault(name, {"channel": name, "last_ts": None, "count": 0, "unread": 0})
+        slot["status"] = row.get("status") or ""
+        slot["model"] = row.get("model") or ""
+        slot["title"] = row.get("title") or ""
+    for slot in seen.values():
+        ch = slot["channel"]
+        if ch.startswith("task:") and "status" not in slot:
+            row = by_id.get(ch[5:])
+            slot["status"] = (row or {}).get("status") or ""
+    order = {"project": 0, "captain": 2, "operator": 3}
+    def key(slot):
+        ch = slot["channel"]
+        if ch.startswith("dm:"):
+            rank = 4
+        elif ch.startswith("task:"):
+            rank = 1
+        else:
+            rank = order.get(ch, 5)
+        return (rank, -(slot["last_ts"] or 0), ch)
+    return {"channels": sorted(seen.values(), key=key),
+            "tasks": [{"id": r["id"], "status": r.get("status") or "",
+                       "model": r.get("model") or "", "title": r.get("title") or ""}
+                      for r in tasks]}
+
+
+def _board_claim_view(project):
+    import agentboard
+    rows = agentboard.claims(project)
+    for c in rows:
+        hits = []
+        for other in rows:
+            if other["id"] == c["id"] or other.get("author") == c.get("author"):
+                continue
+            if any(agentboard.paths_overlap(p, q)
+                   for p in c.get("paths") or [] for q in other.get("paths") or []):
+                hits.append(other.get("author") or "")
+        c["overlaps"] = hits
+        c["conflict"] = bool(hits)
+    return rows
+
+
+def _board_get(path, q, store):
+    """JSON body and status for one board read. None when path is unrelated."""
+    import agentboard
+    if path == "/api/board/projects":
+        return {"projects": _board_projects()}, 200
+    project = _board_token((q.get("project") or [""])[0])
+    if path not in ("/api/board/channels", "/api/board/thread", "/api/board/inbox",
+                    "/api/board/claims", "/api/board/expertise"):
+        return None
+    if not project:
+        return {"error": "project must match [A-Za-z0-9_.:/-]+ and must not traverse"}, 400
+    if path == "/api/board/channels":
+        return _board_channels(store, project), 200
+    if path == "/api/board/claims":
+        return {"claims": _board_claim_view(project)}, 200
+    if path == "/api/board/expertise":
+        return {"expertise": agentboard.expertise(project)}, 200
+    if path == "/api/board/inbox":
+        agent = _board_token((q.get("agent") or [""])[0])
+        if not agent:
+            return {"error": "agent must match [A-Za-z0-9_.:/-]+ and must not traverse"}, 400
+        return {"messages": agentboard.inbox(project, agent)}, 200
+    channel = (q.get("channel") or [""])[0]
+    if channel:
+        channel = _board_token(channel)
+        if not channel or not agentboard.valid_channel(channel):
+            return {"error": "invalid channel"}, 400
+    since = (q.get("since") or [None])[0]
+    since_ts = None
+    if since not in (None, ""):
+        try:
+            since_ts = float(since)
+        except (TypeError, ValueError):
+            return {"error": "since must be a timestamp"}, 400
+    kinds = None
+    raw_kinds = (q.get("kinds") or [""])[0]
+    if raw_kinds:
+        kinds = [k for k in raw_kinds.split(",") if k]
+        if any(k not in agentboard.KINDS for k in kinds):
+            return {"error": "unknown kind"}, 400
+    return {"messages": agentboard.thread(project, channel or None, since_ts, kinds=kinds)}, 200
+
+
+def _board_post(body):
+    """Operator post. Author is always ``operator``. No path, command, or ref
+    from the body is read, opened, or stored — extra keys are ignored."""
+    import agentboard
+    if not isinstance(body, dict):
+        return {"error": "body must be an object"}, 400
+    project = _board_token(body.get("project"))
+    channel = _board_token(body.get("channel"))
+    if not project or not channel or not agentboard.valid_channel(channel):
+        return {"error": "project and channel must match [A-Za-z0-9_.:/-]+ and a real channel"}, 400
+    kind = body.get("kind") if isinstance(body.get("kind"), str) else ""
+    if kind not in agentboard.KINDS:
+        return {"error": "kind must be one of the board kinds"}, 400
+    text = body.get("body")
+    if not isinstance(text, str):
+        return {"error": "body text must be a string"}, 400
+    text = text[:config.BOARD_BODY_MAX]
+    mentions = body.get("mentions") or []
+    if not isinstance(mentions, list) or any(not isinstance(m, str) or not _board_token(m.lstrip("@")) for m in mentions):
+        return {"error": "mentions must be a list of names"}, 400
+    if len(mentions) > 20:
+        return {"error": "too many mentions"}, 400
+    reply_to = body.get("reply_to") or None
+    if reply_to is not None and (not isinstance(reply_to, str) or not _BOARD_REPLY.fullmatch(reply_to)):
+        return {"error": "invalid reply_to"}, 400
+    mid = agentboard.post(
+        project, author="operator", channel=channel, kind=kind, body=text,
+        mentions=[m.lstrip("@") for m in mentions], reply_to=reply_to,
+        author_role="operator")
+    return {"id": mid, "author": "operator"}, 200
+
+
+def _board_read(body):
+    """Mark a channel read for the operator, up to ``ts``. Same name checks
+    as a post: nothing in the body is opened as a path or run as a command."""
+    import agentboard
+    if not isinstance(body, dict):
+        return {"error": "body must be an object"}, 400
+    project = _board_token(body.get("project"))
+    channel = _board_token(body.get("channel"))
+    if not project or not channel or not agentboard.valid_channel(channel):
+        return {"error": "project and channel must match [A-Za-z0-9_.:/-]+ and a real channel"}, 400
+    try:
+        ts = float(body.get("ts"))
+    except (TypeError, ValueError):
+        return {"error": "ts must be a timestamp"}, 400
+    agentboard.mark_read(project, "operator", channel, ts)
+    return {"ok": True, "reader": "operator"}, 200
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ArcDashboard/2.0"
     store = None
@@ -4843,6 +5076,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_captain_sessions())
             if u.path == "/api/captain/queue":
                 return self._json(_captain_queue())
+            if u.path == "/api/captain/autopilot":
+                return self._json(_autopilot_view())
             if u.path == "/api/captain/poll":
                 q = parse_qs(u.query)
                 session = q.get("session", [""])[0]
@@ -5140,6 +5375,11 @@ class Handler(BaseHTTPRequestHandler):
                     _build_graph_topologies()["code"]))
             if u.path == "/api/graphs":
                 return self._json(_build_graph_topologies())
+            if u.path.startswith("/api/board/"):
+                q = parse_qs(u.query)
+                got = _board_get(u.path, q, Handler.store)
+                if got is not None:
+                    return self._json(got[0], got[1])
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
             pass
@@ -5229,6 +5469,12 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/captain/start":
                 obj, code = _captain_start(body)
                 return self._json(obj, code)
+            if u.path == "/api/captain/autopilot/pause":
+                obj, code = _autopilot_pause(body)
+                return self._json(obj, code)
+            if u.path == "/api/captain/autopilot/ack":
+                obj, code = _autopilot_ack(body)
+                return self._json(obj, code)
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)
                 return self._json(obj, code)
@@ -5257,6 +5503,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/restart":
                 obj, code = _restart(body)
+                return self._json(obj, code)
+            if u.path == "/api/board/post":
+                obj, code = _board_post(body)
+                return self._json(obj, code)
+            if u.path == "/api/board/read":
+                obj, code = _board_read(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
@@ -5335,6 +5587,12 @@ def serve(port=None, db_path=None):
         log.info("captain queue drain armed")
     except Exception as exc:
         log.error("captain queue drain did not start: %s", exc)
+    try:
+        from studio import autopilot
+        armed = autopilot.start(db_path)
+        log.info("studio autopilot %s", "armed" if armed else "off")
+    except Exception as exc:
+        log.error("studio autopilot did not start: %s", exc)
     print(f"dashboard: http://localhost:{port}", flush=True)
     # Bound to one address: that is the only one worth printing. Bound to
     # all of them: list the LAN ones, which is what a phone needs.
