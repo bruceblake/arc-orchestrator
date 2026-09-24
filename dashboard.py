@@ -2515,7 +2515,7 @@ _TRANSCRIPT_RE = re.compile(r"^[\w.-]+\.jsonl$")
 
 
 _gh_cache = {"key": 0.0, "data": None}
-GH_CACHE_S = 20.0
+GH_CACHE_S = 60.0  # the GitHub quota is shared with every fleet run
 
 
 def _github(store, repo=None):

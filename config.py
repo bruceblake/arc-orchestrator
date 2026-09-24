@@ -724,6 +724,12 @@ GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "120"))
 # is never retried. Comma-separated; empty disables retries.
 NET_RETRY_DELAYS = [float(x) for x in os.getenv(
     "ARC_NET_RETRY_DELAYS", "5,15,45,90,180").split(",") if x.strip()]
+# GitHub's API quota (5000/h GraphQL, shared by every run, the dashboard and
+# any other tool on the account) is not network weather: retrying on the
+# backoff above just walks back into the same refusal. A gh call refused for
+# quota waits until the reset time `gh api rate_limit` reports (that endpoint
+# does not count against the quota), bounded per call by this many seconds.
+GH_QUOTA_MAX_WAIT = float(os.getenv("ARC_GH_QUOTA_MAX_WAIT", "3600"))
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of
