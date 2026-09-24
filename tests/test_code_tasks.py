@@ -508,6 +508,11 @@ class ResumeRestoresAnInterruptedAttempt(unittest.TestCase):
         """The allowlist, built from the module constants that write them."""
         import reconcile
         from store import Store
+        # Exact equality, so the tuple cannot silently drift from the two
+        # strings that actually write a row: an added-but-unwritten entry would
+        # be dead weight, and a REWORDED writer would stop restoring.
+        self.assertEqual(set(code_tasks._INTERRUPTION_REASONS),
+                         {reconcile.INTERRUPTED_REASON, Store.STALE_REASON})
         for reason in (reconcile.INTERRUPTED_REASON, Store.STALE_REASON):
             with self.subTest(reason=reason[:40]):
                 first = asyncio.run(gitstore.alloc(self.repo, "t1", "main"))
@@ -2782,7 +2787,8 @@ class PlanAmendmentWiring(unittest.TestCase):
         import gitstore
         src = pathlib.Path(gitstore.__file__).read_text()
         self.assertEqual(set(gitstore.CHANNEL_FILES),
-                         {".arc/plan_proposals.jsonl", ".arc/board.jsonl"})
+                         {".arc/plan_proposals.jsonl", ".arc/board.jsonl",
+                          ".arc/handoff.md"})
         self.assertIn(":!.reasonix", gitstore.NEVER_STAGE)
         self.assertIn("await _stage_without_runtime_files(wt, intent=True)", src)
         self.assertIn("await _stage_without_runtime_files(wt)", src)
@@ -2907,3 +2913,111 @@ class TransientNetworkRetries(unittest.TestCase):
         ok, _ = asyncio.run(gitstore._retry_transient("push", once))
         self.assertFalse(ok)
         self.assertEqual(len(calls), 1)
+
+
+class DossierWiring(unittest.TestCase):
+    """The task dossier (dossier.py) is booted into every prompt and fed by
+    every agent run: attempt 2 must see what attempt 1 wrote in its handoff."""
+
+    def _slice(self, start, end):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index(start):]
+        return body[:body.index(end)]
+
+    def test_every_prompt_carries_the_dossier(self):
+        self.assertIn('dossier_block(tid, "implementer")',
+                      self._slice("async def implement(ctx):", "async def gate(ctx):"))
+        self.assertIn('dossier_block(tid, "reviewer")',
+                      self._slice("async def review(ctx):", "async def escalate(ctx):"))
+        self.assertIn('dossier_block(tid, "pr-reviewer")',
+                      self._slice("async def pr_reviewer(ctx):", "async def pr_review(ctx)"))
+
+    def test_dossier_leads_each_prompt(self):
+        t = dict(BASIC, files_hint=[], verify_cmd="true")
+        for p in (code_tasks._impl_prompt(t, "fb", dossier="DOSSIER-X"),
+                  code_tasks._review_prompt(t, "diff", dossier="DOSSIER-X"),
+                  code_tasks._pr_review_prompt(t, "diff", 1, 1, [],
+                                               dossier="DOSSIER-X")):
+            self.assertTrue(p.startswith("DOSSIER-X"))
+        self.assertIn(".arc/handoff.md", code_tasks._impl_prompt(t, ""))
+
+    def test_crash_paths_record_the_attempt(self):
+        body = self._slice("async def implement(ctx):", "async def gate(ctx):")
+        self.assertIn('outcome="crashed"', body)
+        self.assertIn('outcome="usage_swap"', body)
+        body = self._slice("async def review(ctx):", "async def escalate(ctx):")
+        self.assertIn('outcome="crashed"', body)
+        body = self._slice("async def escalate(ctx):", "async def publish(ctx):")
+        self.assertIn("note_model_change", body)
+
+    def test_reviewer_usage_swaps_record_why_and_who_ran(self):
+        body = self._slice("async def review(ctx):", "async def escalate(ctx):")
+        self.assertIn("note_model_change", body)
+        body = self._slice("async def pr_reviewer(ctx):", "async def pr_review(ctx)")
+        self.assertIn("note_model_change", body)
+        self.assertIn('ran_model = getattr(res, "model", None) or model', body)
+        self.assertIn('model=ran_model, role="pr-reviewer"', body)
+
+    def test_an_empty_verify_gate_still_records_the_attempt(self):
+        import dossier
+        repo = tempfile.mkdtemp(prefix="arc-dossier-repo-")
+        wt = tempfile.mkdtemp(prefix="arc-dossier-wt-")
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, wt, ignore_errors=True)
+        ts = code_tasks.load_taskfile(taskfile([{
+            "id": "dz2", "title": "T", "prompt": "do it", "verify_cmd": "",
+            "model": "GLM-5.3", "reviewer": "deepseek"}], repo=repo))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore(), ts, taskfile="tf.json")
+            out = asyncio.run(g.nodes["gate_dz2"].fn(
+                {"results": {"alloc_dz2": {"worktree": wt},
+                             "implement_dz2": {"model": "GLM-5.3",
+                                               "harness": "opencode"}},
+                 "runs": {"implement_dz2": 1}}))
+        self.assertTrue(out["passed"])
+        att = dossier.get(Path(repo).name, "dz2")["attempts"]
+        self.assertEqual([(a["outcome"], a["attempt"], a["model"]) for a in att],
+                         [("passed", 1, "GLM-5.3")])
+
+    def test_the_prompt_includes_the_dossier_on_attempt_2(self):
+        repo = tempfile.mkdtemp(prefix="arc-dossier-repo-")
+        wt = tempfile.mkdtemp(prefix="arc-dossier-wt-")
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, wt, ignore_errors=True)
+        ts = code_tasks.load_taskfile(taskfile([{
+            "id": "dz1", "title": "T", "prompt": "do it", "verify_cmd": "true",
+            "model": "GLM-5.3", "reviewer": "deepseek"}], repo=repo))
+        prompts = []
+
+        class Res:
+            exit_code, transcript_path, seconds = 0, "", 1.0
+            session_id, text, model, harness = "s1", "ok", None, None
+
+        class Drv:
+            harness, model, images = "opencode", "GLM-5.3", None
+
+            async def run(self, prompt, cwd, **kw):
+                prompts.append(prompt)
+                arc = Path(cwd, ".arc")
+                arc.mkdir(exist_ok=True)
+                (arc / "handoff.md").write_text(
+                    "## Decisions\n- keep the cache in store.py (one writer)\n"
+                    "## Next step\nwire the CLI\n")
+                return Res()
+
+        async def hints(t, wt):
+            return ""
+
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: Drv()), \
+                mock.patch.object(code_tasks.graft, "hints", hints), \
+                capture_events():
+            g = code_tasks.build_code_graph(FakeStore(), ts, taskfile="tf.json")
+            for runs in ({}, {"implement_dz1": 1}):
+                asyncio.run(g.nodes["implement_dz1"].fn(
+                    {"results": {"alloc_dz1": {"worktree": wt}}, "runs": runs}))
+        self.assertNotIn("TASK DOSSIER", prompts[0])
+        self.assertTrue(prompts[1].startswith("TASK DOSSIER"))
+        self.assertIn("keep the cache in store.py", prompts[1])
+        self.assertIn("wire the CLI", prompts[1])
+        self.assertFalse(Path(wt, ".arc", "handoff.md").exists())
+

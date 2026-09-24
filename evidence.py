@@ -370,45 +370,269 @@ def blank_share(path, step=8):
     return max(counts.values()) / len(px)
 
 
-def diff_stats(before, after, step=4, threshold=24):
-    """(changed_share, mean_abs_delta) between two same-size screenshots."""
-    wb, hb, pb = _pixels(before, step)
-    wa, ha, pa = _pixels(after, step)
+def frame_diff(before, after, threshold=0):
+    """(changed_share, mean_abs_delta, box) for two same-size screenshots.
+
+    EVERY pixel is compared — not a stride-N sample. A sample on a lattice
+    misses a change that falls between its points, and then the panel both
+    loses the box and (because the share comes back 0.0) is captioned NO
+    CHANGE: a reviewer is shown a confident lie about a real edit. Scan
+    everything and no pixel can hide.
+
+    ANY non-zero colour difference counts (threshold defaults to 0). A
+    tolerance here is a second way to lose a real edit: at 24, an edited
+    20/255 block was captioned NO CHANGE and framed by no box while the
+    unthresholded heatmap still glowed at it — the picture and the text
+    disagreeing, which is the very confusion this evidence exists to remove.
+    The predicate is deliberately the one the heatmap already uses, so "the
+    panel glows" and "the panel says something changed" cannot diverge.
+
+    One pass yields the share, the delta AND the box together, so the number
+    and the region can never disagree about what changed.
+
+    Rows that are byte-identical are skipped without a per-pixel loop, which
+    is what makes the full scan cheap: an unchanged render costs almost
+    nothing, and only the rows that actually differ are walked."""
+    from studio.evaluation import palette
+    wb, hb, chb, rb = palette.read_png(before)
+    wa, ha, cha, ra = palette.read_png(after)
     if (wb, hb) != (wa, ha):
-        return None, None
-    changed, total = 0, 0
-    for (r1, g1, b1), (r2, g2, b2) in zip(pb, pa):
-        d = max(abs(r1 - r2), abs(g1 - g2), abs(b1 - b2))
-        total += d
-        changed += d > threshold
-    n = len(pa) or 1
-    return changed / n, total / n / 255.0
+        return None, None, None
+    x0 = y0 = x1 = y1 = None
+    changed = total = 0
+    for y, (b_row, a_row) in enumerate(zip(rb, ra)):
+        if b_row == a_row:
+            continue
+        for x in range(wb):
+            # Each frame is walked with ITS OWN stride: a baseline render and a
+            # new one need not both be RGBA, and one stride for both compares
+            # misaligned pixels of identical frames (0.75 "changed").
+            i, j = x * chb, x * cha
+            # The first three channels are what is seen; a difference in alpha
+            # alone is not a visual change.
+            d = abs(b_row[i] - a_row[j])
+            for k in (1, 2):
+                dk = abs(b_row[i + k] - a_row[j + k])
+                if dk > d:
+                    d = dk
+            total += d
+            if d > threshold:
+                changed += 1
+                x0 = x if x0 is None or x < x0 else x0
+                x1 = x if x1 is None or x > x1 else x1
+                y0 = y if y0 is None else y0
+                y1 = y
+    n = (wb * hb) or 1
+    box = None if x0 is None else (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+    return changed / n, total / n / 255.0, box
 
 
-def compare(baseline_dir, shots, out_dir):
-    """Per camera: before | after | amplified difference, and the numbers."""
+def diff_stats(before, after, threshold=0):
+    """(changed_share, mean_abs_delta) between two same-size screenshots."""
+    changed, delta, _box = frame_diff(before, after, threshold)
+    return changed, delta
+
+
+def change_box(before, after, threshold=0):
+    """(x, y, w, h) around the pixels that changed, or None if none did."""
+    return frame_diff(before, after, threshold)[2]
+
+
+_CAPTION_H = 56                  # caption bar height, in output pixels
+_PANEL_W = 640                   # before | after | diff panel width
+_TILE_W, _TILE_H = 480, 270      # contact-sheet tile (16:9, like the renders)
+_LABEL_H = 32                    # room under each tile for its name
+_SHEET_COLS = 3                  # tiles per contact-sheet row
+_MAX_BYTES = 2 * 1024 * 1024     # every image we publish stays under this
+_FONTS = {}
+
+# A caption bar is what makes a panel self-describing. 'BEFORE'/'AFTER' are
+# positional, and position is exactly what a reviewer viewing one image on a
+# phone cannot see; the sha says which commit each frame came from.
+
+
+def _font_file():
+    """A TTF path for ffmpeg drawtext, or None when this machine has none."""
+    if not _FONTS:
+        names = ("AdwaitaSans-Regular.ttf", "DejaVuSans.ttf", "AdwaitaMono-Regular.ttf")
+        found = None
+        for root in ("/usr/share/fonts", "/usr/local/share/fonts",
+                     str(Path.home() / ".fonts"),
+                     str(Path.home() / ".local/share/fonts")):
+            if not Path(root).is_dir():
+                continue
+            for name in names:
+                hits = sorted(Path(root).rglob(name))
+                if hits:
+                    found = str(hits[0])
+                    break
+            if found:
+                break
+        _FONTS["font"] = found
+    return _FONTS["font"]
+
+
+def _esc(text):
+    """Escape a caption for a filtergraph option value.
+
+    `:` `'` `\\` and `,` are filtergraph syntax; `%` and `[` `]` only because
+    the text is quoted — expansion=none below keeps ffmpeg from reading the
+    rest as a text expansion (`DIFF 12.5% changed` is a syntax error without
+    it: "Stray % near ' changed'")."""
+    return "".join("\\" + c if c in "\\':%[],;" else c for c in str(text))
+
+
+def _caption(text, *, font, fontsize=26, y=10, x="(w-text_w)/2"):
+    """One drawtext filter, or "" when there is no font to draw with."""
+    if not font:
+        return ""
+    return (f"drawtext=fontfile={_esc(font)}:text='{_esc(text)}':x={x}:y={y}:"
+            f"fontsize={fontsize}:fontcolor=white:box=1:boxcolor=black@0.7:"
+            "boxborderw=6:expansion=none")
+
+
+def _cap_chain(label, font, *, extra=""):
+    """Add a caption bar above the current picture and burn `label` into it."""
+    text = _caption(label, font=font)
+    return (f"pad=iw:ih+{_CAPTION_H}:0:{_CAPTION_H}:0x111111"
+            + (f",{text}" if text else "") + extra)
+
+
+def _diff_filter(lab_b, lab_a, lab_d, box, no_change, font):
+    """before | after | heatmap, captioned; the diff is over the dimmed after.
+
+    The heat comes from the amplified difference ADDED to a dimmed copy of the
+    after frame, so an unchanged area shows the room rather than black, and a
+    few changed pixels glow against it. Nothing changed means the panel still
+    shows the dimmed frame AND says NO CHANGE in large text — a black rectangle
+    is otherwise indistinguishable from a render that failed."""
+    amp = "lutrgb=r='min(val*4,255)':g='min(val*4,255)':b='min(val*4,255)'"
+    dim = "lutrgb=r='val*0.45':g='val*0.45':b='val*0.45'"
+    extra = ""
+    if no_change:
+        # Without a font there is no label to draw: the panel is still the
+        # dimmed after frame, never a black rectangle.
+        label = _caption("NO CHANGE", font=font, fontsize=max(28, _PANEL_W // 12),
+                         y="(h-text_h)/2")
+        extra = f",{label}" if label else ""
+    chain = [
+        # rgb24 first: the renders carry alpha, and the difference of two
+        # opaque alphas is 0 — a fully transparent diff panel.
+        "[0]format=rgb24,split=2[braw][bpanel]",
+        "[1]format=rgb24,split=3[araw][apanel][adim]",
+        f"[braw][araw]blend=all_mode=difference,{amp}[diff]",
+        f"[adim]{dim}[dim]",
+        "[dim][diff]blend=all_mode=screen[heat]",
+        f"[bpanel]scale={_PANEL_W}:-2," + _cap_chain(lab_b, font) + "[bcap]",
+        f"[apanel]scale={_PANEL_W}:-2," + _cap_chain(lab_a, font) + "[acap]",
+        "[heat]"
+        # The box is drawn BEFORE the panel is scaled, so a literal pixel
+        # thickness is multiplied by the scale factor: t=5 on a 64px test frame
+        # becomes a 37px slab on a 480px panel, burying the change it marks.
+        # iw-relative keeps the frame ~3px whatever the render resolution.
+        + (f"drawbox=x={box[0]}:y={box[1]}:w={box[2]}:h={box[3]}:"
+           "color=0xff2d2d@1:t=max(1\\,iw/160)," if box else "")
+        + f"scale={_PANEL_W}:-2," + _cap_chain(lab_d, font, extra=extra) + "[dcap]",
+        "[bcap][acap][dcap]hstack=inputs=3,scale=1440:-2",
+    ]
+    return ";".join(chain)
+
+
+def _shrink(path, limit=_MAX_BYTES):
+    """Re-encode smaller until the PNG fits `limit` (the PR embeds it inline)."""
+    for width in (1200, 960, 780):
+        if Path(path).stat().st_size <= limit:
+            break
+        tmp = Path(str(path) + ".small.png")
+        try:
+            _ffmpeg(["-i", str(path), "-vf", f"scale={width}:-2",
+                     "-compression_level", "9", str(tmp)])
+        except EvidenceError:
+            break
+        os.replace(tmp, path)
+    return Path(path)
+
+
+def compare(baseline_dir, shots, out_dir, *, before_sha="", after_sha=""):
+    """Per camera: before | after | heatmap, each captioned, and the numbers.
+
+    Every panel says what it is and which commit it came from, the diff panel
+    is a heatmap over the dimmed after image with a box around the changed
+    region, and an unchanged camera says NO CHANGE."""
     out_dir.mkdir(parents=True, exist_ok=True)
+    font = _font_file()
     rows = []
     for shot in shots:
         before = Path(baseline_dir) / shot.name
         if not before.exists():
             rows.append({"name": shot.stem, "new": True})
             continue
-        changed, delta = diff_stats(before, shot)
+        # One exact pass: the share, the delta and the box come from the same
+        # pixel comparison, so the caption cannot say NO CHANGE about a pixel
+        # the box is framing.
+        changed, delta, box = frame_diff(before, shot)
+        lab_b = "BEFORE " + (before_sha[:10] or "baseline")
+        lab_a = "AFTER " + (after_sha[:10] or "worktree")
+        lab_d = ("DIFF unavailable" if changed is None
+                 else f"DIFF {changed:.1%} changed")
         side = out_dir / f"{shot.stem}.png"
         try:
-            # rgb24 first: the renders carry alpha, and the difference of
-            # two opaque alphas is 0 — a fully transparent diff panel.
+            # No box IS "nothing changed": both read the same pass, so the
+            # label cannot contradict the glow the reviewer can see.
             _ffmpeg(["-i", str(before), "-i", str(shot), "-filter_complex",
-                     "[0]format=rgb24,split[a0][a1];[1]format=rgb24,split[b0][b1];"
-                     "[a0][b0]blend=all_mode=difference,lutrgb=r='min(val*4,255)':"
-                     "g='min(val*4,255)':b='min(val*4,255)'[d];"
-                     "[a1][b1][d]hstack=inputs=3,scale=1440:-1", str(side)])
+                     _diff_filter(lab_b, lab_a, lab_d, box, box is None, font),
+                     "-compression_level", "9", str(side)])
+            _shrink(side)
         except EvidenceError:
             side = None
         rows.append({"name": shot.stem, "changed": changed, "delta": delta,
+                     "box": list(box) if box else None,
                      "side_by_side": str(side) if side else None})
     return rows
+
+
+def contact_sheet(shots, out_dir, *, cols=_SHEET_COLS, name="contact_sheet.png"):
+    """One labeled grid of every shot: the first thing a reviewer should see.
+
+    `shots` is a list of (label, path). Panels are always in the same order, so
+    two attempts can be compared by eye. Returns the path, or None when there
+    is nothing to show or ffmpeg cannot draw the grid."""
+    items = [(str(lbl), Path(p)) for lbl, p in shots if Path(p).exists()]
+    if not items:
+        return None
+    out = Path(out_dir) / name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    font = _font_file()
+    tile_h = _TILE_H + _LABEL_H
+    chains, labels = [], []
+    for i, (lbl, _p) in enumerate(items):
+        text = _caption(lbl, font=font, fontsize=24, y=_TILE_H + 2)
+        chains.append(
+            f"[{i}:v]format=rgb24,scale={_TILE_W}:{_TILE_H}:"
+            f"force_original_aspect_ratio=decrease,pad={_TILE_W}:{tile_h}:"
+            f"(ow-iw)/2:0:0x111111" + (f",{text}" if text else "") + f"[t{i}]")
+        labels.append(f"[t{i}]")
+    rows = [labels[i:i + cols] for i in range(0, len(labels), cols)]
+    grid_w = _TILE_W * cols
+    outs = []
+    for r, row in enumerate(rows):
+        joined = "".join(row)
+        chains.append(joined + (f"hstack=inputs={len(row)}[r{r}]" if len(row) > 1
+                                else f"null[r{r}]"))
+        # A short last row is left-padded to the grid width so the rows stack.
+        chains.append(f"[r{r}]pad={grid_w}:{tile_h}:0:0:0x111111[p{r}]")
+        outs.append(f"[p{r}]")
+    chains.append("".join(outs)
+                  + (f"vstack=inputs={len(outs)}[grid]" if len(outs) > 1
+                     else "null[grid]"))
+    chains.append(f"[grid]scale={min(grid_w, 1600)}:-2")
+    try:
+        _ffmpeg([*[a for _lbl, p in items for a in ("-i", str(p))],
+                 "-filter_complex", ";".join(chains),
+                 "-compression_level", "9", str(out)])
+    except EvidenceError:
+        return None
+    return _shrink(out)
 
 
 # --- baseline at the merge base ---------------------------------------------
@@ -516,7 +740,12 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
                 manifest["warnings"].append(f"no baseline: {str(exc)[:200]}")
             manifest["baseline"] = {"sha": sha, "dir": str(bdir) if bdir else None}
             if bdir:
-                manifest["compare"] = compare(bdir, shots, out_dir / "compare")
+                manifest["compare"] = compare(
+                    bdir, shots, out_dir / "compare",
+                    before_sha=sha, after_sha=manifest.get("head", ""))
+    sheet = contact_sheet(capture_shots(manifest), out_dir)
+    if sheet:
+        manifest["contact_sheet"] = str(sheet)
     manifest["seconds"] = round(time.time() - started, 1)
     (out_dir / "manifest.json").write_text(json.dumps(manifest, indent=2),
                                            encoding="utf-8")
@@ -529,10 +758,30 @@ def _pct(x):
     return "—" if x is None else f"{x:.1%}"
 
 
+def capture_shots(manifest):
+    """[(label, path)] from the manifest: every render, in capture order.
+
+    The shots ARE the after images (this worktree's renders), so each tile is
+    (camera name, shot). Scene renders — the other producer of shots — follow,
+    named by their scene. These labels are what the contact sheet prints under
+    each tile."""
+    out = [(Path(s).stem, s) for s in manifest.get("shots") or []]
+    for sc in manifest.get("scenes") or []:
+        name = Path(str(sc.get("path") or "")).stem
+        for s in sc.get("shots") or []:
+            out.append((name or Path(s).stem, s))
+    return out
+
+
 def review_images(manifest, limit=8):
-    """Images to attach for a reviewer, most informative first."""
-    out = [c["side_by_side"] for c in manifest.get("compare") or []
-           if c.get("side_by_side")]
+    """Images to attach for a reviewer, most informative first.
+
+    The contact sheet comes FIRST: one labeled grid of every camera is what a
+    reviewer should see before eight full-size panels."""
+    sheet = manifest.get("contact_sheet")
+    out = [sheet] if sheet and Path(sheet).exists() else []
+    out += [c["side_by_side"] for c in manifest.get("compare") or []
+            if c.get("side_by_side")]
     compared = {Path(c["side_by_side"]).stem for c in manifest.get("compare") or []
                 if c.get("side_by_side")}
     out += [s for s in manifest.get("shots") or [] if Path(s).stem not in compared]
@@ -649,6 +898,12 @@ def pr_markdown(manifest, web_base, *, task_id, attempt):
     head = (manifest.get("head") or "")[:10]
     lines = [f"### 🎥 Visual evidence — `{task_id}` attempt {attempt}"
              + (f" at `{head}`" if head else ""), ""]
+    sheet = manifest.get("contact_sheet")
+    if sheet and Path(sheet).exists():
+        # First, before the videos and panels: one labeled grid of everything
+        # captured is what tells a reviewer at a glance what they are looking at.
+        lines += [f"**Every camera** ([full size]({url(sheet, raw=True)}))", "",
+                  f"![contact sheet]({url(sheet)})", ""]
     vids = manifest.get("videos") or {}
     for kind in ("playtest", "flythrough"):
         v = vids.get(kind)

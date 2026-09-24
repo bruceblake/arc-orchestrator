@@ -162,6 +162,7 @@ ACTIVITY_TYPES = frozenset((
     "task.reviewed", "task.failed", "task.escalated", "task.merged",
     "task.pr_opened", "task.pr_reviewed", "task.resynced",
     "task.review_degraded", "driver.stalled",
+    "driver.usage_limit", "driver.usage_swap",
     "chain.wait", "chain.ready", "chain.blocked",
 ))
 # A feed is a window, not a log download: the page asks for 50, and a
@@ -3075,6 +3076,374 @@ def _exited_early(proc, seconds):
 
 _RUN_LOG_RE = re.compile(r"^(run|plan)-[\w.-]+\.log$")
 
+# --- task timeline: everything that happened to one task -------------------
+# Debugging a task used to mean grepping events.jsonl, the harness
+# transcripts, error_events, gate output and logs/evidence by hand. This is
+# the one read-only view that gathers them, and the whole of its input is a
+# task id plus an OPTIONAL taskfile name — never a command, a path or a ref
+# from a request body (AGENTS.md Rule 6b: the dashboard is unauthenticated
+# and listens on every interface).
+#
+# The id is validated before it is used as a path segment under logs/evidence
+# or as a harness_runs LIKE prefix, exactly like the file parameters of
+# /api/gate-log and /api/transcript. `.` and `-` are legal INSIDE an id
+# (`deepseek-v4.1-flash`), but an id made only of dots is a traversal — ".."
+# matched the character class and then became a path segment under the
+# evidence root, which is exactly the hole this validates against.
+_TASK_ID_RE = re.compile(r"^(?!\.+$)[A-Za-z0-9_.-]{1,120}$")
+
+# How far back the timeline reads events.jsonl. The log is append-ordered and
+# rotates at 100 MiB, so the newest records are the last lines: a 100 MiB file
+# must not be parsed to answer "what happened to this one task". Two bounds
+# guard that — the number of LINES examined and the number of events kept —
+# and both are reported, so a truncated answer is visible rather than passed
+# off as the whole history.
+TIMELINE_SCAN_LINES = 20000
+TIMELINE_MAX_EVENTS = 4000
+_TIMELINE_BYTES_PER_LINE = 512      # tail window sized from the line budget
+
+# Which events belong on a task's timeline. Prefix families, not an
+# enumeration of today's names: the driver and code-task namespaces grow
+# (`driver.usage_limit`, `driver.usage_swap`, `driver.queued`… all exist and
+# all belong here), and a hand-kept list would silently drop the next one.
+# That silent drop is exactly the failure this feature exists to end — the
+# scan is bounded separately, so breadth here costs nothing.
+TIMELINE_PREFIXES = ("driver.", "task.", "worktree.", "git.", "evidence.",
+                     "chain.")
+# Events that are technically in those namespaces but are fleet weather on a
+# task that happens to share the account, not this task's history.
+TIMELINE_SKIP = frozenset(("driver.heartbeat", "driver.queued",
+                           "driver.slot_wait", "driver.cap_timeout"))
+# What the drawer renders as the body of an entry. A driver.done carries a
+# verdict, a task.gate its output tail; dumping the whole event is unreadable.
+TIMELINE_BODY_KEYS = ("tail", "output", "why", "reason", "error", "issues",
+                      "message", "note", "review_issues")
+
+
+def _timeline_owns(etype):
+    """Whether an event type is one a task timeline shows."""
+    if not isinstance(etype, str):
+        return False
+    return (etype not in TIMELINE_SKIP
+            and etype.startswith(TIMELINE_PREFIXES))
+
+
+def _timeline_id_matches(ev_task, tid):
+    """Whether this event's task field names this task or one of its attempts.
+
+    Fix rounds record `<tid>-x<attempt>` and PR rounds `<tid>-pr<n>`, so a
+    timeline matching only the bare id would miss every attempt that was not
+    the first — which is exactly where the debugging is.
+
+    The suffix is matched EXPLICITLY (`-x`, `-pr`), not as a bare `-`: a
+    sibling task named `<id>-something` (task ids are hyphenated English, so
+    `t1-sibling` and `t1` are both real) shares the prefix without being an
+    attempt of this task, and its events would otherwise appear here.
+    """
+    if not isinstance(ev_task, str):
+        return False
+    if ev_task == tid:
+        return True
+    return ev_task.startswith((tid + "-x", tid + "-pr"))
+
+
+def _evidence_root():
+    return Path(config.EVIDENCE_DIR).resolve()
+
+
+def _evidence_url(root, p):
+    """The /api/evidence-file URL for a path inside the evidence root, or None.
+
+    Containment, not string matching: a manifest naming /etc/passwd or
+    ../../id_rsa resolves OUTSIDE the root and gets no URL at all.
+    """
+    try:
+        rel = Path(p).resolve().relative_to(root)
+    except (ValueError, OSError):
+        return None
+    return "/api/evidence-file?path=" + str(rel)
+
+
+def _timeline_evidence(tid):
+    """Evidence manifests under logs/evidence/<project>/<tid>/x*/manifest.json.
+
+    EVERY project directory is walked, because the previous cap of the first
+    64 (alphabetically) silently dropped the evidence of any task whose
+    project sorts later — and an absent manifest is indistinguishable from a
+    run that captured none, so the drawer reported it as "no evidence" rather
+    than as a missing lookup. The walk is a readdir plus a stat per candidate;
+    only a directory that actually has a `<tid>/x*` subtree costs anything.
+
+    Each manifest's shots become /api/evidence-file URLs, but only for files
+    that resolve inside the evidence root.
+    """
+    root = _evidence_root()
+    out = []
+    if not root.is_dir():
+        return out
+    try:
+        projects = sorted(p for p in root.iterdir() if p.is_dir())
+    except OSError:
+        return out
+    for proj in projects:
+        tdir = proj / tid
+        if not tdir.is_dir():
+            continue
+        try:
+            attempts = sorted(a for a in tdir.iterdir()
+                              if a.is_dir() and a.name.startswith("x"))
+        except OSError:
+            continue
+        for adir in attempts:
+            mf = adir / "manifest.json"
+            if not mf.is_file():
+                continue
+            try:
+                man = json.loads(mf.read_text(encoding="utf-8", errors="replace"))
+            except Exception:
+                continue                    # a half-written manifest is skipped
+            if not isinstance(man, dict):
+                continue
+            cands, shots, seen = [], [], set()
+            cands += list(man.get("shots") or [])
+            cands += list(man.get("playtest_shots") or [])
+            cands += [c.get("side_by_side") for c in (man.get("compare") or [])
+                      if isinstance(c, dict)]
+            for sc in (man.get("scenes") or []):
+                if isinstance(sc, dict):
+                    cands += list(sc.get("shots") or [])
+            for s in cands:
+                if not s or str(s) in seen:
+                    continue
+                seen.add(str(s))
+                url = _evidence_url(root, s)
+                if url:
+                    shots.append({"name": Path(str(s)).name, "url": url})
+            out.append({
+                "project": proj.name, "attempt": adir.name,
+                "manifest": str(mf), "seconds": man.get("seconds"),
+                # A manifest records no instant of its own; the capture wrote
+                # it into the attempt directory, so that directory's mtime is
+                # when this evidence belongs on the timeline.
+                "ts": _ts_of(mf.stat().st_mtime) if mf.exists() else None,
+                "shots": shots, "videos": man.get("videos") or {},
+                "compare": [c for c in (man.get("compare") or [])
+                            if isinstance(c, dict)],
+                "coverage": man.get("coverage"),
+                "godot_errors": man.get("godot_errors") or [],
+                "no_visible_change": man.get("no_visible_change"),
+                "warnings": man.get("warnings") or [],
+            })
+    return out
+
+
+def _timeline_events(tid, max_events=None, scan_lines=None):
+    """This task's events, oldest first, from a BOUNDED backward scan.
+
+    events.jsonl is append-ordered, so the newest records are the last lines,
+    and a task's own attempts are near the end. Reading the whole history on
+    every drawer open is what this avoids: at most `scan_lines` lines are
+    examined and the scan stops once `max_events` matches are held.
+    `truncated` reports that a bound was hit, so the page can say the view is
+    partial instead of showing a cut-off history as if it were complete.
+    """
+    path = Path(config.EVENTS_LOG)
+    try:
+        st = path.stat()
+    except OSError:
+        return {"events": [], "scanned": 0, "truncated": False}
+    # Resolved at CALL time, not bound as a default: the module constants are
+    # the live policy, and a default argument would freeze the value the
+    # module was imported with (so lowering the bound has no effect).
+    max_events = TIMELINE_MAX_EVENTS if max_events is None else max_events
+    scan_lines = TIMELINE_SCAN_LINES if scan_lines is None else scan_lines
+    # mtime-gated cache: the drawer polls, and re-parsing an unchanged tail
+    # every 3 s is the same waste twice.
+    key = (str(path), st.st_size, st.st_mtime_ns, tid,
+           int(max_events), int(scan_lines))
+    # The check-and-read is ONE critical section. This server is a
+    # ThreadingHTTPServer, so two overlapping GETs used to interleave as
+    # "key matches for task A, value already replaced by task B" and one
+    # task's timeline came back holding another task's events. The lock is
+    # held across the hit test and the publish only — never across the scan —
+    # so it serialises a dict lookup, not the work.
+    with _timeline_cache_lock:
+        if _timeline_cache["key"] == key:
+            return _timeline_cache["value"]
+    lines, window_is_partial = [], False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as fh:
+            window = min(st.st_size,
+                         max(1, int(scan_lines)) * _TIMELINE_BYTES_PER_LINE)
+            window_is_partial = window < st.st_size
+            if window:
+                fh.seek(st.st_size - window)
+            if window_is_partial:
+                fh.readline()               # discard the partial first line
+            lines = fh.read().splitlines()
+    except OSError:
+        lines = []
+    if len(lines) > scan_lines:
+        lines = lines[-scan_lines:]
+        window_is_partial = True
+    events, scanned, hit_bound = [], 0, False
+    for line in reversed(lines):
+        if len(events) >= max_events:
+            hit_bound = True
+            break
+        scanned += 1
+        try:
+            e = json.loads(line)
+        except Exception:
+            continue                        # corrupt line: skip, never 500
+        if not isinstance(e, dict):
+            continue
+        if _timeline_owns(e.get("type")) and _timeline_id_matches(e.get("task"), tid):
+            events.append(e)
+    events.reverse()                        # the scan walked backwards
+    # This call's OWN value is what it returns — never a re-read of the
+    # shared dict, which another thread may have replaced while the scan ran.
+    value = {"events": events, "scanned": scanned,
+             "truncated": bool(hit_bound or window_is_partial)}
+    with _timeline_cache_lock:
+        _timeline_cache["key"], _timeline_cache["value"] = key, value
+    return value
+
+
+_timeline_cache = {"key": None, "value": None}
+# Guards the key/value pair above as ONE snapshot. Dashboard.Handler runs on a
+# ThreadingHTTPServer, so the pair is read and written from several threads.
+_timeline_cache_lock = threading.Lock()
+
+
+def _ts_of(v):
+    """A sortable epoch from whatever a source records time as.
+
+    events.jsonl writes epochs, but harness_runs and error_events store an ISO
+    string (`Store._now`). Sorting the two together needs one type, so an ISO
+    timestamp is converted and anything unparsable is None.
+    """
+    if isinstance(v, (int, float)):
+        return float(v)
+    if isinstance(v, str) and v:
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _timeline_entry(e):
+    """One event reduced to the shape the drawer renders, body text inline.
+
+    A driver.done carries a verdict, a task.gate its output tail, a
+    task.failed its reason. `body` picks the first of these that is present so
+    the page shows WHY an entry matters rather than a JSON blob.
+    """
+    out = {"kind": "event", "ts": e.get("ts"), "type": e.get("type"),
+           "task": e.get("task"), "run_id": e.get("run_id")}
+    for k, v in e.items():
+        if k not in out:
+            out[k] = v
+    for k in TIMELINE_BODY_KEYS:
+        v = e.get(k)
+        if v:
+            out["body"] = v if isinstance(v, list) else str(v)[:2000]
+            break
+    return out
+
+
+def _timeline(tid, taskfile=None, store=None):
+    """Everything recorded about one task, in time order.
+
+    Four sources, one list: this task's events (bounded backward scan of
+    events.jsonl), its harness_runs rows (with the transcript path to open),
+    its error_events rows with their fingerprints, and its evidence manifests.
+    Read-only, and every source is optional — a task that never ran has an
+    empty timeline, not an error.
+    """
+    import errors as _errors_mod
+    store = store if store is not None else Handler.store
+    ev = _timeline_events(tid)
+    entries = [_timeline_entry(e) for e in ev["events"]]
+    # harness_runs: rows for the task itself and each `<tid>-x<n>` attempt.
+    # harness_runs_prefix does the LIKE, so one query covers both shapes.
+    try:
+        runs = store.harness_runs_prefix(tid) if store else []
+    except Exception:
+        runs = []
+    runs = [r for r in runs if _timeline_id_matches(r.get("task_id"), tid)]
+    for r in runs:
+        tpath = r.get("transcript")
+        entries.append({
+            "kind": "run", "ts": _ts_of(r.get("created_at")), "type": "harness.run",
+            "task": r.get("task_id"), "harness": r.get("harness"),
+            "model": r.get("model"), "role": r.get("role"),
+            "attempt": r.get("attempt"), "exit_code": r.get("exit_code"),
+            "seconds": r.get("seconds"),
+            "verdict": (r.get("verdict") or "")[:400],
+            "transcript": str(tpath) if tpath else None,
+            "file": Path(str(tpath)).name if tpath else None,
+        })
+    # error_events: the fingerprint is the whole point of the table (Rule 7b),
+    # so it is carried through and the drawer highlights these rows.
+    errs = []
+    try:
+        errs = _errors_mod.recent(limit=200, task=tid, task_prefix=True)
+    except Exception:
+        errs = []
+    for r in errs:
+        entries.append({
+            "kind": "error", "ts": r.get("ts"), "type": "error",
+            "task": r.get("task"), "fingerprint": r.get("fingerprint"),
+            "error_kind": r.get("kind"), "message": r.get("message"),
+            "where": r.get("where_"), "model": r.get("model"),
+            "node": r.get("node"), "run_id": r.get("run_id"),
+            "traceback": (r.get("traceback") or "")[-4000:],
+        })
+    evidence = _timeline_evidence(tid)
+    for man in evidence:
+        entries.append({
+            "kind": "evidence", "ts": man.get("ts"), "type": "evidence.manifest",
+            "task": tid, "attempt": man["attempt"], "project": man["project"],
+            "manifest": man["manifest"], "shots": man["shots"],
+            "videos": man["videos"], "compare": man["compare"],
+            "coverage": man["coverage"], "godot_errors": man["godot_errors"],
+            "no_visible_change": man["no_visible_change"],
+            "warnings": man["warnings"], "seconds": man["seconds"],
+        })
+    # Time order, across all four sources. The keys mixed epochs (events) and
+    # ISO strings (harness_runs, error_events), which is why _ts_of normalises
+    # them first. An entry with no usable timestamp sorts FIRST rather than
+    # being dropped — an undated entry is still evidence — and the sort is
+    # stable, so equal stamps keep the order they were built in.
+    entries.sort(key=lambda x: _ts_of(x.get("ts"))
+                 if _ts_of(x.get("ts")) is not None else float("-inf"))
+    project = None
+    if taskfile:
+        try:
+            tf = Path(config.TASKS_DIR) / taskfile
+            project = json.loads(tf.read_text(encoding="utf-8",
+                                              errors="replace"))
+        except Exception:
+            project = None
+    status = None
+    try:
+        for row in (store.code_tasks_all(2000) if store else []):
+            if row.get("id") == tid and (not taskfile
+                                         or Path(str(row.get("taskfile") or "")).name == taskfile):
+                status = row.get("status")
+                break
+    except Exception:
+        status = None
+    return {"id": tid, "taskfile": taskfile, "status": status,
+            "title": (project or {}).get("title") if isinstance(project, dict) else None,
+            "entries": entries, "counts": {
+                "events": len(ev["events"]), "runs": len(runs),
+                "errors": len(errs), "evidence": len(evidence)},
+            "scanned": ev["scanned"], "truncated": ev["truncated"],
+            "scan_limit": TIMELINE_SCAN_LINES, "ts": time.time()}
+
 
 def _log_tail(log_name, n):
     """Last n lines of logs/<log_name>, [] if unreadable."""
@@ -3358,7 +3727,37 @@ def _captain_state():
         sessions = _captain_sessions()["sessions"]
     except Exception:
         sessions = []
-    return {"state": state, "sessions": sessions}
+    return {"state": state, "sessions": sessions, "autopilot": _autopilot_view()}
+
+
+def _autopilot_view():
+    """GET /api/captain/autopilot — the autopilot's state, latest findings,
+    recent actions and unacknowledged escalations. Never raises."""
+    try:
+        import captain_autopilot
+        return captain_autopilot.view()
+    except Exception:
+        return {"paused": False, "running": False, "findings": [], "actions": [],
+                "escalations": []}
+
+
+def _autopilot_pause(body):
+    """POST /api/captain/autopilot/pause {"paused": bool} — toggles the pause
+    file. Guarded like every POST (_refuse_post: JSON, same origin, and
+    ARC_DASHBOARD_TOKEN when set)."""
+    if not isinstance(body, dict) or not isinstance(body.get("paused"), bool):
+        return {"error": "body must be {\"paused\": true|false}"}, 400
+    import captain_autopilot
+    return {"paused": captain_autopilot.set_paused(body["paused"], by="dashboard")}, 200
+
+
+def _autopilot_ack(body):
+    """POST /api/captain/autopilot/ack {"id": "<escalation id>"}."""
+    esc = body.get("id") if isinstance(body, dict) else None
+    import captain_autopilot
+    if not captain_autopilot.ack_escalation(esc, by="dashboard"):
+        return {"error": "no such escalation"}, 404
+    return {"ok": True, "id": esc}, 200
 
 
 def _captain_sessions():
@@ -3770,6 +4169,7 @@ def _health(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
     import reconcile
+    import drivers
 
     # Two different caps govern the same model and must not be conflated:
     #   driver_cap  — how many harness instances THIS fleet may run
@@ -3852,6 +4252,7 @@ def _health(store):
             # idle rather than broken: every driver waits for ARC, nothing runs,
             # nothing errors. An operator staring at zeros needs to be told why.
             "arc": _arc_status(now),
+            "plans": drivers.active_plan_windows(_load_event_lines(), now),
             "served_head": (_SERVED_HEAD or "")[:12], "served_at": _SERVED_AT}
 
 
@@ -4177,6 +4578,206 @@ def _build_graph_topologies():
     return {"code": topo}
 
 
+_BOARD_TOKEN = re.compile(r"^[A-Za-z0-9_.:/-]+$")
+_BOARD_REPLY = re.compile(r"^[A-Za-z0-9]{1,32}$")
+
+
+def _board_token(value):
+    """A project or channel name: the allowed alphabet, and no path escape.
+
+    The alphabet includes ``/`` and ``.`` because channels look like
+    ``task:<id>`` and ``dm:<task>/<role>``. ``..`` and a leading slash are
+    still a traversal, so they are rejected even though the class allows
+    those characters. Nothing here is ever opened as a path (Rule 6b).
+    """
+    if not isinstance(value, str) or not _BOARD_TOKEN.fullmatch(value):
+        return None
+    if value.startswith("/") or "\\" in value:
+        return None
+    if any(part == ".." for part in value.split("/")):
+        return None
+    return value
+
+
+def _board_projects():
+    import agentboard
+    with agentboard._lock:
+        rows = agentboard._conn().execute(
+            "SELECT project, COUNT(*) AS n, MAX(ts) AS last_ts "
+            "FROM board_messages GROUP BY project ORDER BY last_ts DESC"
+        ).fetchall()
+    return [{"project": r["project"], "count": r["n"], "last_ts": r["last_ts"]}
+            for r in rows]
+
+
+def _board_task_rows(store, project):
+    """code_tasks rows whose worktree (or taskfile stem) is this board project."""
+    root = Path(config.WORKTREE_ROOT)
+    out = []
+    for row in store.code_tasks_all(2000):
+        wt = row.get("worktree") or ""
+        proj = ""
+        if wt:
+            try:
+                rel = Path(wt).resolve().relative_to(root.resolve())
+                proj = rel.parts[0] if rel.parts else ""
+            except (ValueError, OSError):
+                if project in Path(wt).parts:
+                    proj = project
+        stem = Path(row.get("taskfile") or "").stem
+        if proj == project or stem == project:
+            out.append(row)
+    return out
+
+
+def _board_channels(store, project):
+    import agentboard
+    tasks = _board_task_rows(store, project)
+    by_id = {r["id"]: r for r in tasks}
+    seen = {}
+    for c in agentboard.channels(project, reader="operator"):
+        seen[c["channel"]] = {
+            "channel": c["channel"], "last_ts": c["last_ts"], "count": c["count"],
+            "unread": c.get("unread_for") or 0,
+        }
+    for name in ("project", "captain", "operator"):
+        seen.setdefault(name, {"channel": name, "last_ts": None, "count": 0, "unread": 0})
+    for tid, row in by_id.items():
+        name = f"task:{tid}"
+        slot = seen.setdefault(name, {"channel": name, "last_ts": None, "count": 0, "unread": 0})
+        slot["status"] = row.get("status") or ""
+        slot["model"] = row.get("model") or ""
+        slot["title"] = row.get("title") or ""
+    for slot in seen.values():
+        ch = slot["channel"]
+        if ch.startswith("task:") and "status" not in slot:
+            row = by_id.get(ch[5:])
+            slot["status"] = (row or {}).get("status") or ""
+    order = {"project": 0, "captain": 2, "operator": 3}
+    def key(slot):
+        ch = slot["channel"]
+        if ch.startswith("dm:"):
+            rank = 4
+        elif ch.startswith("task:"):
+            rank = 1
+        else:
+            rank = order.get(ch, 5)
+        return (rank, -(slot["last_ts"] or 0), ch)
+    return {"channels": sorted(seen.values(), key=key),
+            "tasks": [{"id": r["id"], "status": r.get("status") or "",
+                       "model": r.get("model") or "", "title": r.get("title") or ""}
+                      for r in tasks]}
+
+
+def _board_claim_view(project):
+    import agentboard
+    rows = agentboard.claims(project)
+    for c in rows:
+        hits = []
+        for other in rows:
+            if other["id"] == c["id"] or other.get("author") == c.get("author"):
+                continue
+            if any(agentboard.paths_overlap(p, q)
+                   for p in c.get("paths") or [] for q in other.get("paths") or []):
+                hits.append(other.get("author") or "")
+        c["overlaps"] = hits
+        c["conflict"] = bool(hits)
+    return rows
+
+
+def _board_get(path, q, store):
+    """JSON body and status for one board read. None when path is unrelated."""
+    import agentboard
+    if path == "/api/board/projects":
+        return {"projects": _board_projects()}, 200
+    project = _board_token((q.get("project") or [""])[0])
+    if path not in ("/api/board/channels", "/api/board/thread", "/api/board/inbox",
+                    "/api/board/claims", "/api/board/expertise"):
+        return None
+    if not project:
+        return {"error": "project must match [A-Za-z0-9_.:/-]+ and must not traverse"}, 400
+    if path == "/api/board/channels":
+        return _board_channels(store, project), 200
+    if path == "/api/board/claims":
+        return {"claims": _board_claim_view(project)}, 200
+    if path == "/api/board/expertise":
+        return {"expertise": agentboard.expertise(project)}, 200
+    if path == "/api/board/inbox":
+        agent = _board_token((q.get("agent") or [""])[0])
+        if not agent:
+            return {"error": "agent must match [A-Za-z0-9_.:/-]+ and must not traverse"}, 400
+        return {"messages": agentboard.inbox(project, agent)}, 200
+    channel = (q.get("channel") or [""])[0]
+    if channel:
+        channel = _board_token(channel)
+        if not channel or not agentboard.valid_channel(channel):
+            return {"error": "invalid channel"}, 400
+    since = (q.get("since") or [None])[0]
+    since_ts = None
+    if since not in (None, ""):
+        try:
+            since_ts = float(since)
+        except (TypeError, ValueError):
+            return {"error": "since must be a timestamp"}, 400
+    kinds = None
+    raw_kinds = (q.get("kinds") or [""])[0]
+    if raw_kinds:
+        kinds = [k for k in raw_kinds.split(",") if k]
+        if any(k not in agentboard.KINDS for k in kinds):
+            return {"error": "unknown kind"}, 400
+    return {"messages": agentboard.thread(project, channel or None, since_ts, kinds=kinds)}, 200
+
+
+def _board_post(body):
+    """Operator post. Author is always ``operator``. No path, command, or ref
+    from the body is read, opened, or stored — extra keys are ignored."""
+    import agentboard
+    if not isinstance(body, dict):
+        return {"error": "body must be an object"}, 400
+    project = _board_token(body.get("project"))
+    channel = _board_token(body.get("channel"))
+    if not project or not channel or not agentboard.valid_channel(channel):
+        return {"error": "project and channel must match [A-Za-z0-9_.:/-]+ and a real channel"}, 400
+    kind = body.get("kind") if isinstance(body.get("kind"), str) else ""
+    if kind not in agentboard.KINDS:
+        return {"error": "kind must be one of the board kinds"}, 400
+    text = body.get("body")
+    if not isinstance(text, str):
+        return {"error": "body text must be a string"}, 400
+    text = text[:config.BOARD_BODY_MAX]
+    mentions = body.get("mentions") or []
+    if not isinstance(mentions, list) or any(not isinstance(m, str) or not _board_token(m.lstrip("@")) for m in mentions):
+        return {"error": "mentions must be a list of names"}, 400
+    if len(mentions) > 20:
+        return {"error": "too many mentions"}, 400
+    reply_to = body.get("reply_to") or None
+    if reply_to is not None and (not isinstance(reply_to, str) or not _BOARD_REPLY.fullmatch(reply_to)):
+        return {"error": "invalid reply_to"}, 400
+    mid = agentboard.post(
+        project, author="operator", channel=channel, kind=kind, body=text,
+        mentions=[m.lstrip("@") for m in mentions], reply_to=reply_to,
+        author_role="operator")
+    return {"id": mid, "author": "operator"}, 200
+
+
+def _board_read(body):
+    """Mark a channel read for the operator, up to ``ts``. Same name checks
+    as a post: nothing in the body is opened as a path or run as a command."""
+    import agentboard
+    if not isinstance(body, dict):
+        return {"error": "body must be an object"}, 400
+    project = _board_token(body.get("project"))
+    channel = _board_token(body.get("channel"))
+    if not project or not channel or not agentboard.valid_channel(channel):
+        return {"error": "project and channel must match [A-Za-z0-9_.:/-]+ and a real channel"}, 400
+    try:
+        ts = float(body.get("ts"))
+    except (TypeError, ValueError):
+        return {"error": "ts must be a timestamp"}, 400
+    agentboard.mark_read(project, "operator", channel, ts)
+    return {"ok": True, "reader": "operator"}, 200
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "ArcDashboard/2.0"
     store = None
@@ -4272,6 +4873,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_captain_sessions())
             if u.path == "/api/captain/queue":
                 return self._json(_captain_queue())
+            if u.path == "/api/captain/autopilot":
+                return self._json(_autopilot_view())
             if u.path == "/api/captain/poll":
                 q = parse_qs(u.query)
                 session = q.get("session", [""])[0]
@@ -4519,12 +5122,61 @@ class Handler(BaseHTTPRequestHandler):
                 # actually form, and what the engine can and cannot express.
                 import graph_shapes
                 return self._json(graph_shapes.describe())
+            if u.path == "/api/evidence-file":
+                # Read-only bytes of ONE evidence artifact, for the timeline
+                # drawer's thumbnails and video links. The path is confined to
+                # the evidence root by resolving it and testing containment —
+                # a ".." segment, an absolute path elsewhere, or a symlink out
+                # of the tree all resolve outside and are refused.
+                q = parse_qs(u.query, keep_blank_values=True)
+                rel = q.get("path", [""])[0]
+                root = _evidence_root()
+                bad = None
+                try:
+                    target = (root / rel).resolve()
+                except OSError:
+                    bad = "bad path"
+                    target = None
+                if target is None or rel.strip() == "" or Path(rel).is_absolute():
+                    bad = bad or "bad path"
+                elif target != root and root not in target.parents:
+                    bad = "path outside the evidence directory"
+                elif not target.is_file():
+                    bad = "not found"
+                if bad:
+                    return self._json({"error": bad},
+                                      404 if bad == "not found" else 400)
+                ctype = ("video/mp4" if target.suffix == ".mp4"
+                         else "image/gif" if target.suffix == ".gif"
+                         else "image/png" if target.suffix == ".png"
+                         else "application/json" if target.suffix == ".json"
+                         else "application/octet-stream")
+                return self._file(target, ctype)
+            if re.fullmatch(r"/api/tasks/[^/]+/timeline", u.path):
+                # Everything recorded about one task, in time order: its
+                # events, harness runs with transcript paths, error_events
+                # rows with fingerprints, and its evidence manifests. GET
+                # only, and the id is validated before it is used as a path
+                # segment or a LIKE prefix (Rule 6b).
+                tid = u.path[len("/api/tasks/"):-len("/timeline")]
+                if not _TASK_ID_RE.fullmatch(tid):
+                    return self._json({"error": "bad task id"}, 400)
+                q = parse_qs(u.query, keep_blank_values=True)
+                taskfile = q.get("taskfile", [""])[0] or None
+                if taskfile and not re.fullmatch(r"[\w.-]+\.json", taskfile):
+                    return self._json({"error": "bad file name"}, 400)
+                return self._json(_timeline(tid, taskfile, Handler.store))
             if u.path == "/api/pipeline":
                 import pipeline_doc
                 return self._json(pipeline_doc.describe(
                     _build_graph_topologies()["code"]))
             if u.path == "/api/graphs":
                 return self._json(_build_graph_topologies())
+            if u.path.startswith("/api/board/"):
+                q = parse_qs(u.query)
+                got = _board_get(u.path, q, Handler.store)
+                if got is not None:
+                    return self._json(got[0], got[1])
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
             pass
@@ -4614,6 +5266,12 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/captain/start":
                 obj, code = _captain_start(body)
                 return self._json(obj, code)
+            if u.path == "/api/captain/autopilot/pause":
+                obj, code = _autopilot_pause(body)
+                return self._json(obj, code)
+            if u.path == "/api/captain/autopilot/ack":
+                obj, code = _autopilot_ack(body)
+                return self._json(obj, code)
             if u.path == "/api/projects/stop":
                 obj, code = _stop_project(body)
                 return self._json(obj, code)
@@ -4642,6 +5300,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path == "/api/restart":
                 obj, code = _restart(body)
+                return self._json(obj, code)
+            if u.path == "/api/board/post":
+                obj, code = _board_post(body)
+                return self._json(obj, code)
+            if u.path == "/api/board/read":
+                obj, code = _board_read(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
         except BrokenPipeError:
@@ -4720,6 +5384,12 @@ def serve(port=None, db_path=None):
         log.info("captain queue drain armed")
     except Exception as exc:
         log.error("captain queue drain did not start: %s", exc)
+    try:
+        from studio import autopilot
+        armed = autopilot.start(db_path)
+        log.info("studio autopilot %s", "armed" if armed else "off")
+    except Exception as exc:
+        log.error("studio autopilot did not start: %s", exc)
     print(f"dashboard: http://localhost:{port}", flush=True)
     # Bound to one address: that is the only one worth printing. Bound to
     # all of them: list the LAN ones, which is what a phone needs.

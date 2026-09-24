@@ -98,6 +98,18 @@ function renderHealth(h) {
          <span class="hint">Reconnect the Cisco VPN; drivers resume on their own within ~30s.</span>`
       : "";
   }
+  const plans = h.plans || [];
+  const plansEl = $("#plans-banner");
+  if (plansEl) {
+    plansEl.style.display = plans.length ? "" : "none";
+    plansEl.innerHTML = plans.length ? plans.map(p => {
+      const when = p.resets_at
+        ? `resets ${new Date(p.resets_at * 1000).toLocaleString()}`
+        : "reset time not stated";
+      const moved = p.swapped_to ? ` Last attempt moved to ${esc(short(p.swapped_to))}.` : "";
+      return `<div><b>${esc(p.label)} plan spent</b> (${esc(short(p.model || ""))}) — ${esc(when)}.${moved}</div>`;
+    }).join("") + `<span class="hint">The fleet keeps running on other seats. This is a subscription window, not a crash.</span>` : "";
+  }
   const stale = h.stale_source || [];
   const banner = $("#stale-banner");
   const msg = $("#stale-banner-msg");
@@ -131,7 +143,8 @@ function renderHealth(h) {
     `(${drivers} fleet agent${drivers === 1 ? "" : "s"} · ${runs} run${runs === 1 ? "" : "s"}` +
     `${interactive > 0 ? ` · ${interactive} interactive session${interactive === 1 ? "" : "s"} sharing the account` : ""}` +
     `${over.length ? " · OVER CAP: " + over.map(m => m.pretty).join(", ") : ""}` +
-    `${!over.length && at.length ? " · at cap: " + at.map(m => m.pretty).join(", ") : ""})`;
+    `${!over.length && at.length ? " · at cap: " + at.map(m => m.pretty).join(", ") : ""}` +
+    `${plans.length ? " · PLAN SPENT: " + plans.map(p => p.label).join(", ") : ""})`;
   $("#health-models").innerHTML = models.map(m => {
     const cap = m.driver_cap || 0;
     const pct = cap ? Math.min(100, 100 * m.drivers / cap) : 0;
@@ -281,6 +294,8 @@ const ACTIVITY_KIND = {
   "task.review_degraded": {k: "degraded", w: "degraded"},
   "task.resynced": {k: "degraded", w: "resynced"},
   "driver.stalled": {k: "stall",   w: "stalled"},
+  "driver.usage_limit": {k: "plan", w: "plan spent"},
+  "driver.usage_swap": {k: "escalate", w: "plan swap"},
   "chain.wait": {k: "stall",       w: "chain wait"},
   "chain.ready": {k: "merge",      w: "chain ready"},
   "chain.blocked": {k: "fail",     w: "chain blocked"},
@@ -290,13 +305,15 @@ const ACTIVITY_KIND = {
 // waiting on an upstream project is routine and should be visible, not an
 // alarm — while a driver that stopped producing output is the anomaly worth
 // flagging.
-const ACTIVITY_BAD = new Set(["task.failed", "chain.blocked", "driver.stalled"]);
+const ACTIVITY_BAD = new Set(["task.failed", "chain.blocked", "driver.stalled",
+  "driver.usage_limit"]);
 // Badge kind -> colour. One entry per badge family, keyed by the KIND (not
 // the event type) so every event in a family is the same colour and the six
 // families are distinguishable at a glance.
 const ACTIVITY_COLOR = {
   review: "#58a6ff", merge: "#3fb950", fail: "#f85149",
   escalate: "#bc8cff", degraded: "#d29922", stall: "#f0883e",
+  plan: "#e3b341",
 };
 const activityColor = k => ACTIVITY_COLOR[k] || "#8b949e";
 let ACTIVITY_LIMIT = 50;
@@ -357,6 +374,13 @@ function activityWhat(e) {
     case "driver.stalled":
       bits.push(short(e.model));
       if (e.idle_s) bits.push(`no output for ${tick(e.idle_s)}`);
+      break;
+    case "driver.usage_limit":
+      bits.push(short(e.model));
+      if (e.resets_at) bits.push(`resets ${new Date(e.resets_at * 1000).toLocaleTimeString()}`);
+      break;
+    case "driver.usage_swap":
+      bits.push(`${short(e.model)} → ${short(e.to_model)}`);
       break;
     case "chain.wait": case "chain.ready": case "chain.blocked":
       bits.push((e.taskfile || "").split("/").pop());

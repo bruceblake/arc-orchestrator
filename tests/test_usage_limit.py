@@ -81,6 +81,52 @@ class ResetParsing(unittest.TestCase):
     def test_unstated_reset_is_none(self):
         self.assertIsNone(drivers.usage_reset_at("Claude AI usage limit reached", NOW))
 
+    def test_codex_try_again_at_wall_clock(self):
+        at = drivers.usage_reset_at(
+            "You've hit your usage limit. try again at 3:39 PM.", NOW)
+        self.assertIsNotNone(at)
+        self.assertGreater(at, NOW)
+        self.assertLessEqual(at - NOW, 86400)
+
+
+class ActivePlanWindows(unittest.TestCase):
+    def test_a_future_reset_stays_up_after_the_swap(self):
+        now = 1_000_000.0
+        rows = [
+            {"type": "driver.usage_limit", "harness": "claude", "model": "Claude-Opus-5.5",
+             "ts": now - 100, "resets_at": now + 3600, "task": "t1"},
+            {"type": "driver.usage_swap", "harness": "claude", "model": "Claude-Opus-5.5",
+             "ts": now - 90, "to_model": "Cursor-Grok-4.7"},
+            {"type": "driver.done", "harness": "cursor", "ts": now - 10},
+        ]
+        got = drivers.active_plan_windows(rows, now)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["label"], "Claude")
+        self.assertEqual(got[0]["swapped_to"], "Cursor-Grok-4.7")
+        self.assertEqual(got[0]["resets_at"], now + 3600)
+
+    def test_a_later_success_on_that_harness_clears_it(self):
+        now = 1_000_000.0
+        rows = [
+            {"type": "driver.usage_limit", "harness": "codex", "model": "GPT-6-Sol",
+             "ts": now - 100, "resets_at": now + 3600},
+            {"type": "driver.done", "harness": "codex", "ts": now - 10},
+        ]
+        self.assertEqual(drivers.active_plan_windows(rows, now), [])
+
+    def test_an_unstated_refusal_stays_up_for_the_hold(self):
+        now = 1_000_000.0
+        rows = [{"type": "driver.usage_limit", "harness": "codex",
+                 "model": "GPT-6-Sol", "ts": now - 60, "resets_at": None,
+                 "error": "usage limit reached"}]
+        got = drivers.active_plan_windows(rows, now)
+        self.assertEqual(got[0]["harness"], "codex")
+        self.assertIsNone(got[0]["resets_at"])
+        old = [{"type": "driver.usage_limit", "harness": "codex",
+                "model": "GPT-6-Sol", "ts": now - drivers._PLAN_UNKNOWN_HOLD_S - 1,
+                "resets_at": None, "error": "usage limit reached"}]
+        self.assertEqual(drivers.active_plan_windows(old, now), [])
+
 
 class ScriptedDriver(Driver):
     harness = "fake-plan"

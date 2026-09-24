@@ -56,7 +56,9 @@ const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setGH = v => { GH = v; };"
   + "\nglobalThis.__setSlots = v => { SLOTS = v; };"
   + "\nglobalThis.__setProjects = v => { PROJECTS = v; };"
-  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY};");
+  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY, boardPaint, boardMarkRead, showTab,"
+  + " tlGist, tlEntry, renderTimeline, openTaskTimeline, closeTimeline, tlWhen, pollTimeline,"
+  + " openTranscript, __gen: () => timelineGen, __task: () => timelineTask};");
 const api = mod();
 
 let n = 0;
@@ -405,6 +407,171 @@ ok(clean(document.querySelector("#drv-events").innerHTML), "usage: driver-event 
   globalThis.prompt = () => { prompted++; return "x"; };
   const r3 = await api.jpost("/api/promote", {});
   ok(r3.code === 200 && prompted === 0, "jpost: no prompt when the server does not ask for a token");
+}
+
+// ---- Messages tab: mounts, escapes a mention, flags a claim overlap --------
+api.showTab("messages");
+ok(!document.querySelector("#messages-panel").className.includes("tab-hidden"),
+   "messages: tab mounts the messages panel");
+ok(document.querySelector("#activity-panel").className.includes("tab-hidden"),
+   "messages: other tabs are hidden");
+api.boardPaint({
+  project: "demo", channel: "project",
+  projects: [{project: "demo"}],
+  channels: [{channel: "project", unread: 1}, {channel: "task:locks", status: "running", unread: 0}],
+  messages: [{
+    id: "m1", author: "doors/implementer", author_model: "GLM-5.3", kind: "question",
+    body: "@locks look at " + EVIL, ts: Date.now() / 1000 - 30, state: "open", mentions: ["locks"],
+    refs: {pr: "https://github.com/acme/widgets/pull/4", files: ["static/panels/board.js"]},
+    replies: [],
+  }],
+  claims: [{
+    id: "c1", task: "locks", author: "locks/implementer", paths: ["static/panels/board.js"],
+    ts: Date.now() / 1000 - 10, expires_at: Date.now() / 1000 + 3600,
+    overlaps: ["doors/implementer"], conflict: true,
+  }],
+  expertise: {"locks/implementer": {paths: ["static/panels/board.js"], topics: [], results: 1}},
+  questions: [],
+});
+const threadHtml = document.querySelector("#bd-thread").innerHTML;
+ok(threadHtml.includes("bd-mention") && threadHtml.includes("@locks"), "messages: mention is highlighted");
+ok(clean(threadHtml) && threadHtml.includes("&lt;img"), "messages: author text is escaped");
+ok(threadHtml.includes("bd-kind-question"), "messages: question kind stands out");
+ok(threadHtml.includes("https://github.com/acme/widgets/pull/4"), "messages: PR ref is linked");
+ok(document.querySelector("#bd-rail").innerHTML.includes("bd-dot"), "messages: a task channel shows a status dot");
+ok(document.querySelector("#bd-side").innerHTML.includes("bd-conflict"), "messages: overlapping claim is flagged");
+ok(clean(document.querySelector("#bd-side").innerHTML), "messages: claim authors are escaped");
+
+{
+  let prompted = 0;
+  globalThis.prompt = () => { prompted++; return "tok"; };
+  globalThis.fetch = async () => ({status: 401, json: async () => ({error: "token"})});
+  api.boardPaint({project: "demo", channel: "project", since: 10, messages: []});
+  const code = await api.boardMarkRead();
+  ok(code === 401 && prompted === 0, "messages: a 401 on read does not prompt for a token");
+}
+
+// ---- task timeline drawer --------------------------------------------------
+// Clicking a DAG task node opens the timeline: every event, harness run, error
+// and evidence manifest of that task, in time order. The drawer must render
+// entries as MARKUP (it is a <pre>, so the whitespace model matters), must
+// highlight the errors, and must never let a task-supplied string reach the
+// DOM as HTML.
+{
+  const errEntry = api.tlEntry({kind: "error", ts: 1700000000, type: "error",
+    task: "t1", fingerprint: "ValueError:gate_t1:publish_t1",
+    error_kind: "ValueError", message: "gate exploded", body: "gate exploded",
+    traceback: "Traceback...\nValueError: gate exploded"});
+  ok(errEntry.includes('class="tl-row error"'), "timeline: an error entry is highlighted");
+  ok(errEntry.includes("ValueError:gate_t1:publish_t1"), "timeline: the fingerprint is shown");
+  ok(errEntry.includes("gate exploded"), "timeline: the message is shown");
+
+  const evEntry = api.tlEntry({kind: "evidence", type: "evidence.manifest",
+    ts: 1700000000, project: "prison-escape", attempt: "x3",
+    shots: [{name: "cell.png", url: "/api/evidence-file?path=p/x3/cell.png"}],
+    compare: [], warnings: [], godot_errors: [], coverage: null});
+  ok(evEntry.includes('class="tl-row evidence"'), "timeline: an evidence entry is highlighted");
+  ok(evEntry.includes("<img"), "timeline: evidence renders thumbnails");
+  ok(evEntry.includes('alt="evidence cell.png"'), "timeline: every thumbnail has alt text");
+  ok(evEntry.includes("/api/evidence-file?path=p/x3/cell.png"), "timeline: the thumbnail uses the evidence route");
+
+  // A video has no still: it must render as a link, not a broken <img>.
+  const vid = api.tlEntry({kind: "evidence", type: "evidence.manifest",
+    shots: [{name: "fly.mp4", url: "/api/evidence-file?path=x/fly.mp4"}],
+    compare: [], warnings: [], godot_errors: []});
+  ok(!/<img[^>]*fly\.mp4/.test(vid), "timeline: a video is a link, not a broken <img>");
+  ok(vid.includes("fly.mp4"), "timeline: the video link is labelled");
+
+  // A godot error and a coverage gap are what a reviewer must not miss.
+  const gap = api.tlEntry({kind: "evidence", type: "evidence.manifest", shots: [],
+    coverage: {playtest: {status: "failed", reason: "exited 0 but wrote no video"}},
+    godot_errors: ["SCRIPT ERROR: bad node"], warnings: [], compare: []});
+  ok(gap.includes("coverage gaps"), "timeline: a coverage gap is called out");
+  ok(gap.includes("SCRIPT ERROR: bad node"), "timeline: godot errors are shown");
+  ok(gap.includes("exited 0 but wrote no video"), "timeline: the gap carries its reason");
+
+  const noc = api.tlEntry({kind: "evidence", type: "evidence.manifest", shots: [],
+    no_visible_change: true, compare: [], warnings: [], godot_errors: []});
+  ok(noc.includes("no visible change"), "timeline: a no-visible-change flag is surfaced");
+
+  // Escaping: an event field is attacker-influenced in the general case (a
+  // branch name, a reviewer's prose), and this drawer renders markup.
+  const evil = api.tlEntry({kind: "event", type: "task.gate", ts: 1,
+    task: EVIL, body: EVIL, reason: EVIL, tail: EVIL});
+  ok(clean(evil), "timeline: a hostile event field is escaped");
+  const evil2 = api.tlEntry({kind: "evidence", type: "evidence.manifest", shots: [],
+    godot_errors: [EVIL], warnings: [EVIL], compare: []});
+  ok(clean(evil2), "timeline: a hostile evidence field is escaped");
+  const evil3 = api.tlEntry({kind: "run", type: "harness.run", ts: 1,
+    model: EVIL, role: EVIL, verdict: EVIL, task: EVIL});
+  ok(clean(evil3), "timeline: a hostile run row is escaped");
+
+  // Gists: the common entries say what they mean instead of showing a name.
+  ok(api.tlGist({type: "task.reviewed", passed: false, issues: ["a", "b"]})
+     .includes("2 issues"), "timeline: a rejected review names its issue count");
+  ok(api.tlGist({type: "task.gate", passed: false}).includes("FAILED"),
+     "timeline: a failed gate says so");
+  ok(api.tlGist({type: "task.escalated", from_model: "DeepSeek-V4.1-Flash-thinking-max",
+                 to_model: "GLM-5.3", n: 2}).includes("→"),
+     "timeline: an escalation shows the tier move");
+  ok(api.tlWhen(1700000000).length > 5, "timeline: an entry is timestamped");
+  ok(api.tlWhen(null) === "—", "timeline: a missing timestamp degrades to a dash");
+}
+
+// ---- the poller must not clobber another drawer view -----------------------
+// The drawer is shared by the timeline, the transcript, gate logs, run logs
+// and the diff. A 5 s timeline poll that resolves AFTER another view has taken
+// the drawer over used to render its own content on top of that view — the
+// reader's gate output replaced by a timeline. The poll now re-checks after
+// its await, and every other drawer writer calls closeTimeline().
+{
+  // A fetch we resolve by hand, so "the response arrives late" is
+  // deterministic rather than a race.
+  const pending = [];
+  globalThis.fetch = (url) => new Promise(res => {
+    pending.push({ url, res: () => res({ json: async () => ({
+      entries: [{kind: "event", type: "driver.start", ts: 1, task: "t1"}],
+      counts: {events: 1, runs: 0, errors: 0, evidence: 0}, id: "t1"}) }) });
+  });
+  const flush = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+  const body = document.querySelector("#drawer-body");
+
+  // A poll in flight, then the drawer changes hands before it resolves.
+  api.openTaskTimeline("p.json", "t1");
+  const genAtOpen = api.__gen();
+  ok(api.__task() === "t1", "poller: opening a timeline sets the polled task");
+  ok(pending.length === 1, "poller: opening sends exactly one request");
+  api.closeTimeline();                       // e.g. showGateLog took the drawer
+  ok(api.__gen() > genAtOpen, "poller: closeTimeline invalidates the in-flight view");
+  body.innerHTML = "GATE OUTPUT";
+  pending[0].res();                          // the late response arrives
+  await flush();
+  ok(body.innerHTML === "GATE OUTPUT",
+     "poller: a response arriving after the drawer changed hands is discarded");
+
+  // A poll for a *different* task must not write either: the reader clicked
+  // another node while the first request was still in flight.
+  pending.length = 0;
+  api.openTaskTimeline("p.json", "tA");
+  api.openTaskTimeline("p.json", "tB");
+  body.innerHTML = "LATER VIEW";
+  pending[0].res();                          // tA's response lands now
+  await flush();
+  ok(body.innerHTML === "LATER VIEW",
+     "poller: a stale task's response is discarded");
+  ok(api.__task() === "tB", "poller: the newest open wins");
+  api.closeTimeline();
+
+  // openTranscript takes the drawer too, so it must stop the timeline poller.
+  pending.length = 0;
+  api.openTaskTimeline("p.json", "t1");
+  ok(api.__task() === "t1", "poller: armed by openTaskTimeline");
+  api.openTranscript("t.jsonl", "title", "sub");
+  ok(api.__task() === null, "poller: openTranscript stops the timeline poller");
+
+  api.closeTimeline();
+  ok(api.__task() === null, "poller: closeTimeline clears the polled task");
+  globalThis.fetch = async () => ({ json: async () => ({}), status: 200 });
 }
 
 if (failures.length) {

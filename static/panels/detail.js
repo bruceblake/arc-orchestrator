@@ -214,6 +214,7 @@ async function loadDeliverable(tid, host) {
   host.querySelectorAll("[data-patch]").forEach(b => b.onclick = async ev => {
     ev.stopPropagation();
     const full = await jget(`/api/task-diff?file=${encodeURIComponent(CUR)}&task=${encodeURIComponent(tid)}&patch=1`);
+    closeTimeline();                         // the drawer changes hands
     $("#drawer").classList.add("open");
     $("#drawer-title").textContent = `${tid} — what changed`;
     $("#drawer-sub").textContent = full.summary || "";
@@ -338,6 +339,7 @@ document.addEventListener("click", ev => {
 });
 async function showRunLog(fn) {
   const d = await jget(`/api/run-log?file=${encodeURIComponent(fn)}`);
+  closeTimeline();                            // the drawer changes hands
   $("#drawer").classList.add("open");
   $("#drawer-title").textContent = "run log";
   $("#drawer-sub").textContent = d.error ? "" : `logs/${fn} · last ${(d.lines || []).length} lines`;

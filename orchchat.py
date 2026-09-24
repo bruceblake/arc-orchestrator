@@ -29,6 +29,7 @@ import code_tasks
 import config
 import drivers
 import errors
+import project_contract
 
 SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 
@@ -230,6 +231,7 @@ def _planner_driver():
 def build_prompt(repo, turns):
     return (PLANNER_PERSONA
             + f"\n\nTARGET REPO: {repo}\n\n"
+            + project_contract.planner_block(repo)
             + "CONVERSATION WITH THE OPERATOR (oldest first). Reply as the "
               "planning orchestrator:\n\n"
             + _history(turns))

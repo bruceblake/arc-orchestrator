@@ -256,7 +256,8 @@ def usage_reset_at(text, now=None):
                     for n, u in re.findall(r"(\d+)\s*([a-z]+)", m.group(1), re.I))
         if total:
             return now + total
-    m = re.search(r"resets?\s+(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
+    m = re.search(r"(?:resets?\s+(?:at\s+)?|try again at\s+)"
+                  r"(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
                   r"(?:\s*\(([A-Za-z_]+/[A-Za-z_/]+)\))?", text, re.I)
     if m:
         import datetime
@@ -275,6 +276,80 @@ def usage_reset_at(text, now=None):
             at += datetime.timedelta(days=1)
         return at.timestamp()
     return None
+
+
+# A refusal that names no reset (Codex's "try again at 3:39 PM" used to miss
+# the parser) must stay visible. Six hours covers a 5-hour Claude window
+# without leaving yesterday's refusal on the board all week.
+_PLAN_UNKNOWN_HOLD_S = 6 * 3600
+_PLAN_LABEL = {"claude": "Claude", "codex": "Codex", "cursor": "Cursor",
+               "agy": "Antigravity"}
+
+
+def active_plan_windows(lines, now=None):
+    """Subscription plans that are spent right now, one row per harness.
+
+    Read from the event log, not from a run process's memory: the dashboard
+    and the captain are other processes, and a swap onto another seat used
+    to make the spent plan disappear. A later `driver.done` on the same
+    harness means a request got through, so the window is clear. A stated
+    `resets_at` in the future stays up even when the run has moved on.
+    """
+    now = time.time() if now is None else now
+    limits, swaps, dones = {}, {}, {}
+    for line in lines or []:
+        if isinstance(line, dict):
+            e = line
+        else:
+            if '"driver.usage_limit"' not in line and '"driver.usage_swap"' not in line \
+                    and '"driver.done"' not in line:
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+        kind = e.get("type")
+        harness = e.get("harness")
+        ts = e.get("ts") or 0
+        if not harness or kind not in ("driver.usage_limit", "driver.usage_swap",
+                                       "driver.done"):
+            continue
+        if kind == "driver.done":
+            dones[harness] = max(dones.get(harness, 0), ts)
+        elif kind == "driver.usage_swap":
+            prev = swaps.get(harness)
+            if prev is None or ts >= prev.get("ts", 0):
+                swaps[harness] = e
+        else:
+            prev = limits.get(harness)
+            if prev is None or ts >= prev.get("ts", 0):
+                limits[harness] = e
+    out = []
+    for harness, rec in limits.items():
+        ts = rec.get("ts") or 0
+        if dones.get(harness, 0) > ts:
+            continue
+        stated = rec.get("resets_at")
+        if not isinstance(stated, (int, float)) or stated <= 0:
+            stated = usage_reset_at(rec.get("error") or "", ts)
+        future = stated if isinstance(stated, (int, float)) and stated > now else None
+        if future is None and ts + _PLAN_UNKNOWN_HOLD_S <= now:
+            continue
+        swap = swaps.get(harness)
+        swapped = None
+        if swap and (swap.get("ts") or 0) >= ts:
+            swapped = swap.get("to_model")
+        out.append({
+            "harness": harness,
+            "label": _PLAN_LABEL.get(harness, harness),
+            "model": rec.get("model"),
+            "since": ts,
+            "resets_at": future,
+            "swapped_to": swapped,
+            "task": rec.get("task"),
+        })
+    out.sort(key=lambda r: r["label"])
+    return out
 
 
 # harness -> epoch its plan's usage window resets. Shared by every driver in
@@ -302,7 +377,7 @@ def _tier_rank(model):
 
 
 def usage_substitute(model, harness, role="implementer", exclude=(),
-                     avoid_families=()):
+                     avoid_families=(), allow_planner=False):
     """A same-or-stronger model on a harness that is not `harness` and not blocked.
 
     None when swapping is off, or no seat qualifies — the caller then parks
@@ -314,8 +389,14 @@ def usage_substitute(model, harness, role="implementer", exclude=(),
     drops to a free medium model), and come from none of `avoid_families`.
     Review callers pass the implementer's family, so a swapped reviewer
     cannot land in the family that wrote the code (Rule 2).
+
+    ``allow_planner`` is the captain autopilot's opt-in (a driver with
+    ``planner_swap`` set): its turns are advisory, not a plan, so a spent
+    PLANNER_MODEL window moves to another planner-capable seat (GLM-5.3).
     """
-    if not config.USAGE_SWAP or role not in ("implementer", "reviewer", "pr_reviewer"):
+    roles = ("implementer", "reviewer", "pr_reviewer") + (
+        ("planner",) if allow_planner else ())
+    if not config.USAGE_SWAP or role not in roles:
         return None
     now = time.time()
     skip = set(exclude)
@@ -1376,7 +1457,8 @@ class Driver:
         The result carries the SUBSTITUTE's model and harness, so callers
         record (and trailers name) the model that actually did the work."""
         sub = usage_substitute(self.model, self.harness, self.role,
-                               exclude=tried, avoid_families=avoid_families)
+                               exclude=tried, avoid_families=avoid_families,
+                               allow_planner=getattr(self, "planner_swap", False))
         if not sub:
             return None
         events.emit("driver.usage_swap", harness=self.harness, model=self.model,

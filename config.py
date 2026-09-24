@@ -450,6 +450,15 @@ TASKS_DIR = os.getenv("ARC_TASKS_DIR") or str(Path.home() / "tasks")
 # hazard; the constant exists so the docs-truth scan sees the var config.py
 # reads. Defaulting here and there must agree: logs/captain.
 CAPTAIN_DIR = os.getenv("ARC_CAPTAIN_DIR") or str(ROOT / "logs" / "captain")
+# Captain autopilot (`main.py captain --autopilot`, captain_autopilot.py,
+# AGENTS.md Rule 11): seconds between ticks, the most actions one tick may
+# take, how often each active project gets a standup on the board, and how
+# long the captain leaves one target (a task, a PR, a question) alone after
+# acting on it.
+CAPTAIN_INTERVAL = int(os.getenv("ARC_CAPTAIN_INTERVAL", "600"))
+CAPTAIN_MAX_ACTIONS_PER_TICK = int(os.getenv("ARC_CAPTAIN_MAX_ACTIONS_PER_TICK", "5"))
+CAPTAIN_STANDUP_S = int(os.getenv("ARC_CAPTAIN_STANDUP_S", "3600"))
+CAPTAIN_COOLDOWN_S = int(os.getenv("ARC_CAPTAIN_COOLDOWN_S", "1800"))
 # The only directory tree the dashboard will accept a project repo from
 # (/api/projects/create and every taskfile it runs). A network client can
 # name any path in a POST body; this is the fence. It was the operator's
@@ -1586,6 +1595,11 @@ STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
 # over. Retention is per task (gitstore.prune_checkpoints drops the oldest).
 CHECKPOINT_DIR = Path(os.getenv("ARC_CHECKPOINT_DIR") or ROOT / "logs" / "checkpoints")
 CHECKPOINT_KEEP = int(os.getenv("ARC_CHECKPOINT_KEEP", "10"))
+# Dashboard background loop (studio/autopilot.py). Off unless the deployment
+# opts in: when set, the dashboard plans one current-phase roadmap feature at
+# a time and enqueues a governed `code run` through the captain queue.
+STUDIO_AUTOPILOT = os.getenv("ARC_STUDIO_AUTOPILOT", "").strip().lower() in (
+    "1", "true", "yes", "on")
 # Visual evidence (evidence.py, AGENTS.md Rule 7d): after a Godot task's gate
 # passes, screenshots from the fixed anchor cameras, a flythrough video, the
 # scripted playtest recorded, and before/after comparisons against the
@@ -1614,6 +1628,10 @@ EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
 # at .arc/board.jsonl and are excluded from publish; this directory is the
 # copy every task in a project can read. Outside every worktree on purpose.
 BOARD_DIR = Path(os.getenv("ARC_BOARD_DIR") or ROOT / "logs" / "boards")
+
+# The agent coordination board (agentboard.py, docs/agent-board.md): the cap
+# on one message body. board.py's JSONL lines keep their 400-character cap.
+BOARD_BODY_MAX = int(os.getenv("ARC_BOARD_BODY_MAX", "4000"))
 
 # The spend ceiling, in USD, for one studio run. The local fleet never needed
 # one: ARC is campus-served and effectively free, so the only cost of a task

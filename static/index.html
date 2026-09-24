@@ -148,6 +148,24 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .drawer.open { transform: none; }
 .drawer header { position: static; }
 .drawer pre { flex: 1; overflow: auto; margin: 0; padding: 10px 12px; font-size: 11px; white-space: pre-wrap; word-break: break-all; }
+/* Task timeline drawer: an entry per thing that happened, in time order.
+   Errors and evidence are the two the eye must not miss, so they carry a
+   left rule in the status colours — the same visual grammar as the panels.
+   #drawer-body is a <pre> (white-space: pre-wrap) because it renders
+   transcripts as text; the timeline puts MARKUP there, so the template's own
+   newlines would render as gaps and the rows reset the whitespace model. */
+.tl-row { padding: 6px 12px; border-bottom: 1px solid var(--border); border-left: 3px solid transparent; white-space: normal; }
+.tl-row.error { border-left-color: var(--err); background: rgba(248,81,73,.07); }
+.tl-row.evidence { border-left-color: var(--purple); background: rgba(188,140,255,.06); }
+.tl-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tl-type { font-size: 11px; color: var(--text); font-weight: 600; }
+.tl-gist { font-size: 11px; color: var(--dim); margin-top: 2px; word-break: break-word; }
+.tl-body { font-size: 10.5px; color: var(--dim); margin: 4px 0 0; padding: 6px 8px; background: #0d1117; border-radius: 4px; max-height: 220px; overflow: auto; white-space: pre-wrap; word-break: break-all; }
+.tl-cut { padding: 6px 12px; font-size: 11px; }
+.tl-shots { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.tl-shot { display: block; text-align: center; font-size: 10px; color: var(--dim); text-decoration: none; }
+.tl-shot img { display: block; width: 116px; height: 65px; object-fit: cover; border: 1px solid var(--border); border-radius: 4px; }
+.tl-shot:hover img { border-color: var(--accent); }
 .subrow td { background: #0d1117; font-size: 11px; }
 .repohead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin: 14px 0 8px; }
 .repohead h3 { margin: 0; font-size: 13px; color: var(--purple); }
@@ -447,6 +465,30 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .pt-sev.s2 { color: var(--conflict); border-color: var(--conflict); }
 .pt-sev.s3 { color: var(--warn); border-color: var(--warn); }
 .pt-sev.s4 { color: var(--dim); }
+.bd-wrap { display: grid; grid-template-columns: minmax(140px, 190px) minmax(0, 1fr) minmax(160px, 240px); gap: 8px; min-height: 420px; }
+.bd-col { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.bd-thread { flex: 1 1 auto; overflow: auto; max-height: 56vh; border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
+.bd-msg { border-bottom: 1px solid var(--border); padding: 6px 4px; }
+.bd-chip { display: inline-block; padding: 0 6px; border-radius: 8px; border: 1px solid; font-size: 11px; }
+.bd-kind { font-size: 10px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--border); color: var(--dim); }
+.bd-kind-question, .bd-kind-blocker { color: var(--err); border-color: var(--err); font-weight: 600; }
+.bd-kind-decision { color: var(--warn); border-color: var(--warn); font-weight: 600; }
+.bd-mention { color: var(--accent); font-weight: 600; }
+.bd-replies { margin-left: 14px; }
+.bd-ch { display: flex; gap: 6px; align-items: center; padding: 3px 4px; cursor: pointer; border-radius: 4px; }
+.bd-ch.on { background: #1c2128; }
+.bd-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; display: inline-block; }
+.bd-conflict { color: var(--err); border: 1px solid var(--err); border-radius: 6px; padding: 4px 6px; margin: 4px 0; }
+.bd-compose { display: flex; gap: 4px; flex-wrap: wrap; }
+.bd-compose input, .bd-compose select, .bd-compose textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 4px; font: inherit; font-size: 12px; }
+.bd-compose textarea { flex: 1 1 160px; min-height: 36px; }
+.bd-suggest { position: relative; }
+.bd-suggest ul { position: absolute; z-index: 5; background: var(--panel); border: 1px solid var(--border); margin: 0; padding: 2px 0; list-style: none; max-height: 140px; overflow: auto; }
+@media (max-width: 800px) {
+  .bd-wrap { grid-template-columns: 1fr; }
+  .bd-thread { max-height: 40vh; }
+  .bd-side, .bd-rail { max-height: 28vh; overflow: auto; }
+}
 </style>
 </head>
 <body>
@@ -480,6 +522,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 </header>
 <main>
   <div class="panel err" id="vpn-banner" style="display:none" role="alert"></div>
+  <div class="panel err" id="plans-banner" style="display:none" role="alert"></div>
   <div class="panel err" id="stale-banner" style="display:none" role="alert">
     <span id="stale-banner-msg"></span>
     <button class="act" id="btn-restart-dashboard" type="button" style="margin-left:8px">Restart dashboard</button>
@@ -490,6 +533,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       <button class="tab" role="tab" data-tab="studio" aria-selected="false">Studio</button>
       <button class="tab" role="tab" data-tab="projects" aria-selected="false">Projects</button>
       <button class="tab" role="tab" data-tab="activity" aria-selected="false">Activity</button>
+      <button class="tab" role="tab" data-tab="messages" aria-selected="false">Messages</button>
     </div>
     <div class="panel tab-hidden" id="studio-panel">
       <h2>Studio <span class="hint" id="studio-meta"></span></h2>
@@ -526,6 +570,27 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       </h2>
       <div id="activity"></div>
       <div class="empty" id="activity-empty" style="display:none">No fleet activity in the log yet.</div>
+    </div>
+    <div class="panel tab-hidden" id="messages-panel">
+      <h2>Messages <span class="hint">how the agents coordinate</span></h2>
+      <div class="bd-filters">
+        <select id="bd-kind" aria-label="filter by kind"></select>
+        <select id="bd-agent" aria-label="filter by agent"></select>
+        <input id="bd-search" type="search" placeholder="search this window" aria-label="search messages">
+      </div>
+      <div class="bd-wrap">
+        <div class="bd-rail" id="bd-rail"></div>
+        <div class="bd-col">
+          <div class="bd-thread" id="bd-thread"></div>
+          <div class="bd-compose">
+            <select id="bd-post-kind" aria-label="message kind"></select>
+            <textarea id="bd-post-body" placeholder="note, question, decision, or ping — @agent or @all" aria-label="message"></textarea>
+            <button class="act primary" id="bd-send" type="button">Post</button>
+          </div>
+          <ul id="bd-suggest" hidden></ul>
+        </div>
+        <div class="bd-side" id="bd-side"></div>
+      </div>
     </div>
     <div class="panel" id="slots-panel">
       <h2>Model slots <span class="hint" id="slots-meta">idle</span>
@@ -714,9 +779,12 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/chat.js"></script>
 <script src="/panels/captain.js"></script>
 <script src="/panels/transcript.js"></script>
+<!-- timeline.js AFTER transcript.js: its run entries call openTranscript. -->
+<script src="/panels/timeline.js"></script>
 <script src="/panels/summary.js"></script>
 <script src="/panels/keyboard.js"></script>
 <script src="/panels/studio.js"></script>
+<script src="/panels/board.js"></script>
 <script>
 // ---- boot: staggered polls so nothing fires all at once ----
 loadHash(); syncFilterControls();

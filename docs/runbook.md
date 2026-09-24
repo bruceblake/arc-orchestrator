@@ -77,6 +77,29 @@ The code workload is a DAG of coding-agent tasks described in a JSON task
 file. Two entry points build one: GLM-5.3 as the
 planner (CLI) or the dashboard's plan tab.
 
+### 2.0 Where you talk, and where the project lives
+
+Two directories. Do not collapse them.
+
+- **This checkout** (`/home/proxyie/arc-orchestrator`) is the fleet. Its
+  `AGENTS.md` is fleet governance: models, taskfiles, gates, reviews. Talk
+  to the fleet from here — the dashboard Captain panel, or
+  `main.py captain --session S --repo /path/to/product` — or run `code plan`
+  with the product path. A coding session whose working directory is this
+  checkout is for changing the orchestrator or writing taskfiles. It will
+  follow *this* `AGENTS.md`.
+- **The product checkout** (usually `~/repos/<project>`) is the software
+  being built. Its own `AGENTS.md` (and `CLAUDE.md`, and `.cursor/rules`,
+  when present) is how that project is structured. Implementers run inside
+  a worktree of that repo, so they read that file, not this one.
+
+`code plan` and `code run --dry-run` print one line, `project contract: ...`,
+naming the files found. The line says `none` only when the product root has
+no `AGENTS.md`, no `CLAUDE.md`, and no `.cursor/rules` markdown files. A
+missing contract does not block the run. When you are starting a project,
+put layout, the test command, and the boundaries in the product's
+`AGENTS.md` before feature work. Do not add those rules to this file.
+
 ### 2.1 Plan
 
 ```bash
@@ -87,7 +110,8 @@ cd /home/proxyie/arc-orchestrator
 - `code plan` asks GLM-5.3 (the planner) to break the goal into 2–8 small
   tasks and writes the task file to `~/tasks/<goal-slug>.json`, then prints its
   path plus a `describe(...)` summary of the resolved DAG
-  (implement/review pairing, deps, verify gates).
+  (implement/review pairing, deps, verify gates) and a `project contract:`
+  line for the target repo (see § 2.0).
 - Review the generated file in `~/tasks/` and edit it by hand if needed
   (schema rules are in `docs/taskfile-schema.md`).
 
@@ -1163,3 +1187,47 @@ outage is picked up here.
 Install: `cp deploy/arc-watchdog.service ~/.config/systemd/user/ &&
 systemctl --user enable --now arc-watchdog`. On WSL, run
 `sudo loginctl enable-linger $USER` once so it survives closed terminals.
+
+## The captain autopilot
+
+`main.py captain --autopilot` runs the captain as an always-on project
+manager (AGENTS.md Rule 11, `captain_autopilot.py`). Every tick it reads the
+fleet, finds stuck or failing work, and acts through the agent board: pings
+a silent implementer, answers or escalates a stale question, flags
+overlapping claims, resumes a stalled run through the capacity gate, posts
+an hourly standup per project, and escalates what needs a person. It never
+runs git, kills a process, edits code or merges a PR.
+
+Try it first without acting:
+
+```
+./py main.py captain --autopilot --once --dry-run
+./py main.py captain --autopilot --once --no-llm
+```
+
+`--dry-run` records every decision (`captain.auto.dry_run` events and
+`logs/captain/autopilot.jsonl`) and acts on none; `--no-llm` uses the
+playbooks only and never calls the model.
+
+Install: `cp deploy/arc-captain.service ~/.config/systemd/user/ &&
+systemctl --user enable --now arc-captain`. It ticks every
+`ARC_CAPTAIN_INTERVAL` seconds (default 600; `--interval N` overrides).
+Tuning: `ARC_CAPTAIN_MAX_ACTIONS_PER_TICK` (default 5),
+`ARC_CAPTAIN_COOLDOWN_S` (default 1800 — one target is never nagged twice
+in 30 min), `ARC_CAPTAIN_STANDUP_S` (default 3600).
+
+Pause without stopping the service: `touch logs/captain/autopilot.pause`
+(remove the file to resume), or the Pause / Resume button in the dashboard's
+Captain panel. A paused tick records `captain.auto.paused` and does nothing
+else.
+
+Where to look:
+
+- the Captain panel: autopilot state (running / paused, last and next tick),
+  the latest findings with severity, recent actions, and escalations with
+  an Acknowledge button; the Captain button shows the unacknowledged count;
+- the board's `captain` channel: the captain's reasoning for each action;
+  `operator`: its escalations;
+- `logs/captain/autopilot.jsonl` (one line per decision),
+  `logs/captain/autopilot.json` (state, cooldowns),
+  `logs/captain/escalations.jsonl`, and `captain.auto.*` events.
