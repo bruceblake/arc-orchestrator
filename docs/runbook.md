@@ -598,6 +598,108 @@ curl -s -X POST localhost:8787/api/projects/retry-task \
 - It emits a `task.reset` event `{taskfile, task}` in `logs/events.jsonl`, and
   the dashboard project detail shows the task back at `pending` immediately.
 
+### Worktree checkpoints: recovering an interrupted attempt's work
+
+A task worktree is **state**, not scratch space. `gitstore.alloc` resets
+`task/<id>` to the base branch on every (re)alloc, which discards both
+uncommitted edits and unpublished commits. On 2026-09-24 a resume after a
+reboot threw away the reviewed work of three tasks that way; it survived only
+because those branches happened to have been pushed. So the fleet checkpoints
+a worktree like a long-running server process:
+
+- **What is saved.** A binary-safe patch of the worktree against its **merge
+  base** — commits, staged and unstaged edits, untracked files — plus a small
+  JSON beside it (head sha, merge base, file list, label, attempt, model).
+  The `.arc` channel files and `.reasonix/` are excluded: they are runtime
+  state, never PR content. "Binary-safe" is literal: the diff is captured and
+  written as **raw bytes** (`gitstore._git_bytes`), never decoded and
+  re-encoded. `--binary` alone is not enough — git only calls a blob binary
+  when it contains a NUL byte, so a latin-1 source file would round-trip
+  through U+FFFD as `0xE9` → `EF BF BD` while still reporting success.
+- **Where.** `logs/checkpoints/<project>/<task>/<ts>-<label>.patch` (+ `.json`),
+  `ARC_CHECKPOINT_DIR` to move it. Retention is
+  `config.CHECKPOINT_KEEP` per task (**10**, `ARC_CHECKPOINT_KEEP`); the oldest
+  are pruned, patch and JSON together. "Oldest" is decided by **write time**,
+  not by filename: a name is a timestamp plus a label, and two checkpoints in
+  the same second would otherwise sort on the label (`pre-reset` before `x1`),
+  so a resume restored a patch older than the one it had just written.
+- **When.** After **every implement attempt** (label `x<attempt>`), before
+  **every alloc that would reset a branch or worktree holding work** (label
+  `pre-reset`), at a task's own tail node when that task **fails**, and — the
+  one that covers a **cancel**, where no graph node runs at all — in the run's
+  own shutdown path (label `interrupted`). That path `await`s
+  `gitstore.checkpoint_stopping`; `gitstore.checkpoint_worktrees` is only for a
+  caller whose loop is already gone, and refuses (rather than silently saving
+  nothing) if one is still running. The failure tail is deliberate, not the
+  merge: `pr_merge` calls `gitstore.cleanup` and removes the worktree before it
+  returns, so a node hung off the merge would have nothing left to save. The
+  sweep takes task ids **or** `code_tasks` row dicts, and emits
+  `task.checkpoint_skipped` for a task with no worktree — so a wrong id shows up
+  in the event log instead of saving nothing silently.
+- **It never raises, and it never changes the worktree.** The capture is
+  read-only — it does not `git add -N` to surface untracked files, because that
+  mutates the index and takes `index.lock` while sibling agents may be running,
+  and hands the implementer a staged copy of work it never staged. Each
+  untracked file is diffed against `/dev/null` instead. A failure is a
+  `task.checkpoint_failed` event and a warning; `task.checkpointed` records
+  every success.
+- **Paths are read with `-z` and never quoted.** git C-quotes any path that is
+  not plain ASCII (`core.quotePath`), so a listing yields `"caf\303\251.txt"` —
+  a string that names no file on disk. Handed to `diff --no-index` git exits 1
+  with EMPTY stdout, and 1 is also the exit code for "the files differ", so the
+  empty blob was appended and the quoted name recorded: **the checkpoint
+  reported success with a 0-byte patch and the file was gone.** Every listing
+  (`diff --name-only`, `ls-files --others`, `ls-files -u`) now uses `-z` and is
+  split on NUL, and a per-file diff that produced no patch is skipped with a
+  warning rather than recorded. Names are decoded with `os.fsdecode`, whose
+  surrogateescape round-trips a name holding raw non-UTF-8 bytes; `_git`'s
+  `errors="replace"` would rewrite it into a path that exists nowhere.
+
+**Resume restores it for you.** When a task restarts at `alloc` and its
+previous row failed for a reason that is *not* a capability failure — an
+interrupted run process, a cancelled graph (the same reasons Rule 4 refuses to
+escalate on) — the latest checkpoint is applied back onto the fresh worktree
+with `git apply --3way`, the `task.checkpoint_restored` event is emitted, and
+the board gets a post telling the implementer to continue rather than start
+over. Restoration is decided by an **allowlist**
+(`code_tasks._INTERRUPTION_REASONS`), not by "anything that is not a
+capability failure": exactly `reconcile.INTERRUPTED_REASON` and
+`store.STALE_REASON`, the two strings that say the run was cut off mid-flight.
+Anything unrecognised — every gate, review and PR rejection, a push failure, a
+reason a future version introduces — starts **clean**. That is the safe error:
+restoring work a gate or a reviewer refused re-submits it.
+
+This was a denylist once, and it cost four review rounds. Each new failure
+string `publish()` or `fail()` grew defaulted to *restoring*: `verify gate
+still failing…`, `pre-merge review still rejecting…`, `PR #N rejected after…`,
+`rework after PR rejection produced no changes` each had to be found and added
+separately. An allowlist cannot acquire that class of bug — a string nobody has
+thought of yet fails closed. The companion `_CAPABILITY_FAILURES` list (which
+words justify escalating a resumed task) still names fail()'s real strings, and
+`tests/test_code_tasks.py` builds every one of them from the same f-strings the
+writers use, so the two cannot drift apart.
+
+A conflicting restore is **reported, not half-applied**: `--3way` recovers the
+non-conflicting parts, and if anything is left unmerged the whole apply is
+rolled back (`git reset --hard HEAD`), with the conflicting paths named in a
+`task.checkpoint_conflict` event. A tree carrying conflict markers must never
+be published as though it were the attempt's own work.
+
+Operator commands:
+
+```bash
+# what exists for a task (newest first; --json for machines)
+.venv/bin/python main.py code checkpoints <task-id> [--taskfile F] [--json]
+
+# put the latest (or a named) checkpoint back into the task's worktree
+.venv/bin/python main.py code restore <task-id> [--checkpoint PATH] [--taskfile F]
+```
+
+`--taskfile` names the project outright; without it the task id is looked up in
+`code_tasks`, so you do not have to remember which file planned it. `restore`
+needs the worktree to exist — it applies into `~/worktrees/<project>/<task-id>`
+and exits 1 when there is no worktree, no checkpoint, or a conflict.
+
 ### Agents produce output but change no files (plan mode)
 
 *Historical: this was the single most damaging misconfiguration of the

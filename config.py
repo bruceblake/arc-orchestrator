@@ -1589,6 +1589,12 @@ def max_tasks_in_flight():
 # archive inside the worktree would land in a pull request (Rule 5 publishes
 # with `git add -A`).
 STUDIO_DIR = Path(os.getenv("ARC_STUDIO_DIR") or ROOT / "logs" / "studio")
+# Worktree checkpoints (gitstore.checkpoint): a binary-safe patch of an
+# attempt's committed AND uncommitted work, saved before anything resets its
+# branch or worktree, so a resume after a reboot restores instead of starting
+# over. Retention is per task (gitstore.prune_checkpoints drops the oldest).
+CHECKPOINT_DIR = Path(os.getenv("ARC_CHECKPOINT_DIR") or ROOT / "logs" / "checkpoints")
+CHECKPOINT_KEEP = int(os.getenv("ARC_CHECKPOINT_KEEP", "10"))
 # Dashboard background loop (studio/autopilot.py). Off unless the deployment
 # opts in: when set, the dashboard plans one current-phase roadmap feature at
 # a time and enqueues a governed `code run` through the captain queue.

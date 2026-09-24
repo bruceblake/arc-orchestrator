@@ -178,6 +178,9 @@ def cmd_code(args):
     if args.code_cmd == "list":
         cmd_code_list(args)
         return
+    if args.code_cmd in ("checkpoints", "restore"):
+        asyncio.run(cmd_code_checkpoints(args))
+        return
     if args.code_cmd == "context":
         sys.exit(cmd_code_context(args))
 
@@ -365,6 +368,27 @@ def cmd_code(args):
             freed = store.release_leases_for_pid(os.getpid())
             if freed:
                 log.info("released %d driver lease(s)", freed)
+            # Drain or cancel — this is the moment, whatever ended the run.
+            # A worktree is state: the NEXT alloc resets task/<id> to base, so
+            # whatever the attempts left in theirs is checkpointed here, before
+            # anything can discard it. AWAITED, not asyncio.run: this finally is
+            # still inside async def run(), and asyncio.run raises RuntimeError
+            # on a live loop — which the except below would swallow into a log
+            # line, losing the very checkpoint a cancel exists to write.
+            # The TASK IDS, not the row dicts: `leaked` holds dicts (the log
+            # line above reads r["id"]), and checkpoint_stopping resolves each
+            # entry to WORKTREE_ROOT/<repo>/<id>. Passing the dicts made every
+            # lookup miss, so a cancel saved nothing and said nothing — a
+            # non-existent directory is an ordinary skip in the sweep.
+            try:
+                import gitstore as _gs
+                n = await _gs.checkpoint_stopping(
+                    taskset["repo"], [r["id"] for r in leaked])
+                if n:
+                    log.info("checkpointed %d interrupted worktree(s)", n)
+            except Exception as exc:                           # noqa: BLE001
+                import errors as _errors
+                _errors.capture(exc, node="checkpoint_stopping")
         results = final.get("results", {})
         merged = sorted(k for k, v in results.items()
                         if k.startswith("publish_") and isinstance(v, dict) and v.get("merged"))
@@ -445,6 +469,90 @@ def cmd_code_dream(args):
         print(f"    {name:18s} {score:8.4f}{mark}")
     print(f"  selected policy: {result.selected}")
     print(f"  report: {path}")
+
+
+async def cmd_code_checkpoints(args):
+    """`code checkpoints` / `code restore`: inspect and apply an attempt's work.
+
+    A worktree is state (gitstore.checkpoint): every implement attempt, every
+    reset that would discard work, and every drain is checkpointed. These are
+    the operator's handles on them — list what exists, and put one back.
+    """
+    import json
+
+    import gitstore
+    from store import Store
+
+    store = Store(args.db or config.DB_PATH)
+    repo, tf = _resolve_task_repo(args, store)
+    tid = args.task
+    rows = gitstore.checkpoint_files(repo, tid)
+    if args.code_cmd == "checkpoints":
+        if args.json:
+            print(json.dumps([{"path": str(p), **m} for p, m in rows],
+                             indent=2, default=str))
+            return
+        if not rows:
+            print(f"no checkpoints for {tid} in {repo}")
+            return
+        print(f"{len(rows)} checkpoint(s) for {tid} in {repo}:")
+        for p, m in rows:
+            print(f"  {p.name:44} {str(m.get('label') or '?'):12} "
+                  f"{len(m.get('files') or []):3} file(s)  "
+                  f"{m.get('commits') if m.get('commits') is not None else '?'}"
+                  f" commit(s)  {m.get('model') or ''}")
+            files = m.get("files") or []
+            if files:
+                print(f"      {', '.join(files[:8])}"
+                      + (" ..." if len(files) > 8 else ""))
+        print(f"\nrestore with: main.py code restore {tid} "
+              f"[--checkpoint PATH]")
+        return
+
+    wt = gitstore.worktree_for(repo, tid)
+    if not (wt / ".git").exists():
+        print(f"no worktree at {wt}. Run the task's alloc first "
+              f"(`main.py code run <taskfile>`), then restore.")
+        sys.exit(1)
+    res = await gitstore.restore_checkpoint(repo, tid, wt, path=args.checkpoint)
+    if res.get("restored"):
+        print(f"restored {len(res.get('files') or [])} file(s) from "
+              f"{res.get('path')} into {wt}")
+        for f in res.get("files") or []:
+            print(f"  {f}")
+        return
+    print(f"not restored: {res.get('reason')}")
+    for f in res.get("conflicts") or []:
+        print(f"  conflict: {f}")
+    sys.exit(1)
+
+
+def _resolve_task_repo(args, store):
+    """(repo, taskfile) for a checkpoint command.
+
+    `--taskfile` names the project outright. Without it the task id is looked
+    up in the recorded rows, because an operator restoring work at 3am should
+    not have to remember which file planned it. What the lookup finds is the
+    REPO the row recorded, never a path from the command line.
+    """
+    from code_tasks import load_taskfile
+
+    tf = getattr(args, "taskfile", None)
+    if tf:
+        return Path(load_taskfile(tf)["repo"]).resolve(), str(tf)
+    try:
+        rows = [r for r in store.code_tasks_all() if r.get("id") == args.task]
+    except Exception:                                          # noqa: BLE001
+        rows = []
+    for r in sorted(rows, key=lambda r: r.get("created_at") or "", reverse=True):
+        raw = r.get("taskfile") or ""
+        if raw and Path(raw).is_file():
+            try:
+                return Path(load_taskfile(raw)["repo"]).resolve(), raw
+            except Exception:                                  # noqa: BLE001
+                continue
+    sys.exit(f"cannot tell which repo task {args.task!r} belongs to — "
+             f"pass --taskfile <taskfile>")
 
 
 def cmd_code_context(args):
@@ -927,6 +1035,23 @@ def main():
     cs_p.add_argument("--reset-stale", action="store_true",
                       help="mark 'running' tasks 'failed' when their taskfile "
                            "has no live run (concurrent runs are left alone)")
+    cck = code_sub.add_parser(
+        "checkpoints", help="list a task's worktree checkpoints (attempt work saved on reset/drain)")
+    cck.add_argument("task", help="task id")
+    cck.add_argument("--taskfile", default=None,
+                     help="the taskfile that planned it (default: look the id up in the database)")
+    cck.add_argument("--json", action="store_true", help="emit the list as JSON")
+    cck.add_argument("--db", default=None, help="sqlite database path")
+    cck.add_argument("-v", "--verbose", action="store_true", help="debug logging")
+    crs = code_sub.add_parser(
+        "restore", help="apply a task's latest (or named) checkpoint into its worktree")
+    crs.add_argument("task", help="task id")
+    crs.add_argument("--checkpoint", default=None,
+                     help="a specific checkpoint .patch (default: the latest)")
+    crs.add_argument("--taskfile", default=None,
+                     help="the taskfile that planned it (default: look the id up in the database)")
+    crs.add_argument("--db", default=None, help="sqlite database path")
+    crs.add_argument("-v", "--verbose", action="store_true", help="debug logging")
     cpr = code_sub.add_parser(
         "promote",
         help=f"open a {config.BASE_BRANCH} -> {config.PROD_BRANCH} PR for you to merge")

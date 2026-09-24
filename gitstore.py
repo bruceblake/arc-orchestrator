@@ -8,8 +8,10 @@ import asyncio
 import fcntl
 import json
 import logging
+import os
 import re
 import shutil
+import time
 from pathlib import Path
 
 import config
@@ -57,6 +59,333 @@ class _RepoLock:
             self._fh = None
 
 
+def _null_split(raw):
+    """Split NUL-delimited git output (-z) into path strings.
+
+    fsdecode, not decode: a filename on this fleet can hold bytes that are not
+    valid UTF-8, and fsdecode's surrogateescape round-trips them, so the string
+    still names the real file when it is passed back to git. `errors="replace"`
+    would hand back a path that exists nowhere — the same class of bug as the
+    C-quoting this replaced.
+    """
+    if not raw:
+        return []
+    return [os.fsdecode(p) for p in raw.split(b"\0")]
+
+
+async def checkpoint(repo, task_id, wt, label, *, model=None, attempt=None):
+    """Save the worktree's work as a patch; returns its Path, or None.
+
+    A worktree is state, like a long-running server process. alloc RESETS
+    task/<id> to base on every (re)alloc and discards both uncommitted edits
+    and unpublished commits; on 2026-09-24 a resume after a reboot threw away
+    the reviewed work of three tasks that way and it survived only because
+    their branches had been pushed. This is the checkpoint: a patch of
+    everything the worktree holds against its MERGE BASE — commits, staged and
+    unstaged edits, untracked files — minus the .arc channel files (the
+    orchestrator's, never PR content) and .reasonix.
+
+    It is binary-safe in the literal sense: the diffs are captured as BYTES and
+    written unchanged. `--binary` is not enough on its own, because git only
+    classifies a blob as binary when it contains a NUL byte — a latin-1 source
+    file is "text" to git, and decoding it would rewrite 0xE9 into the three
+    bytes of U+FFFD while the restore still reported success.
+
+    NEVER raises: it runs on reset, drain and cancel paths, where turning a
+    handled interruption into an unhandled exception is worse than losing the
+    checkpoint. Returns None when there is nothing to save or git refuses.
+
+    It also leaves the worktree EXACTLY as it found it. It never stages, so it
+    cannot hand a live agent a staged copy of its own work, and it can be run
+    on a sibling still being implemented without racing index.lock.
+    """
+    try:
+        wt = Path(wt)
+        if not (wt / ".git").exists():
+            return None
+        base = config.BASE_BRANCH
+        rc, mb, _ = await _git(["merge-base", base, "HEAD"], cwd=wt, check=False)
+        ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
+        _, head, _ = await _git(["rev-parse", "HEAD"], cwd=wt, check=False)
+        # READ-ONLY capture. This deliberately does NOT run `git add -N` to make
+        # untracked files visible: that mutates the index and takes index.lock,
+        # and a drain fires a sweep while sibling tasks are still being
+        # implemented — the add would race a live agent's own git commands and
+        # hand it a staged copy of work it never staged. The tracked half is one
+        # `diff`; each untracked file is diffed against /dev/null, which git
+        # treats as a new file and which touches nothing at all. Both halves
+        # apply with `git apply --3way`.
+        excl = [*(f":!{p}" for p in CHANNEL_FILES), *NEVER_STAGE]
+        # -z, NOT newline-split. With core.quotePath on (the default) git
+        # C-quotes any path that is not plain ASCII, so `ls-files --others`
+        # yields `"caf\303\251.txt"` — and that QUOTED string names no file on
+        # disk. Fed to `diff --no-index` it makes git exit 1 with EMPTY stdout
+        # ("Could not access …"), and 1 is also the exit code for "the files
+        # differ", so the empty blob was appended and the quoted name recorded:
+        # a checkpoint that reported success while silently dropping the file.
+        # -z emits raw bytes and never quotes. _git_BYTES, not _git: the name is
+        # a path, and _git decodes with errors="replace", which rewrites a
+        # non-UTF-8 tracked name into a string that names no file on disk —
+        # the same defect one layer down.
+        _, files_raw, _ = await _git_bytes(
+            ["diff", "--name-only", "-z", ref, "--", ".", *excl],
+            cwd=wt, check=False)
+        # BYTES, not text — see _git_bytes. A latin-1 or otherwise non-UTF-8
+        # source file is not "binary" to git (it has no NUL byte), so --binary
+        # alone does not protect it: decoding would rewrite 0xE9 into the three
+        # bytes of U+FFFD, and the checkpoint would restore a corrupted file
+        # while still reporting success.
+        rc, patch, _ = await _git_bytes(
+            ["diff", "--binary", ref, "--", ".", *excl], cwd=wt, check=False)
+        rc_others, others_raw, _ = await _git_bytes(
+            ["ls-files", "-z", "--others", "--exclude-standard", "--", ".",
+             *excl], cwd=wt, check=False)
+        if rc_others > 1:
+            return None
+        # Each -z field is a raw path; fsdecode round-trips ANY bytes
+        # (surrogateescape), so an undecodable name still names the real file.
+        listed = [f for f in _null_split(files_raw) if f]
+        for rel in _null_split(others_raw):
+            if not rel:
+                continue
+            rc2, one, err2 = await _git_bytes(
+                ["diff", "--no-index", "--binary", "--", "/dev/null", rel],
+                cwd=wt, check=False)
+            # --no-index exits 1 when the files differ, which is the normal
+            # case here; only a real failure (2) discards the capture. Exit 1
+            # with NO patch is the third case: git could not access the path it
+            # was handed. Trusting the exit code alone is what recorded it.
+            if rc2 > 1:
+                return None
+            if rc2 == 1 and not one.strip():
+                log.warning("checkpoint %s: skipped unreadable untracked path "
+                            "%r (%s)", task_id, rel, err2.strip()[:120])
+                continue
+            patch += one
+            listed.append(rel)
+        if rc != 0 or (not listed and not patch.strip()):
+            return None
+        out = (Path(config.CHECKPOINT_DIR) / Path(repo).resolve().name
+               / str(task_id))
+        out.mkdir(parents=True, exist_ok=True)
+        # Subsecond stamp AND mtime ordering. A whole-second stamp made two
+        # checkpoints in the same second sort on their LABEL, which is worse
+        # than arbitrary: "20260924T120000-interrupted-1" sorts BEFORE
+        # "…-interrupted", and "pre-reset" before "x1". checkpoint_files reads
+        # that order as newest-first and _prune_checkpoints drops its FRONT, so
+        # a resume restored an older patch than the one it had just written.
+        stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+        stamp += f".{int(time.time() * 1000) % 1000:03d}"
+        dest = out / f"{stamp}-{label}.patch"
+        n = 0
+        while dest.exists():
+            n += 1
+            dest = out / f"{stamp}-{label}.{n}.patch"
+        await asyncio.to_thread(dest.write_bytes, patch)
+        meta = {"task": str(task_id), "label": str(label), "head": head.strip(),
+                "merge_base": ref, "files": listed, "model": model,
+                "attempt": attempt, "patch": dest.name, "bytes": len(patch)}
+        rc, ahead, _ = await _git(["rev-list", "--count", f"{ref}..HEAD"],
+                                  cwd=wt, check=False)
+        meta["commits"] = int(ahead.strip()) if (rc == 0
+                                                 and ahead.strip().isdigit()) else None
+        await asyncio.to_thread(
+            dest.with_suffix(".json").write_text,
+            json.dumps(meta, indent=2, default=str), "utf-8")
+        events.emit("task.checkpointed", task=str(task_id), label=str(label),
+                    path=str(dest), files=len(listed), commits=meta["commits"],
+                    model=model)
+        _prune_checkpoints(out)
+        return dest
+    except Exception as exc:                                   # noqa: BLE001
+        try:
+            events.emit("task.checkpoint_failed", task=str(task_id),
+                        label=str(label), error=str(exc)[:200])
+        except Exception:                                      # noqa: BLE001
+            pass
+        log.warning("checkpoint %s (%s) failed: %s", task_id, label, exc)
+        return None
+
+
+async def checkpoint_stopping(repo, task_ids=None, label="interrupted"):
+    """Checkpoint the worktrees of tasks that have STOPPED; returns how many.
+
+    This is the drain/cancel sweep, and its scope is the point. A drain fires
+    it from the tail node of one task while its siblings are still being
+    implemented: checkpointing one of THOSE would run git in a worktree a live
+    agent is writing to. Callers pass the tasks that have genuinely stopped —
+    main.py the rows it just marked interrupted, the graph the task whose merge
+    or failure has already fired.
+
+    AWAIT this; it needs the event loop the run is still holding.
+
+    A `code_tasks` row dict is accepted as well as a bare id, because that is
+    what main.py has in hand at the moment it needs this. It must be: the
+    first version took `str(t)` of whatever it was given, so passing the row
+    dicts from `store.running_code_tasks` looked up a directory literally named
+    "{'id': 'x', …}" — every task missed, the sweep saved nothing, and because
+    a missing directory is an ordinary skip there was not even an error. A
+    lookup that finds no worktree now SAYS SO, so the next version of that
+    mistake is visible in the event log instead of silent.
+    """
+    saved, root = 0, Path(config.WORKTREE_ROOT) / Path(repo).resolve().name
+    seen = set()
+    for raw in (task_ids or []):
+        # A row dict, a path, a plain id: take the id out of whatever it is.
+        tid = str(raw.get("id") if isinstance(raw, dict) else raw) if raw else ""
+        if not tid or tid in seen:
+            continue
+        seen.add(tid)
+        wt = root / tid
+        if not (wt / ".git").exists():
+            events.emit("task.checkpoint_skipped", task=tid, label=label,
+                        path=str(wt), reason="no worktree")
+            continue
+        try:
+            events.emit("task.checkpoint_sweep", task=tid, label=label)
+            if await checkpoint(repo, tid, wt, label):
+                saved += 1
+        except Exception as exc:                               # noqa: BLE001
+            log.warning("checkpoint sweep: %s failed: %s", tid, exc)
+    return saved
+
+
+def checkpoint_worktrees(repo, task_ids=None, label="interrupted"):
+    """`checkpoint_stopping` for a caller with NO event loop left.
+
+    A wrapper, not the primary path: awaiting is what the run itself must do
+    (it still holds its loop), and `asyncio.run` inside a running loop raises
+    RuntimeError — which the caller's `except Exception` would swallow into a
+    log line, quietly losing the checkpoint a cancel was supposed to write.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(checkpoint_stopping(repo, task_ids, label))
+    raise RuntimeError(
+        "checkpoint_worktrees needs no running loop — await "
+        "checkpoint_stopping instead")
+
+
+def _prune_checkpoints(directory):
+    """Keep only the newest config.CHECKPOINT_KEEP checkpoints of one task."""
+    try:
+        keep = max(1, int(config.CHECKPOINT_KEEP))
+    except (TypeError, ValueError):
+        keep = 10
+    try:
+        for old in _ordered_patches(directory)[:-keep]:
+            for p in (old, old.with_suffix(".json")):
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
+
+
+def _ordered_patches(directory):
+    """This task's checkpoints, OLDEST first, ordered by WRITE TIME.
+
+    By mtime, not by name. A name is a timestamp plus a label, so two
+    checkpoints written in the same second used to sort on the LABEL — and
+    "…-interrupted-1" sorts before "…-interrupted", "pre-reset" before "x1".
+    Since checkpoint_files reads that order as newest-first and
+    _prune_checkpoints drops the front of it, the fleet restored a patch older
+    than the one it had just written and could prune the newest away. mtime is
+    what "newest" actually meant, and it never depends on a label.
+    """
+    try:
+        return sorted(directory.glob("*.patch"),
+                      key=lambda p: (p.stat().st_mtime_ns, p.name))
+    except OSError:
+        return []
+
+
+def checkpoint_files(repo, task_id):
+    """Every checkpoint of this task, newest first, as (path, metadata)."""
+    out = (Path(config.CHECKPOINT_DIR) / Path(repo).resolve().name
+           / str(task_id))
+    rows = []
+    for p in reversed(_ordered_patches(out)):
+        try:
+            meta = json.loads(p.with_suffix(".json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        rows.append((p, meta))
+    return rows
+
+
+async def restore_checkpoint(repo, task_id, wt, path=None):
+    """Apply the latest (or a named) checkpoint onto a worktree; report conflicts.
+
+    This runs after alloc, which has already reset the branch to base, so the
+    patch applies against the merge base it was taken from. `--3way` is what
+    lets a partially overlapping patch recover its non-conflicting parts; a
+    genuinely conflicting file is then REPORTED and the whole apply rolled back
+    rather than left half-applied — a conflicted tree would otherwise be
+    published as if it were the attempt's own work.
+    """
+    wt = Path(wt)
+    meta = {}
+    if path is None:
+        rows = checkpoint_files(repo, task_id)
+        if not rows:
+            return {"restored": False, "path": None, "files": [],
+                    "conflicts": [], "meta": {},
+                    "reason": "no checkpoint for this task"}
+        path, meta = rows[0]
+    else:
+        path = Path(path)
+        try:
+            meta = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+    if not Path(path).exists():
+        return {"restored": False, "path": str(path), "files": [],
+                "conflicts": [], "meta": meta,
+                "reason": f"checkpoint not found: {path}"}
+    rc, _, _ = await _git(["apply", "--3way", "--whitespace=nowarn",
+                           str(Path(path).resolve())], cwd=wt, check=False)
+    # A conflicting `--3way` apply leaves conflict markers in the files AND
+    # unmerged entries in the index (exit 1, "Applied patch ... with
+    # conflicts"). Neither the exit code alone nor the message may be the test:
+    # the index is the honest one, and `ls-files -u` prints a bare path per
+    # stage — its `--name-only` is silently ignored.
+    # -z here too: the conflict list is what an operator reads and what the
+    # event records, and a C-quoted `"caf\303\251.txt"` names nothing.
+    _, unmerged_raw, _ = await _git_bytes(["ls-files", "-u", "-z"], cwd=wt,
+                                          check=False)
+    conflicts = sorted({f.split("\t")[-1]
+                        for f in _null_split(unmerged_raw) if f})
+    _, applied_raw, _ = await _git_bytes(
+        ["diff", "--name-only", "-z", config.BASE_BRANCH, "--", "."],
+        cwd=wt, check=False)
+    files = sorted({p for p in _null_split(applied_raw)
+                    if p and p not in conflicts})
+    if conflicts or rc != 0:
+        # Leave nothing half-applied: a tree carrying conflict markers, or one
+        # where only part of the patch landed, would be published as though it
+        # were the attempt's own work. Worse than not restoring at all.
+        await _git(["reset", "-q", "--hard", "HEAD"], cwd=wt, check=False)
+        events.emit("task.checkpoint_conflict", task=str(task_id),
+                    path=str(path), conflicts=conflicts, exit=rc)
+        return {"restored": False, "path": str(path), "files": [], "meta": meta,
+                "conflicts": conflicts,
+                "reason": (f"{len(conflicts)} conflicting file(s)" if conflicts
+                           else "git apply refused the patch")}
+    # Unstage. `--3way` implies `--index`, so a clean apply stages everything it
+    # wrote, and an implementer that starts work on a tree with a pre-staged
+    # index publishes a diff it did not choose (publish's `git add -A` would
+    # have masked this, but a reviewer reading `git diff` would not). The work
+    # belongs in the FILES, exactly as the checkpoint recorded it.
+    await _git(["reset", "-q", "--mixed", "HEAD"], cwd=wt, check=False)
+    events.emit("task.checkpoint_restored", task=str(task_id), path=str(path),
+                files=len(files), conflicts=0)
+    return {"restored": True, "path": str(path), "files": files,
+            "conflicts": [], "meta": meta, "reason": ""}
+
+
 async def _git(args, cwd, check=True):
     proc = await asyncio.create_subprocess_exec(
         "git", *args, cwd=str(cwd),
@@ -75,6 +404,34 @@ async def _git(args, cwd, check=True):
             f"{text_err.strip()[:400]}"
         )
     return proc.returncode, text_out, text_err
+
+
+async def _git_bytes(args, cwd, check=True):
+    """Like `_git`, but returns stdout as BYTES, undecoded and unreplaced.
+
+    A patch is data, not text. `_git` decodes with errors="replace" and the
+    caller re-encodes, which silently rewrites every byte that is not valid
+    UTF-8 (0xE9 in a latin-1 source file becomes EF BF BD) — and `--binary`
+    does not protect that file, because git only calls a file binary when it
+    contains a NUL byte. Tolerable for a filename or a status line; corruption
+    for a checkpoint. Only the stderr is decoded, for the error message.
+    """
+    proc = await asyncio.create_subprocess_exec(
+        "git", *args, cwd=str(cwd),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), GIT_TIMEOUT)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        raise GitError(f"git {' '.join(args[:3])} timed out in {cwd}")
+    if check and proc.returncode != 0:
+        raise GitError(
+            f"git {' '.join(args[:4])} failed ({proc.returncode}) in {cwd}: "
+            f"{err.decode(errors='replace').strip()[:400]}"
+        )
+    return proc.returncode, out, err.decode(errors="replace")
 
 
 async def _ensure_identity(repo):
@@ -170,6 +527,14 @@ async def alloc(repo, task_id, base="main"):
     rc, ahead, _ = await _git(["rev-list", "--count", f"{base_ref}..{branch}"],
                               cwd=repo, check=False)
     n = int(ahead.strip()) if rc == 0 and ahead.strip().isdigit() else 0
+    # A re-alloc is about to discard this worktree. Checkpoint it first, so a
+    # resume can restore instead of starting over — uncommitted edits count as
+    # work too, and the checkpoint never raises, so the reset still happens.
+    prev = await existing_worktree(repo, task_id)
+    if prev is not None:
+        _, dirty, _ = await _git(["status", "--porcelain"], cwd=prev, check=False)
+        if n or dirty.strip():
+            await checkpoint(repo, task_id, prev, "pre-reset")
     if n:
         events.emit("task.branch_reset", task=task_id, branch=branch,
                     commits_discarded=n, base=base_ref)
@@ -318,15 +683,29 @@ async def diff_stat(wt):
 # that exist or are already indexed are reset. Reasonix state
 # (.reasonix/tasks/<run>/events.jsonl, snapshot.json, task.lock) must never
 # be published: thirty-three such files reached main before this exclusion.
-CHANNEL_FILES = (".arc/plan_proposals.jsonl", ".arc/board.jsonl", ".arc/handoff.md")
+# Path exclusions for `git diff`, where the `:!` form is required. NEVER_STAGE
+# is NOT usable with `git add`: naming an ignored path that way makes the add
+# exit 1 ("The following paths are ignored by one of your .gitignore files"),
+# and .reasonix is ignored in this repo.
+CHANNEL_FILES = (".arc/plan_proposals.jsonl", ".arc/board.jsonl",
+                 ".arc/handoff.md")
 NEVER_STAGE = (":!.reasonix",)
+# The same exclusion as a plain path, for the `git reset` that unstages it.
+RUNTIME_PATHS = (".reasonix",)
 
 
 async def _stage_without_runtime_files(wt, *, intent=False):
     args = ["add", "-A"]
     if intent:
         args.append("-N")
-    await _git([*args, "--", ".", *NEVER_STAGE], cwd=wt)
+    # NEVER_STAGE is a pathspec EXCLUSION, and git refuses that shape outright
+    # when the path it names is .gitignore'd ("The following paths are ignored
+    # by one of your .gitignore files: .reasonix", exit 1) — it is ignored in
+    # this very repo. So the add takes everything and the exclusions are
+    # applied by unstaging afterwards, which works whether or not the path is
+    # ignored and whether or not it exists.
+    await _git([*args, "--", "."], cwd=wt)
+    await _git(["reset", "-q", "--", *RUNTIME_PATHS], cwd=wt, check=False)
     root = Path(wt)
     present = [p for p in CHANNEL_FILES if (root / p).exists()]
     _, indexed, _ = await _git(

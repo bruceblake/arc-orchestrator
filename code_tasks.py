@@ -1329,8 +1329,40 @@ def _reviewer_that_ran(ctx, tid, store, fallback):
 # resuming one tier higher. Anything else (a killed run process, a cancelled
 # graph, a harness crash, a merge conflict) is infrastructure noise: the task
 # resumes at the SAME tier, because escalating on it wastes the scarcest models.
-_CAPABILITY_FAILURES = ("exhausted escalation", "exhausted fix rounds",
-                        "review rejected", "gate failed")
+_CAPABILITY_FAILURES = (
+    "exhausted escalation",
+    # fail()'s real wording. The list used to hold "gate failed" and
+    # "review rejected" — words fail() NEVER writes — so a gate- or
+    # review-rejected task was classified as infrastructure noise.
+    "verify gate still failing",         # "verify gate still failing after N…"
+    "pre-merge review still rejecting",  # "pre-merge review still rejecting…"
+    "rejected after",                    # "PR #N rejected after M round(s)…"
+    # publish(): a rework told to fix rejected issues produced nothing. The
+    # SIBLING string ("implementer produced no changes", the first publish) is
+    # deliberately NOT here: the runbook's plan-mode failure produces the same
+    # words from an infrastructure cause, so it is not reliably a capability
+    # signal.
+    "rework after pr rejection produced no changes",
+    # Legacy / hand-written rows.
+    "exhausted fix rounds",
+    "review rejected",
+    "gate failed",
+)
+
+# The reasons that POSITIVELY say the run was interrupted before the model
+# could finish — the only ones a checkpoint may be restored on. An ALLOWLIST,
+# deliberately, and the difference matters: the restore test used to be
+# `not _is_capability_failure(...)`, a denylist, so every new string publish()
+# or fail() grew defaulted to RESTORING. Restoring a refused diff re-submits
+# exactly what a gate or a reviewer rejected, and three review rounds each
+# found one more string leaking through ("verify gate still failing…",
+# "rework after PR rejection produced no changes", …). Unknown reasons now
+# start CLEAN. Both entries are the module constants that write them
+# (reconcile.INTERRUPTED_REASON, store.STALE_REASON); a test asserts that.
+_INTERRUPTION_REASONS = (
+    "interrupted: run process exited before the task finished",
+    "reset-stale: owning run process died",
+)
 
 
 def _is_capability_failure(error):
@@ -1340,6 +1372,19 @@ def _is_capability_failure(error):
         # unexplained failure as a capability signal, matching the old behaviour.
         return True
     return any(m in low for m in _CAPABILITY_FAILURES)
+
+
+def _was_interrupted(error):
+    """True only for the reasons that say the run was cut off mid-flight.
+
+    The allowlist half of the pair above, and the one a checkpoint RESTORE is
+    decided on. An unrecognised reason is False: starting clean is the safe
+    error, because restoring work a gate or a reviewer refused re-submits it.
+    """
+    low = (error or "").lower()
+    if not low:
+        return False
+    return any(m in low for m in _INTERRUPTION_REASONS)
 
 
 async def _run_probe(cmd, wt):
@@ -1728,6 +1773,51 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             sum(r.get("seconds") or 0.0 for r in rows), 1),
                         total_tokens=toks)
 
+        async def restore_interrupted(tid, wt):
+            """Continue an interrupted attempt instead of restarting it.
+
+            alloc has just reset task/<id> to base. The previous row says WHY
+            the task ended: "interrupted: run process exited before the task
+            finished" (main.py on SIGTERM/Ctrl-C, reconcile on a dead pid) or a
+            cancelled graph — the reasons Rule 4 already treats as NOT a
+            capability failure, because the model was never given a chance to
+            fail. The work it wrote is the work to continue from, so its latest
+            checkpoint is applied back onto the fresh worktree and the board is
+            told, in the same words the implementer reads.
+
+            A genuine capability failure starts CLEAN on purpose: a gate or a
+            reviewer rejected that work, and restoring it would re-submit the
+            very thing that was refused.
+
+            Which is which is an ALLOWLIST (`_INTERRUPTION_REASONS`), not
+            "not a capability failure". The old test was a DENYLIST, so every
+            failure string publish() or fail() grew later defaulted to
+            RESTORING — three review rounds each found one more leaking through
+            ("verify gate still failing…", "rework after PR rejection produced
+            no changes", …). An unrecognised reason is not evidence the model
+            was interrupted; it starts clean.
+            """
+            row = prior.get(tid) or {}
+            if row.get("status") != "failed":
+                return
+            if not _was_interrupted(row.get("error")):
+                return
+            res = await gitstore.restore_checkpoint(repo, tid, wt)
+            if not res.get("restored"):
+                return
+            files = res.get("files") or []
+            events.emit("task.checkpoint_restored", task=tid,
+                        path=res.get("path"), files=len(files),
+                        previous_failure=row.get("error"),
+                        attempt=(res.get("meta") or {}).get("attempt"))
+            board.post(wt, task=tid, role="orchestrator", model="",
+                       harness="checkpoint", kind="note", project=project_slug,
+                       body=(f"restored {len(files)} file(s) from checkpoint "
+                             f"{Path(str(res.get('path') or '')).name}: the "
+                             f"previous attempt was interrupted, not rejected — "
+                             f"continue it instead of starting over: "
+                             f"{', '.join(files[:12])}"))
+
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
             store.upsert_code_task(taskfile, tid, t["title"], model0,
@@ -1735,6 +1825,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    branch=f"task/{tid}", worktree=str(wt))
             events.set_context(module=tid)
             events.emit("worktree.alloc", path=str(wt), base=base)
+            await restore_interrupted(tid, wt)
             return {"worktree": str(wt)}
 
         async def implement(ctx):
@@ -1765,6 +1856,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # session_id as exactly that flag.
             resume = _resume_session(results, tid, model, driver.harness)
             thread = board.prompt_block(wt, project=project_slug, task=tid)
+            # Which model this attempt actually RAN on. A spent plan window can
+            # substitute another driver (drivers.usage_substitute), and the
+            # checkpoint written in the `finally` below must name the model
+            # that ran — on the crash path exactly as on the success path.
+            ran = {"model": model}
             try:
                 res = await driver.run(
                     _impl_prompt(t, feedback, hints, roster, thread,
@@ -1772,6 +1868,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                  dossier=dossier_block(tid, "implementer")), wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
                     avoid_families={reviewer_for(t, model)})
+                ran["model"] = getattr(res, "model", None) or model
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -1798,9 +1895,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                            body=str(exc)[:400], project=project_slug)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
+            finally:
+                # A worktree is state: save what this attempt produced before
+                # anything — a reset, a cancel, a reboot — can discard it.
+                # A `finally`, not a line after the try, because the CRASH path
+                # returns from its except and used to skip the checkpoint
+                # entirely: an attempt that wrote three files and then died
+                # saved nothing, and a reboot loses it — there is no fail tail
+                # to fall back on when the process is gone. Never raises.
+                await gitstore.checkpoint(repo, tid, wt, f"x{attempt}",
+                                          model=ran["model"], attempt=attempt)
             # A spent plan window may have moved this attempt to another
             # model (drivers.usage_substitute): record the one that RAN.
-            ran_model = getattr(res, "model", None) or model
+            ran_model = ran["model"]
             ran_harness = getattr(res, "harness", None) or driver.harness
             store.save_harness_run(tid, ran_harness, ran_model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
@@ -2876,7 +2983,57 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     else:
         for h in heads:
             g.start(h)
+    for tid in tasks:
+        # ONE tail node PER TASK, edged from that task's FAILURE, not its
+        # merge. The merge path is useless for this: pr_merge calls
+        # gitstore.cleanup(repo, tid) before it returns, so by the time a node
+        # downstream of it runs the worktree is already gone and there is
+        # nothing left to save. `fail` is where work actually survives — the
+        # task stopped mid-flight with its worktree intact, which is exactly
+        # the state the next alloc would reset. Not a gathered sweep either: a
+        # task still mid-pipeline when a sibling drains never reaches fail at
+        # all, so a gather waiting on it hangs the drain ("unreachable
+        # sources"), and reading a tree somebody is writing is wrong anyway.
+        # A merged task has only a skip stub, so neither node exists for it.
+        if f"fail_{tid}" in g.nodes:
+            g.node(f"checkpoint_{tid}", _make_checkpoint_one(tid, repo))
+            g.edge(f"fail_{tid}", f"checkpoint_{tid}", on_drain=True)
     return g
+
+
+def _make_checkpoint_one(tid, repo):
+    """Checkpoint THIS task's worktree, the moment the task fails.
+
+    The implement node checkpoints after every attempt already; this is the
+    second belt for the path BETWEEN attempts — a task that died during a gate,
+    a review or a PR round left work in its worktree that the next alloc would
+    reset, and nothing else saves it before the run ends. Only ever this one
+    worktree, so a drain never touches a sibling that is still running. Never
+    raises.
+    """
+
+    async def checkpoint_one(ctx):
+        results = ctx.get("results", {})
+        wt = (results.get(f"alloc_{tid}") or {}).get("worktree")
+        if not wt:
+            # A resume that started at publish never ran alloc in THIS graph,
+            # so the worktree is not in the results — ask git for it, the same
+            # way every other node does.
+            try:
+                found = await gitstore.existing_worktree(repo, tid)
+            except Exception:                                   # noqa: BLE001
+                found = None
+            if found is None:
+                return {"saved": None}
+            wt = str(found)
+        try:
+            p = await gitstore.checkpoint(repo, tid, Path(wt), "interrupted")
+        except Exception as exc:                                # noqa: BLE001
+            errors.capture(exc, task=tid, node=f"checkpoint_{tid}")
+            return {"saved": None}
+        return {"saved": str(p) if p else None}
+
+    return checkpoint_one
 
 
 def _routing_tiers_prose():

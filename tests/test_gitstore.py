@@ -1,5 +1,7 @@
 """Worktree/diff/merge behaviour against real temporary git repos."""
 import asyncio
+import json
+import os
 import shutil
 import subprocess
 import tempfile
@@ -283,6 +285,370 @@ class FindingAnExistingWorktree(unittest.TestCase):
         with capture_events() as ev:
             asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
         self.assertEqual([t for t, _ in ev.seen if t == "task.branch_reset"], [])
+
+
+class CheckpointingWorktreeWork(RepoFixture):
+    """A worktree is state. alloc resets task/<id> to base on every (re)alloc,
+    which on 2026-09-24 threw away the reviewed work of three tasks in one
+    reboot-resume (it survived only because those branches had been pushed).
+    The checkpoint is the fix: the work is saved before anything discards it,
+    and a resume restores it instead of starting over.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._orig_cp = config.CHECKPOINT_DIR
+        self._cps = Path(self._dir.name) / "checkpoints"
+        config.CHECKPOINT_DIR = self._cps
+        self.addCleanup(setattr, config, "CHECKPOINT_DIR", self._orig_cp)
+        (self.repo / ".gitignore").write_text(".arc/\n.reasonix/\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "ignore channels")
+
+    def work(self, wt):
+        """One attempt's output: a commit, an edit, an untracked file, channels."""
+        (wt / "committed.txt").write_text("done\n")
+        git(wt, "add", "-A", "--", ".")
+        git(wt, "commit", "-qm", "attempt work")
+        (wt / "calc.py").write_text("def add(a, b):\n    return a + b + 0\n")
+        (wt / "untracked.txt").write_text("new file\n")
+        (wt / ".arc").mkdir(exist_ok=True)
+        (wt / ".arc" / "board.jsonl").write_text('{"kind":"note"}\n')
+        (wt / ".arc" / "plan_proposals.jsonl").write_text('{"kind":"note"}\n')
+        (wt / ".reasonix").mkdir(exist_ok=True)
+        (wt / ".reasonix" / "state.json").write_text("{}\n")
+
+    def test_captures_commits_uncommitted_and_untracked_work(self):
+        wt = self.alloc("t1")
+        self.work(wt)
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1",
+                                            model="m", attempt=1))
+        self.assertTrue(p.exists())
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertEqual(sorted(meta["files"]),
+                         ["calc.py", "committed.txt", "untracked.txt"])
+        self.assertEqual(meta["commits"], 1)
+        self.assertEqual(meta["label"], "x1")
+        self.assertEqual(meta["attempt"], 1)
+        self.assertEqual(meta["model"], "m")
+        self.assertTrue(meta["head"])
+        self.assertEqual(meta["merge_base"], git(self.repo, "rev-parse", "main").strip())
+
+    def test_excludes_the_channel_files_and_reasonix_state(self):
+        wt = self.alloc("t1")
+        self.work(wt)
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        patch = p.read_text()
+        self.assertNotIn(".arc/", patch)
+        self.assertNotIn("board.jsonl", patch)
+        self.assertNotIn(".reasonix", patch)
+
+    def test_non_ascii_paths_are_captured_not_silently_dropped(self):
+        """PR review: `ls-files` C-quotes a non-ASCII path by default, so it
+        yielded `"caf\\303\\251.txt"` — a string naming no file. Handed to
+        `diff --no-index` git exited 1 ("Could not access …") with EMPTY stdout,
+        and 1 is also the exit code for "the files differ", so the empty blob
+        was appended and the quoted name recorded: checkpoint reported SUCCESS
+        with a 0-byte patch and the file was gone. -z emits raw bytes, and a
+        file whose per-file diff produced nothing is skipped, not recorded.
+        """
+        wt = self.alloc("t1")
+        names = ["café.txt", "日本語.md", "sp ace.txt"]
+        for n in names:
+            (wt / n).write_text(f"content of {n}\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertEqual(sorted(meta["files"]), sorted(names))
+        for f in meta["files"]:
+            self.assertNotIn("\\303", f)
+            self.assertFalse(f.startswith('"'), f)
+        self.assertGreater(p.stat().st_size, 0)
+        git(wt, "reset", "-q", "--hard", "HEAD")
+        git(wt, "clean", "-qfd")
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt))
+        self.assertTrue(res["restored"], res)
+        for n in names:
+            self.assertEqual((wt / n).read_text(), f"content of {n}\n", n)
+
+    def test_a_non_utf8_path_round_trips(self):
+        """The same defect one layer down: `_git` decodes with errors="replace",
+        which turns a name holding a raw non-UTF-8 byte into a string that names
+        nowhere. fsdecode's surrogateescape round-trips it instead."""
+        raw = b"lat\xe9n1.txt"          # 0xE9 is not valid UTF-8
+        name = os.fsdecode(raw)
+        wt = self.alloc("t1")
+        # Do NOT chdir: the test process is shared, and leaving cwd inside a
+        # torn-down temp worktree breaks every later test (it showed up as an
+        # unrelated GitHubQuota error). A bytes path through builtin open()
+        # reaches the same file without touching the process cwd.
+        with open(os.path.join(os.fsencode(wt), raw), "wb") as fh:
+            fh.write(b"latin1 name\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertEqual(meta["files"], [name])
+        self.assertEqual(os.fsencode(meta["files"][0]), raw)
+        git(wt, "reset", "-q", "--hard", "HEAD")
+        git(wt, "clean", "-qfd")
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt))
+        self.assertTrue(res["restored"], res)
+        self.assertEqual((wt / name).read_text(), "latin1 name\n")
+
+    def test_a_modified_tracked_non_ascii_path_is_listed(self):
+        """The tracked half uses `diff --name-only`, which C-quotes too — and it
+        is that listing which feeds meta["files"] and the list an operator
+        reads. A trace-only fix would leave the record wrong."""
+        wt = self.alloc("t1")
+        (wt / "café.txt").write_text("base\n")
+        git(wt, "add", "-A", "--", ".")
+        git(wt, "commit", "-qm", "add accented file")
+        (wt / "café.txt").write_text("base\nmodified\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertEqual(meta["files"], ["café.txt"])
+        # The commit is checkpointed too, so a reset that keeps HEAD would
+        # apply the patch onto a tree that already contains it and conflict.
+        # alloc resets to the BASE — reproduce that, which is the real case.
+        git(wt, "reset", "-q", "--hard", meta["merge_base"])
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt))
+        self.assertTrue(res["restored"], res)
+        self.assertEqual((wt / "café.txt").read_text(), "base\nmodified\n")
+
+    def test_a_file_git_cannot_read_is_skipped_not_faked(self):
+        """The guard behind both: a per-file diff that produced no patch must
+        never be recorded as captured. A path that cannot be read is the honest
+        way to drive that branch."""
+        wt = self.alloc("t1")
+        (wt / "real.txt").write_text("kept\n")
+        orig = gitstore._git_bytes
+
+        async def flaky(args, cwd, check=True):
+            if "--no-index" in args and args[-1] == "ghost.txt":
+                return 1, b"", "error: could not access 'ghost.txt'"
+            return await orig(args, cwd, check=check)
+
+        gitstore._git_bytes = flaky
+        self.addCleanup(setattr, gitstore, "_git_bytes", orig)
+        (wt / "ghost.txt").write_text("here at listing time\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        meta = json.loads(p.with_suffix(".json").read_text())
+        self.assertNotIn("ghost.txt", meta["files"])
+        self.assertIn("real.txt", meta["files"])
+
+    def test_restore_after_a_reset_recovers_the_files(self):
+        wt = self.alloc("t1")
+        self.work(wt)
+        saved = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        with capture_events() as ev:
+            wt2 = self.alloc("t1")          # resets task/t1 to base
+        # alloc checkpointed the work it was about to discard...
+        self.assertTrue(any(t == "task.branch_reset" for t, _ in ev.seen))
+        self.assertGreater(len(gitstore.checkpoint_files(self.repo, "t1")), 1)
+        self.assertFalse((wt2 / "committed.txt").exists())
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt2))
+        self.assertTrue(res["restored"], res)
+        self.assertEqual((wt2 / "committed.txt").read_text(), "done\n")
+        self.assertEqual((wt2 / "untracked.txt").read_text(), "new file\n")
+        self.assertIn("return a + b + 0", (wt2 / "calc.py").read_text())
+        self.assertTrue(saved.exists())
+        # Restored into the FILES, not the index: `git apply --3way` implies
+        # --index, so the implementer would otherwise inherit a pre-staged diff.
+        self.assertEqual(git(wt2, "diff", "--cached", "--name-only").strip(), "")
+        self.assertIn("calc.py", git(wt2, "status", "--porcelain"))
+
+    def test_a_non_utf8_file_round_trips_byte_for_byte(self):
+        """A patch is DATA, not text.
+
+        `_git` decodes stdout with errors="replace", and the patch used to be
+        re-encoded with encode("utf-8", "replace") — so every byte that is not
+        valid UTF-8 was silently rewritten (0xE9 -> EF BF BD) and the restore
+        still reported success. `--binary` does NOT save this file: git only
+        classifies a blob as binary when it contains a NUL byte, and a latin-1
+        source file has none. The capture reads and writes raw bytes.
+        """
+        wt = self.alloc("t1")
+        latin = b"caf\xe9 na\xefve\n"        # 0xE9, no NUL: git calls it TEXT
+        (wt / "latin.txt").write_bytes(latin)
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        raw = p.read_bytes()
+        self.assertIn(b"\xe9", raw, "the patch must carry the original byte")
+        self.assertNotIn(b"\xef\xbf\xbd", raw, "…not the U+FFFD replacement")
+
+        wt2 = self.alloc("t1")
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt2))
+        self.assertTrue(res["restored"], res)
+        self.assertEqual((wt2 / "latin.txt").read_bytes(), latin)
+
+    def test_a_non_utf8_untracked_file_round_trips_too(self):
+        """The untracked half is a separate `git diff --no-index` per file."""
+        wt = self.alloc("t1")
+        blob = b"\xff\xfe\x00\x01mixed\n"    # this one IS binary to git
+        latin = b"na\xefve\n"
+        (wt / "blob.bin").write_bytes(blob)
+        (wt / "latin.txt").write_bytes(latin)
+        asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        wt2 = self.alloc("t1")
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt2))
+        self.assertTrue(res["restored"], res)
+        self.assertEqual((wt2 / "blob.bin").read_bytes(), blob)
+        self.assertEqual((wt2 / "latin.txt").read_bytes(), latin)
+
+    def test_a_conflicting_restore_is_reported_not_half_applied(self):
+        wt = self.alloc("t1")
+        self.work(wt)
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        # The base moves under the checkpoint: the same file now says something
+        # else, so the patch cannot apply cleanly.
+        git(wt, "reset", "-q", "--hard", "HEAD~1")
+        (wt / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+        git(wt, "commit", "-qam", "someone else changed it")
+        (wt / "untracked.txt").unlink(missing_ok=True)
+        with capture_events() as ev:
+            res = asyncio.run(
+                gitstore.restore_checkpoint(self.repo, "t1", wt, str(p)))
+        self.assertFalse(res["restored"])
+        self.assertEqual(res["conflicts"], ["calc.py"])
+        # Nothing half-applied: no conflict markers, no partial new file, and
+        # the tree is exactly what HEAD says it is.
+        self.assertNotIn("<<<<<<<", (wt / "calc.py").read_text())
+        self.assertEqual(git(wt, "status", "--porcelain").strip(), "")
+        self.assertEqual([f for t, f in ev.seen
+                          if t == "task.checkpoint_conflict"][0]["conflicts"],
+                         ["calc.py"])
+
+    def test_retention_keeps_only_the_newest_per_task(self):
+        orig = config.CHECKPOINT_KEEP
+        config.CHECKPOINT_KEEP = 3
+        self.addCleanup(setattr, config, "CHECKPOINT_KEEP", orig)
+        wt = self.alloc("t1")
+        for i in range(5):
+            (wt / f"f{i}.txt").write_text(f"attempt {i}\n")
+            asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, f"x{i}"))
+        rows = gitstore.checkpoint_files(self.repo, "t1")
+        self.assertEqual(len(rows), 3)
+        # The newest survive, and no orphaned JSON is left behind.
+        self.assertEqual([m["label"] for _, m in rows], ["x4", "x3", "x2"])
+        jsons = list((self._cps / "proj" / "t1").glob("*.json"))
+        self.assertEqual(len(jsons), 3)
+
+    def test_a_clean_tree_checkpoints_nothing(self):
+        wt = self.alloc("t1")
+        self.assertIsNone(
+            asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1")))
+        self.assertEqual(gitstore.checkpoint_files(self.repo, "t1"), [])
+
+    def test_the_cancel_sweep_runs_synchronously(self):
+        """The run's finally block calls this with no event loop left."""
+        wt = self.alloc("t1")
+        (wt / "half-written.txt").write_text("attempt was cut off\n")
+        # No asyncio.run here on purpose: the caller is synchronous.
+        n = gitstore.checkpoint_worktrees(self.repo, ["t1", "no-such-task"])
+        self.assertEqual(n, 1)
+        rows = gitstore.checkpoint_files(self.repo, "t1")
+        self.assertEqual([m["label"] for _, m in rows], ["interrupted"])
+        self.assertIn("half-written.txt", rows[0][1]["files"])
+
+    def test_the_sweep_accepts_store_row_dicts(self):
+        """What main.py actually has in hand at a cancel is
+        store.running_code_tasks(...) — a list of ROW DICTS, not ids. The sweep
+        used to do str(t) on whatever it was given, so each lookup became a
+        directory named "{'id': 't1', …}": every task missed, nothing was saved,
+        and because a missing worktree is an ordinary skip there was not even an
+        error. Both forms must work, and a genuine miss must be reported."""
+        wt = self.alloc("t1")
+        (wt / "still-here.txt").write_text("interrupted mid-write\n")
+        rows = [{"id": "t1", "taskfile": "tf.json", "model": "m", "status": "running"},
+                {"id": "gone", "status": "running"}]
+        with capture_events() as ev:
+            n = asyncio.run(gitstore.checkpoint_stopping(self.repo, rows))
+        self.assertEqual(n, 1, "a row dict must resolve to its task id")
+        saved = gitstore.checkpoint_files(self.repo, "t1")
+        self.assertIn("still-here.txt", saved[0][1]["files"])
+        # And the miss is visible rather than silent.
+        skipped = [f for t, f in ev.seen if t == "task.checkpoint_skipped"]
+        self.assertEqual([f["task"] for f in skipped], ["gone"])
+        # The id form still works too.
+        self.assertEqual(asyncio.run(
+            gitstore.checkpoint_stopping(self.repo, ["no-such-task"])), 0)
+
+
+    def test_the_sweep_awaits_on_a_live_loop(self):
+        """main.py's finally is INSIDE async def run(): asyncio.run there raises
+        RuntimeError, which the caller's except would swallow into a log line —
+        so a cancel wrote no checkpoint at all. checkpoint_stopping is the
+        awaited form, and checkpoint_worktrees must refuse, not lie."""
+        wt = self.alloc("t1")
+        (wt / "stopped.txt").write_text("cut off\n")
+
+        async def sweep():
+            n = await gitstore.checkpoint_stopping(self.repo, ["t1"])
+            # The sync wrapper is a last resort, not something a live loop may
+            # call: failing loudly beats silently saving nothing.
+            with self.assertRaises(RuntimeError):
+                gitstore.checkpoint_worktrees(self.repo, ["t1"])
+            return n
+
+        self.assertEqual(asyncio.run(sweep()), 1)
+        self.assertIn("stopped.txt",
+                      gitstore.checkpoint_files(self.repo, "t1")[0][1]["files"])
+
+    def test_a_checkpoint_leaves_the_index_and_worktree_untouched(self):
+        """A drain sweeps while sibling agents are still implementing: `git add
+        -N` would race index.lock and leave a staged copy of work the agent
+        never staged. The capture is read-only instead."""
+        wt = self.alloc("t1")
+        (wt / "calc.py").write_text("def add(a, b):\n    return a + b + 9\n")
+        (wt / "untracked.txt").write_text("brand new\n")
+        before_status = git(wt, "status", "--porcelain")
+        before_index = git(wt, "ls-files", "-s")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        self.assertTrue(p.exists())
+        self.assertIn("untracked.txt", p.read_text())
+        self.assertEqual(git(wt, "status", "--porcelain"), before_status)
+        self.assertEqual(git(wt, "ls-files", "-s"), before_index)
+
+    def test_newest_wins_even_when_two_checkpoints_share_a_second(self):
+        """The stamp used to be whole seconds, so two checkpoints in the same
+        second sorted on their LABEL — "…-interrupted-1" before "…-interrupted",
+        "pre-reset" before "x1". checkpoint_files reads newest-first and
+        _prune_checkpoints drops the front, so a resume restored an OLDER patch
+        than the one just written and could prune the newest away."""
+        wt = self.alloc("t1")
+        labels = ["pre-reset", "interrupted", "interrupted", "x1"]
+        for i, label in enumerate(labels):
+            (wt / "calc.py").write_text(f"def add(a, b):\n    return a + b + {i}\n")
+            asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, label))
+        rows = gitstore.checkpoint_files(self.repo, "t1")
+        self.assertEqual(len(rows), len(labels))
+        # Newest first: the LAST written is the one restore_checkpoint applies.
+        self.assertEqual(rows[0][1]["files"], ["calc.py"])
+        self.assertIn("a + b + 3", rows[0][0].read_text())
+        # And the order is the write order, whatever the labels were.
+        by_mtime = sorted(rows, key=lambda r: r[0].stat().st_mtime_ns)
+        self.assertIn("a + b + 3", by_mtime[-1][0].read_text())
+
+    def test_retention_keeps_the_newest_when_stamps_collide(self):
+        orig = config.CHECKPOINT_KEEP
+        config.CHECKPOINT_KEEP = 2
+        self.addCleanup(setattr, config, "CHECKPOINT_KEEP", orig)
+        wt = self.alloc("t1")
+        for i in range(4):
+            (wt / "calc.py").write_text(f"def add(a, b):\n    return a + b + {i}\n")
+            # Labels chosen so a NAME sort would keep the wrong pair.
+            asyncio.run(gitstore.checkpoint(self.repo, "t1", wt,
+                                            ["interrupted-1", "pre-reset"][i % 2]))
+        rows = gitstore.checkpoint_files(self.repo, "t1")
+        self.assertEqual(len(rows), 2)
+        self.assertIn("a + b + 3", rows[0][0].read_text())
+        self.assertIn("a + b + 2", rows[1][0].read_text())
+
+
+    def test_never_raises_on_a_worktree_that_is_gone(self):
+        self.assertIsNone(asyncio.run(
+            gitstore.checkpoint(self.repo, "t1", Path("/nonexistent/wt"), "x1")))
+        res = asyncio.run(gitstore.restore_checkpoint(
+            self.repo, "t1", self.alloc("t1")))
+        self.assertFalse(res["restored"])
+        self.assertIn("no checkpoint", res["reason"])
 
 
 class SyncingATaskBranchWithItsBase(unittest.TestCase):
