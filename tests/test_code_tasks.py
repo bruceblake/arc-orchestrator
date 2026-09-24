@@ -2268,3 +2268,48 @@ class PlanAmendmentWiring(unittest.TestCase):
         self.assertIn(plan_amend.PROPOSALS_REL, pr)
         self.assertNotIn(plan_amend.PROPOSALS_REL,
                          code_tasks._review_prompt(self._task(), "diff"))
+
+
+class TransientNetworkRetries(unittest.TestCase):
+    """A network blip on push must not fail a finished, reviewed task."""
+
+    def setUp(self):
+        self._old = config.NET_RETRY_DELAYS
+        config.NET_RETRY_DELAYS = [0, 0, 0]
+        self.addCleanup(setattr, config, "NET_RETRY_DELAYS", self._old)
+
+    def test_classifier(self):
+        import gitstore
+        self.assertTrue(gitstore.is_transient_network_error(
+            "fatal: unable to access 'https://github.com/o/r.git/': SSL connection timeout"))
+        self.assertTrue(gitstore.is_transient_network_error("Could not resolve host: github.com"))
+        self.assertFalse(gitstore.is_transient_network_error(
+            "! [rejected] task/t -> task/t (stale info)"))
+        self.assertFalse(gitstore.is_transient_network_error(
+            "GraphQL: No commits between main and task/t"))
+
+    def test_network_failures_retry_until_success(self):
+        import gitstore
+        calls = []
+
+        async def once():
+            calls.append(1)
+            if len(calls) < 3:
+                return False, "fatal: unable to access 'https://github.com/o/r.git/'"
+            return True, "pushed"
+        with capture_events() as ev:
+            ok, _note = asyncio.run(gitstore._retry_transient("push", once))
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(ev.of("git.retry")), 2)
+
+    def test_real_refusals_are_not_retried(self):
+        import gitstore
+        calls = []
+
+        async def once():
+            calls.append(1)
+            return False, "! [rejected] (stale info)"
+        ok, _ = asyncio.run(gitstore._retry_transient("push", once))
+        self.assertFalse(ok)
+        self.assertEqual(len(calls), 1)

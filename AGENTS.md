@@ -38,8 +38,9 @@ builds software — and this repo itself — as a directed graph of small tasks:
 Every project is two graphs, and they are owned by different parties:
 
 1. **The per-task pipeline — static, in code.** Every task runs
-   `alloc → implement → gate(verify_cmd) → cross-family review → publish →
-   PR → PR review (ONE cross-family reviewer today, Rule 5) → merge`, with
+   `alloc → implement → gate(verify_cmd + visual evidence, Rule 7d) →
+   cross-family review → publish → PR (+ evidence comment) → PR review
+   (ONE cross-family reviewer today, Rule 5) → merge`, with
    the bounded fix loop (Rule 4)
    and tier escalation (`config.ESCALATION_PATH`) as conditional edges. It
    is built by `code_tasks.build_code_graph`, documented per node by
@@ -701,6 +702,54 @@ capacity for processes that no longer exist, log growth, and whether
   and **skips entirely while any run is in flight**: reaping worktrees and
   leases out from under a live run turns a cleanup into an outage.
 
+### Rule 7d — Every game change is SEEN: screenshots and video, everywhere a decision is made
+
+A green gate proves what the tests measure. A game is judged by looking at
+it, so for every task whose worktree is a Godot project (`project.godot`),
+the gate node runs `evidence.capture` right after `verify_cmd` passes:
+
+- **Screenshots** from the project's fixed anchor cameras
+  (`studio/evaluation/camera_system.py`, overridable by a committed
+  `studio_cameras.json`) — the same viewpoints every attempt, so they compare.
+- **A flythrough video** through those anchors, recorded with Godot's movie
+  writer (`--write-movie`), kept as `.mp4` plus a small looping `.gif`.
+- **The scripted playtest recorded** (`tools/playtest.gd`) when the game has
+  one, plus the screenshots it takes along its route.
+- **Before | after | difference** per camera against the SAME cameras
+  rendered at the task's **merge base** (never the live base branch — the
+  `gitstore.diff_full` rule; siblings' merges are not this task's change),
+  with the share of pixels changed. Near-solid frames are flagged as blank
+  renders.
+
+That evidence goes to every place a decision is made:
+
+- the **pre-merge reviewer** and **every PR reviewer** get the images attached
+  (drivers' `images`) and an evidence block in the prompt that makes a visible
+  regression a blocking issue, exactly like a failing test;
+- the **pull request** gets a comment with the comparisons, screenshots and
+  videos inline — pushed to the game repo's orphan `arc-evidence` branch
+  (`ARC_EVIDENCE_BRANCH`) so a private repo renders them for its viewers;
+- the **agent board** gets a `kind: "evidence"` post (`board.py`);
+- the files stay under `logs/evidence/<project>/<task>/x<attempt>/`.
+
+Rules the code holds to:
+
+- **Nothing is written into the worktree.** The capture harnesses run from a
+  temp directory (Godot takes an absolute `--script` path) and every untracked
+  file the capture creates is deleted — publish's `git add -A` would ship it.
+- **`ARC_EVIDENCE=required` (default): a project that will not render fails
+  the gate** with the Godot errors as feedback. `best-effort` downgrades that
+  to a warning; `off` disables capture. A task opts out with
+  `"evidence": false` (documentation-only work).
+- **A machine that cannot capture never fails a task** — no display, Godot or
+  ffmpeg is `evidence.unavailable`, an infrastructure gap, not the
+  implementer's bug. Rendering needs a display: WSLg provides `:0`; elsewhere
+  run Xvfb and set `ARC_STUDIO_DISPLAY`.
+- A publish or comment failure never fails publish (`evidence.publish_failed`
+  with a fingerprint): the reviewers already had the images.
+- Events: `evidence.captured`, `evidence.failed`, `evidence.unavailable`,
+  `evidence.error`, `evidence.posted`, `evidence.publish_failed`.
+
 ### Rule 8 — Dry-run before every run
 
 - Before executing a taskfile for real, run
@@ -817,7 +866,10 @@ no `planner` role and is refused);
 roster-driven enforcement as Rule 2). Default model `config.GH_MODEL`
 (`ARC_GH_MODEL` env), falling back to `config.PLANNER_MODEL` =
 GLM-5.3; each `gh` subprocess is bounded by
-`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 120 s).
+`config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 120 s). Pipeline pushes and
+`gh pr create` retry NETWORK failures only (`gitstore.is_transient_network_error`)
+with backoff `ARC_NET_RETRY_DELAYS` (default `5,15,45,90,180` s, `git.retry`
+events); a lease, auth or no-commits refusal is never retried.
 
 **Preview by default.** `--apply-labels`, `--create`, and `--post` are the
 ONLY paths that write to GitHub; without them every command is read-only.
@@ -843,7 +895,9 @@ Top-level Python modules (one role each):
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local `git init` + one commit, then best-effort gh remote creation), `POST /api/repos/remote` (gh remote for an existing allowlisted checkout), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
 | `drivers.py` | Headless CLI harness drivers: `OpencodeDriver` (`opencode`, GLM-5.3 — since 2026-09-16 the ONLY path is the persistent `opencode serve` server reached through `ocserve.py`: one server per orchestrator, one session per run over `x-opencode-directory`, prompts on the async route, results over SSE, dispose on exit; the one-shot `opencode run` spawn is retired) and `ReasonixDriver` (`reasonix`, DeepSeek-V4.1-Flash-thinking-max since 2026-09-13 — `reasonix run --output-format stream-json`: every tool call, text delta and token receipt on stdout, final `{"type":"result"}` object carries the answer and session id; a private `REASONIX_HOME` generated by `reasonix_fleet_home`); `DeepseekDriver` (`dsh`, 2026-09-12..13, historical — streams reasoning on stderr, prints only the final message on stdout, pumps both pipes for the stall clock, no session resume, 0 tokens reported); `KimiDriver` still exists for historical transcripts only (no live model runs the kimi harness); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
 | `dream_rsi.py` | Dream-RSI offline policy improvement (`main.py code dream`, arXiv:2609.14858): rebuilds the *discovery tree* a run produced from `code_tasks` + `harness_runs` (`build_tree`), re-scores attempts (`attempt_score`), replays exploration policies against recorded history with Eq.1 (`replay`, `score_policies`, `improve`), and offers an LLM policy-development hook (`propose_source`, `compile_policy` — sandboxed) — no model calls, no git. Prose: [docs/dream-rsi.md](docs/dream-rsi.md) |
+| `evidence.py` | Visual evidence (Rule 7d): screenshots from the fixed anchor cameras, a flythrough video (Godot movie writer → mp4 + gif), the scripted playtest recorded, before/after/diff against the task's merge base, blank-render detection; publishes to the game repo's `arc-evidence` branch and renders the PR comment and reviewer prompt block. Never writes into the worktree |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
+| `fleetwatch.py` | Fleet watchdog (`deploy/arc-watchdog.service`, always on): records the argv/cwd/env of every live `code run`, re-runs any that died with unfinished work (the normal resume path), holds chained taskfiles until `chain_status` is ready, never overrules a `run.stopped` (operator Stop), and parks a taskfile after repeated quick exits. Never kills a run or touches git. State: `logs/watchdog/` |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
 | `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (120 s per-git-op timeout); nothing merges locally |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
