@@ -857,6 +857,47 @@ class TestStageGates(StudioDirTest):
         self.assertFalse(r["passed"])
         self.assertTrue(any("fuzz report" in f for f in r["failures"]))
 
+    CLEAN_FUZZ = {"project": "p", "bots": 3, "messages_sent": 120,
+                  "replies_seen": 120, "authority_violations": 0,
+                  "desyncs": 0, "crashes": 0}
+
+    def _fuzz(self, d, report):
+        path = config.studio_run_dir("p", create=True) / "fuzz-1.json"
+        path.write_text(json.dumps(report))
+        return stage_manager.check("p", d, gt.PHASE_4_NETWORKED_QA)
+
+    def test_phase_4_rejects_unreachable_or_empty_swarm(self):
+        d = self._project(bucket_a={"x": 1}, bucket_b={"m": "x"})
+        unreachable = {**self.CLEAN_FUZZ, "messages_sent": 0, "replies_seen": 0,
+                       "server_unreachable": True}
+        failures = self._fuzz(d, unreachable)["failures"]
+        self.assertTrue(any("unreachable" in f for f in failures), failures)
+        self.assertTrue(any("messages_sent" in f for f in failures), failures)
+        # A reachable server with a real swarm IS evidence, and passes.
+        self.assertTrue(self._fuzz(d, self.CLEAN_FUZZ)["passed"])
+
+    def test_phase_4_needs_explicit_counts_for_the_same_project(self):
+        d = self._project(bucket_a={"x": 1}, bucket_b={"m": "x"})
+        for key in ("bots", "messages_sent", "replies_seen",
+                    "authority_violations", "desyncs", "crashes"):
+            missing = {k: v for k, v in self.CLEAN_FUZZ.items() if k != key}
+            failures = self._fuzz(d, missing)["failures"]
+            self.assertTrue(any(key in f for f in failures), (key, failures))
+        for key in ("authority_violations", "desyncs", "crashes"):
+            r = self._fuzz(d, {**self.CLEAN_FUZZ, key: "0"})
+            self.assertFalse(r["passed"], (key, r["failures"]))
+        r = self._fuzz(d, {**self.CLEAN_FUZZ, "project": "some-other-game"})
+        self.assertFalse(r["passed"])
+        self.assertTrue(any("project" in f for f in r["failures"]), r["failures"])
+
+    def test_phase_4_keeps_genuine_failures_failing(self):
+        d = self._project(bucket_a={"x": 1}, bucket_b={"m": "x"})
+        for key, needle in (("authority_violations", "authoritative"),
+                            ("desyncs", "desync"),
+                            ("crashes", "crashed")):
+            failures = self._fuzz(d, {**self.CLEAN_FUZZ, key: 2})["failures"]
+            self.assertTrue(any(needle in f for f in failures), (key, failures))
+
 
 class TestVideoChecks(StudioDirTest):
     """The checks the published workflows use: measure, look, the colour
