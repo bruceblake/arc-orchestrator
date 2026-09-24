@@ -184,6 +184,19 @@ def _items(body):
     return [i for i in items if i]
 
 
+def _section_key(heading):
+    """SECTIONS key for a heading, ignoring a trailing hint.
+
+    HANDOFF_PROMPT itself prints "## Decisions (each with its reason)", so
+    a parenthetical, a colon or a dash clause after the name must not push
+    the section into notes.
+    """
+    if not heading:
+        return None
+    name = re.split(r"\s*(?:\(|:|\u2014|\u2013|\s-\s)", _norm(heading), maxsplit=1)[0]
+    return SECTIONS.get(name.strip())
+
+
 def parse_handoff(text):
     """{key: str|list} from handoff.md; unknown headings and preamble -> notes."""
     out, notes = {}, []
@@ -193,7 +206,7 @@ def parse_handoff(text):
         body = "\n".join(buf).strip()
         if not body:
             return
-        key = SECTIONS.get(_norm(heading).rstrip(":")) if heading else None
+        key = _section_key(heading)
         if key in LIST_KEYS:
             out.setdefault(key, []).extend(_items(body))
         elif key:

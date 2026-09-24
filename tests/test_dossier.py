@@ -78,6 +78,44 @@ class HarvestHandoff(unittest.TestCase):
         self.assertEqual(d["decisions"], ["sqlite, not files (one writer)"])
         self.assertEqual(d["dead_ends"], ["regex over markdown: broke on nesting"])
 
+    def test_headings_exactly_as_the_prompt_prints_them(self):
+        # The prompt writes hints after the names ("## Decisions (each with
+        # its reason)"); an agent copying them verbatim must still land in
+        # the sections, not in notes.
+        import re
+        line = next(l for l in dossier.HANDOFF_PROMPT.splitlines()
+                    if l.startswith("## "))
+        heads = [h.strip() for h in re.split(r"\s*/\s*(?=## )", line)]
+        self.assertEqual(len(heads), 6, heads)
+        bodies = {"Done": "D-1", "Remaining": "R-1",
+                  "Decisions": "- use sqlite (one writer)",
+                  "Dead ends": "- regex parser (broke on nesting)",
+                  "Gotchas": "G-1", "Next step": "N-1"}
+        text = ""
+        for h in heads:
+            name = next(k for k in bodies if h[3:].lower().startswith(k.lower()))
+            text += f"{h}\n{bodies[name]}\n"
+        self.assertIn("## Decisions (each with its reason)", text)
+        self.assertIn("## Dead ends (approaches that failed, and why)", text)
+        self.harvest(text)
+        d = dossier.get(self.p, self.t)
+        self.assertEqual(d["decisions"], ["use sqlite (one writer)"])
+        self.assertEqual(d["dead_ends"], ["regex parser (broke on nesting)"])
+        self.assertEqual((d["done"], d["remaining"], d["gotchas"], d["next_step"]),
+                         ("D-1", "R-1", "G-1", "N-1"))
+        self.assertEqual(d["notes"], [])
+        text = dossier.render(self.p, self.t, role="implementer")
+        self.assertIn("use sqlite (one writer)",
+                      text.split("Decisions (do not relitigate)")[1])
+        self.assertIn("regex parser", text.split("Dead ends (do not retry)")[1])
+
+    def test_heading_hints_after_colon_or_dash(self):
+        self.harvest("## Decisions: why\n- A\n## Dead ends \u2014 tried\n- B\n"
+                     "## Next step - soon\nC\n")
+        d = dossier.get(self.p, self.t)
+        self.assertEqual((d["decisions"], d["dead_ends"], d["next_step"]),
+                         (["A"], ["B"], "C"))
+
     def test_free_form_text_lands_in_notes(self):
         self.harvest("I fixed the bug but ran out of time.\n## Musings\nmaybe split it\n")
         notes = dossier.get(self.p, self.t)["notes"]
