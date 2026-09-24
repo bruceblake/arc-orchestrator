@@ -48,7 +48,9 @@ class _FakeDriver:
     def __init__(self, text):
         self.text, self.harness, self.model = text, "fake", "Fake-Model"
 
-    async def run(self, prompt, cwd, task_id=None):
+    async def run(self, prompt, cwd, task_id=None, **_kw):
+        # **_kw: the pipeline passes driver options (avoid_families, ...)
+        # this fake has no use for.
         return types.SimpleNamespace(text=self.text, exit_code=0,
                                      transcript_path="", seconds=0.0)
 

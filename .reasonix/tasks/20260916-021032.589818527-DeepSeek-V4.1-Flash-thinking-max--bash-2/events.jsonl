@@ -1,2 +1,0 @@
-{"sequence":1,"timestamp":"2026-09-15T22:23:04.577612445-04:00","event_type":"state_change","task_id":"20260916-021032.589818527-DeepSeek-V4.1-Flash-thinking-max--bash-2","session_id":"20260916-021032.589818527-DeepSeek-V4.1-Flash-thinking-max","state":"running","runtime_state":"alive"}
-{"sequence":2,"timestamp":"2026-09-15T22:23:34.660176237-04:00","event_type":"state_change","task_id":"20260916-021032.589818527-DeepSeek-V4.1-Flash-thinking-max--bash-2","session_id":"20260916-021032.589818527-DeepSeek-V4.1-Flash-thinking-max","state":"succeeded","runtime_state":"exited"}

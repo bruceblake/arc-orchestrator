@@ -2188,8 +2188,41 @@ class PlanAmendmentWiring(unittest.TestCase):
         # delete suspenders.
         import gitstore
         src = pathlib.Path(gitstore.__file__).read_text()
-        self.assertEqual(src.count('":!.arc/plan_proposals.jsonl"'), 2)
-        self.assertEqual(src.count('":!.arc/board.jsonl"'), 2)
+        for path in (".arc/plan_proposals.jsonl", ".arc/board.jsonl", ".reasonix"):
+            self.assertIn(":!" + path, gitstore.NEVER_STAGE)
+        self.assertEqual(src.count("*NEVER_STAGE"), 2,
+                         "publish and the review diff must both exclude them")
+
+    def test_publish_never_commits_harness_state(self):
+        """A real repo: .reasonix state beside a real change stays unstaged."""
+        import asyncio, subprocess, tempfile
+        import gitstore
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                       GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+            run = lambda *a: subprocess.run(["git", "-C", d, *a], env=env,
+                                            check=True, capture_output=True)
+            run("init", "-q", "-b", "main")
+            pathlib.Path(d, "a.txt").write_text("1")
+            run("add", "a.txt"); run("commit", "-qm", "init")
+            pathlib.Path(d, "a.txt").write_text("2")
+            state = pathlib.Path(d, ".reasonix", "tasks", "run-1")
+            state.mkdir(parents=True)
+            (state / "events.jsonl").write_text("{}")
+            old = {k: os.environ.get(k) for k in env}
+            os.environ.update(env)
+            try:
+                head = asyncio.run(gitstore.publish(d, "task(t): x"))
+            finally:
+                for k, v in old.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+            self.assertTrue(head)
+            files = subprocess.run(["git", "-C", d, "show", "--name-only", "--format=", head],
+                                   capture_output=True, text=True).stdout.split()
+            self.assertEqual(files, ["a.txt"])
 
     def test_implement_harvests_on_success_and_crash(self):
         body = self._slice("async def implement(ctx):", "async def gate(ctx):")
