@@ -387,15 +387,14 @@ PR** in the life of the repo.
 
 - `config.PR_REVIEWERS_WANTED` (default 2) is the *wanted* number of
   reviewers reading the **real PR diff** via `gh pr diff`, each with its own
-  prompt and no knowledge of the others' verdicts. **In the two-family fleet
-  of 2026-09-12 the effective `config.PR_REVIEWERS` is 1**: reviewers must
-  come from families other than the implementer's, and there is exactly one
-  such family per task, so `PR_REVIEWERS = max(1, min(wanted, families - 1))`
-  resolves to 1 and **exactly ONE cross-family reviewer reads each PR**.
+  prompt and no knowledge of the others' verdicts. Reviewers must come from
+  families other than the implementer's; `config.PR_REVIEWERS` is the effective
+  `max(1, min(wanted, families - 1))`. With only two families it resolves to
+  1, so exactly one cross-family reviewer reads each PR.
 - **This WEAKENS the gate, and the code says so out loud.** When the
-  roster cannot field the wanted number, `pr_review` emits
+  roster cannot field the wanted number, `pr_fanout` emits
   `task.pr_review_thin {task, pr, wanted, got, reviewers, implementer}`
-  (code_tasks.py:1233) so a thin review is visible in the event log and the
+  so a thin review is visible in the event log and the
   dashboard, not silent. The **compensating control is the pre-merge review
   of Rule 2**: a bounded diff is judged there by the opposite family first,
   and the PR review is the second read of a change that already passed a
@@ -418,9 +417,17 @@ PR** in the life of the repo.
   implementer, and the retry comes from `config.PR_MAX_INCONCLUSIVE` — kept
   separate from `PR_MAX_ROUNDS` so infrastructure failures cannot eat the
   rounds reserved for real disagreement about the code (`ARC_PR_MAX_INCONCLUSIVE`,
-  default 20). A genuine objection still beats a crash. Before this, a crash was posted to a public PR as
-  "changes requested: reviewer crashed" and sent the implementer to fix issues
-  that did not exist.
+  default 20). On an inconclusive retry, `pr_fanout` remembers crashed models
+  for this task and pairs each crashed reviewer with a healthy eligible
+  reviewer of the same or a stronger tier, so a hard-tier crash does not
+  block a healthy medium reviewer from replacing a medium-tier crash. A
+  crashed model that still looks idle loses to that replacement. It records
+  the selection and reason in `task.pr_review_selected`. If no such reviewer
+  is eligible, it retries the crashed reviewer; it does not substitute a weaker
+  reviewer or waive cross-family review. A genuine objection still beats a
+  crash and clears this retry preference. Before this, a crash was posted to
+  a public PR as "changes requested: reviewer crashed" and sent the
+  implementer to fix issues that did not exist.
 - **A conflicting PR is resynced, not abandoned.** `pr_merge` merges the
   current base into the task branch (`gitstore.sync_with_base`, which ABORTS
   on failure so a genuine overlap never leaves a half-merged worktree for the
