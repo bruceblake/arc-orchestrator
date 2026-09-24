@@ -311,14 +311,32 @@ async def diff_stat(wt):
     return "\n".join(parts) or "(clean)"
 
 
-# Paths `git add -A` must never stage, in publish() and in the review diff's
-# intent-to-add. The two .arc files are orchestrator<->agent channels; the
-# harness state dirs are written by the harnesses themselves inside the
-# worktree (reasonix keeps .reasonix/tasks/<run>/events.jsonl, snapshot.json
-# and a task.lock there). Thirty-three .reasonix files reached main this way
-# before this list existed, and a fleet PR carried three more.
-NEVER_STAGE = (":!.arc/plan_proposals.jsonl", ":!.arc/board.jsonl",
-               ":!.reasonix")
+# The .arc channel files are ignored in this repo, but not in every project
+# repo. Naming an ignored path in `git add` makes Git 2.55 fail ("The
+# following paths are ignored"), so unstage them after adding. `git reset`
+# of a path that is neither on disk nor in the index errors, so only those
+# that exist or are already indexed are reset. Reasonix state
+# (.reasonix/tasks/<run>/events.jsonl, snapshot.json, task.lock) must never
+# be published: thirty-three such files reached main before this exclusion.
+CHANNEL_FILES = (".arc/plan_proposals.jsonl", ".arc/board.jsonl")
+NEVER_STAGE = (":!.reasonix",)
+
+
+async def _stage_without_runtime_files(wt, *, intent=False):
+    args = ["add", "-A"]
+    if intent:
+        args.append("-N")
+    await _git([*args, "--", ".", *NEVER_STAGE], cwd=wt)
+    root = Path(wt)
+    present = [p for p in CHANNEL_FILES if (root / p).exists()]
+    _, indexed, _ = await _git(
+        ["ls-files", "--", *CHANNEL_FILES], cwd=wt, check=False)
+    for name in indexed.splitlines():
+        if name and name not in present:
+            present.append(name)
+    # Also clears a channel file staged by an earlier interrupted run.
+    if present:
+        await _git(["reset", "-q", "--", *present], cwd=wt)
 
 
 async def diff_full(wt, base, max_chars=24000):
@@ -332,13 +350,14 @@ async def diff_full(wt, base, max_chars=24000):
     time — the more the fleet parallelized, the more often correct work was
     rejected and escalated to a stronger model for no reason.
     """
-    # Same `.arc` exclusion as publish(): a surviving proposals file must not
-    # leak into the diff reviewers read either.
-    await _git(["add", "-A", "-N", "--", ".", *NEVER_STAGE],
-               cwd=wt, check=False)  # intent-to-add
+    # Same channel exclusion as publish(): a surviving proposals file must
+    # not leak into the diff reviewers read either.
+    await _stage_without_runtime_files(wt, intent=True)
     rc, mb, _ = await _git(["merge-base", base, "HEAD"], cwd=wt, check=False)
     ref = mb.strip() if rc == 0 and mb.strip() else "HEAD"
-    _, diff, _ = await _git(["diff", ref], cwd=wt, check=False)
+    _, diff, _ = await _git(
+        ["diff", ref, "--", ".", *(f":!{path}" for path in CHANNEL_FILES)],
+        cwd=wt, check=False)
     if len(diff) > max_chars:
         diff = diff[:max_chars] + f"\n... [truncated at {max_chars} chars]"
     return diff or "(empty diff)"
@@ -351,11 +370,9 @@ async def publish(wt, message, trailers=None):
         return None
     # `.arc/plan_proposals.jsonl` is the plan-amendment channel (plan_amend.py)
     # — an orchestrator<->agent runtime file, never PR content. Harvest deletes
-    # it before publish runs, and this pathspec is the belt to those
-    # suspenders for the day a delete fails (plan.amend.channel_survives
-    # events are the alarm). Verified against git 2.54: the exclusion leaves
-    # the file unstaged even when present.
-    await _git(["add", "-A", "--", ".", *NEVER_STAGE], cwd=wt)
+    # it before publish runs; unstaging afterwards is the belt for the day a
+    # delete fails (plan.amend.channel_survives events are the alarm).
+    await _stage_without_runtime_files(wt)
     # The board is excluded on purpose and is left in the worktree. If it is
     # the only dirty path, commit would exit 1 with "nothing added to commit"
     # and a resume that only posted to the board would fail publish.
