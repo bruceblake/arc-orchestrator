@@ -50,7 +50,7 @@ if ! "$PY" -m compileall -q $(ls *.py) >/dev/null; then
 fi
 
 step "imports"
-for m in config store graph events drivers gitstore code_tasks reconcile dashboard; do
+for m in config store graph events drivers gitstore code_tasks project_contract reconcile dashboard; do
     # No pipe here: `cmd | tail || rc=1` tests TAIL's status, which is always
     # 0, so import failures were reported and then silently forgiven.
     if ! out=$("$PY" -c "import $m" 2>&1); then

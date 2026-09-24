@@ -225,6 +225,11 @@ TASK <id>: <title>
 
 <prompt>
 
+Project contract: read AGENTS.md ...               ← when the worktree has
+                                                       AGENTS.md, CLAUDE.md,
+                                                       or .cursor/rules
+                                                       (project_contract.role_block)
+
 Files you are expected to touch: <files_hint>        ← only if non-empty
 
 Rules: make only the changes this task requires; do not git-commit
@@ -239,8 +244,9 @@ NOT to touch. "See the other task" or "as discussed" is invisible to the agent.
 ### What the reviewer sees
 
 The review prompt contains the task id/title, the `prompt` (as SPEC), a note
-that the gate (`verify_cmd`) already passed, and the **full working-tree diff
-vs `main`** (capped at 24,000 chars). The reviewer replies strict JSON
+that the gate (`verify_cmd`) already passed, the **full working-tree diff
+vs `main`** (capped at 24,000 chars), and the project-contract line for
+that worktree when one is passed in. The reviewer replies strict JSON
 `{"pass": true}` or `{"pass": false, "issues": [...]}`; rejections loop back
 to the implementer with the issue list.
 
