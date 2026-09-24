@@ -1096,3 +1096,47 @@ outage is picked up here.
 Install: `cp deploy/arc-watchdog.service ~/.config/systemd/user/ &&
 systemctl --user enable --now arc-watchdog`. On WSL, run
 `sudo loginctl enable-linger $USER` once so it survives closed terminals.
+
+## The captain autopilot
+
+`main.py captain --autopilot` runs the captain as an always-on project
+manager (AGENTS.md Rule 11, `captain_autopilot.py`). Every tick it reads the
+fleet, finds stuck or failing work, and acts through the agent board: pings
+a silent implementer, answers or escalates a stale question, flags
+overlapping claims, resumes a stalled run through the capacity gate, posts
+an hourly standup per project, and escalates what needs a person. It never
+runs git, kills a process, edits code or merges a PR.
+
+Try it first without acting:
+
+```
+./py main.py captain --autopilot --once --dry-run
+./py main.py captain --autopilot --once --no-llm
+```
+
+`--dry-run` records every decision (`captain.auto.dry_run` events and
+`logs/captain/autopilot.jsonl`) and acts on none; `--no-llm` uses the
+playbooks only and never calls the model.
+
+Install: `cp deploy/arc-captain.service ~/.config/systemd/user/ &&
+systemctl --user enable --now arc-captain`. It ticks every
+`ARC_CAPTAIN_INTERVAL` seconds (default 600; `--interval N` overrides).
+Tuning: `ARC_CAPTAIN_MAX_ACTIONS_PER_TICK` (default 5),
+`ARC_CAPTAIN_COOLDOWN_S` (default 1800 — one target is never nagged twice
+in 30 min), `ARC_CAPTAIN_STANDUP_S` (default 3600).
+
+Pause without stopping the service: `touch logs/captain/autopilot.pause`
+(remove the file to resume), or the Pause / Resume button in the dashboard's
+Captain panel. A paused tick records `captain.auto.paused` and does nothing
+else.
+
+Where to look:
+
+- the Captain panel: autopilot state (running / paused, last and next tick),
+  the latest findings with severity, recent actions, and escalations with
+  an Acknowledge button; the Captain button shows the unacknowledged count;
+- the board's `captain` channel: the captain's reasoning for each action;
+  `operator`: its escalations;
+- `logs/captain/autopilot.jsonl` (one line per decision),
+  `logs/captain/autopilot.json` (state, cooldowns),
+  `logs/captain/escalations.jsonl`, and `captain.auto.*` events.
