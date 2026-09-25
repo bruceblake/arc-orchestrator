@@ -8,6 +8,7 @@ produced a message like "opencode exited 1:".
 import json
 import os
 import tempfile
+import time
 import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
@@ -306,6 +307,41 @@ class TheDailyAudit(unittest.TestCase):
         seen = [order[f["severity"]] for f in
                 audit.run(store=None, with_health=False)["findings"]]
         self.assertEqual(seen, sorted(seen))
+
+
+class TheWatchdogIsReportedWhenItIsNotThere(unittest.TestCase):
+    """`audit.run` must ASK whether the watchdog is alive, not just what it found.
+
+    `audit_watchdog` existing in audit.py is not the same as the report the
+    operator reads containing it: the 2026-09-24 WSL restart killed the watchdog
+    and the fleet, and the daily audit stayed green because no check was wired
+    into `run()`. This pins the wiring, so deleting the call is a test failure
+    rather than a silent regression.
+    """
+
+    def test_run_includes_the_watchdog_findings(self):
+        import audit
+        orig = audit.audit_watchdog
+        audit.audit_watchdog = lambda: [{"severity": "warning", "area": "watchdog",
+                                         "what": "no fleetwatch process is alive",
+                                         "detail": "", "action": "sysctl"}]
+        try:
+            report = audit.run(store=None, with_health=False)
+        finally:
+            audit.audit_watchdog = orig
+        self.assertTrue(any(f["area"] == "watchdog" for f in report["findings"]),
+                        "audit.run dropped the watchdog findings")
+
+    def test_the_finding_reaches_the_rendered_report(self):
+        import audit
+        text = audit.render({"ts": 0, "since_s": 1,
+                             "counts": {"critical": 0, "warning": 1, "info": 0},
+                             "findings": [{
+                                 "severity": "warning", "area": "watchdog",
+                                 "what": "loginctl linger is off for this user",
+                                 "detail": "", "action": "sudo loginctl enable-linger u"}]})
+        self.assertIn("loginctl linger is off", text)
+        self.assertIn("enable-linger", text)
 
 
 class FileClashDetection(unittest.TestCase):
@@ -1242,3 +1278,343 @@ class TheDailyAuditSchedulesItself(unittest.TestCase):
             audit.run = orig
         self.assertLessEqual(len(list(pathlib.Path(self.dir, "logs", "audit").glob("2*.json"))),
                              sa.KEEP_REPORTS)
+
+
+class TheBoardSectionOfTheAudit(unittest.TestCase):
+    """`main.py audit` reports whether agents COORDINATE, not just whether
+    anything crashed (Rule 4c). The metrics come from
+    `agentboard.board_health`; this pins the section's rendering: a finding
+    per problem, each with a concrete action, and INFO on a board that is
+    simply quiet."""
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp(prefix="arc-audit-board-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        orig_db, orig_events = config.DB_PATH, config.EVENTS_LOG
+        config.DB_PATH = os.path.join(self.dir, "board.db")
+        config.EVENTS_LOG = os.path.join(self.dir, "events.jsonl")
+        self.addCleanup(setattr, config, "DB_PATH", orig_db)
+        self.addCleanup(setattr, config, "EVENTS_LOG", orig_events)
+
+    def test_a_healthy_board_is_info_not_a_warning(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="doors/implementer", kind="claim",
+                body="claiming", author_task="doors", refs={"paths": ["a.py"]})
+        ab.post("prison", author="doors/implementer", kind="result", body="done",
+                author_task="doors", refs={"files": ["a.py"]})
+        f = audit.board_health_findings("prison")
+        self.assertEqual([x["severity"] for x in f], ["info"], f)
+        self.assertIn("board post(s)", f[0]["what"])
+
+    def test_a_quiet_board_produces_no_warnings(self):
+        import audit
+        f = audit.board_health_findings("empty-project")
+        self.assertEqual([x["severity"] for x in f], ["info"])
+        self.assertIn("0 board post(s)", f[0]["what"])
+
+    def test_an_unanswered_question_is_a_warning_with_an_action(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="locks/implementer", kind="question",
+                body="is @doors ready?", author_task="locks",
+                ts=time.time() - 6 * 3600)
+        f = [x for x in audit.board_health_findings("prison")
+             if "unanswered" in x["what"]]
+        self.assertTrue(f, "an unanswered question must be reported")
+        self.assertEqual(f[0]["severity"], "warning", "older than 4h")
+        self.assertIn("reply_to", f[0]["action"])
+        self.assertIn("oldest 6.0h", f[0]["detail"])
+
+    def test_a_recent_unanswered_question_is_only_info(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="locks/implementer", kind="question",
+                body="quick one", author_task="locks", ts=time.time() - 600)
+        f = [x for x in audit.board_health_findings("prison")
+             if "unanswered" in x["what"]]
+        self.assertEqual(f[0]["severity"], "info")
+
+    def test_a_question_the_asker_answered_itself_is_still_unanswered(self):
+        """The audit must warn about it: the asker replying to its own
+        question is not someone replying, and the warning is the only thing
+        that gets the question in front of an agent that can answer it."""
+        import audit
+        import agentboard as ab
+        q = ab.post("prison", author="locks/implementer", kind="question",
+                    body="is @doors ready?", author_task="locks",
+                    ts=time.time() - 6 * 3600)
+        ab.post("prison", author="locks/implementer", kind="answer",
+                body="never mind", reply_to=q, ts=time.time() - 6 * 3600 + 60)
+        f = [x for x in audit.board_health_findings("prison")
+             if "unanswered" in x["what"]]
+        self.assertEqual(len(f), 1, "the question must still be reported")
+        self.assertEqual(f[0]["severity"], "warning", "older than 4h")
+        self.assertIn("1 unanswered question(s)", f[0]["what"])
+
+    def test_tasks_that_never_claimed_or_reported_are_warnings(self):
+        import audit
+        import agentboard as ab
+        for t in ("doors", "locks", "hatch"):
+            ab.post("prison", author=f"{t}/implementer", kind="status",
+                    body="working", author_task=t)
+        f = {x["what"]: x for x in audit.board_health_findings("prison")}
+        claim = [x for w, x in f.items() if "posted a claim" in w]
+        result = [x for w, x in f.items() if "posted a result" in w]
+        self.assertEqual(claim[0]["severity"], "warning")
+        self.assertIn("0%", claim[0]["what"])
+        self.assertTrue(claim[0]["action"])
+        self.assertEqual(result[0]["severity"], "warning")
+        self.assertIn("refs.files", result[0]["action"])
+
+    def test_overlapping_claims_are_a_warning_naming_both(self):
+        import audit
+        import agentboard as ab
+        ab.claim("prison", task="doors", author="doors/implementer",
+                 paths=["pkg/"])
+        ab.claim("prison", task="locks", author="locks/implementer",
+                 paths=["pkg/a.py"])
+        f = [x for x in audit.board_health_findings("prison")
+             if "overlapping files" in x["what"]]
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("doors/implementer", f[0]["what"])
+        self.assertIn("locks/implementer", f[0]["what"])
+        self.assertIn("pkg/", f[0]["detail"])
+
+    def test_the_conflict_warning_survives_the_author_order(self):
+        """The warning must not depend on which author sorts first: the old
+        pairing dropped the pair entirely when the earlier name claimed
+        second, so the audit went silent on a real collision."""
+        import audit
+        import agentboard as ab
+        ab.claim("prison", task="locks", author="locks/implementer",
+                 paths=["pkg/"])
+        ab.claim("prison", task="doors", author="doors/implementer",
+                 paths=["pkg/a.py"])
+        f = [x for x in audit.board_health_findings("prison")
+             if "overlapping files" in x["what"]]
+        self.assertEqual(len(f), 1, "exactly one pair, not two")
+        self.assertIn("doors/implementer", f[0]["what"])
+        self.assertIn("locks/implementer", f[0]["what"])
+
+    def test_a_released_conflict_stops_warning(self):
+        """After release the audit must go quiet: warning about a lease
+        nobody holds is exactly the false alarm that makes a report
+        unreadable."""
+        import audit
+        import agentboard as ab
+        ab.claim("prison", task="doors", author="doors/implementer",
+                 paths=["pkg/"])
+        ab.claim("prison", task="locks", author="locks/implementer",
+                 paths=["pkg/a.py"])
+        self.assertTrue([x for x in audit.board_health_findings("prison")
+                         if "overlapping files" in x["what"]])
+        ab.release("prison", "locks", "locks/implementer")
+        self.assertEqual([x for x in audit.board_health_findings("prison")
+                          if "overlapping files" in x["what"]], [])
+
+    def test_an_agent_that_read_a_mention_and_never_replied_is_reported(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="captain", channel="project",
+                body="@all stand up")
+        ab.mark_read("prison", "doors/implementer", "inbox", time.time() + 1)
+        f = [x for x in audit.board_health_findings("prison")
+             if "never replied" in x["what"]]
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("doors/implementer", f[0]["what"])
+        self.assertIn("delivered to its prompt", f[0]["detail"])
+        self.assertTrue(f[0]["action"])
+
+    def test_the_section_renders_under_the_board_area(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="locks/implementer", kind="question",
+                body="is @doors ready?", author_task="locks",
+                ts=time.time() - 6 * 3600)
+        report = {"ts": time.time(), "since_s": 86400.0,
+                  "counts": {"critical": 0, "warning": 1, "info": 0},
+                  "findings": audit.board_health_findings("prison")}
+        text = audit.render(report)
+        self.assertIn("[WARNING]", text)
+        self.assertIn("board: prison:", text)
+        self.assertIn("-> answer with kind=answer", text)
+
+    def test_an_unreadable_board_is_info_not_a_crash(self):
+        import audit
+        import agentboard
+        orig = agentboard.board_health
+        agentboard.board_health = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("boom"))
+        try:
+            f = audit.board_health_findings("prison")
+        finally:
+            agentboard.board_health = orig
+        self.assertEqual([x["severity"] for x in f], ["info"])
+        self.assertIn("unreadable", f[0]["what"])
+
+    def test_run_includes_the_board_section(self):
+        import audit
+        orig = audit.board_health_findings
+        seen = {}
+
+        def spy(*, project=None, since_hours=24):
+            seen["since_hours"] = since_hours
+            return [{"severity": "info", "area": "board", "what": "spy",
+                     "detail": "", "action": ""}]
+        audit.board_health_findings = spy
+        try:
+            report = audit.run(None, since_s=12 * 3600.0, with_health=False)
+        finally:
+            audit.board_health_findings = orig
+        self.assertEqual(seen["since_hours"], 12.0)
+        self.assertIn("spy", [f["what"] for f in report["findings"]])
+
+
+class SeatUtilization(unittest.TestCase):
+    """Four synthetic event logs: starved, idle, spent plan, error-dominated."""
+
+    def setUp(self):
+        import audit
+        self.audit = audit
+        roster = config.live_roster(check_api=False)
+        self.assertGreaterEqual(len(roster), 2)
+        self.a, self.a_harness = roster[0][0], roster[0][2]
+        self.b = roster[1][0]
+        self.now = 1_800_000_000.0
+        self.hours = 24.0
+        self.cutoff = self.now - self.hours * 3600.0
+
+    def _seats(self, events, runs=None):
+        rows = self.audit.seat_utilization(
+            self.hours, now=self.now, events=events, runs=runs or [], leases=[])
+        return {r["model"]: r for r in rows}
+
+    def test_a_full_seat_with_cap_waits_is_starved(self):
+        cap = config.driver_limit(self.a)
+        runs = [{"model": self.a, "seconds": self.hours * 3600, "created_at": self.now,
+                 "task_id": f"t{i}", "attempt": 1} for i in range(cap)]
+        events = [{"type": "driver.cap_wait", "model": self.a, "task": "queued",
+                   "ts": self.cutoff + 10}]
+        row = self._seats(events, runs)[self.a]
+        self.assertGreaterEqual(row["utilization"], 90)
+        self.assertGreaterEqual(row["cap_waits"], 1)
+        self.assertEqual(row["idle_while_waiting_hours"], 0.0)
+
+    def test_a_free_seat_while_another_cap_waits_is_idle(self):
+        events = [{"type": "driver.cap_wait", "model": self.a, "task": "queued",
+                   "ts": self.cutoff}]
+        row = self._seats(events)[self.b]
+        self.assertGreater(row["idle_while_waiting_hours"], 0.5 * self.hours)
+        self.assertEqual(row["cap_waits"], 0)
+        findings = self.audit.audit_seats(
+            int(self.hours * 3600), events=events, runs=[], leases=[], now=self.now)
+        idle = [f for f in findings if self.b in f["what"]]
+        self.assertTrue(idle)
+        self.assertEqual(idle[0]["severity"], "warning")
+        self.assertIn(idle[0]["action"],
+                      ("route more tiers to it", "raise its cap", "fix its errors"))
+
+    def test_a_future_reset_marks_the_plan_spent(self):
+        reset = self.now + 3600
+        events = [{"type": "driver.usage_limit", "harness": self.a_harness,
+                   "model": self.a, "ts": self.now - 30, "resets_at": reset}]
+        row = self._seats(events)[self.a]
+        self.assertTrue(row["plan_spent"])
+        self.assertEqual(row["resets_at"], reset)
+
+    def test_errors_dominate_when_most_runs_fail(self):
+        events = [{"type": "driver.error", "model": self.a, "task": f"e{i}",
+                   "ts": self.now - i} for i in range(1, 5)]
+        events.append({"type": "driver.done", "model": self.a, "task": "ok",
+                       "ts": self.now - 10, "seconds": 5})
+        row = self._seats(events)[self.a]
+        self.assertGreaterEqual(row["error_rate"], 0.5)
+
+    def test_a_store_written_run_is_iso_and_counts(self):
+        """created_at is store._now()'s ISO string, not an epoch."""
+        import store
+        from datetime import datetime, timezone
+        st = store.Store(":memory:")
+        self.addCleanup(st.conn.close)
+        old = datetime.fromtimestamp(self.now - 10 * 86400, tz=timezone.utc).isoformat(
+            timespec="seconds")
+        st.conn.execute(
+            "INSERT INTO harness_runs(task_id, harness, model, role, attempt, "
+            "exit_code, transcript, seconds, verdict, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("old", "opencode", self.a, "implementer", 1, 0, "", 999999, None, old))
+        st.conn.commit()
+        st.save_harness_run("t1", "opencode", self.a, "implementer", 1, 0, "", 3600)
+        rows = self.audit.seat_utilization(24, store=st, events=[], leases=[])
+        row = {r["model"]: r for r in rows}[self.a]
+        self.assertAlmostEqual(row["busy_hours"], 1.0, places=2)
+        self.assertLessEqual(row["utilization"], 100)
+
+    def test_a_stale_unmatched_start_does_not_fill_the_window(self):
+        events = [{"type": "driver.start", "model": self.a, "task": "old",
+                   "attempt": 1, "ts": self.now - 15 * 86400}]
+        row = self._seats(events)[self.a]
+        self.assertEqual(row["busy_hours"], 0.0)
+
+    def test_overlapping_runs_cannot_exceed_the_cap(self):
+        cap = config.driver_limit(self.a)
+        runs = [{"model": self.a, "seconds": self.hours * 3600, "created_at": self.now,
+                 "task_id": f"t{i}", "attempt": 1} for i in range(cap + 5)]
+        row = self._seats([], runs)[self.a]
+        self.assertLessEqual(row["utilization"], 100)
+        self.assertAlmostEqual(row["busy_hours"], cap * self.hours, places=1)
+
+    def test_a_stale_event_and_a_dead_pid_are_not_busy(self):
+        dead = 2 ** 31 - 1
+        events = [
+            {"type": "driver.start", "model": self.a, "task": "gone", "attempt": 1,
+             "pid": dead, "ts": self.cutoff},
+            {"type": "driver.heartbeat", "model": self.a, "task": "gone", "attempt": 1,
+             "ts": self.now - 10},
+            {"type": "driver.start", "model": self.a, "task": "pruned", "attempt": 1,
+             "ts": self.cutoff},
+            {"type": "driver.heartbeat", "model": self.a, "task": "pruned", "attempt": 1,
+             "ts": self.now - 10},
+            {"type": "driver.stale", "model": self.a, "task": "pruned", "attempt": 1,
+             "ts": self.cutoff + 30},
+        ]
+        row = self._seats(events)[self.a]
+        self.assertEqual(row["busy_hours"], 0.0)
+
+    def test_an_unmatched_start_ends_at_its_last_heartbeat(self):
+        events = [
+            {"type": "driver.start", "model": self.a, "task": "live", "attempt": 1,
+             "ts": self.cutoff},
+            {"type": "driver.heartbeat", "model": self.a, "task": "live", "attempt": 1,
+             "ts": self.cutoff + 3600},
+        ]
+        row = self._seats(events)[self.a]
+        self.assertAlmostEqual(row["busy_hours"], 1.0, places=2)
+        self.assertLess(row["utilization"], 50)
+
+    def test_a_wait_closes_on_a_terminal_event(self):
+        events = [
+            {"type": "driver.cap_wait", "model": self.a, "task": "q-x2",
+             "ts": self.cutoff},
+            {"type": "driver.cancelled", "model": self.a, "task": "q",
+             "ts": self.cutoff + 60},
+        ]
+        row = self._seats(events)[self.b]
+        self.assertLess(row["idle_while_waiting_hours"], 0.5 * self.hours)
+
+    def test_capacity_and_plan_refusals_are_not_the_error_rate(self):
+        events = [
+            {"type": "driver.error", "model": self.a, "task": "c", "capacity": True,
+             "error": "concurrent session limit reached", "ts": self.now - 5},
+            {"type": "driver.error", "model": self.a, "task": "u",
+             "error": "usage limit reached", "ts": self.now - 4},
+            {"type": "driver.done", "model": self.a, "task": "ok", "ts": self.now - 3},
+        ]
+        row = self._seats(events)[self.a]
+        self.assertEqual(row["error_rate"], 0.0)
+        events.append({"type": "driver.stale", "model": self.a, "task": "s",
+                       "ts": self.now - 2})
+        row = self._seats(events)[self.a]
+        self.assertGreaterEqual(row["error_rate"], 0.5)

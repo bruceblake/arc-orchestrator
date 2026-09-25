@@ -1811,6 +1811,130 @@ class ResumingAnOpenPullRequest(unittest.TestCase):
         self.assertIn("alloc_t1", g.starts)
 
 
+class ResumeKeepsAnOpenPullRequest(unittest.TestCase):
+    """A stale 'running' row (or the 'failed' stale-reset writes) whose PR is
+    still open keeps its commits; unfinished edits pass gate and review."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        base = Path(self.dir)
+        self.repo = base / "proj"
+        self.repo.mkdir()
+        for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True,
+                           capture_output=True)
+        (self.repo / "f.txt").write_text("x\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "init"],
+                       check=True, capture_output=True)
+        self._orig = config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = str(base / "wts")
+        self.addCleanup(setattr, config, "WORKTREE_ROOT", self._orig)
+
+    def _row(self, status="running"):
+        return [{"id": "t1", "status": status,
+                 "model": config.ESCALATION_PATH[0],
+                 "error": ("interrupted: run process exited before the task finished"
+                           if status == "failed" else None)}]
+
+    def _graph(self, find_pr, status="running"):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], repo=str(self.repo)))
+        with mock.patch.object(gitstore, "find_pr", find_pr), capture_events():
+            return code_tasks.build_code_graph(
+                FakeStore(self._row(status)), ts, taskfile="tf.json")
+
+    def _commit_on_branch(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (wt / "kept.txt").write_text("reviewed\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "reviewed work"], cwd=wt,
+                       check=True, capture_output=True)
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_stale_running_with_open_pr_resumes_at_publish(self):
+        tip = self._commit_on_branch()
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 5, "https://example/5", "OPEN"
+
+        g = self._graph(open_pr)
+        self.assertIn("publish_t1", g.starts)
+        self.assertNotIn("alloc_t1", g.starts)
+        again = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(again, tip)
+
+    def test_interrupted_pr_rework_runs_gate_and_review_before_publish(self):
+        tip = self._commit_on_branch()
+        wt = gitstore.worktree_for(self.repo, "t1")
+        (wt / "kept.txt").write_text("reviewed, then partly reworked\n")
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 5, "https://example/5", "OPEN"
+
+        for status in ("running", "failed", "in_review", "conflict"):
+            with self.subTest(status=status):
+                g = self._graph(open_pr, status)
+                self.assertEqual(g.starts, ["gate_t1"])
+                self.assertTrue(any(e.src == "gate_t1" and e.dst == "review_t1"
+                                    for e in g.edges))
+                self.assertTrue(any(e.src == "review_t1" and e.dst == "publish_t1"
+                                    for e in g.edges))
+                self.assertEqual(subprocess.run(
+                    ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+                    check=True, capture_output=True, text=True).stdout.strip(), tip)
+
+    def test_runtime_handoff_alone_does_not_trigger_re_review(self):
+        self._commit_on_branch()
+        wt = gitstore.worktree_for(self.repo, "t1")
+        (wt / ".arc").mkdir()
+        (wt / ".arc" / "handoff.md").write_text("handoff\n")
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 5, "https://example/5", "OPEN"
+
+        self.assertEqual(self._graph(open_pr).starts, ["publish_t1"])
+
+    def test_stale_running_without_pr_still_reallocs(self):
+        async def no_pr(repo, task_id, state="open", *, wait_quota=True):
+            return None, None, None
+
+        g = self._graph(no_pr)
+        self.assertIn("alloc_t1", g.starts)
+        self.assertNotIn("publish_t1", g.starts)
+
+    def test_gh_failure_falls_back_to_alloc(self):
+        async def boom(repo, task_id, state="open", *, wait_quota=True):
+            raise RuntimeError("gh down")
+
+        g = self._graph(boom)
+        self.assertIn("alloc_t1", g.starts)
+
+    def test_alloc_refuses_to_reset_while_pr_is_open(self):
+        tip = self._commit_on_branch()
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 12, "https://example/12", "OPEN"
+
+        with mock.patch.object(gitstore, "find_pr", open_pr), capture_events() as ev:
+            asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        again = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(again, tip)
+        kept = [f for t, f in ev.seen if t == "task.branch_kept"]
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["pr"], 12)
+        self.assertEqual(
+            [t for t, _ in ev.seen if t == "task.branch_reset"], [])
+
+
 class ReviewersSendingAPullRequestBack(unittest.TestCase):
     """The rework implementer must actually be told why the PR was rejected.
 
@@ -2022,6 +2146,18 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
                                         config.harness_limit(h))
         return usage
 
+    def test_idle_arc_reviewers_prefer_deepseek_for_a_third_family(self):
+        ds = "DeepSeek-V4.1-Flash-thinking-max"
+        glm = "GLM-5.3"
+        # A third-family implementer leaves both ARC families eligible.
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False), \
+             mock.patch.object(config, "ESCALATION_PATH", [ds, glm]):
+            pool = code_tasks._eligible_pr_reviewers("openai", None)
+        self.assertEqual(sorted(pool, key=lambda m: code_tasks._reviewer_rank(m, {})),
+                         [ds, glm])
+        self.assertEqual(sorted(pool, key=lambda m: code_tasks._reviewer_rank(
+            m, {ds: config.driver_limit(ds)}))[0], glm)
+
     def _stand_in(self, patch_driver=True):
         """An idle hard-tier reviewer on its own harness.
 
@@ -2112,6 +2248,67 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
             "glm", "Claude-Opus-5.5", None, self._full(*busy))
         self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
         self.assertLess(code_tasks._tier_rank(weaker), code_tasks._tier_rank(planned))
+
+    def test_fallback_prefers_free_arc_then_headroom_and_claude_last(self):
+        """Unlimited ARC seats, then the subscription seat with the most headroom.
+
+        A recent usage_limit skips that seat. Claude sorts last. The
+        implementer's own family is never the fallback.
+        """
+        seats = {
+            "Codex-X": ("openai", "codex", 4),
+            "Cursor-X": ("cursor", "cursor", 3),
+            "Agy-X": ("google", "agy", 3),
+            "Claude-X": ("anthropic", "claude", 2),
+        }
+        top = config.TIER_ORDER[-1]
+        real_dl = config.driver_limit
+        real_hl = config.harness_limit
+        roles = {m: {"reviewer", "pr_reviewer"} for m in seats}
+        fams = {m: spec[0] for m, spec in seats.items()}
+        tiers = {m: top for m in seats}
+        harnesses = {m: spec[1] for m, spec in seats.items()}
+        caps = {m: spec[2] for m, spec in seats.items()}
+        patches = [
+            mock.patch.dict(config.MODEL_ROLES, roles),
+            mock.patch.dict(config.MODEL_FAMILY, fams),
+            mock.patch.dict(config.MODEL_TIER, tiers),
+            mock.patch.dict(config.MODEL_HARNESS, harnesses),
+            mock.patch.object(
+                config, "driver_limit",
+                lambda m, interactive=False: caps[m] if m in caps
+                else real_dl(m, interactive)),
+            mock.patch.object(
+                config, "harness_limit",
+                lambda h: 8 if h in {s[1] for s in seats.values()} else real_hl(h)),
+        ]
+        real = code_tasks._driver
+
+        def _drv(m, role, pol):
+            if m in seats:
+                return mock.Mock(model=m, harness=harnesses[m], images=None)
+            return real(m, role, pol)
+
+        patches.append(mock.patch.object(code_tasks, "_driver", _drv))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        planned = config.REVIEW_FAMILIES["glm"]
+        usage = self._full(planned)
+        for m in config.MODEL_ROLES:
+            if m in ("Cursor-X", "Claude-X"):
+                continue
+            usage[m] = config.driver_limit(m)
+        usage["Cursor-X"] = 0
+        usage["Codex-X"] = 2
+        usage["Claude-X"] = 0
+        usage["usage_limit:agy"] = 1
+        model, reason = code_tasks._select_reviewer(
+            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+        self.assertEqual(reason, "planned_full_fallback")
+        self.assertEqual(model, "Cursor-X")
+        self.assertNotEqual(config.MODEL_FAMILY[model], "deepseek")
+        self.assertNotEqual(model, "Claude-X")
 
     def test_a_crashed_fallback_reviewer_is_recorded_and_is_not_a_rejection(self):
         self._stand_in(patch_driver=False)
@@ -3295,7 +3492,6 @@ class DossierWiring(unittest.TestCase):
         self.assertFalse(Path(wt, ".arc", "handoff.md").exists())
 
 
-
 class AgentBoardWiring(unittest.TestCase):
     """Every governed run uses the agent board (agentboard.py, Rule 4c):
     claims on files_hint, the reader's digest in every prompt, agents'
@@ -3400,6 +3596,49 @@ class AgentBoardWiring(unittest.TestCase):
             self._implement(self._graph())
         st = [m for m in self._msgs(channel="task:bw1") if m["kind"] == "status"]
         self.assertTrue(st and "implementing" in st[0]["body"])
+
+    def test_the_etiquette_checklist_is_short_and_has_examples(self):
+        """Every prompt carrying it pays for it out of the task's own
+        attention, so it stays a checklist with concrete JSON examples."""
+        e = code_tasks.BOARD_ETIQUETTE
+        self.assertLess(len(e), 900, "the checklist must not crowd out the task")
+        for kind in ("claim", "question", "answer", "result", "blocker"):
+            self.assertIn(f'"kind":"{kind}"', e)
+        # The interface question names a task and mentions it; the answer
+        # points at a file:line rather than describing prose.
+        self.assertIn("mentions", e)
+        self.assertIn(".py:", e)
+        self.assertIn("refs", e)
+
+    def test_all_three_agent_roles_are_told_the_etiquette(self):
+        t = code_tasks.load_taskfile(taskfile([{
+            "id": "bw1", "title": "T", "prompt": "do it", "verify_cmd": "true",
+            "model": "GLM-5.3", "reviewer": "deepseek",
+            "files_hint": ["pkg/a.py"]}], repo=self.repo))["tasks"]["bw1"]
+        for prompt in (code_tasks._impl_prompt(t, None, board="BOARD"),
+                       code_tasks._review_prompt(t, "DIFF", board="BOARD"),
+                       code_tasks._pr_review_prompt(t, "DIFF", 1, 1, [],
+                                                     board="BOARD")):
+            self.assertIn("BOARD", prompt)
+            self.assertIn(code_tasks.BOARD_ETIQUETTE, prompt)
+
+    def test_the_implementer_prompt_is_what_ingest_compares_against(self):
+        """A body that is a bare copy of the prompt it was given is refused,
+        so the node must RECORD the prompt before the run — otherwise the
+        check silently never fires."""
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
+                capture_events():
+            self._implement(self._graph())
+        [prompt] = self.prompts
+        body = " ".join(prompt.split())
+        line = {"kind": "status", "body": body}
+        with mock.patch.object(code_tasks, "_driver",
+                               lambda m, r, p: self._drv(line=line)), \
+                capture_events():
+            self._implement(self._graph(), {"implement_bw1": 1})
+        errs = [m for m in self._msgs(kinds=["error"])]
+        self.assertTrue(errs, "the echoed prompt must come back as an error post")
+        self.assertIn("bare copy of your prompt", errs[0]["body"])
 
     def test_ingest_happens_after_a_crash(self):
         line = {"kind": "note", "body": "half-way: the parser is done"}

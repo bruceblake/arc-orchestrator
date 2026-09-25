@@ -1153,3 +1153,26 @@ class HttpParamsTimeline(EndpointCase):
         hit = dashboard._timeline_events("ta")            # served from cache
         self.assertEqual(hit["events"][0]["note"], "A")
         self.assertIs(hit, first, "the cached value must be the one stored for this key")
+
+
+class HttpParamsSeats(EndpointCase):
+    """GET /api/seats is read-only: no query and no body select a command."""
+
+    def test_get_returns_one_row_per_live_model(self):
+        req = self.get("/api/seats")
+        self.assertEqual(req.status, 200)
+        body = req.json()
+        self.assertIsInstance(body.get("seats"), list)
+        models = {r["model"] for r in body["seats"]}
+        for name, *_rest in config.live_roster(check_api=False):
+            self.assertIn(name, models)
+        for row in body["seats"]:
+            for key in ("busy_hours", "cap", "utilization", "cap_waits",
+                        "idle_while_waiting_hours", "error_rate",
+                        "plan_spent", "resets_at"):
+                self.assertIn(key, row)
+
+    def test_a_query_string_does_not_change_the_window(self):
+        plain = self.get("/api/seats").json()
+        queried = self.get("/api/seats?since_hours=1&model=nope").json()
+        self.assertEqual(queried, plain)

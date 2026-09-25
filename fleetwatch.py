@@ -21,9 +21,24 @@ Each tick:
    in a row the taskfile is parked and reported — it needs a person, not
    another launch. Any merge resets the counter.
 
-It never kills a run, never touches git, and never edits a taskfile.
+Taskfiles live outside the repo (~/tasks, sometimes /tmp) and a reboot takes
+the ones under /tmp with it. So on first sight of a live run its taskfile is
+copied to logs/watchdog/taskfiles/ (mangled path name, never overwritten by a
+copy taken from a different path, and never by a source OLDER than the copy),
+a watched taskfile under a temp directory raises
+`watchdog.tmp_taskfile`, and a taskfile whose original has vanished is
+restored from its copy before the run is resumed (`watchdog.taskfile_kept` /
+`watchdog.taskfile_restored`).
+
+It never kills a run and never touches git. It DOES write one file of its own:
+a taskfile whose original has been deleted is recreated at that same path from
+its durable copy, and only then, because the resume path is driven by the file
+on disk. An existing taskfile is never touched, and an existing copy is never
+replaced by a source older than it.
+
 Status: logs/watchdog/status.json, log: logs/watchdog/watchdog.log,
-events: watchdog.resume / watchdog.parked / watchdog.done.
+events: watchdog.resume / watchdog.parked / watchdog.done /
+watchdog.taskfile_kept / watchdog.taskfile_restored / watchdog.tmp_taskfile.
 
     .venv/bin/python fleetwatch.py            # loop forever (the service)
     .venv/bin/python fleetwatch.py --once     # one tick
@@ -31,10 +46,13 @@ events: watchdog.resume / watchdog.parked / watchdog.done.
     .venv/bin/python fleetwatch.py --ignore <taskfile>  # stop watching one
 """
 import argparse
+import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -55,6 +73,12 @@ MAX_QUICK_FAILS = 6
 # A task in one of these states will not move by re-running: `failed` after
 # the last escalation tier is a capability verdict, not an interruption.
 TERMINAL = {"merged", "skipped"}
+# Durable copies of the taskfiles in flight — see `keep_taskfile`.
+TASKFILE_DIR = "taskfiles"
+# A taskfile under one of these is one reboot away from being gone: WSL wipes
+# /tmp on restart, and a taskfile that vanished is what parked seven runs on
+# 2026-09-24. A watched taskfile living here is reported below.
+TMP_DIRS = tuple(dict.fromkeys(("/tmp", "/var/tmp", tempfile.gettempdir())))
 
 
 def _now():
@@ -98,6 +122,115 @@ def _proc_launch(pid):
     except OSError:
         return None
     return argv, cwd, env
+
+
+def _under_tmp(p):
+    """True when `p` (any path form) resolves inside a temp directory."""
+    try:
+        q = str(Path(p).expanduser().resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return any(q == d or q.startswith(d + os.sep) for d in TMP_DIRS)
+
+
+def _tf_copy_name(tf):
+    """The durable copy's filename: the basename, made unique by a path digest.
+
+    Two different files can share a basename (`~/tasks/plan.json` and
+    `/tmp/wave2/plan.json` both exist in practice), so a digest of the full
+    path is what keeps them apart. Path-mangled rather than content-addressed
+    because the copy must be findable from the taskfile PATH alone: on resume
+    the original may be gone and nothing else identifies it.
+    """
+    stem = re.sub(r"[^A-Za-z0-9_.-]+", "-", Path(tf).stem)[:60] or "taskfile"
+    digest = hashlib.sha256(str(Path(tf).expanduser()).encode()).hexdigest()[:12]
+    return f"{stem}.{digest}.json"
+
+
+def keep_taskfile(tf, rec=None):
+    """Copy the taskfile at `tf` into the watchdog state dir; return the copy.
+
+    The durable instance of a plan: taskfiles live in ~/tasks or /tmp, neither
+    of which survives a WSL reboot or a tmpfs wipe, and on 2026-09-24 a restart
+    left seven runs with rows stuck at `running` and no file to resume.
+
+    The copy is written once, on first sight, and then left alone — resume is
+    driven by the file on disk, and re-reading every tick could capture an
+    in-flight edit. It is only replaced when all three hold: the source's bytes
+    differ, the source is the same path the copy was taken from (a different
+    path that happens to share the basename must never silently swap plans),
+    and the source is STRICTLY NEWER than the copy. The mtime rule is what
+    makes "never overwriting a newer copy" true: a rollback that preserved
+    mtimes, a half-finished write, or a tick that read stale bytes would
+    otherwise replace a good durable copy with older content, and when the
+    original is gone the copy is all that is left.
+    """
+    src = Path(tf)
+    if not src.is_file():
+        return rec.get("taskfile_copy") if rec else None
+    dest = STATE_DIR / TASKFILE_DIR / _tf_copy_name(tf)
+    try:
+        text = src.read_text(encoding="utf-8")
+    except OSError:
+        return rec.get("taskfile_copy") if rec else None
+    prior = dest.read_text(encoding="utf-8") if dest.is_file() else None
+    try:
+        fresh = prior is None or src.stat().st_mtime_ns > dest.stat().st_mtime_ns
+    except OSError:
+        fresh = prior is None
+    if prior != text and fresh and \
+            (rec is None or rec.get("taskfile_source") in (None, str(src))):
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, dest)
+            if rec is not None:
+                rec["taskfile_source"] = str(src)
+            log(f"KEEP {src.name} -> {dest} ({len(text)} bytes)")
+            events.emit("watchdog.taskfile_kept", taskfile=str(tf),
+                        copy=str(dest), bytes=len(text))
+        except OSError as exc:
+            log(f"KEEP FAILED {src}: {type(exc).__name__}: {exc}")
+            return rec.get("taskfile_copy") if rec else None
+    if not dest.is_file():
+        return None
+    if rec is not None:
+        rec.setdefault("taskfile_source", str(src))
+        rec["taskfile_copy"] = str(dest)
+    return dest
+
+
+def restore_taskfile(tf, rec=None):
+    """Put a durable copy back at `tf` when the original is gone; report it.
+
+    Returns the path to run from: the original when it exists, `tf` after a
+    successful restore, else None. The restore is deliberate — the copy was
+    taken from this exact path, so writing it back changes nothing for any
+    other reader (a `deps` entry, a chain gate), while resuming with
+    logs/watchdog/taskfiles/ as the run's taskfile would resolve
+    `project.after` relative to the wrong directory.
+    """
+    p = Path(tf)
+    if p.is_file():
+        return tf
+    copy = (rec or {}).get("taskfile_copy") or str(
+        STATE_DIR / TASKFILE_DIR / _tf_copy_name(tf))
+    src = Path(copy)
+    if not src.is_file():
+        return None
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(p.suffix + ".restore.tmp")
+        tmp.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError as exc:
+        log(f"RESTORE FAILED {tf}: {type(exc).__name__}: {exc}")
+        return None
+    log(f"RESTORE {tf} <- {src} (original gone; resuming from the durable "
+        "copy taken while it was live)")
+    events.emit("watchdog.taskfile_restored", taskfile=str(tf), copy=str(src))
+    return tf
 
 
 def _unfinished(store, tf):
@@ -191,6 +324,14 @@ def tick(store):
         rec.update(argv=[a for a in argv if a != "--force"], cwd=cwd, env=env,
                    pid=r["pid"], last_seen=_now(), parked=False)
         rec.setdefault("quick_fails", 0)
+        keep_taskfile(tf, rec)
+        if _under_tmp(tf) and not rec.get("tmp_warned"):
+            rec["tmp_warned"] = True
+            log(f"TMP {tf}: this taskfile lives under a temp directory, which a "
+                "reboot wipes — the durable copy is what resumes it (move the "
+                f"plan to {config.TASKS_DIR} to fix it)")
+            events.emit("watchdog.tmp_taskfile", taskfile=tf,
+                        copy=rec.get("taskfile_copy"))
 
     status = {"ts": _now(), "live": {}, "waiting": {}, "parked": {}, "done": []}
     stopped = _stopped_since(min((r.get("started") or _now()) for r in runs.values())
@@ -204,6 +345,13 @@ def tick(store):
             rec["merged_seen"] = max(rec.get("merged_seen", 0), _merged_count(store, tf))
             continue
         left = _unfinished(store, tf)
+        if left is None:
+            # The file itself is gone — a WSL reboot wiped /tmp, or somebody
+            # moved it. Put the durable copy back where it was and carry on;
+            # resume is driven by the file on disk, so without this the row
+            # stays `running` forever and nothing ever picks it up.
+            if restore_taskfile(tf, rec):
+                left = _unfinished(store, tf)
         if left is None:
             status["parked"][tf] = "taskfile unreadable"
             continue

@@ -281,6 +281,27 @@ class FindingAnExistingWorktree(unittest.TestCase):
         self.assertEqual(len(reset), 1)
         self.assertEqual(reset[0]["commits_discarded"], 1)
 
+    def test_alloc_keeps_a_branch_whose_pr_is_open(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (wt / "new.txt").write_text("work\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "reviewed work"], cwd=wt,
+                       check=True, capture_output=True)
+        tip = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+                             check=True, capture_output=True, text=True).stdout.strip()
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 6, "https://example/6", "OPEN"
+
+        with mock.patch.object(gitstore, "find_pr", open_pr), capture_events() as ev:
+            asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        again = subprocess.run(["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+                               check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(again, tip)
+        kept = [f for t, f in ev.seen if t == "task.branch_kept"]
+        self.assertEqual(kept[0]["commits"], 1)
+        self.assertEqual([t for t, _ in ev.seen if t == "task.branch_reset"], [])
+
     def test_a_fresh_alloc_reports_nothing(self):
         with capture_events() as ev:
             asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))

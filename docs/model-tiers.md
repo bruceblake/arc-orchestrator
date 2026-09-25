@@ -17,6 +17,19 @@ Two models, two harnesses (operator decision 2026-09-12):
 | GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 10 |
 
+Subscription seats (studio profile, 2026-09-24) are not unlimited. The plan
+window is the real limit; local caps in `config._SEAT_CAP` keep a burst from
+spending it in minutes. `ARC_DRIVER_LIMIT_<FAMILY>` overrides the driver cap.
+Routine review prefers the ARC seats above, then the subscription seat with
+the most headroom and no recent `driver.usage_limit`. Claude is last.
+
+| Seat | Plan | Harness | Local cap |
+|---|---|---|---|
+| GPT-6-Sol (Codex) | ChatGPT Pro | `codex` | 4 |
+| Cursor-Grok-4.7 | Cursor Pro | `cursor` | 3 |
+| Antigravity-Gemini (`gemini-3.8-flash-high`) | Google AI Pro | `agy` | 3 |
+| Claude-Opus-5.5 | Claude Pro | `claude` | 2 |
+
 Context windows and defaults per the official ARC docs
 (https://www.docs.arc.vt.edu/ai/011_llm_api_arc_vt_edu.html, checked
 2026-09-15): **GLM-5.3** 128k context, concurrency 4, default
@@ -43,13 +56,14 @@ reviews, and **never plans**.
   family via `ARC_LIMIT_<FAMILY>`.
 - **Driver semaphore cap** — `config._MODEL_DRIVER_CAP`, the max concurrent
   harness instances per model via `drivers._gate` → `config.driver_limit`.
-  It is the account cap divided by sessions-per-process (both harnesses hold
-  about two ARC sessions at once: `config._SESSIONS_PER_PROCESS` is
-  `{"opencode": 2, "reasonix": 2}`), so DeepSeek is 10 ÷ 2 = 5.
-  GLM-5.3 is the exception: its driver cap is **pinned at the account's full
-  4** (`config._DRIVER_CAP_PIN`, operator directive 2026-09-15 — in-flight
-  GLM sessions tracked one per harness, so the halving under-sold the
-  account). `ARC_DRIVER_HEADROOM` subtracts further from non-pinned models;
+  Opencode still holds about two ARC sessions per process
+  (`config._SESSIONS_PER_PROCESS["opencode"]` is 2). Reasonix is **1**
+  (operator directive 2026-09-24: the unmeasured factor of 2 held DeepSeek
+  at 5 while GLM logged 201 `driver.cap_wait`s). DeepSeek is 10 ÷ 1 = 10.
+  GLM-5.3 is **pinned at the account's full 4** (`config._DRIVER_CAP_PIN`,
+  operator directive 2026-09-15 — in-flight GLM sessions tracked one per
+  harness, so the halving under-sold the account).
+  `ARC_DRIVER_HEADROOM` subtracts further from non-pinned models;
   batch callers on the
   planner model see one slot fewer while the reserve can afford to give
   (`INTERACTIVE_RESERVE`, reduced by `_apply_reserve` while it would leave
@@ -60,10 +74,10 @@ reviews, and **never plans**.
 - GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
   **`reasonix`** (`drivers.ReasonixDriver`, binary via `config.reasonix_bin()`).
   The driver caps apply per model; the **harness** pools are separate —
-  5 opencode, 7 reasonix (`config._HARNESS_CAP`) — so neither model can
-  starve the other's binary. reasonix 7 was measured 2026-09-14: 3/3, 6/6
-  and 7/7 concurrent one-shot runs all exited 0 cleanly (opencode's
-  equivalent cliff was at 6).
+  5 opencode, 10 reasonix (`config._HARNESS_CAP`, 2026-09-24) — so neither
+  model can starve the other's binary. The reasonix load test of 2026-09-14
+  went 3/3, 6/6 and 7/7 with no capacity rejections; the pool is the
+  account's 10 sessions. Opencode's cliff was at 6.
 - **Kimi-K3 was retired from this repo on 2026-09-12** by operator decision:
   its ROSTER row was deleted, it is gone from `config.FAMILIES` and from every
   live role, and no table above can name it as current. `drivers.KimiDriver`
@@ -124,8 +138,10 @@ design, or architectural judgment.
 
 Implementer → required reviewer. Cross-review is **family**-based: a task's
 reviewer must come from a model family other than the implementer's own
-(`config.cross_family_reviewer` picks the strongest review-capable family
-that qualifies). With today's roster that resolves to:
+(`config.cross_family_reviewer` prefers the unlimited ARC seats —
+deepseek, then glm — and skips the implementer's own family, so the next
+seat in that order reviews. Claude is last. Operator directive 2026-09-24).
+With today's two-model roster that still resolves to:
 
 | Implementer | Required reviewer (family → model) |
 |---|---|
