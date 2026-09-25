@@ -152,18 +152,14 @@ print(json.dumps({
         self.assertTrue(d["sample"], d["sample"])
         self.assertTrue(d["sample"].startswith("opencode/"))
 
-    def test_subscription_harnesses_follow_the_subscription_cap(self):
-        # Operator directive 2026-09-22: the plan seats are not capped low;
-        # the plan's usage window is the limit, and Driver.run waits it out
-        # (tests/test_usage_limit.py).
+    def test_subscription_harnesses_follow_the_seat_caps(self):
+        # Operator directive 2026-09-24: per-seat caps, not a flat 32.
         out = in_studio(
             "import config, json;"
-            "print(json.dumps([config.SUBSCRIPTION_SESSION_CAP,"
-            " {h: config.harness_limit(h) for h in "
-            "('claude', 'codex', 'cursor', 'agy')}]))")
-        cap, caps = json.loads(out)
-        self.assertEqual(caps, {"claude": cap, "codex": cap, "cursor": cap,
-                                "agy": cap})
+            "print(json.dumps({h: config.harness_limit(h) for h in "
+            "('claude', 'codex', 'cursor', 'agy')}))")
+        self.assertEqual(json.loads(out),
+                         {"claude": 2, "codex": 4, "cursor": 3, "agy": 3})
 
     IMAGE_PROBE = """
 import json, config, drivers
@@ -213,9 +209,10 @@ print(json.dumps(out))
         self.assertEqual(fresh[fresh.index("--print") + 1], "fix the door")
         self.assertIn("--dangerously-skip-permissions", fresh)
         self.assertNotIn("--sandbox", fresh)
-        self.assertNotIn("--model", fresh)
+        self.assertEqual(fresh[fresh.index("--model") + 1], "gemini-3.8-flash-high")
         resumed = argv["resume"]
         self.assertEqual(resumed[resumed.index("--print") + 1], "fix the door")
+        self.assertEqual(resumed[resumed.index("--model") + 1], "gemini-3.8-flash-high")
         self.assertLess(resumed.index("--conversation"), resumed.index("--print"))
         self.assertEqual(resumed[resumed.index("--conversation") + 1], "conv-9")
 

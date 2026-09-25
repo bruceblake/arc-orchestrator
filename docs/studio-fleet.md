@@ -59,20 +59,20 @@ Verified live on 2026-09-22, not assumed:
   frontier plan first.
 - **Antigravity CLI** (`agy --print`) on the Google account is the next seat
   after Cursor. Install is `~/.local/bin/agy`. One interactive `agy` sign-in
-  caches the account; `agy models` lists slugs only after that. An empty
-  `ARC_AGY_MODEL` leaves the account's default model. The old Gemini CLI is
+  caches the account; `agy models` lists slugs only after that.
+  `ARC_AGY_MODEL` defaults to `gemini-3.8-flash-high` (Gemini 3.8 Flash,
+  the slug `agy models` listed on 2026-09-24). The old Gemini CLI is
   still not a roster row. Gemini remains available per token on `studio-api`
   as the judge. The visual judge on this profile rotates between Claude and
   GPT-6, both of which read images.
 
 A consumer plan is metered on rolling windows — a live run shows
 `five_hour: {utilization: 0.4}` and, when exhausted,
-`overageStatus: "rejected"` with no fallback. **The fleet does not cap the
-plan seats locally** (operator directive 2026-09-22): `claude` and `codex`
-run up to `ARC_SUBSCRIPTION_SESSION_CAP` (default 32) concurrent sessions,
-and the plan's usage window is the real limit. This was once 1 for Claude and
-2 for Codex; set `ARC_SUBSCRIPTION_SESSION_CAP=1` to go back to a single seat
-when you want your own interactive session to have the plan to itself.
+`overageStatus: "rejected"` with no fallback. **Local concurrency is per seat**
+(operator directive 2026-09-24): Codex 4, Cursor 3, Antigravity 3, Claude 2
+(`config._SEAT_CAP`). The plan window is the real limit; these caps keep a
+burst from spending it in minutes. Override a driver cap with
+`ARC_DRIVER_LIMIT_<FAMILY>` (`OPENAI`, `CURSOR`, `GOOGLE`, `ANTHROPIC`).
 
 **When a window runs out, the attempt moves to a free harness, and waits
 only if every seat is blocked.** `drivers.Driver.run` recognises the plans'
@@ -168,11 +168,12 @@ capability question is answered by the roster at call time.
 
 ### Review pairing
 
-`config.cross_family_reviewer` returns *the strongest review-capable family
-that is not the implementer's*. On the two-family local fleet that is exactly
-right. On six families it sends **every** task to `anthropic`: Opus-5.5
-reviewing all five other workers at $4/$20 per Mtok through a driver cap of 2,
-while a cheap 1M-context multimodal reviewer sits idle.
+`config.cross_family_reviewer` skips the implementer's family and prefers
+the unlimited ARC seats: `deepseek`, then `glm`. On the two-family local
+fleet this still pairs glm and deepseek in both directions. On the studio
+fleet, the other subscription families follow the ARC seats, with
+`anthropic` last so Claude's smaller plan stays available for planning,
+final escalation and hard reviews.
 
 So `studio/schemas/task.py` carries `STUDIO_REVIEW_PREFERENCE`: a preference
 **among equally legal reviewers**, every candidate filtered through
@@ -646,19 +647,19 @@ Every route acts only on values the server listed: projects, builds, sessions, f
 | `ARC_CURSOR_BIN` | agent | pin the Cursor Agent CLI (`agent`) |
 | `ARC_CURSOR_MODEL` | grok-4.7-high | model id passed to `agent --model` (Cursor's Grok 4.7) |
 | `ARC_AGY_BIN` | agy | pin the Antigravity CLI (`agy`) |
-| `ARC_AGY_MODEL` | (unset) | model slug passed to `agy --model`; empty leaves the signed-in account's default |
+| `ARC_AGY_MODEL` | `gemini-3.8-flash-high` | model slug passed to `agy --model` (Gemini 3.8 Flash) |
 | `ARC_USAGE_SWAP` | 1 | on a spent plan window, rerun an implementation or review on the next free harness (Cursor Grok 4.7, then Antigravity, then Claude, then Codex, then OpenCode Zen free models, then billed API models); a review never lands in the implementer's family; a planner is not swapped; `0` waits out the reset on the same model |
 | `ARC_ZEN_FREE` | 0 | admit every live OpenCode Zen free slug as its own roster family (`Zen-*`, `opencode/<slug>`); `0` drops them |
 | `ARC_ZEN_MODEL_CAP` | 2 | per-slug driver/account cap — each partner pool is independent, so run different slugs in parallel and wait for daily resets per model |
-| `ARC_SUBSCRIPTION_SESSION_CAP` | 32 | concurrent sessions per plan seat (Claude Code, Codex, Cursor, Antigravity): the roster cap, driver cap and harness pool; 1 restores a single seat |
+| `ARC_DRIVER_LIMIT_<FAMILY>` | seat cap | per-seat driver cap: openai 4, cursor 3, google 3, anthropic 2 |
 | `ARC_USAGE_LIMIT_MAX_WAIT` | 691200 (8 days) | the longest one driver run waits for a spent plan window to reset before the attempt fails |
 | `ARC_USAGE_LIMIT_POLL` | 900 | re-check interval, in seconds, when a usage-limit refusal names no reset time |
 | `ARC_USAGE_LIMIT_MARGIN` | 60 | seconds added past a named reset time before retrying |
-| `ARC_HARNESS_LIMIT_CLAUDE` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent Claude Code sessions (harness pool only) |
-| `ARC_HARNESS_LIMIT_CODEX` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `codex exec` sessions (harness pool only) |
+| `ARC_HARNESS_LIMIT_CLAUDE` | 2 | concurrent Claude Code sessions (harness pool only) |
+| `ARC_HARNESS_LIMIT_CODEX` | 4 | concurrent `codex exec` sessions (harness pool only) |
 | `ARC_HARNESS_LIMIT_GEMINI` | 2 | concurrent Gemini CLI sessions |
-| `ARC_HARNESS_LIMIT_CURSOR` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `agent` sessions (harness pool only) |
-| `ARC_HARNESS_LIMIT_AGY` | `ARC_SUBSCRIPTION_SESSION_CAP` | concurrent `agy` sessions (harness pool only) |
+| `ARC_HARNESS_LIMIT_CURSOR` | 3 | concurrent `agent` sessions (harness pool only) |
+| `ARC_HARNESS_LIMIT_AGY` | 3 | concurrent `agy` sessions (harness pool only) |
 | `ARC_PR_MANUAL_REVIEW` | 0 | `1` holds every fleet-approved PR for a human label (`manual-approved` / `manual-rejected`) |
 | `ARC_PR_MANUAL_POLL` | 30 | seconds between GitHub checks while a PR waits for manual review |
 | `ARC_PR_MANUAL_TIMEOUT` | 0 | give up waiting after this many seconds and REJECT (0 = wait as long as it takes) |

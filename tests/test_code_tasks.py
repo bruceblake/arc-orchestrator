@@ -1749,6 +1749,18 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
                                         config.harness_limit(h))
         return usage
 
+    def test_idle_arc_reviewers_prefer_deepseek_for_a_third_family(self):
+        ds = "DeepSeek-V4.1-Flash-thinking-max"
+        glm = "GLM-5.3"
+        # A third-family implementer leaves both ARC families eligible.
+        with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False), \
+             mock.patch.object(config, "ESCALATION_PATH", [ds, glm]):
+            pool = code_tasks._eligible_pr_reviewers("openai", None)
+        self.assertEqual(sorted(pool, key=lambda m: code_tasks._reviewer_rank(m, {})),
+                         [ds, glm])
+        self.assertEqual(sorted(pool, key=lambda m: code_tasks._reviewer_rank(
+            m, {ds: config.driver_limit(ds)}))[0], glm)
+
     def _stand_in(self, patch_driver=True):
         """An idle hard-tier reviewer on its own harness.
 
@@ -1839,6 +1851,67 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
             "glm", "Claude-Opus-5.5", None, self._full(*busy))
         self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
         self.assertLess(code_tasks._tier_rank(weaker), code_tasks._tier_rank(planned))
+
+    def test_fallback_prefers_free_arc_then_headroom_and_claude_last(self):
+        """Unlimited ARC seats, then the subscription seat with the most headroom.
+
+        A recent usage_limit skips that seat. Claude sorts last. The
+        implementer's own family is never the fallback.
+        """
+        seats = {
+            "Codex-X": ("openai", "codex", 4),
+            "Cursor-X": ("cursor", "cursor", 3),
+            "Agy-X": ("google", "agy", 3),
+            "Claude-X": ("anthropic", "claude", 2),
+        }
+        top = config.TIER_ORDER[-1]
+        real_dl = config.driver_limit
+        real_hl = config.harness_limit
+        roles = {m: {"reviewer", "pr_reviewer"} for m in seats}
+        fams = {m: spec[0] for m, spec in seats.items()}
+        tiers = {m: top for m in seats}
+        harnesses = {m: spec[1] for m, spec in seats.items()}
+        caps = {m: spec[2] for m, spec in seats.items()}
+        patches = [
+            mock.patch.dict(config.MODEL_ROLES, roles),
+            mock.patch.dict(config.MODEL_FAMILY, fams),
+            mock.patch.dict(config.MODEL_TIER, tiers),
+            mock.patch.dict(config.MODEL_HARNESS, harnesses),
+            mock.patch.object(
+                config, "driver_limit",
+                lambda m, interactive=False: caps[m] if m in caps
+                else real_dl(m, interactive)),
+            mock.patch.object(
+                config, "harness_limit",
+                lambda h: 8 if h in {s[1] for s in seats.values()} else real_hl(h)),
+        ]
+        real = code_tasks._driver
+
+        def _drv(m, role, pol):
+            if m in seats:
+                return mock.Mock(model=m, harness=harnesses[m], images=None)
+            return real(m, role, pol)
+
+        patches.append(mock.patch.object(code_tasks, "_driver", _drv))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        planned = config.REVIEW_FAMILIES["glm"]
+        usage = self._full(planned)
+        for m in config.MODEL_ROLES:
+            if m in ("Cursor-X", "Claude-X"):
+                continue
+            usage[m] = config.driver_limit(m)
+        usage["Cursor-X"] = 0
+        usage["Codex-X"] = 2
+        usage["Claude-X"] = 0
+        usage["usage_limit:agy"] = 1
+        model, reason = code_tasks._select_reviewer(
+            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+        self.assertEqual(reason, "planned_full_fallback")
+        self.assertEqual(model, "Cursor-X")
+        self.assertNotEqual(config.MODEL_FAMILY[model], "deepseek")
+        self.assertNotEqual(model, "Claude-X")
 
     def test_a_crashed_fallback_reviewer_is_recorded_and_is_not_a_rejection(self):
         self._stand_in(patch_driver=False)
@@ -3020,4 +3093,3 @@ class DossierWiring(unittest.TestCase):
         self.assertIn("keep the cache in store.py", prompts[1])
         self.assertIn("wire the CLI", prompts[1])
         self.assertFalse(Path(wt, ".arc", "handoff.md").exists())
-

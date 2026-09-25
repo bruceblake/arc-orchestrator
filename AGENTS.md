@@ -90,6 +90,21 @@ Routing is decided at plan time (by GLM-5.3 in
 | GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 10 |
 
+Subscription seats (studio profile, operator directive 2026-09-24) are sized
+to the plan, not a flat 32. The plan window is the real limit; local caps
+(`config._SEAT_CAP`, override `ARC_DRIVER_LIMIT_<FAMILY>`) keep a burst from
+spending it. Routine review prefers the unlimited ARC seats (deepseek, then
+glm) and then the subscription seat with the most headroom and no recent
+`driver.usage_limit`. Claude is last, kept for planning, final escalation
+and hard reviews. Rule 2 stays exact: the implementer's own family is skipped.
+
+| Seat | Plan | Harness | Local cap |
+|---|---|---|---|
+| GPT-6-Sol (Codex) | ChatGPT Pro (5-hour + weekly) | `codex` | 4 |
+| Cursor-Grok-4.7 | Cursor Pro | `cursor` | 3 |
+| Antigravity-Gemini (`gemini-3.8-flash-high`, `ARC_AGY_MODEL`) | Google AI Pro (5-hour + weekly) | `agy` | 3 |
+| Claude-Opus-5.5 | Claude Pro (smallest window) | `claude` | 2 |
+
 **GLM-5.3 is the fleet's strongest model** — operator decision 2026-09-12:
 hard tier, the planner, and the last escalation stage. Its cap of 4 is the
 official ARC docs value (docs.arc.vt.edu model table, checked 2026-09-15:
@@ -188,8 +203,8 @@ on `reasonix`).
   remapped off a retired one — a normal taskfile with a same-family reviewer is
   rejected, not flipped. With two families the cross-review pairing
   is exact: **GLM-5.3 work is reviewed by deepseek; DeepSeek-V4.1-Flash-thinking-max
-  work is reviewed by glm** (`config.cross_family_reviewer`: the strongest
-  review-capable family that is not the implementer's).
+  work is reviewed by glm** (`config.cross_family_reviewer` prefers deepseek,
+  then glm, and always skips the implementer's family).
 - The taskfile `reviewer` token stays the deterministic plan. The review
   node resolves it through `config.REVIEW_FAMILIES` and, **before**
   instantiating a driver, asks `code_tasks._select_reviewer` whether that
@@ -197,8 +212,9 @@ on `reasonix`).
   does, that model reviews. When it does not, the node picks another model
   whose driver can be constructed for `reviewer`, from a family other than
   the model that **actually implemented** (`wrote_the_code`), at the same or
-  a stronger tier, and with real headroom right now — least contended, then
-  stronger. Otherwise it keeps the planned reviewer and waits. It never
+  a stronger tier, and with real headroom right now — deepseek, then glm,
+  then the subscription seat with the most headroom, with Claude last.
+  Otherwise it keeps the planned reviewer and waits. It never
   allows a same-family review, never drops to a weaker tier, and never skips
   the review. A bench `policy` and `ARC_ALLOW_SAME_FAMILY_REVIEW` do not
   swap: those runs measure or replace the named reviewer on purpose. A
@@ -526,7 +542,7 @@ merged work.
 |---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | `ARC_LIMIT_<FAMILY>` |
 | Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once (GLM is pinned at its full account budget, `config._DRIVER_CAP_PIN`) | 10 | 4 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | reasonix (deepseek): **10** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | reasonix (deepseek): **10** total | opencode (glm): **5** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
 on this fleet were gpt-oss 5, DeepSeek(V4-Flash) 5, GLM 4, Kimi 3 — that was
@@ -539,7 +555,8 @@ cap set equal to the session limit over-subscribed by that factor. Since
 2026-09-16 that per-attempt spawn is gone for opencode: it runs through ONE
 persistent `opencode serve` server, with ONE session per run — the "two
 sessions per process" factor is a property of the retired spawn, not of the
-serve path, and reasonix keeps the assumed-2 factor until measured. Measured
+serve path. Reasonix is 1 session per process (2026-09-24), not the old
+assumed 2. Measured
 from the event log: 23 capacity rejections in four hours, GLM-5.3 refused with
 as few as TWO of our drivers live against a ceiling of four — and the
 backend's rejection text has twice contradicted the official table: "max 3 in

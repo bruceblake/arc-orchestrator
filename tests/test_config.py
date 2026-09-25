@@ -178,6 +178,84 @@ class RoutingInvariants(unittest.TestCase):
                 "can out-request the account and ARC rejects over-limit mid-run")
 
 
+class SeatCaps(unittest.TestCase):
+    """Operator directive 2026-09-24: every seat sized to its real plan."""
+
+    def test_deepseek_uses_all_ten_sessions_and_glm_stays_at_four(self):
+        self.assertEqual(config._SESSIONS_PER_PROCESS["reasonix"], 1)
+        self.assertEqual(config.harness_limit("reasonix"), 10)
+        self.assertEqual(
+            config.driver_limit("DeepSeek-V4.1-Flash-thinking-max", True), 10)
+        self.assertEqual(config._DRIVER_CAP_PIN["GLM-5.3"], 4)
+        self.assertEqual(config.driver_limit("GLM-5.3", True), 4)
+
+    def test_subscription_harness_caps_match_the_seat_table(self):
+        self.assertEqual(config._SEAT_CAP, {
+            "openai": 4, "cursor": 3, "google": 3, "anthropic": 2})
+        self.assertEqual(config.harness_limit("codex"), 4)
+        self.assertEqual(config.harness_limit("cursor"), 3)
+        self.assertEqual(config.harness_limit("agy"), 3)
+        self.assertEqual(config.harness_limit("claude"), 2)
+
+    def test_agy_defaults_to_gemini_38_flash(self):
+        self.assertEqual(config.AGY_CLI_MODEL, "gemini-3.8-flash-high")
+
+    def test_cross_family_reviewer_prefers_arc_and_skips_own_family(self):
+        ds = "DeepSeek-V4.1-Flash-thinking-max"
+        self.assertEqual(config.cross_family_reviewer("GLM-5.3"), "deepseek")
+        # Preferred family is deepseek; the implementer is deepseek, so glm.
+        self.assertEqual(config.cross_family_reviewer(ds), "glm")
+        self.assertNotEqual(config.cross_family_reviewer(ds), "deepseek")
+
+    def test_studio_seat_driver_caps_and_reviewer_order(self):
+        import json
+        import subprocess
+        import sys
+        snippet = (
+            "import config, json\n"
+            "models = ['Claude-Opus-5.5', config.STUDIO_OPENAI_MODEL,\n"
+            "          'Cursor-Grok-4.7', 'Antigravity-Gemini',\n"
+            "          'GLM-5.3', 'DeepSeek-V4.1-Flash-thinking-max']\n"
+            "print(json.dumps({\n"
+            "  'drivers': {m: config.driver_limit(m, True) for m in models[:4]},\n"
+            "  'review': {m: config.cross_family_reviewer(m) for m in models},\n"
+            "}))\n"
+        )
+        root = pathlib.Path(__file__).resolve().parent.parent
+        env = dict(os.environ, ARC_FLEET="studio", PYTHONPATH=str(root))
+        p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
+                           text=True, env=env, cwd=str(root), timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        data = json.loads(p.stdout)
+        self.assertEqual(data["drivers"]["Claude-Opus-5.5"], 2)
+        self.assertEqual(data["drivers"][config.STUDIO_OPENAI_MODEL], 4)
+        self.assertEqual(data["drivers"]["Cursor-Grok-4.7"], 3)
+        self.assertEqual(data["drivers"]["Antigravity-Gemini"], 3)
+        ds = "DeepSeek-V4.1-Flash-thinking-max"
+        for model, fam in data["review"].items():
+            if model == ds:
+                self.assertEqual(fam, "glm")
+            else:
+                self.assertEqual(fam, "deepseek")
+            self.assertNotEqual(fam, config.MODEL_FAMILY.get(model))
+
+    def test_driver_limit_env_overrides_a_seat_cap(self):
+        import json
+        import subprocess
+        import sys
+        snippet = (
+            "import config\n"
+            "print(config.driver_limit('Claude-Opus-5.5', True))\n"
+        )
+        root = pathlib.Path(__file__).resolve().parent.parent
+        env = dict(os.environ, ARC_FLEET="studio", ARC_DRIVER_LIMIT_ANTHROPIC="1",
+                   PYTHONPATH=str(root))
+        p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
+                           text=True, env=env, cwd=str(root), timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(p.stdout.strip(), "1")
+
+
 if __name__ == "__main__":
     unittest.main()
 

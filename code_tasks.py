@@ -616,6 +616,31 @@ def _harness_of(model):
     return config.MODEL_HARNESS.get(model, "opencode")
 
 
+def _seat_blocked(model, usage):
+    """True when this harness has a recent driver.usage_limit still in force."""
+    harness = _harness_of(model)
+    if usage.get(f"usage_limit:{harness}"):
+        return True
+    return drivers._usage_blocked_until.get(harness, 0) > time.time()
+
+
+def _reviewer_rank(model, usage):
+    """Lower sorts first: DeepSeek, GLM, other seats, then Claude.
+
+    A full or usage-blocked seat sorts after every free seat.
+    Among subscription seats the least contended (most headroom) wins.
+    """
+    fam = config.MODEL_FAMILY.get(model)
+    pressure = _reviewer_pressure(model, usage)
+    order = {"deepseek": 0, "glm": 1, "anthropic": 3}.get(fam, 2)
+    return (
+        1 if _seat_blocked(model, usage) or pressure >= 1.0 else 0,
+        order,
+        pressure,
+        -_tier_rank(model),
+    )
+
+
 def _reviewer_pressure(model, usage):
     """How contended this reviewer is, 0.0 (idle) to 1.0+ (at a ceiling).
 
@@ -1284,7 +1309,7 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
                 continue
         except (KeyError, ValueError):
             continue
-        if _reviewer_pressure(m, usage) >= 1.0:
+        if _reviewer_pressure(m, usage) >= 1.0 or _seat_blocked(m, usage):
             continue
         try:
             _driver(m, "reviewer", pol)
@@ -1293,8 +1318,9 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
         fit.append(m)
     if not fit:
         return planned, "planned_full_no_alternative"
-    # Least contended first; on a tie the stronger reviewer.
-    fit.sort(key=lambda m: (_reviewer_pressure(m, usage), -_tier_rank(m)))
+    # Free ARC seats, then the subscription seat with the most headroom.
+    # Claude sorts last so the smallest plan is not spent on routine review.
+    fit.sort(key=lambda m: _reviewer_rank(m, usage))
     return fit[0], "planned_full_fallback"
 
 
@@ -2465,13 +2491,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             impl_fam = config.MODEL_FAMILY.get(
                 wrote_the_code(ctx, tid, cur_model(ctx), store))
             pool = _eligible_pr_reviewers(impl_fam, pol)
-            # Least-contended first; contention is whichever ceiling binds
-            # first, the model's own cap or its harness's (_reviewer_pressure).
+            # Free DeepSeek, then GLM, then the subscription seat with the
+            # most headroom; full or usage-blocked seats sort last.
             try:
                 usage = store.lease_usage()
             except Exception:
                 usage = {}
-            pool.sort(key=lambda m: (_reviewer_pressure(m, usage), usage.get(m, 0)))
+            pool.sort(key=lambda m: _reviewer_rank(m, usage))
             crashed_before = set(prior_r.get("crashed_models") or prior_r.get("crashed") or []) \
                 if prior_r.get("inconclusive") else set()
             if crashed_before:
