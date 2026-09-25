@@ -695,6 +695,7 @@ def _collect_inflight(now, store=None):
                      "pretty": _pretty(model), "source": f"driver:{harness}",
                      "purpose": f"{harness} {role}", "harness": harness,
                      "role": role, "task": task, "websearch": False,
+                     "pid": e.get("pid"),
                      "started": started, "elapsed_s": round(max(0.0, now - started), 1),
                      "idle_s": idle_s, "bytes": prog.get("bytes"),
                      "state": prog.get("state") if fresh_sample else None,
@@ -2541,6 +2542,206 @@ def _agents(store):
              if v.get("kind") == "chat"]
     return {"now": now, "agents": inflight, "runs": runs, "chats": chats,
             "recent": _recent_agent_runs(store)}
+
+
+_work_status_cache = {"at": 0.0, "value": None}
+
+
+def _work_status(store):
+    """Live project DAGs with task-level pipeline and wait evidence.
+
+    The task table records durable outcomes, not the active graph node. Event
+    pairs provide that node, while driver events distinguish a running harness
+    from a usage-window or capacity wait. An old unmatched event is never
+    presented as live unless the owning project run is alive.
+    """
+    now = time.time()
+    if _work_status_cache["value"] is not None and now - _work_status_cache["at"] < 5:
+        return _work_status_cache["value"]
+    projects = _projects(store)
+    agents, _ = _collect_inflight(now, store)
+    ids = {n["id"] for p in projects for n in p["dag"]["nodes"]
+           if n.get("kind") != "chain"}
+    live_tasks_by_pid = {
+        str(p["run_pid"]): {n["id"] for n in p["dag"]["nodes"]
+                             if n.get("kind") != "chain"}
+        for p in projects if p.get("run_pid")}
+    # Match the full task suffix. partition('_') silently turns
+    # pr_reviewer_<id> into stage 'pr' and task 'reviewer_<id>'.
+    suffixes = sorted(ids, key=len, reverse=True)
+
+    def task_of(raw):
+        base, _ = _xkey(raw)
+        base = re.sub(r"-pr\d+$", "", base or "")
+        return base if base in ids else None
+
+    def node_of(name):
+        for tid in suffixes:
+            if name.endswith("_" + tid):
+                return tid, name[:-(len(tid) + 1)]
+        return None, None
+
+    state = {(pid, tid): {"node": None, "stage_since": None,
+                          "open_nodes": {}, "driver_event": None}
+             for pid, tids in live_tasks_by_pid.items() for tid in tids}
+    for line in _load_event_lines():
+        if not any(marker in line for marker in ('"node_', '"driver.')):
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        # All current graph and driver events carry a run_id ending in their
+        # owner PID. Exclude old unmatched starts from a previous run.
+        run_id = str(e.get("run_id") or "")
+        pid = run_id.rsplit("-", 1)[-1]
+        if not run_id or pid not in live_tasks_by_pid:
+            continue
+        kind = e.get("type")
+        if kind in ("node_start", "node_end", "node_error"):
+            tid, stage = node_of(e.get("node") or "")
+            if tid is None or tid not in live_tasks_by_pid[pid]:
+                continue
+            s = state[(pid, tid)]
+            if kind == "node_start":
+                if s["node"] != stage or not s["open_nodes"].get(stage):
+                    s["stage_since"] = _ts(e.get("ts"))
+                s["node"] = stage
+                s["open_nodes"][stage] = s["open_nodes"].get(stage, 0) + 1
+                s["driver_event"] = None  # a new graph firing clears old waits
+            elif s["open_nodes"].get(stage, 0):
+                s["open_nodes"][stage] -= 1
+                if not s["open_nodes"][stage]:
+                    del s["open_nodes"][stage]
+                if s["node"] == stage and stage not in s["open_nodes"]:
+                    s["node"] = next(reversed(s["open_nodes"]), None)
+                    if s["node"] is None:
+                        s["stage_since"] = None
+                        s["driver_event"] = None
+        elif isinstance(kind, str) and kind.startswith("driver."):
+            tid = task_of(e.get("task"))
+            if tid is None or tid not in live_tasks_by_pid[pid]:
+                continue
+            if kind in ("driver.queued", "driver.slot_wait", "driver.cap_wait",
+                        "driver.start", "driver.progress", "driver.heartbeat",
+                        "driver.usage_limit", "driver.usage_wait",
+                        "driver.usage_swap", "driver.stalled", "driver.timeout",
+                        "driver.done", "driver.error", "driver.cancelled",
+                        "driver.cap_timeout"):
+                state[(pid, tid)]["driver_event"] = e
+
+    live_agents = {}
+    for a in agents:
+        tid = task_of(a.get("task"))
+        if tid and a.get("source", "").startswith("driver:"):
+            live_agents.setdefault(tid, []).append(a)
+
+    for p in projects:
+        nodes = {n["id"]: n for n in p["dag"]["nodes"] if n.get("kind") != "chain"}
+        tasks = []
+        live_run = bool(p.get("run_pid"))
+        chain_ready = not p.get("chain") or p["chain"].get("ready", True)
+        for tid, n in nodes.items():
+            s = state.get((str(p.get("run_pid")), tid)) or {
+                "node": None, "stage_since": None, "driver_event": None}
+            ev = s["driver_event"] or {}
+            # An unmatched driver.start from a previous run may still appear
+            # in /api/agents. Keep only agents started inside this node firing.
+            task_agents = ([a for a in live_agents.get(tid, [])
+                            if s["stage_since"] is not None
+                            and str(a.get("pid")) == str(p.get("run_pid"))
+                            and (a.get("started") or 0) >= s["stage_since"] - 2]
+                           if live_run else [])
+            task_agents.sort(key=lambda a: a.get("started") or 0, reverse=True)
+            agent = task_agents[0] if task_agents else None
+            status = n.get("status") or "pending"
+            deps = [e["src"] for e in p["dag"]["edges"]
+                    if e.get("dst") == tid and e.get("kind") != "fixloop"
+                    and e.get("src") in nodes
+                    and nodes[e["src"]].get("status") not in ("merged", "skipped")]
+            failed_deps = [dep for dep in deps
+                           if nodes[dep].get("status") in ("failed", "conflict")]
+            stage = s["node"] if live_run and status in ("pending", "running", "in_review") else None
+            activity, reason = "unknown", None
+            if status in ("merged", "skipped"):
+                activity = "done"
+            elif status in ("failed", "conflict"):
+                activity, reason = "blocked", next(
+                    (x.get("error") for x in p.get("errors", []) if x.get("id") == tid), None)
+            elif not live_run and status in ("running", "in_review"):
+                activity, reason = "stalled", "owning project run is not live"
+            elif failed_deps:
+                activity, reason = "blocked", "upstream task needs repair: " + ", ".join(failed_deps)
+            elif deps:
+                activity, reason = "waiting", "waiting for " + ", ".join(deps)
+            elif not chain_ready:
+                failed_chain = [d.get("title") or d.get("file")
+                                for d in (p.get("chain") or {}).get("deps", [])
+                                if d.get("state") == "failed"]
+                if failed_chain:
+                    activity, reason = "blocked", "upstream project needs repair: " + ", ".join(failed_chain)
+                else:
+                    activity, reason = "waiting", "waiting for upstream project to merge"
+            elif not live_run:
+                activity = "waiting"
+            elif stage:
+                activity = "working"
+                ev_age = now - (_ts(ev.get("ts")) or 0)
+                if ev.get("type") in ("driver.usage_limit", "driver.usage_wait") and ev_age < 420:
+                    reset = ev.get("resets_at")
+                    activity, reason = "usage_wait", (
+                        f"usage limit; resets at {datetime.fromtimestamp(reset).astimezone().isoformat()}"
+                        if isinstance(reset, (int, float)) else
+                        "usage limit; waiting for the next reset check")
+                elif ev.get("type") in ("driver.slot_wait", "driver.cap_wait", "driver.queued") and ev_age < 120:
+                    activity = "queued"
+                    reason = ("waiting for a driver slot" if ev.get("type") == "driver.cap_wait"
+                              else "waiting for an available model or harness slot")
+                elif agent and (agent.get("stalled") or
+                                (agent.get("last_event_s") or 0) >
+                                config.DRIVER_PROGRESS_INTERVAL * 3):
+                    activity, reason = "stalled", "agent idle past stall threshold"
+                elif ev.get("type") == "driver.stalled" and ev_age < 420:
+                    activity, reason = "stalled", "agent reported a stall"
+                elif stage in ("implement", "review", "pr_reviewer") and not agent and ev_age > 420:
+                    activity, reason = "stalled", "no recent agent heartbeat"
+                elif stage == "chain_wait":
+                    activity, reason = "waiting", "waiting for upstream project to merge"
+            elif status == "in_review":
+                activity, reason = "waiting", "pull request is awaiting review"
+            else:
+                # A live project PID does not prove this particular task has
+                # entered a driver queue. Reserve "queued" for a fresh slot
+                # event above; until then it is ready for graph scheduling.
+                activity, reason = "waiting", (
+                    "ready; waiting for the task scheduler" if live_run else None)
+            if stage is None and not deps and not chain_ready and activity in ("waiting", "blocked"):
+                stage = "chain_wait"
+            elif stage is None and deps and activity in ("waiting", "blocked"):
+                stage = "dependency_wait"
+            task = {"id": tid, "title": n.get("title"), "status": status,
+                    "stage": stage, "stage_since": s["stage_since"] if stage else None,
+                    "activity": activity, "reason": reason, "blocked_by": deps,
+                    "model": (agent or {}).get("model") or n.get("model"),
+                    "role": (agent or {}).get("role"),
+                    "agents": [{"model": a.get("model"), "role": a.get("role"),
+                                "harness": a.get("harness"), "started": a.get("started"),
+                                "elapsed_s": a.get("elapsed_s"), "idle_s": a.get("idle_s"),
+                                "stalled": bool(a.get("stalled") or
+                                                (a.get("last_event_s") or 0) >
+                                                config.DRIVER_PROGRESS_INTERVAL * 3),
+                                "last_event_s": a.get("last_event_s")}
+                               for a in task_agents],
+                    "started_at": (agent or {}).get("started"),
+                    "last_event_at": _ts(ev.get("ts")) if live_run else None,
+                    "idle_s": (agent or {}).get("idle_s"),
+                    "elapsed_s": (agent or {}).get("elapsed_s"),
+                    "usage_resets_at": (ev.get("resets_at") if activity == "usage_wait" else None)}
+            tasks.append(task)
+        p["tasks"] = tasks
+    out = {"now": now, "projects": projects, "agents": agents}
+    _work_status_cache.update(at=now, value=out)
+    return out
 
 
 _TRANSCRIPT_RE = re.compile(r"^[\w.-]+\.jsonl$")
@@ -4943,6 +5144,8 @@ class Handler(BaseHTTPRequestHandler):
                     store=Handler.store)})
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
+            if u.path == "/api/work-status":
+                return self._json(_work_status(Handler.store))
             if u.path == "/api/repos":
                 return self._json({"repos": _list_repos()})
             if u.path == "/api/chat/poll":
