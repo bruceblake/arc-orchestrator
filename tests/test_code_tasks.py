@@ -1538,6 +1538,130 @@ class ResumingAnOpenPullRequest(unittest.TestCase):
         self.assertIn("alloc_t1", g.starts)
 
 
+class ResumeKeepsAnOpenPullRequest(unittest.TestCase):
+    """A stale 'running' row (or the 'failed' stale-reset writes) whose PR is
+    still open keeps its commits; unfinished edits pass gate and review."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        base = Path(self.dir)
+        self.repo = base / "proj"
+        self.repo.mkdir()
+        for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True,
+                           capture_output=True)
+        (self.repo / "f.txt").write_text("x\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "init"],
+                       check=True, capture_output=True)
+        self._orig = config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = str(base / "wts")
+        self.addCleanup(setattr, config, "WORKTREE_ROOT", self._orig)
+
+    def _row(self, status="running"):
+        return [{"id": "t1", "status": status,
+                 "model": config.ESCALATION_PATH[0],
+                 "error": ("interrupted: run process exited before the task finished"
+                           if status == "failed" else None)}]
+
+    def _graph(self, find_pr, status="running"):
+        ts = code_tasks.load_taskfile(taskfile([BASIC], repo=str(self.repo)))
+        with mock.patch.object(gitstore, "find_pr", find_pr), capture_events():
+            return code_tasks.build_code_graph(
+                FakeStore(self._row(status)), ts, taskfile="tf.json")
+
+    def _commit_on_branch(self):
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (wt / "kept.txt").write_text("reviewed\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True, capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "reviewed work"], cwd=wt,
+                       check=True, capture_output=True)
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_stale_running_with_open_pr_resumes_at_publish(self):
+        tip = self._commit_on_branch()
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 5, "https://example/5", "OPEN"
+
+        g = self._graph(open_pr)
+        self.assertIn("publish_t1", g.starts)
+        self.assertNotIn("alloc_t1", g.starts)
+        again = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(again, tip)
+
+    def test_interrupted_pr_rework_runs_gate_and_review_before_publish(self):
+        tip = self._commit_on_branch()
+        wt = gitstore.worktree_for(self.repo, "t1")
+        (wt / "kept.txt").write_text("reviewed, then partly reworked\n")
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 5, "https://example/5", "OPEN"
+
+        for status in ("running", "failed", "in_review", "conflict"):
+            with self.subTest(status=status):
+                g = self._graph(open_pr, status)
+                self.assertEqual(g.starts, ["gate_t1"])
+                self.assertTrue(any(e.src == "gate_t1" and e.dst == "review_t1"
+                                    for e in g.edges))
+                self.assertTrue(any(e.src == "review_t1" and e.dst == "publish_t1"
+                                    for e in g.edges))
+                self.assertEqual(subprocess.run(
+                    ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+                    check=True, capture_output=True, text=True).stdout.strip(), tip)
+
+    def test_runtime_handoff_alone_does_not_trigger_re_review(self):
+        self._commit_on_branch()
+        wt = gitstore.worktree_for(self.repo, "t1")
+        (wt / ".arc").mkdir()
+        (wt / ".arc" / "handoff.md").write_text("handoff\n")
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 5, "https://example/5", "OPEN"
+
+        self.assertEqual(self._graph(open_pr).starts, ["publish_t1"])
+
+    def test_stale_running_without_pr_still_reallocs(self):
+        async def no_pr(repo, task_id, state="open", *, wait_quota=True):
+            return None, None, None
+
+        g = self._graph(no_pr)
+        self.assertIn("alloc_t1", g.starts)
+        self.assertNotIn("publish_t1", g.starts)
+
+    def test_gh_failure_falls_back_to_alloc(self):
+        async def boom(repo, task_id, state="open", *, wait_quota=True):
+            raise RuntimeError("gh down")
+
+        g = self._graph(boom)
+        self.assertIn("alloc_t1", g.starts)
+
+    def test_alloc_refuses_to_reset_while_pr_is_open(self):
+        tip = self._commit_on_branch()
+
+        async def open_pr(repo, task_id, state="open", *, wait_quota=True):
+            return 12, "https://example/12", "OPEN"
+
+        with mock.patch.object(gitstore, "find_pr", open_pr), capture_events() as ev:
+            asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        again = subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+        self.assertEqual(again, tip)
+        kept = [f for t, f in ev.seen if t == "task.branch_kept"]
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["pr"], 12)
+        self.assertEqual(
+            [t for t, _ in ev.seen if t == "task.branch_reset"], [])
+
+
 class ReviewersSendingAPullRequestBack(unittest.TestCase):
     """The rework implementer must actually be told why the PR was rejected.
 
@@ -3020,4 +3144,3 @@ class DossierWiring(unittest.TestCase):
         self.assertIn("keep the cache in store.py", prompts[1])
         self.assertIn("wire the CLI", prompts[1])
         self.assertFalse(Path(wt, ".arc", "handoff.md").exists())
-

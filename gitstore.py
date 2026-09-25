@@ -48,8 +48,19 @@ class _RepoLock:
     async def __aenter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fh = open(self.path, "a+")
-        await asyncio.to_thread(fcntl.flock, self._fh.fileno(), fcntl.LOCK_EX)
-        return self
+        try:
+            # Keep the event loop responsive without a thread whose shutdown
+            # can stall short asyncio.run() gates after the lock is released.
+            while True:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    await asyncio.sleep(0.05)
+        except BaseException:
+            self._fh.close()
+            self._fh = None
+            raise
 
     async def __aexit__(self, *_exc):
         try:
@@ -181,7 +192,9 @@ async def checkpoint(repo, task_id, wt, label, *, model=None, attempt=None):
         while dest.exists():
             n += 1
             dest = out / f"{stamp}-{label}.{n}.patch"
-        await asyncio.to_thread(dest.write_bytes, patch)
+        # Local checkpoint writes finish before the next git step. Offloading
+        # them left a default-executor thread that stalled test-run shutdown.
+        dest.write_bytes(patch)
         meta = {"task": str(task_id), "label": str(label), "head": head.strip(),
                 "merge_base": ref, "files": listed, "model": model,
                 "attempt": attempt, "patch": dest.name, "bytes": len(patch)}
@@ -189,9 +202,8 @@ async def checkpoint(repo, task_id, wt, label, *, model=None, attempt=None):
                                   cwd=wt, check=False)
         meta["commits"] = int(ahead.strip()) if (rc == 0
                                                  and ahead.strip().isdigit()) else None
-        await asyncio.to_thread(
-            dest.with_suffix(".json").write_text,
-            json.dumps(meta, indent=2, default=str), "utf-8")
+        dest.with_suffix(".json").write_text(
+            json.dumps(meta, indent=2, default=str), encoding="utf-8")
         events.emit("task.checkpointed", task=str(task_id), label=str(label),
                     path=str(dest), files=len(listed), commits=meta["commits"],
                     model=model)
@@ -505,11 +517,11 @@ async def existing_worktree(repo, task_id):
 async def alloc(repo, task_id, base="main"):
     """Create (or recreate, on retry) the task worktree; returns its Path.
 
-    A re-alloc always resets task/<task_id> to the base: a failed/crashed
-    attempt's branch holds rejected work and must not leak into the retry.
-    (A resume of a task whose PR is open re-attaches to the existing
-    worktree in code_tasks.publish and never reaches alloc, so reviewed
-    commits are never discarded silently.)"""
+    A re-alloc resets task/<task_id> to the base when the branch has no open
+    pull request: a failed attempt's rejected work must not leak into the
+    retry. A branch whose tip is not an ancestor of base AND whose PR is
+    still open is reused instead — resetting it discards reviewed commits.
+    A gh failure is not an open PR, so alloc then resets as before."""
     repo = Path(repo).resolve()
     wt = Path(config.WORKTREE_ROOT) / repo.name / task_id
     if not wt.resolve().is_relative_to(
@@ -527,6 +539,25 @@ async def alloc(repo, task_id, base="main"):
     rc, ahead, _ = await _git(["rev-list", "--count", f"{base_ref}..{branch}"],
                               cwd=repo, check=False)
     n = int(ahead.strip()) if rc == 0 and ahead.strip().isdigit() else 0
+    # n > 0 means the branch tip is not an ancestor of base. Resetting it
+    # throws away commits. If an open PR still points at the branch, reuse it.
+    if n:
+        number = url = state = None
+        try:
+            number, url, state = await find_pr(
+                repo, task_id, state="open", wait_quota=False)
+        except Exception:
+            number = None
+        if number is not None and (state or "").upper() == "OPEN":
+            events.emit("task.branch_kept", task=task_id, branch=branch,
+                        pr=number, url=url, commits=n,
+                        reason="open pull request")
+            log.warning(
+                "alloc %s: open PR #%s — reusing %s (%d commit(s)), not resetting",
+                task_id, number, branch, n)
+            async with _RepoLock(repo):
+                await _reuse_branch_worktree(repo, wt, branch)
+            return wt
     # A re-alloc is about to discard this worktree. Checkpoint it first, so a
     # resume can restore instead of starting over — uncommitted edits count as
     # work too, and the checkpoint never raises, so the reset still happens.
@@ -625,6 +656,25 @@ async def _drop_worktree_dir(repo, wt):
                 f"cannot replace {wt}: git still tracks it and worktree remove failed")
         shutil.rmtree(wt)
     await _git(["worktree", "prune"], cwd=repo, check=False)
+
+
+async def _reuse_branch_worktree(repo, wt, branch):
+    """Check out `branch` as it stands. Never uses -B, which resets the tip."""
+    live = wt if await existing_worktree(repo, Path(wt).name) else None
+    if live is None:
+        await _drop_worktree_dir(repo, wt)
+        await _git(["worktree", "add", "--force", str(wt), branch], cwd=repo)
+        live = wt
+    if await _checkout_intact(repo, live, branch):
+        return live
+    log.warning("alloc %s: checkout at %s was empty; recreating it on %s",
+                Path(wt).name, live, branch)
+    events.emit("worktree.hollow", task=Path(wt).name, path=str(live))
+    await _drop_worktree_dir(repo, live)
+    await _git(["worktree", "add", "--force", str(wt), branch], cwd=repo)
+    if not await _checkout_intact(repo, wt, branch):
+        raise GitError(f"worktree {wt} checked out empty")
+    return wt
 
 
 async def _replace_worktree(repo, wt, branch, base_ref):
@@ -1233,7 +1283,7 @@ async def pr_state(repo, number):
         return {}
 
 
-async def find_pr(repo, task_id, state="open"):
+async def find_pr(repo, task_id, state="open", *, wait_quota=True):
     """PR for task/<id> — (number, url, state) or (None, None, None).
 
     `state` is open | closed | merged | all. Used on resume to notice a PR
@@ -1241,10 +1291,14 @@ async def find_pr(repo, task_id, state="open"):
     row was dead: the row can then be marked terminal instead of re-imploding
     through publish → alloc, which would reset a branch whose work is already
     on main.
+
+    `wait_quota=False` is the resume probe: a rate-limit wait must not stall
+    planning. A non-zero gh exit is "no PR", and the caller keeps today's path.
     """
     rc, out, _ = await _gh(
         ["pr", "list", "--head", f"task/{task_id}", "--state", state,
-         "--json", "number,url,state"], cwd=Path(repo).resolve())
+         "--json", "number,url,state"], cwd=Path(repo).resolve(),
+        wait_quota=wait_quota)
     if rc != 0 or not out.strip():
         return None, None, None
     try:

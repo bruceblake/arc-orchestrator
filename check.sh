@@ -76,10 +76,10 @@ step "unit tests"
 # step validates the operator's real ~/tasks files, authored for whichever
 # review mode the fleet is running.
 TESTENV=(env -u ARC_ESCALATION_PATH)
+# pipefail keeps unittest's status through tail; one reported run is the gate.
 if ! "${TESTENV[@]}" "$PY" -m unittest discover -s tests -t tests 2>&1 | tail -20; then
     echo "FAIL: unit tests"; rc=1
 fi
-"${TESTENV[@]}" "$PY" -m unittest discover -s tests -t tests >/dev/null 2>&1 || rc=1
 
 step "dashboard javascript"
 if command -v node >/dev/null 2>&1; then
