@@ -525,8 +525,9 @@ class Store:
             self.conn.commit()
             return cur.rowcount
 
-    def reap_driver_leases(self, ttl):
+    def reap_driver_leases(self, ttl=None):
         """Delete lease rows whose owner is dead or whose TTL has expired.
+        If ttl is None or inf, leases whose owner is alive are never dropped.
         Returns the number removed."""
         now = time.time()
         removed = 0
@@ -536,9 +537,13 @@ class Store:
                 alive = True
                 try:
                     os.kill(r["pid"], 0)
+                except ProcessLookupError:
+                    alive = False
+                except PermissionError:
+                    alive = True
                 except OSError:
                     alive = False
-                if alive and r["acquired_at"] > now - ttl:
+                if alive and (ttl is None or r["acquired_at"] > now - ttl):
                     continue
                 self.conn.execute("DELETE FROM driver_leases WHERE id=?", (r["id"],))
                 removed += 1
