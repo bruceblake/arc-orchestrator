@@ -388,6 +388,31 @@ def _tier_rank(model):
     return config.TIER_ORDER.index(tier) if tier in config.TIER_ORDER else -1
 
 
+_ATTEMPT_SUFFIX = re.compile(r"-(?:x|pr)\d+$")
+
+
+def post_handoff(worktree, task_id, role, model, harness, body, **refs):
+    """A usage-swap handoff on the agent board (agentboard.py), in the task's
+    channel and addressed to the role that continues, so the substitute's
+    next prompt (and the next fix round's digest) carries it. `task_id` may
+    carry the attempt suffix (``<tid>-x3``, ``<tid>-pr2``). Never raises."""
+    try:
+        import agentboard
+        tid = _ATTEMPT_SUFFIX.sub("", str(task_id or ""))
+        project = agentboard.infer_project(worktree)[0]
+        if not project or not tid:
+            return None
+        who = f"{tid}/{str(role or '').replace('_', '-')}"
+        return agentboard.post(
+            project, author=f"{tid}/orchestrator", channel=f"task:{tid}",
+            kind="handoff", body=body, mentions=[who], author_model=model,
+            author_task=tid,
+            refs={"harness": harness, **{k: v for k, v in refs.items() if v}})
+    except Exception as exc:  # noqa: BLE001 — a handoff note never fails a run
+        errors.capture(exc, task=task_id, model=model, node="post_handoff")
+        return None
+
+
 def usage_substitute(model, harness, role="implementer", exclude=(),
                      avoid_families=(), allow_planner=False):
     """A same-or-stronger model on a harness that is not `harness` and not blocked.
@@ -1507,13 +1532,12 @@ class Driver:
                     self.model, sub)
         # The substitute must not resume this harness's session. The board
         # is what it (and the next fix round) reads instead.
-        import board
         to_h = config.MODEL_HARNESS.get(sub) or "?"
-        board.post(worktree, task=task_id or "", role=self.role, model=self.model,
-                   harness=self.harness, kind="handoff",
-                   body=(f"usage limit on {self.harness}/{self.model}; "
-                         f"this attempt continues on {to_h}/{sub}. "
-                         f"Do not resume a {self.harness} session there."))
+        post_handoff(worktree, task_id, self.role, self.model, self.harness,
+                     (f"usage limit on {self.harness}/{self.model}; "
+                      f"this attempt continues on {to_h}/{sub}. "
+                      f"Do not resume a {self.harness} session there."),
+                     to_model=sub, to_harness=to_h)
         other = driver_for(sub, self.role,
                            interactive=getattr(self, "interactive", False))
         # A Codex session id is meaningless to `agent` or `claude`. The

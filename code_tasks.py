@@ -9,6 +9,7 @@ by default; an explicit bench `policy` (see orchbench.py) may relax
 routing/review rules to measure what the governance defaults buy.
 """
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -18,6 +19,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import agentboard
 import board
 import config
 import errors
@@ -529,6 +531,13 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
+BOARD_ETIQUETTE = (
+    "COORDINATE ON THE BOARD: before editing files outside the files you are "
+    "expected to touch, check live claims (`./py main.py board claims`) and "
+    "post a claim for them; ask a question with @mentions instead of guessing "
+    "another task's interface; post a result line when you are done.\n")
+
+
 def _impl_prompt(t, feedback, hints="", roster=None, board="", contract="",
                  dossier=""):
     """The implementer's whole world: the task, where its code is, the rules.
@@ -589,7 +598,7 @@ def _impl_prompt(t, feedback, hints="", roster=None, board="", contract="",
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"
     p += dossier_mod.HANDOFF_PROMPT
     if board:
-        p += "\n" + board
+        p += "\n" + board + "\n" + BOARD_ETIQUETTE
     if roster:
         p += plan_amend.prompt_block(roster)
     return p
@@ -1763,6 +1772,109 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             errors.capture(exc, task=tid, node=f"dossier_{tid}", role=role)
             return ""
 
+    # The agent board (agentboard.py, Rule 4c): digests IN to every prompt,
+    # agents' .arc/board.jsonl lines OUT after every run, claims on the
+    # task's files, and the orchestrator's own status/result/question posts.
+    # Every helper swallows its errors: the board coordinates, it never gates.
+    def board_digest(tid, wt, role, model):
+        """The reader's digest; the old raw tail only when the digest is
+        empty. Marks the inbox read, so a mention or broadcast posted after
+        this prompt is delivered to the NEXT one — nothing interrupts a
+        running harness."""
+        text = ""
+        try:
+            text = agentboard.digest_for(
+                project_slug, task=tid, role=role, model=model,
+                files_hint=tasks[tid].get("files_hint") or (), mark_seen=True)
+        except Exception as exc:
+            errors.capture(exc, task=tid, model=model, node=f"board_{tid}",
+                           role=role)
+        return text or board.prompt_block(wt, project=project_slug, task=tid)
+
+    def board_ingest(tid, wt, role, model):
+        """Land what the agent wrote to .arc/board.jsonl on the board. Runs
+        next to every plan-proposal harvest, crash paths included."""
+        if wt is None:
+            return
+        try:
+            agentboard.ingest_file(project_slug, wt, task=tid, role=role,
+                                   model=model)
+        except Exception as exc:
+            errors.capture(exc, task=tid, model=model, node=f"board_{tid}",
+                           role=role)
+
+    def board_post(tid, kind, body, **kw):
+        kw.setdefault("author_task", tid)
+        try:
+            return agentboard.post(project_slug, author=f"{tid}/orchestrator",
+                                   channel=kw.pop("channel", f"task:{tid}"),
+                                   kind=kind, body=body, **kw)
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"board_{tid}")
+
+    def claim_ttl():
+        budget = config.total_timeout_for("implementer")
+        return float(budget) if budget and budget > 0 else 4 * 3600.0
+
+    def claim_files(tid):
+        """(Re)take the implementer's lease on files_hint. Returns the prompt
+        text naming overlapping claims ("" when none) and pings each other
+        task, mentioning both, so the two coordinate instead of colliding."""
+        author = f"{tid}/implementer"
+        paths = tasks[tid].get("files_hint") or []
+        try:
+            agentboard.release(project_slug, tid, author)
+            cid = agentboard.claim(project_slug, task=tid, author=author,
+                                   paths=paths, ttl_s=claim_ttl(),
+                                   note="implementer lease on files_hint")
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"board_{tid}")
+            return ""
+        lines = []
+        for c in getattr(cid, "conflicts", ()) or ():
+            other = c.get("task") or agentboard.split_agent(c["author"])[0]
+            shared = ", ".join(c.get("paths") or [])
+            lines.append(f"- {c['author']} holds {shared}")
+            if other and other != tid:
+                board_post(tid, "ping", channel=f"task:{other}",
+                           body=(f"@{other} @{tid}: both tasks claim "
+                                 f"overlapping files ({shared}). Coordinate "
+                                 f"on the board before editing them."),
+                           mentions=[other, tid])
+        if not lines:
+            return ""
+        return ("CLAIM CONFLICTS — other live tasks hold files you are "
+                "expected to touch. Ask them (@mention) before editing:\n"
+                + "\n".join(lines) + "\n")
+
+    def release_files(tid):
+        try:
+            agentboard.release(project_slug, tid, f"{tid}/implementer")
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"board_{tid}")
+
+    def releasing_on_cancel(tid, fn):
+        """Wrap a task's node: a cancelled graph releases the implementer's
+        claim wherever the task is (gate, publish, merge, ...) — nobody will
+        edit those files any more. The cancellation still propagates."""
+        @functools.wraps(fn)
+        async def node(ctx):
+            try:
+                return await fn(ctx)
+            except asyncio.CancelledError:
+                release_files(tid)
+                raise
+        return node
+
+    def ask_implementer(tid, source, issues):
+        """A rejection as an OPEN question addressed to the implementer, so
+        the next round's digest lists it until it is answered."""
+        who = f"{tid}/implementer"
+        body = (f"@{who} {source} rejected this change. Fix or answer "
+                "(kind=answer, reply_to=<this id>):\n"
+                + "\n".join(f"- {i}" for i in (issues or ["(no issues listed)"])[:20]))
+        board_post(tid, "question", body, mentions=[who])
+
     def dossier_after(tid, wt, *, attempt, model, role, outcome=None,
                       harness="", summary="", failure_excerpt="", files=(),
                       session_id=None):
@@ -2110,7 +2222,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # the worktree is per-task): drivers.py argv treats a truthy
             # session_id as exactly that flag.
             resume = _resume_session(results, tid, model, driver.harness)
-            thread = board.prompt_block(wt, project=project_slug, task=tid)
+            # Lease files_hint for this round (re-taken every fix round, so
+            # the lease never lapses under a live agent), then the digest.
+            conflicts = claim_files(tid)
+            board_post(tid, "status",
+                       f"implementing: attempt {attempt} on {model}")
+            thread = conflicts + board_digest(tid, wt, "implementer", model)
             # Which model this attempt actually RAN on. A spent plan window can
             # substitute another driver (drivers.usage_substitute), and the
             # checkpoint written in the `finally` below must name the model
@@ -2141,6 +2258,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             model=model, attempt=attempt,
                             error=str(exc)[:200], fingerprint=fp)
                 harvest_proposals(tid, wt, "implementer", model)
+                board_ingest(tid, wt, "implementer", model)
                 dossier_after(tid, wt, attempt=attempt, model=model,
                               role="implementer", outcome="crashed",
                               harness=driver.harness,
@@ -2150,6 +2268,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                            body=str(exc)[:400], project=project_slug)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
+            except asyncio.CancelledError:
+                # A cancelled graph releases the lease: nobody is editing.
+                board_ingest(tid, wt, "implementer", model)
+                release_files(tid)
+                raise
             finally:
                 # A worktree is state: save what this attempt produced before
                 # anything — a reset, a cancel, a reboot — can discard it.
@@ -2167,6 +2290,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, ran_harness, ran_model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
             harvest_proposals(tid, wt, "implementer", ran_model)
+            board_ingest(tid, wt, "implementer", ran_model)
             # The outcome of this attempt is the gate's to record; here only
             # the agent's handoff is harvested — and a plan-window swap is
             # written down, so the next model knows why it changed.
@@ -2292,6 +2416,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                               role="implementer", outcome="gate_failed",
                               harness=prev.get("harness", ""),
                               summary=f"gate timed out after {config.GATE_TIMEOUT}s")
+                board_post(tid, "status", f"gate failed: gate timed out after "
+                           f"{config.GATE_TIMEOUT}s: {cmd[:200]}"[:300])
                 return {"passed": False, "output": f"gate timed out after {config.GATE_TIMEOUT}s",
                         "log_path": None}
             full = out.decode(errors="replace")
@@ -2381,6 +2507,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                           failure_excerpt="" if passed else (tail or output)[-1200:],
                           files=await _changed_files(wt, base),
                           session_id=prev.get("session_id"))
+            if not passed:
+                board_post(tid, "status", "gate failed: "
+                           + " ".join((tail or output or cmd).split())[:300])
             return {"passed": passed, "output": output, "log_path": log_path,
                     "verdict": verdict, "evidence": shown}
 
@@ -2416,13 +2545,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             try:
                 res = await driver.run(
                     _review_prompt(t, diff, impact, roster,
-                                   board.prompt_block(wt, project=project_slug, task=tid)
+                                   board_digest(tid, wt, "reviewer", driver.model)
                                    + evidence.prompt_block(shown),
                                    project_contract.role_block(wt, "reviewer"),
                                    dossier=dossier_block(tid, "reviewer")),
                     wt, task_id=f"{tid}-x{attempt}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
+            except asyncio.CancelledError:
+                # A cancelled graph: land what the reviewer wrote, and end the
+                # implementer's lease — nobody will edit these files now.
+                board_ingest(tid, wt, "reviewer", driver.model)
+                release_files(tid)
+                raise
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -2444,6 +2579,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # that was never rejected. Same distinction pr_review already
                 # makes — the diff has not been read, so retry the REVIEW.
                 harvest_proposals(tid, wt, "reviewer", driver.model)
+                board_ingest(tid, wt, "reviewer", driver.model)
                 dossier_after(tid, wt, attempt=attempt, model=driver.model,
                               role="reviewer", outcome="crashed",
                               harness=driver.harness,
@@ -2460,6 +2596,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
             harvest_proposals(tid, wt, "reviewer", ran_model)
+            board_ingest(tid, wt, "reviewer", ran_model)
             if ran_model != driver.model:
                 dossier_call(tid, dossier_mod.note_model_change,
                              f"review round {attempt}: usage swap "
@@ -2500,6 +2637,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                        body=("pass" if verdict.get("pass") else
                              "reject: " + "; ".join(str(i) for i in issues)[:300]),
                        project=project_slug)
+            if not verdict.get("pass"):
+                ask_implementer(tid, f"pre-merge review (round {attempt}, "
+                                f"{ran_model})", issues)
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
                         # The family that ACTUALLY reviewed; the planned
                         # token rides beside it when capacity moved the review.
@@ -2544,6 +2684,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.upsert_code_task(taskfile, tid, t["title"], nxt, rev, "running")
             events.emit("task.escalated", task=tid, from_model=src, to_model=nxt,
                         n=esc_n(ctx) + 1)
+            board_post(tid, "status", f"escalated {src} -> {nxt} (escalation "
+                       f"{esc_n(ctx) + 1}: fix rounds exhausted on {src})")
             dossier_call(tid, dossier_mod.note_model_change,
                          f"escalation {esc_n(ctx) + 1}: {src} -> {nxt} "
                          f"(fix rounds exhausted on {src})")
@@ -2591,7 +2733,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                              "on resume without re-implement")
                             await gitstore.cleanup(repo, tid)
                             return {"published": False, "merged": True,
-                                    "empty": True, "head": None}
+                                    "empty": True, "head": None,
+                                    "pr": number, "url": url}
                     return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)
@@ -2601,6 +2744,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # does `git add -A`, so without this sweep the channel file would
             # land in the PR. Also catches proposals from PR-review rework.
             harvest_proposals(tid, wt, "publish-sweep", "")
+            board_ingest(tid, wt, "publish-sweep", "")
             dossier_after(tid, wt, attempt=0, model="", role="publish-sweep")
             impl = results.get(f"implement_{tid}", {})
             model = cur_model(ctx)
@@ -2679,6 +2823,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     error=("rework after PR rejection produced no changes"
                            if reworked else "implementer produced no changes"),
                     finished=True)
+                release_files(tid)
                 events.emit("task.failed", task=tid,
                             reason=("rework produced no changes" if reworked
                                     else "no changes to publish"))
@@ -2689,6 +2834,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "failed", error=f"push failed: {note}",
                                        finished=True)
+                release_files(tid)
                 events.emit("task.failed", task=tid, reason=f"push failed: {note}")
                 return {"published": False, "reason": note}
             body = (f"Task `{tid}` from `{Path(taskfile).name if taskfile else '?'}`\n\n"
@@ -2703,6 +2849,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "failed", error=f"could not open PR: {note}",
                                        finished=True)
+                release_files(tid)
                 events.emit("task.failed", task=tid, reason=f"pr: {note}")
                 return {"published": False, "reason": note}
             store.upsert_code_task(taskfile, tid, t["title"], model, rev,
@@ -2840,19 +2987,24 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
                                       it["prior_issues"], impact, roster,
-                                      board.prompt_block(wt, project=project_slug, task=tid)
+                                      board_digest(tid, wt, "pr-reviewer", model)
                                       + evidence.prompt_block(shown),
                                       project_contract.role_block(wt, "reviewer"),
                                       dossier=dossier_block(tid, "pr-reviewer")),
                     wt, task_id=f"{tid}-pr{it['round']}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
+            except asyncio.CancelledError:
+                board_ingest(tid, wt, "pr-reviewer", model)
+                release_files(tid)
+                raise
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather
                 # than sending the implementer to fix nothing.
                 if wt is not None:
                     harvest_proposals(tid, wt, "pr-reviewer", model)
+                    board_ingest(tid, wt, "pr-reviewer", model)
                 dossier_after(tid, wt, attempt=it["round"], model=model,
                               role="pr-reviewer", outcome="crashed",
                               failure_excerpt=str(exc)[:600])
@@ -2863,6 +3015,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    it["round"], res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
             harvest_proposals(tid, wt, "pr-reviewer", model)
+            board_ingest(tid, wt, "pr-reviewer", model)
             ran_model = getattr(res, "model", None) or model
             ran_harness = getattr(res, "harness", None) or drv.harness
             if ran_model != model:
@@ -2965,6 +3118,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     approved = False
                     issues = manual["issues"]
             if not approved and not inconclusive:
+                ask_implementer(tid, f"PR #{number} review (round {round_n})",
+                                issues)
                 await gitstore._gh(
                     ["pr", "comment", str(number), "--body",
                      "**Changes requested** (round %d) — returning to the "
@@ -2988,6 +3143,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
             if pub.get("empty") and pub.get("merged"):
                 gate_res = ctx.get("results", {}).get(f"gate_{tid}") or {}
+                release_files(tid)
+                # No diff reached main here (or the PR was merged before this
+                # run): the result still lands, with no files.
+                pr_ref = pub.get("url") or (
+                    f"PR #{pub['pr']}" if pub.get("pr") is not None else "")
+                board_post(tid, "result",
+                           f"merged {pr_ref or '(no PR: empty diff)'}: "
+                           f"{t['title']} (0 file(s) changed)",
+                           refs={"files": [], "pr": pr_ref})
                 return {"merged": True, "pr": None,
                         "verdict": gate_res.get("verdict")}
             state = await gitstore.pr_state(repo, number)
@@ -3020,6 +3184,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.conflict", task=tid, pr=number, reason=note,
                             files=conflicts[:20])
                 return {"merged": False, "reason": "conflict"}
+            # The files this PR changes, read BEFORE the merge moves the base
+            # (after it the merge base can equal HEAD and the diff is empty).
+            try:
+                merged_files = await _changed_files(await worktree(ctx), base)
+            except Exception:
+                merged_files = []
             if state.get("state") == "MERGED":
                 # Someone merged it while the fleet was still reviewing — an
                 # operator from the GitHub UI, or a hand merge of a backlog.
@@ -3046,6 +3216,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    "merged", finished=True)
             events.emit("task.merged", task=tid, pr=number,
                         approvals=rv.get("approvals"))
+            release_files(tid)
+            pr_url = (pub.get("url") if pub.get("pr") == number else None) or (
+                f"PR #{number}" if number is not None else "")
+            board_post(tid, "result",
+                       f"merged {pr_url}: {t['title']} "
+                       f"({len(merged_files)} file(s) changed)",
+                       refs={"files": merged_files, "pr": pr_url})
             dossier_after(tid, None, attempt=0, model=model, role="orchestrator",
                           outcome="merged", summary=f"PR #{number} merged")
             dossier_call(tid, dossier_mod.set_pr, None)
@@ -3115,6 +3292,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    (pr_res.get("issues") or [])[:5])[:800]
             if not detail:
                 detail = why
+            release_files(tid)
+            board_post(tid, "status", f"failed: {why}"[:300])
             events.emit("task.failed", task=tid, reason=why[:400],
                         detail=detail[:800], model=last,
                         escalations=escalations,
@@ -3127,7 +3306,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                  "pr_fanout": pr_fanout, "pr_review": pr_review,
                  "pr_merge": pr_merge, "fail": fail}
         for suffix, fn in chain.items():
-            g.node(f"{suffix}_{tid}", fn)
+            g.node(f"{suffix}_{tid}", releasing_on_cancel(tid, fn))
         # One reviewer per node, with the per-node policy the fan-out makes
         # possible: a harness that dies on the way in is retried HERE, and the
         # join only ever sees crashes that survived the retries. The timeout is
@@ -3136,7 +3315,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # bounds silence), so a reviewer cannot hold the join open indefinitely.
         from graph import Retry
         _rev_total = config.total_timeout_for("reviewer")
-        g.node(f"pr_reviewer_{tid}", pr_reviewer,
+        g.node(f"pr_reviewer_{tid}", releasing_on_cancel(tid, pr_reviewer),
                retry=Retry(attempts=3, backoff=20.0, max_backoff=120.0,
                            on=(DriverError,)),
                timeout=(_rev_total + 600) if _rev_total > 0 else None)

@@ -329,3 +329,81 @@ class InferProject(BoardCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PipelineDelivery(BoardCase):
+    """What agentboard-pipeline-wiring relies on: broadcasts reach every
+    reader once, and a usage swap's handoff lands on the board."""
+
+    def test_a_project_channel_ping_is_an_unread_mention_for_every_task(self):
+        agentboard.post(P, author="operator", channel="project", kind="ping",
+                        body="freeze merges for ten minutes")
+        agentboard.post(P, author="operator", channel="project", kind="note",
+                        body="a plain note is not a broadcast")
+        d = agentboard.digest_for(P, task="doors", role="implementer", model="m")
+        head, _, _ = d.partition("Open questions")
+        self.assertIn("freeze merges", head)
+        self.assertNotIn("a plain note", head)
+        agentboard.mark_read(P, "doors/implementer", "inbox", time.time())
+        d = agentboard.digest_for(P, task="doors", role="implementer", model="m")
+        self.assertNotIn("freeze merges", d)
+
+    def test_a_usage_swap_handoff_is_posted_to_the_task_channel(self):
+        import drivers
+        mid = drivers.post_handoff(self.wt, "doors-x3", "implementer", "GLM-5.3",
+                                   "opencode", "usage limit on opencode/GLM-5.3; "
+                                   "this attempt continues on cursor/X.",
+                                   to_model="X", to_harness="cursor")
+        self.assertTrue(mid)
+        [m] = agentboard.thread(P, channel="task:doors")
+        self.assertEqual(m["kind"], "handoff")
+        self.assertIn("doors/implementer", m["mentions"])
+        self.assertTrue(m["body"].startswith("usage limit on opencode/GLM-5.3"))
+        self.assertEqual(m["refs"]["to_model"], "X")
+
+    def test_a_handoff_outside_a_worktree_is_a_no_op(self):
+        import drivers
+        self.assertIsNone(drivers.post_handoff(self.tmp.name, "doors-x1",
+                                               "reviewer", "m", "h", "b"))
+
+    def test_mark_seen_marks_what_the_digest_read_not_the_clock(self):
+        agentboard.post(P, author="operator", channel="project", kind="ping",
+                        body="first broadcast")
+        d1 = agentboard.digest_for(P, task="doors", role="implementer",
+                                   model="m", mark_seen=True)
+        # Posted right after, very likely inside the same millisecond.
+        agentboard.post(P, author="operator", channel="project", kind="ping",
+                        body="second broadcast")
+        d2 = agentboard.digest_for(P, task="doors", role="implementer",
+                                   model="m", mark_seen=True)
+        d3 = agentboard.digest_for(P, task="doors", role="implementer",
+                                   model="m", mark_seen=True)
+        self.assertIn("first broadcast", d1)
+        self.assertNotIn("first broadcast", d2)
+        self.assertIn("second broadcast", d2)
+        self.assertNotIn("broadcast", d3)
+
+    def test_more_than_eight_pings_are_all_delivered_across_prompts(self):
+        for i in range(11):
+            agentboard.post(P, author="operator", channel="project", kind="ping",
+                            body=f"broadcast-{i:02d}")
+        seen = []
+        for _ in range(3):
+            d = agentboard.digest_for(P, task="doors", role="implementer",
+                                      model="m", mark_seen=True)
+            seen.append([i for i in range(11) if f"broadcast-{i:02d}" in d])
+        self.assertEqual(seen[0], list(range(8)), "oldest first")
+        self.assertEqual(seen[1], [8, 9, 10], "the rest stay unread")
+        self.assertEqual(seen[2], [])
+
+    def test_mentions_cut_by_the_char_budget_stay_unread(self):
+        for i in range(4):
+            agentboard.post(P, author="operator", channel="project", kind="ping",
+                            body=f"long-{i} " + "x" * 250)
+        got = set()
+        for _ in range(6):
+            d = agentboard.digest_for(P, task="doors", role="implementer",
+                                      model="m", mark_seen=True,
+                                      limit_chars=len(agentboard.HOW_TO_POST) + 700)
+            got |= {i for i in range(4) if f"long-{i} " in d}
+        self.assertEqual(got, {0, 1, 2, 3})
