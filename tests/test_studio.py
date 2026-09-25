@@ -1319,6 +1319,8 @@ class TestToolchainHonesty(unittest.TestCase):
     def test_godot_output_errors_are_found_despite_exit_zero(self):
         self.assertTrue(godot.output_errors(
             "SCRIPT ERROR: Parse Error: Identifier 'foo' not declared"))
+        self.assertTrue(godot.output_errors(
+            "ERROR: no scene to render: set application/run/main_scene in project.godot or pass --scene"))
         self.assertFalse(godot.output_errors("Godot Engine v4.4 - loaded fine"))
 
 
@@ -1520,8 +1522,16 @@ class TestScaffoldUnderGodot(unittest.TestCase):
 
 def _can_render():
     import os
-    return godot.available() and bool(config.STUDIO_DISPLAY or os.environ.get("DISPLAY")
-                                      or os.path.exists("/tmp/.X11-unix/X0"))
+    display = config.STUDIO_DISPLAY or os.environ.get("DISPLAY") or ":0"
+    if not godot.available():
+        return False
+    if display.startswith(":"):
+        with socket.socket(socket.AF_UNIX) as probe:
+            try:
+                probe.connect(f"/tmp/.X11-unix/X{display[1:].split('.')[0]}")
+            except OSError:
+                return False
+    return bool(display)
 
 
 @unittest.skipUnless(_can_render(), "needs godot and a display")
@@ -1543,16 +1553,38 @@ class TestRenderUnderGodot(unittest.TestCase):
             old = config.STUDIO_DISPLAY
             config.STUDIO_DISPLAY = old or os.environ.get("DISPLAY") or ":0"
             try:
-                shots = godot.render(d, camera_system.to_json(
-                    camera_system.cameras_for_round("t", 1)), Path(d) / "out",
-                    scene="res://scenes/world.tscn", resolution="480x270", timeout=300)
+                cameras = camera_system.to_json(camera_system.cameras_for_round("t", 1))
+                shots = godot.render(d, cameras, Path(d) / "out",
+                                     resolution="480x270", timeout=300)
+                project_file = Path(d) / "project.godot"
+                project_text = project_file.read_text()
+                self.assertIn('run/main_scene="res://scenes/world.tscn"', project_text)
+                project_file.write_text(project_text.replace(
+                    'run/main_scene="res://scenes/world.tscn"', ''))
+                with self.assertRaisesRegex(godot.GodotError, "application/run/main_scene"):
+                    godot.render(d, cameras[:1], Path(d) / "no-scene",
+                                 resolution="480x270", timeout=300)
+                override = godot.render(d, cameras[:1], Path(d) / "override",
+                                        scene="res://scenes/world.tscn",
+                                        resolution="480x270", timeout=300)
             finally:
                 config.STUDIO_DISPLAY = old
+            import evidence
             self.assertEqual(len(shots), 4)
             for s in shots:
                 # A lit, aimed graybox frame compresses to tens of KB; the
                 # blank frames it replaced were ~2KB of one or two colours.
                 self.assertGreater(Path(s).stat().st_size, 10_000, s)
+                share = evidence.blank_share(s)
+                self.assertIsNotNone(share, f"could not compute blank share for {s}")
+                self.assertLess(share, config.EVIDENCE_BLANK_SHARE,
+                                f"{s} is dominated by one colour ({share:.2f}): blank render")
+            self.assertEqual(len(override), 1)
+            self.assertGreater(Path(override[0]).stat().st_size, 10_000)
+            share_ov = evidence.blank_share(override[0])
+            self.assertIsNotNone(share_ov, f"could not compute blank share for {override[0]}")
+            self.assertLess(share_ov, config.EVIDENCE_BLANK_SHARE,
+                            f"{override[0]} is dominated by one colour ({share_ov:.2f}): blank render")
 
 
 class TestScaffold(unittest.TestCase):
