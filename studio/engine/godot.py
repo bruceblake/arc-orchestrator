@@ -113,6 +113,9 @@ _ERROR_PATTERNS = (
     r"Cannot open file",
     r"ERROR: Cannot instantiate",
     r"Condition \"[^\"]*\" is true\. Returning",
+    r"no scene to render",
+    r"cannot load scene",
+    r"cannot instantiate scene",
 )
 
 
@@ -291,6 +294,7 @@ _HARNESS_SRC = '''extends SceneTree
 # Renders one PNG per camera from a JSON camera list and writes a manifest.
 # Usage:
 #   godot --path <project> studio_render.gd -- <cameras.json> <out_dir> [scene]
+# When [scene] is omitted, it defaults to application/run/main_scene from project.godot.
 #
 # It runs as a SceneTree script rather than a scene so it can be dropped into
 # any project without touching that project's main scene.
@@ -306,6 +310,14 @@ func _initialize() -> void:
 \tvar cameras_path: String = args[0]
 \tvar out_dir: String = args[1]
 \tvar scene_path: String = args[2] if args.size() > 2 else ""
+\tif scene_path == "":
+\t\tvar setting: Variant = ProjectSettings.get_setting("application/run/main_scene", "")
+\t\tif setting != null and str(setting) != "<null>":
+\t\t\tscene_path = str(setting)
+\tif scene_path == "":
+\t\tpush_error("no scene to render: set application/run/main_scene in project.godot or pass --scene")
+\t\tquit(2)
+\t\treturn
 \tvar f := FileAccess.open(cameras_path, FileAccess.READ)
 \tif f == null:
 \t\tpush_error("cannot read cameras: " + cameras_path)
@@ -319,13 +331,17 @@ func _initialize() -> void:
 \t\treturn
 \tDirAccess.make_dir_recursive_absolute(out_dir)
 \tvar root := get_root()
-\tif scene_path != "":
-\t\tvar packed := load(scene_path)
-\t\tif packed == null:
-\t\t\tpush_error("cannot load scene: " + scene_path)
-\t\t\tquit(2)
-\t\t\treturn
-\t\troot.add_child(packed.instantiate())
+\tvar packed := load(scene_path)
+\tif packed == null:
+\t\tpush_error("cannot load scene: " + scene_path)
+\t\tquit(2)
+\t\treturn
+\tvar inst: Node = packed.instantiate()
+\tif inst == null:
+\t\tpush_error("cannot instantiate scene: " + scene_path)
+\t\tquit(2)
+\t\treturn
+\troot.add_child(inst)
 \tvar cam := Camera3D.new()
 \troot.add_child(cam)
 \t# _initialize runs BEFORE the tree starts: nothing is "inside the tree"
@@ -407,6 +423,8 @@ def render(project, cameras, out_dir, *, scene="", timeout=900, display=None,
 
     `cameras` is a list of dicts from studio.evaluation.camera_system. This
     needs a DISPLAY: see the module docstring for why --headless cannot do it.
+    When `scene` is omitted, the project's application/run/main_scene is
+    rendered by default.
     """
     project, out_dir = Path(project), Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
