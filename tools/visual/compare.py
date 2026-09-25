@@ -29,6 +29,7 @@ already carries (slow, but correct).
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import struct
 import subprocess
@@ -40,6 +41,12 @@ REPO = HERE.parent.parent
 
 DEFAULT_THRESHOLD = 8
 DEFAULT_TOLERANCE = 0.00002
+# config.CHILD_ENV_DROP. Not imported: config loads .env into this process.
+CHILD_ENV_DROP = ("ARC_DASHBOARD_TOKEN",)
+
+
+def child_env():
+    return {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
 
 
 def _size(path):
@@ -55,7 +62,8 @@ def decode(path):
     w, h = _size(path)
     if shutil.which("ffmpeg"):
         p = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "rawvideo",
-                            "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=120)
+                            "-pix_fmt", "rgb24", "-"], capture_output=True, timeout=120,
+                           env=child_env())
         if p.returncode == 0 and len(p.stdout) == w * h * 3:
             return w, h, p.stdout
     if str(REPO) not in sys.path:

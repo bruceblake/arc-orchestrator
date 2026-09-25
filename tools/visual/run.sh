@@ -10,8 +10,19 @@
 # intended change gets `--update` in the same diff, an unintended one is a
 # regression to fix. A machine that cannot run headless Chromium SKIPS with a
 # message and exit 0: that is an infrastructure gap, not a failing change.
+#
+# The goldens are the FLEET MACHINE's render: the pages ask for `monospace`,
+# which fontconfig resolves per host (Adwaita Mono on the fleet box, DejaVu
+# Sans Mono on an Ubuntu CI runner), and a different font moves far more
+# than the 0.002% tolerance. So CI skips: this gate is enforced on the fleet
+# machine only.
 set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
+if [ -n "${GITHUB_ACTIONS:-}" ]; then
+    echo "SKIP visual regression: CI renders with different fonts than the goldens;"
+    echo "     the visual gate is enforced on the fleet machine only (docs/visual-testing.md)"
+    exit 0
+fi
 PY="${PY:-./py}"
 out=logs/visual/check
 # logs/ is gitignored, so a fresh checkout has no logs/visual/ yet: the
@@ -21,7 +32,10 @@ rm -rf "$out" logs/visual/check-diff
 "$PY" tools/visual/capture.py --out "$out" --strict >"$out.log" 2>&1
 rc=$?
 if [ $rc -eq 3 ]; then
-    echo "SKIP visual regression: $(tail -1 "$out.log")"
+    # The Unavailable message can be a multi-line Playwright banner; its first
+    # line names the cause, its last is box-drawing.
+    reason="$(grep -m1 '^SKIP: ' "$out.log" || head -1 "$out.log")"
+    echo "SKIP visual regression: ${reason#SKIP: }"
     echo "     (install with: ./py -m pip install -r requirements.txt && ./py -m playwright install chromium)"
     exit 0
 fi

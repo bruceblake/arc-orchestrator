@@ -41,6 +41,8 @@ PAGES = (
     ("usage", "/usage.html", None),
     ("phone", "/phone.html", None),
 )
+# config.CHILD_ENV_DROP. Not imported: config loads .env into this process.
+CHILD_ENV_DROP = ("ARC_DASHBOARD_TOKEN",)
 MAX_HEIGHT = 2400          # a full-page shot is clipped here: a reviewer reads
 SETTLE_MS = 3200           # index.html staggers its first polls up to 2.4 s
 
@@ -53,6 +55,10 @@ def views():
             for scheme in SCHEMES:
                 out.append((f"{name}-{vp}-{scheme}", path, tab, vp, scheme))
     return out
+
+
+def child_env():
+    return {k: v for k, v in os.environ.items() if k not in CHILD_ENV_DROP}
 
 
 class Unavailable(RuntimeError):
@@ -77,7 +83,8 @@ def start_server(tree, fixture_dir, python=None, timeout=45):
     proc = subprocess.Popen(
         [python or sys.executable, str(HERE / "serve.py"), "--tree", str(tree),
          "--fixture", str(fixture_dir), "--port", "0"],
-        stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True)
+        stdout=subprocess.PIPE, stderr=log, text=True, start_new_session=True,
+        env=child_env())
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         line = proc.stdout.readline()
@@ -187,7 +194,7 @@ def _refuse_worktree_out(out, force):
         if (parent / ".git").exists():
             rel = out.relative_to(parent)
             ignored = subprocess.run(["git", "-C", str(parent), "check-ignore", "-q",
-                                      str(rel / "x.png")]).returncode == 0
+                                      str(rel / "x.png")], env=child_env()).returncode == 0
             if not ignored and not force:
                 raise SystemExit(f"refusing to write screenshots to {out}: inside the "
                                  f"git checkout {parent} and not gitignored (use a "
@@ -207,6 +214,9 @@ def main(argv=None):
     ap.add_argument("--strict", action="store_true",
                     help="exit 4 when any page throws a JavaScript error")
     a = ap.parse_args(argv)
+    # Playwright's driver and Chromium inherit this process's environment.
+    for key in CHILD_ENV_DROP:
+        os.environ.pop(key, None)
     if a.list:
         print("\n".join(v[0] for v in views()))
         return 0

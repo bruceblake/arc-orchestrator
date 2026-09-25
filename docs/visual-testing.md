@@ -16,8 +16,12 @@ Two jobs:
 
 ## Install
 
-`playwright` is listed in `requirements.txt`, so a normal venv setup gets the
-Python API:
+`playwright` is pinned in `requirements.txt` (`playwright==1.63.0`), so a
+normal venv setup gets the Python API. The pin is exact on purpose: each
+Playwright release bundles its own Chromium build, and a different build
+renders glyph edges differently, so **upgrading Playwright means re-blessing
+every golden** (`tools/visual/run.sh --update`) in the same change, after
+looking at the panels.
 
 ```bash
 ./.venv/bin/python -m pip install -r requirements.txt
@@ -185,7 +189,29 @@ passes. A page that throws a JavaScript error while rendering the fixture
 fails the step.
 
 Goldens depend on this box's Chromium build and fonts; upgrading Playwright
-or the fonts is a legitimate re-bless.
+(see the pin above) or the fonts is a legitimate re-bless.
+
+**Dark mode is covered on `phone.html` only.** It is the one page with
+`prefers-color-scheme` styles; `index.html` and `usage.html` have a single
+dark theme, so their `-dark` goldens are pixel-identical to their `-light`
+ones. Those views stay in the matrix so a page that gains light/dark styles
+is covered the moment it does, but today they prove nothing about dark mode.
+
+### Where the gate runs: the fleet machine only, not CI
+
+The pages ask for `ui-monospace, monospace`, and fontconfig resolves that per
+host: **Adwaita Mono** on the fleet box (`fc-match monospace`), **DejaVu Sans
+Mono** on GitHub's Ubuntu runner. The goldens are the fleet box's render, and
+a different font is not a small change — measured by re-rendering with
+`monospace` mapped to another font: the Overview page moved 3.6% of its
+pixels and the Usage page 100%, against a 0.002% tolerance. Installing
+Chromium on CI would therefore fail every view on every pull request.
+
+So `tools/visual/run.sh` **skips when `GITHUB_ACTIONS` is set** and says so
+(`SKIP visual regression: CI renders with different fonts ...`), and
+`.github/workflows/check.yml` does not install a browser. The visual gate is
+enforced where the fleet runs `check.sh`: in every task worktree on the
+fleet machine, and by the operator.
 
 ## In the pipeline (AGENTS.md Rule 7e): `ui_evidence.py`
 

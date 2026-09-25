@@ -948,7 +948,14 @@ is judged the same way. Detail: [docs/visual-testing.md](docs/visual-testing.md)
   pixel-exact run to run, so the tolerance is tight (0.002% of pixels). An
   intended look change re-blesses the goldens in the same diff
   (`tools/visual/run.sh --update`); a page that throws a JS error fails; no
-  browser on the machine is a SKIP, never a failure.
+  browser on the machine is a SKIP, never a failure. **Dark mode is covered
+  on `phone.html` only**: it is the one page with
+  `prefers-color-scheme` styles, so the `-dark` views of index, projects and
+  usage render exactly like their `-light` views. They are kept so a page
+  that gains dark styles is covered at once, not as evidence of dark mode.
+  The goldens are the fleet machine's render (host fonts decide
+  `monospace`), so CI skips this step: **the visual gate is enforced on the
+  fleet machine only**.
 - **Before | after | diff in the pipeline.** For a task on this repo whose
   diff touches the UI, the gate runs `ui_evidence.capture` after
   `verify_cmd` passes: the views rendered from the worktree and from the

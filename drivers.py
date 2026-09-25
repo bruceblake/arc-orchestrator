@@ -1645,6 +1645,8 @@ class Driver:
                      to_model=sub, to_harness=to_h)
         other = driver_for(sub, self.role,
                            interactive=getattr(self, "interactive", False))
+        # The reviewer's evidence screenshots belong to the attempt, not the seat.
+        other.images = self.images
         # A Codex session id is meaningless to `agent` or `claude`. The
         # substitute starts in the same worktree and reads what is there.
         return await other.run(prompt, worktree, session_id=None, task_id=task_id,
@@ -1670,6 +1672,7 @@ class Driver:
                      to_model=sw.to_model, to_harness=to_h)
         other = driver_for(sw.to_model, self.role,
                            interactive=getattr(self, "interactive", False))
+        other.images = self.images
         return await other.run(prompt, worktree, session_id=None, task_id=task_id,
                                _swapped_from=set(tried) | {self.model},
                                avoid_families=avoid_families)

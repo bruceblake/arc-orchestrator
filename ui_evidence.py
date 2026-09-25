@@ -131,7 +131,7 @@ def run_capture(tree, out_dir, timeout=None):
     try:
         p = subprocess.run([sys.executable, str(TOOL_DIR / "capture.py"), "--out",
                             str(out_dir), "--tree", str(tree), "--force"],
-                           capture_output=True, text=True,
+                           capture_output=True, text=True, env=config.child_env(),
                            timeout=timeout or config.EVIDENCE_TIMEOUT)
     except subprocess.TimeoutExpired as exc:
         raise evidence.EvidenceError(f"screenshot capture timed out after {exc.timeout}s")
@@ -158,7 +158,8 @@ def baseline(worktree, sha, timeout=None):
         tar = Path(tmp) / "tree.tar"
         with open(tar, "wb") as fh:
             r = subprocess.run(["git", "-C", str(worktree), "archive", "--format=tar", sha],
-                               stdout=fh, stderr=subprocess.PIPE, timeout=120)
+                               stdout=fh, stderr=subprocess.PIPE, timeout=120,
+                               env=config.child_env())
         if r.returncode != 0:
             raise evidence.EvidenceError(
                 f"git archive {sha[:10]}: {r.stderr.decode(errors='replace')[:300]}")
@@ -387,10 +388,12 @@ def prompt_block(manifest, sees_images=True):
         lines.append(
             "The images attached to this review are real screenshots. LOOK at each "
             "one: a visible regression — broken or overlapping layout, clipped or "
-            "unreadable text, lost contrast in light or dark mode, a panel that "
-            "disappeared, a phone layout that overflows — is a BLOCKING issue, "
-            "exactly like a failing test. So is a change that does not show what "
-            "the spec asks for.")
+            "unreadable text, lost contrast, a panel that disappeared, a phone "
+            "layout that overflows — is a BLOCKING issue, exactly like a failing "
+            "test. So is a change that does not show what the spec asks for. "
+            "Only phone.html has dark-mode styles: the -dark views of index, "
+            "projects and usage render exactly like their -light views, so they "
+            "say nothing about how dark mode looks.")
     else:
         lines.append(
             "YOU CANNOT SEE IMAGES: this reviewer model rejects image input. Do not "
@@ -429,7 +432,10 @@ def prompt_block(manifest, sees_images=True):
 
 def pr_markdown(manifest, web_base, *, task_id, attempt):
     """The PR comment: changed views as before|after|diff, then every view."""
-    root = Path(manifest["shots"][0]).parent.parent
+    shots = manifest.get("shots") or []
+    # Every link is relative to the capture dir; without a shot there is
+    # nothing to link (compare and the contact sheet are built from shots).
+    root = Path(shots[0]).parent.parent if shots else None
 
     def url(local, raw=True):
         rel = Path(local).relative_to(root)
@@ -442,7 +448,10 @@ def pr_markdown(manifest, web_base, *, task_id, attempt):
     ui = manifest.get("ui_files") or []
     if ui:
         lines += ["UI files in this diff: " + ", ".join(f"`{p}`" for p in ui[:8]), ""]
-    comp = [c for c in manifest.get("compare") or [] if c.get("side_by_side")]
+    if root is None:
+        lines += ["**No view was captured**, so there is nothing to compare.", ""]
+    comp = [c for c in manifest.get("compare") or []
+            if c.get("side_by_side") and root is not None]
     if comp:
         lines += [f"**Changed views — before \\| after \\| difference** (vs merge base "
                   f"`{base}`; cropped to the region that changed)", ""]
@@ -459,10 +468,9 @@ def pr_markdown(manifest, web_base, *, task_id, attempt):
     if unchanged and comp:
         lines += [f"Unchanged views: {', '.join(unchanged)}", ""]
     sheet = manifest.get("contact_sheet")
-    if sheet and Path(sheet).exists():
+    if sheet and root is not None and Path(sheet).exists():
         lines += [f"**Every view after the change** ([full size]({url(sheet)}))", "",
                   f"![every view]({url(sheet)})", ""]
-    shots = manifest.get("shots") or []
     if shots:
         lines += ["<details><summary>Full-page screenshots (" + str(len(shots))
                   + ")</summary>", ""]
@@ -511,7 +519,8 @@ if __name__ == "__main__":                              # manual capture
     a = ap.parse_args()
     files = subprocess.run(["git", "-C", a.worktree, "diff", "--name-only",
                             evidence.merge_base(a.worktree, a.base) or "HEAD"],
-                           capture_output=True, text=True).stdout.split()
+                           capture_output=True, text=True,
+                           env=config.child_env()).stdout.split()
     m = capture(a.worktree, a.out_dir, base=a.base, project=Path(a.worktree).name,
                 changed=files)
     print(json.dumps(m, indent=2))

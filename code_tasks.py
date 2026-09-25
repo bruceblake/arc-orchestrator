@@ -1460,8 +1460,10 @@ def _visual_review_prose(diff):
             "screenshots under tests/visual/golden/ in this diff — the visual "
             "regression check in ./check.sh fails until they match. A visible "
             "regression (broken layout, clipped or overlapping text, lost "
-            "contrast in light or dark mode, a phone layout that overflows, a "
-            "new JavaScript error) is BLOCKING, exactly like a failing test. "
+            "contrast, a phone layout that overflows, a new JavaScript error) "
+            "is BLOCKING, exactly like a failing test. Only phone.html has "
+            "dark-mode styles; the other pages' -dark screenshots match their "
+            "-light ones and do not show dark mode. "
             "If there is no VISUAL EVIDENCE block and no golden update for a "
             "change that alters what a page shows, reject it for missing "
             "visual evidence.\n")

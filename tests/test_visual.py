@@ -146,6 +146,63 @@ class RunScriptInAFreshCheckout(unittest.TestCase):
         self.assertIn("mkdir -p logs/visual", body)
         self.assertLess(body.index("mkdir -p logs/visual"), body.index('>"$out.log"'))
 
+    def _run(self, env, capture_output):
+        import subprocess
+        d = _tmp(self)
+        (d / "tools" / "visual").mkdir(parents=True)
+        shutil.copy(ROOT / "tools" / "visual" / "run.sh", d / "tools" / "visual" / "run.sh")
+        fake = d / "fakepy"
+        fake.write_text("#!/bin/sh\nprintf '%s' \"$FAKE_OUT\"\nexit 3\n")
+        fake.chmod(0o755)
+        base = {k: v for k, v in os.environ.items() if k != "GITHUB_ACTIONS"}
+        return subprocess.run(["bash", str(d / "tools" / "visual" / "run.sh")],
+                              env={**base, "PY": str(fake), "FAKE_OUT": capture_output, **env},
+                              capture_output=True, text=True, timeout=30)
+
+    def test_skip_names_the_first_line_of_the_reason_not_the_banner(self):
+        p = self._run({}, "SKIP: chromium will not launch: Executable doesn't exist\n"
+                          "╔═════╗\n║ run playwright install ║\n╚═════╝\n")
+        self.assertEqual(p.returncode, 0)
+        first = p.stdout.splitlines()[0]
+        self.assertEqual(first, "SKIP visual regression: chromium will not launch: "
+                                "Executable doesn't exist")
+
+    def test_ci_skips_because_goldens_are_the_fleet_machines_render(self):
+        p = self._run({"GITHUB_ACTIONS": "true"}, "should not run\n")
+        self.assertEqual(p.returncode, 0)
+        self.assertIn("fleet machine only", p.stdout)
+        self.assertNotIn("should not run", p.stdout)
+
+
+class ChildEnv(unittest.TestCase):
+    """The dashboard token never reaches a child the visual tools spawn."""
+
+    FILES = (ROOT / "ui_evidence.py", ROOT / "tools" / "visual" / "capture.py",
+             ROOT / "tools" / "visual" / "compare.py", ROOT / "tools" / "visual" / "serve.py")
+
+    def test_every_subprocess_passes_an_env(self):
+        import ast
+        bare = []
+        for f in self.FILES:
+            for node in ast.walk(ast.parse(f.read_text())):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "subprocess"
+                        and node.func.attr in ("run", "Popen", "call", "check_call",
+                                               "check_output")
+                        and not any(k.arg == "env" for k in node.keywords)):
+                    bare.append(f"{f.name}:{node.lineno}")
+        self.assertEqual(bare, [])
+
+    def test_the_tools_drop_what_config_drops(self):
+        for name in ("capture", "compare"):
+            mod = _load(name)
+            self.assertEqual(tuple(mod.CHILD_ENV_DROP), tuple(config.CHILD_ENV_DROP), name)
+            with mock.patch.dict(os.environ, {"ARC_DASHBOARD_TOKEN": "s3cret", "KEEP": "1"}):
+                env = mod.child_env()
+            self.assertNotIn("ARC_DASHBOARD_TOKEN", env)
+            self.assertEqual(env["KEEP"], "1")
+
 
 class FixtureIsolation(unittest.TestCase):
     """The fixture server never reads the operator's live state."""
@@ -262,6 +319,14 @@ class Presenting(unittest.TestCase):
         self.assertIn(f"{web}/shots/usage-desktop-dark.png?raw=true", md)
         self.assertIn("1.23% of pixels changed", md)
         self.assertIn("TypeError: x is undefined", md)
+
+    def test_pr_markdown_with_no_shots_still_renders(self):
+        m = {"kind": "ui", "head": "abc", "ui_files": ["static/index.html"], "shots": [],
+             "compare": [], "warnings": ["no view rendered"], "new_page_errors": {}}
+        md = ui_evidence.pr_markdown(m, "https://x/blob/b/t/x1", task_id="t", attempt=2)
+        self.assertIn("No view was captured", md)
+        self.assertIn("no view rendered", md)
+        self.assertNotIn("![", md)
 
     def test_presenter_dispatch(self):
         self.assertIs(ui_evidence.presenter({"kind": "ui"}), ui_evidence)
