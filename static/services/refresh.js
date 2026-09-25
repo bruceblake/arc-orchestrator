@@ -28,11 +28,18 @@ function forgetEtag(slot) {
   delete POLL_BODY[slot];
 }
 
+const ON_SHOW = [];
+let SHOW_BOUND = false;
+
 function every(fn, ms, delay) {
   const run = () => { if (!document.hidden) fn(); };
   setTimeout(() => { run(); setInterval(run, ms); }, delay || 0);
+  ON_SHOW.push(run);
+  if (SHOW_BOUND) return;
+  SHOW_BOUND = true;
   document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) run();
+    if (document.hidden) return;
+    for (const poll of ON_SHOW) poll();
   });
 }
 

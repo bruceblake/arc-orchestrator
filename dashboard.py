@@ -5144,7 +5144,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(Path(config.ROOT) / "static" / "phone.html", "text/html; charset=utf-8")
             if u.path == "/common.js":
                 return self._file(Path(config.ROOT) / "static" / "common.js", "application/javascript; charset=utf-8")
-            if re.fullmatch(r"/panels/[a-z]+\.js", u.path):
+            # Underscores are part of panel names (work_status.js). A
+            # letters-only pattern 404s that file, boot then throws on
+            # pollWorkStatus, and every later poll never starts.
+            if re.fullmatch(r"/panels/[a-z_]+\.js", u.path):
                 return self._file(Path(config.ROOT) / "static" / u.path[1:], "application/javascript; charset=utf-8")
             if re.fullmatch(r"/services/[a-z_]+\.js", u.path):
                 return self._file(Path(config.ROOT) / "static" / u.path[1:], "application/javascript; charset=utf-8")

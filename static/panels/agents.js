@@ -80,7 +80,7 @@ function renderAgents() {
       <span class="hint">${esc(a.task)}</span>
       ${att ? `<span class="hint">attempt ${att}</span>` : ""}
       ${a.stalled ? '<span class="bad">STALLED</span>' : ""}
-      <span class="hint" data-since="${a.started || ""}">…</span>
+      ${a.started ? `<span class="hint" data-since="${a.started}">…</span>` : ""}
       <span class="hint">hb ${hb}</span>
       ${a.bytes ? `<span class="hint">${fmtK(a.bytes)}B out</span>` : ""}
       ${quiet}</div>`;
