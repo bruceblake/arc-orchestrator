@@ -1,0 +1,157 @@
+{
+  "kind": "ui",
+  "worktree": "/home/proxyie/arc-orchestrator/.claude/worktrees/agent-aed2e71c271f08c22",
+  "project": "arc-orchestrator",
+  "head": "1356721bd3d971692a179bab4a7122cd62c59803",
+  "ui_files": [],
+  "shots": [
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/index-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/index-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/index-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/index-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/projects-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/projects-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/projects-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/projects-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/usage-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/usage-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/usage-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/usage-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/phone-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/phone-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/phone-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/shots/phone-phone-dark.png"
+  ],
+  "videos": {},
+  "compare": [
+    {
+      "name": "index-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "index-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "index-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "index-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-desktop-light",
+      "changed": 4.7839506172839504e-05,
+      "box": [
+        36,
+        53,
+        1388,
+        202
+      ],
+      "side_by_side": null
+    },
+    {
+      "name": "projects-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    }
+  ],
+  "warnings": [
+    "NO VISIBLE CHANGE: this diff touches  but none of the captured views changed a pixel. Either the change is outside the captured views (a dialog, a hover state, another tab), or it does not do what it claims."
+  ],
+  "coverage": {
+    "views": {
+      "status": "captured",
+      "reason": ""
+    },
+    "baseline": {
+      "status": "captured",
+      "reason": ""
+    },
+    "compare": {
+      "status": "captured",
+      "reason": ""
+    }
+  },
+  "page_errors": {},
+  "baseline": {
+    "sha": "c2ee3934dbdc20f1efdcafd1339c5cda6b3f9b62",
+    "dir": "/home/proxyie/arc-orchestrator/.claude/worktrees/agent-aed2e71c271f08c22/logs/evidence/_ui_baseline/c2ee3934dbdc20f1efdcafd1339c5cda6b3f9b62-aa084f3ae3",
+    "status": "captured"
+  },
+  "new_page_errors": {},
+  "changed_views": [],
+  "no_visible_change": true,
+  "contact_sheet": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/contact_sheet.png",
+  "seconds": 12.8
+}
