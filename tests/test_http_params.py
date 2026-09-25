@@ -467,7 +467,7 @@ class HttpParamsUsage(EndpointCase):
 
     def test_documented_ranges_are_accepted(self):
         """Every value the picker offers must round-trip."""
-        for r in ("1h", "24h", "7d", "all"):
+        for r in ("1h", "3h", "6h", "today", "24h", "7d", "all"):
             with self.subTest(range=r):
                 req = self.get(f"/api/usage?range={r}")
                 self.assertEqual(req.status, 200)

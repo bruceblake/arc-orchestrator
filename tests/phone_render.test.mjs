@@ -170,8 +170,9 @@ ok(el("figs").innerHTML.split('class="fig"').length - 1 === 4, "figs row renders
 ok(el("figs").innerHTML.includes('fl">merged today</span>'), "ready github labels the figure 'merged today'");
 ok(el("agents").innerHTML.includes("GLM 5.3 · implementer"), "agent card shows model and role");
 ok(el("agents").innerHTML.includes("t2 · STALLED"), "stalled agent is flagged");
-ok(el("nowsub").textContent.includes("2 harness runs today"), "harness-run count in the sub line");
-ok(el("nowsub").textContent.includes("paused while hidden"), "sub line keeps the battery hint after render");
+ok(el("nowsub").textContent.includes("2 dashboard runs"), "sub line counts dashboard-launched runs");
+ok(el("nowsub").textContent.includes("waiting for a refresh"), "sub line waits until a poll succeeds");
+ok(!el("nowsub").textContent.includes("paused"), "a visible tab does not say it is paused");
 ok(el("alert").innerHTML.includes("DeepSeek V4.1 Flash max stalled on t2"),
    "stall surfaces in the alert line");
 ok(el("alert").style.display === "block", "alert is visible while red lines exist");

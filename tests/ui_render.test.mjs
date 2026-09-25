@@ -282,7 +282,7 @@ const uext = [...usrc.matchAll(/<script[^>]+src="([^"]+)"/g)]
   .join("\n");
 const umod = new Function(uext + "\n" + ujs
   + "\nglobalThis.__setDaily = v => { DAILY = v; };"
-  + "\nreturn {updateUI, fillTotal, updateModels, updateDaily, updateDriverEvents};");
+  + "\nreturn {updateUI, fillTotal, updateModels, updateDaily, updateDriverEvents, RANGES};");
 const uapi = umod();
 
 // Fixture: one model at 60% (ok 3 / err 1 / failed 1 of 5 requests), one at
@@ -324,22 +324,18 @@ ok(document.querySelector("#total-waste").textContent === "1 failed · ≈4.0k t
 ok(document.querySelector("#total-tok").textContent === "48.0k", "usage: total tokens still rendered");
 ok(document.querySelector("#split-prompt").style.width === "62.5%", "usage: prompt/completion split still rendered");
 ok(document.querySelector("#range-label").textContent === "24H", "usage: range label rendered");
-ok(document.querySelector("#dir-tok").textContent === "▲ +100%", "usage: token direction vs yesterday up");
-ok(document.querySelector("#dir-req").textContent === "▼ -50%", "usage: request direction vs yesterday down");
-ok(document.querySelector("#dir-tok").className === "dir up" && document.querySelector("#dir-req").className === "dir down",
-   "usage: direction arrows carry up/down colour class");
+ok(document.querySelector("#total-cost").textContent === "—", "usage: missing cost stays a dash");
 const drows = document.querySelector("#daily-body").innerHTML;
 ok(drows.includes("2026-09-10") && drows.indexOf("2026-09-10") < drows.indexOf("2026-09-09"),
    "usage: daily breakdown rendered, newest first");
+ok(uapi.RANGES.join() === "1h,3h,6h,today,24h,7d,all", "usage: every range button the page shows is a real window");
 ok(document.querySelector("#fam-body").innerHTML.includes("kimi"), "usage: family chips still rendered");
 ok(document.querySelector("#drv-events").innerHTML.includes("boom"), "usage: driver events feed still rendered");
 uapi.updateDaily([]);
 ok(document.querySelector("#daily-box").style.display === "none", "usage: daily box hidden when no days");
 
-// A range with no comparable preceding window shows no arrow, not a fake one.
-uapi.fillTotal({ range: "1h", totals: usage.totals });
-ok(document.querySelector("#dir-tok").textContent === "" && document.querySelector("#dir-req").textContent === "",
-   "usage: 1h range has no direction arrow");
+uapi.fillTotal({ range: "1h", totals: Object.assign({cost: 1.5}, usage.totals) });
+ok(document.querySelector("#total-cost").textContent === "$1.50", "usage: cost renders from the totals");
 
 // Nothing below 90% → back to token order.
 uapi.updateModels([
