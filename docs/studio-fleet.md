@@ -624,6 +624,7 @@ Every route acts only on values the server listed: projects, builds, sessions, f
 | `ARC_EVIDENCE_RESOLUTION` | 1280x720 | render size for screenshots and videos |
 | `ARC_EVIDENCE_TIMEOUT` | 600 | seconds per Godot run inside one capture |
 | `ARC_EVIDENCE_BLANK_SHARE` | 0.97 | a screenshot this dominated by one colour is flagged as a blank render |
+| `ARC_EVIDENCE_MIN_CHANGE` | 0.005 | share of changed pixels below which a camera counts as "nothing to see"; a gameplay diff under it on every camera is flagged `no_visible_change` |
 | `ARC_BOARD_DIR` | `logs/boards` | project-wide agent board (`board.py`); per-task threads stay in the worktree at `.arc/board.jsonl` and are not committed |
 | `ARC_STUDIO_BUDGET_USD` | 25 | ceiling for direct studio calls; 0 disables |
 | `ARC_STUDIO_JUDGE_PASS` | 75 | judge score (0–100) a phase must reach to promote |

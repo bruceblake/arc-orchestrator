@@ -1711,6 +1711,9 @@ EVIDENCE_RESOLUTION = os.getenv("ARC_EVIDENCE_RESOLUTION", "1280x720")
 EVIDENCE_TIMEOUT = float(os.getenv("ARC_EVIDENCE_TIMEOUT", "600"))
 # A screenshot this dominated by one colour is flagged as a blank render.
 EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
+# Below this share of changed pixels a camera counts as "nothing to see", and
+# a gameplay diff whose every camera is under it is flagged no_visible_change.
+EVIDENCE_MIN_CHANGE = float(os.getenv("ARC_EVIDENCE_MIN_CHANGE", "0.005"))
 
 # Project-wide agent board (board.py). Per-task threads live in the worktree
 # at .arc/board.jsonl and are excluded from publish; this directory is the
