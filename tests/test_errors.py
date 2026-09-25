@@ -1513,8 +1513,30 @@ class SeatUtilization(unittest.TestCase):
         idle = [f for f in findings if self.b in f["what"]]
         self.assertTrue(idle)
         self.assertEqual(idle[0]["severity"], "warning")
-        self.assertIn(idle[0]["action"],
-                      ("route more tiers to it", "raise its cap", "fix its errors"))
+        self.assertTrue(idle[0]["action"].startswith(
+            ("route more of", "do NOT route", "raise its cap", "fix its errors")),
+            idle[0]["action"])
+
+    def _idle_action(self, idle_model, starved_model):
+        events = [{"type": "driver.cap_wait", "model": starved_model, "task": "q",
+                   "ts": self.cutoff}]
+        findings = self.audit.audit_seats(
+            int(self.hours * 3600), events=events, runs=[], leases=[], now=self.now)
+        hit = [f for f in findings if f["what"].startswith(idle_model + " idle")]
+        self.assertTrue(hit, findings)
+        return hit[0]["action"]
+
+    def test_an_idle_lower_tier_is_never_told_to_take_the_starved_tier(self):
+        """Rule 1: DeepSeek (medium) idle while GLM-5.3 (hard) starves must
+        not be answered with "route more tiers to it" — that is a hard task
+        routed down a tier. The audit said exactly that on 2026-09-25."""
+        medium = config.IMPLEMENT_TIERS["medium"][0]
+        hard = config.IMPLEMENT_TIERS["hard"][0]
+        action = self._idle_action(medium, hard)
+        self.assertTrue(action.startswith("do NOT route"), action)
+        self.assertIn("Rule 1", action)
+        # Upward is legal: an idle hard seat may take medium work.
+        self.assertTrue(self._idle_action(hard, medium).startswith("route more of"))
 
     def test_a_future_reset_marks_the_plan_spent(self):
         reset = self.now + 3600
