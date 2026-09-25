@@ -1,0 +1,201 @@
+{
+  "kind": "ui",
+  "shots": [
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-phone-dark.png"
+  ],
+  "head": "synthetic-demo",
+  "ui_files": [
+    "static/index.html"
+  ],
+  "baseline": {
+    "sha": "c2ee3934dbdc20f1efdcafd1339c5cda6b3f9b62"
+  },
+  "compare": [
+    {
+      "name": "index-desktop-light",
+      "changed": 0.0012154803578374174,
+      "box": [
+        117,
+        134,
+        393,
+        31
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/index-desktop-light.png",
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/index-desktop-light.png"
+    },
+    {
+      "name": "index-desktop-dark",
+      "changed": 0.0012154803578374174,
+      "box": [
+        117,
+        134,
+        393,
+        31
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/index-desktop-dark.png",
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/index-desktop-dark.png"
+    },
+    {
+      "name": "index-phone-light",
+      "changed": 0.2631259274597094,
+      "box": [
+        0,
+        245,
+        390,
+        1984
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/index-phone-light.png",
+      "size": {
+        "before": [
+          390,
+          2213
+        ],
+        "after": [
+          390,
+          2229
+        ]
+      },
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/index-phone-light.png"
+    },
+    {
+      "name": "index-phone-dark",
+      "changed": 0.2631259274597094,
+      "box": [
+        0,
+        245,
+        390,
+        1984
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/index-phone-dark.png",
+      "size": {
+        "before": [
+          390,
+          2213
+        ],
+        "after": [
+          390,
+          2229
+        ]
+      },
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/index-phone-dark.png"
+    },
+    {
+      "name": "projects-desktop-light",
+      "changed": 0.0034375,
+      "box": [
+        117,
+        134,
+        393,
+        31
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/projects-desktop-light.png",
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/projects-desktop-light.png"
+    },
+    {
+      "name": "projects-desktop-dark",
+      "changed": 0.0034375,
+      "box": [
+        117,
+        134,
+        393,
+        31
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/projects-desktop-dark.png",
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/projects-desktop-dark.png"
+    },
+    {
+      "name": "projects-phone-light",
+      "changed": 0.2939656060137988,
+      "box": [
+        16,
+        245,
+        374,
+        689
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/projects-phone-light.png",
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/projects-phone-light.png"
+    },
+    {
+      "name": "projects-phone-dark",
+      "changed": 0.2939656060137988,
+      "box": [
+        16,
+        245,
+        374,
+        689
+      ],
+      "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/projects-phone-dark.png",
+      "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/projects-phone-dark.png"
+    },
+    {
+      "name": "usage-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    }
+  ],
+  "warnings": [],
+  "coverage": {},
+  "page_errors": {},
+  "new_page_errors": {},
+  "videos": {},
+  "contact_sheet": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/contact_sheet.png",
+  "seconds": 0
+}

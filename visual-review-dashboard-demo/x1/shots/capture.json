@@ -1,0 +1,22 @@
+{
+  "tree": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/mod",
+  "shots": [
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/index-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/projects-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/usage-phone-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-desktop-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-desktop-dark.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-phone-light.png",
+    "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/shots/phone-phone-dark.png"
+  ],
+  "page_errors": {}
+}
