@@ -14,6 +14,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import capture_events  # noqa: F401  (also puts ROOT on sys.path)
 
@@ -161,19 +162,42 @@ class ServerLifecycle(unittest.TestCase):
             ocserve.start_server(binary=str(Path(self.tmp.name) / "nope"),
                                  startup_timeout=2)
 
+    def test_default_binary_is_resolved_at_spawn_not_import_time(self):
+        """OPENCODE_SERVE_BIN is fixed at import; start_server must re-resolve."""
+        resolved = str(Path(self.tmp.name) / "resolved-opencode")
+        Path(resolved).write_text(f"#!{sys.executable}\n", encoding="utf-8")
+        Path(resolved).chmod(0o755)
+        saved = config.OPENCODE_SERVE_BIN
+        config.OPENCODE_SERVE_BIN = "opencode"
+        self.addCleanup(setattr, config, "OPENCODE_SERVE_BIN", saved)
+
+        mock_proc = mock.MagicMock()
+        mock_proc.poll.return_value = None
+        mock_proc.pid = 424242
+
+        with mock.patch.object(config, "opencode_serve_bin", return_value=resolved):
+            with mock.patch("ocserve.subprocess.Popen", return_value=mock_proc) as popen:
+                with mock.patch("ocserve._health_ok", return_value=True):
+                    handle = ocserve.start_server(startup_timeout=5)
+                    try:
+                        argv = popen.call_args[0][0]
+                        self.assertEqual(argv[0], resolved)
+                        self.assertEqual(config.OPENCODE_SERVE_BIN, "opencode")
+                    finally:
+                        handle.stop()
+
     def test_shared_server_is_one_process_and_restarts_after_stop(self):
         binary, _ = _write_stub(self.tmp.name, "ok")
         saved = config.OPENCODE_SERVE_BIN
-        config.OPENCODE_SERVE_BIN = binary
         ocserve._shared = None
         self.addCleanup(_reset_shared, saved)
-
-        first = ocserve.get_shared_server()
-        self.assertIs(first, ocserve.get_shared_server())   # ONE per process
-        first.stop()
-        second = ocserve.get_shared_server()                # died: replaced
-        self.assertIsNot(first, second)
-        self.assertTrue(ocserve._health_ok(second.base_url))
+        with mock.patch.object(config, "opencode_serve_bin", return_value=binary):
+            first = ocserve.get_shared_server()
+            self.assertIs(first, ocserve.get_shared_server())   # ONE per process
+            first.stop()
+            second = ocserve.get_shared_server()                # died: replaced
+            self.assertIsNot(first, second)
+            self.assertTrue(ocserve._health_ok(second.base_url))
 
 
 class ClientAgainstFake(unittest.TestCase):
