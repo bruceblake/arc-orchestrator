@@ -50,7 +50,7 @@ if ! "$PY" -m compileall -q $(ls *.py) >/dev/null; then
 fi
 
 step "imports"
-for m in config store graph events drivers gitstore code_tasks project_contract reconcile dashboard; do
+for m in config store graph events drivers gitstore code_tasks project_contract reconcile dashboard ui_evidence; do
     # No pipe here: `cmd | tail || rc=1` tests TAIL's status, which is always
     # 0, so import failures were reported and then silently forgiven.
     if ! out=$("$PY" -c "import $m" 2>&1); then
@@ -221,6 +221,18 @@ PYEOF
     fi
 else
     echo "(node not installed — skipping JavaScript checks)"
+fi
+
+step "visual regression (dashboard screenshots vs tests/visual/golden)"
+# Every DOM check above can pass while a page looks broken: a panel pushed
+# off-screen, text clipped on a phone, a colour lost in dark mode. This renders
+# every dashboard view headlessly (Playwright + Chromium) from THIS tree over
+# fixed fixture data with a frozen clock — pixel-exact run to run — and
+# compares it to the committed goldens. An intended look change re-blesses
+# them in the same diff (tools/visual/run.sh --update); anything else is a
+# regression. No browser on this machine is a SKIP, never a failure.
+if ! PY="$PY" tools/visual/run.sh; then
+    echo "FAIL: visual regression"; rc=1
 fi
 
 step "every imported module is actually tracked"

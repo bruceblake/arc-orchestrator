@@ -336,6 +336,24 @@ class SwapsOffASpentPlan(unittest.TestCase):
                          "Cursor-Grok-4.7")
         self.assertEqual(drv.calls, 1)
 
+    def test_the_substitute_reviewer_gets_the_evidence_images(self):
+        """A swapped review must still see the screenshots the gate attached."""
+        other = ScriptedDriver(['{"pass": true}'])
+        other.harness = "cursor"
+        other.model = "GLM-5.3"
+        drv = ScriptedDriver([
+            DriverError("usage limit", usage_limit=True, resets_at=NOW + 3 * 3600)])
+        drv.images = ("/ev/index-desktop-light.png", "/ev/usage-phone-dark.png")
+        with TempLeaseDB(), capture_events(), \
+                mock.patch.object(config, "USAGE_SWAP", True), \
+                mock.patch.object(drivers, "usage_substitute",
+                                  return_value="Cursor-Grok-4.7"), \
+                mock.patch.object(drivers, "driver_for", return_value=other), \
+                mock.patch.object(drivers.time, "time", lambda: NOW):
+            drivers._semaphores.pop(drv.model, None)
+            asyncio.run(drv.run("p", Path("."), task_id="t1"))
+        self.assertEqual(other.images, drv.images)
+
     def test_swap_off_returns_no_substitute(self):
         with mock.patch.object(config, "USAGE_SWAP", False):
             self.assertIsNone(drivers.usage_substitute("Sol", "codex"))

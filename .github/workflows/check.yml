@@ -12,7 +12,11 @@
 #   * there is no .venv — check.sh takes the interpreter from $PY;
 #   * ~/tasks does not exist — the taskfile steps skip an absent directory;
 #   * no dashboard is listening — the live render check skips itself;
-#   * node IS installed, so the JavaScript checks run rather than skip.
+#   * node IS installed, so the JavaScript checks run rather than skip;
+#   * the visual regression step skips (tools/visual/run.sh checks
+#     GITHUB_ACTIONS): its goldens are the fleet machine's render, and this
+#     runner's fonts differ, so no browser is installed here. That gate is
+#     enforced on the fleet machine only (docs/visual-testing.md).
 name: check
 
 on:

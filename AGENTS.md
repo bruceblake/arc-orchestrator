@@ -934,6 +934,47 @@ Rules the code holds to:
 - Events: `evidence.captured`, `evidence.failed`, `evidence.unavailable`,
   `evidence.error`, `evidence.posted`, `evidence.publish_failed`.
 
+### Rule 7e — Every dashboard change is SEEN too, and golden-tested
+
+This repo's own UI (`static/*.html`, `static/panels/*.js`, `dashboard.py`)
+is judged the same way. Detail: [docs/visual-testing.md](docs/visual-testing.md).
+
+- **Golden regression in `check.sh`.** `tools/visual/run.sh` renders every
+  dashboard view (index, projects tab, usage, phone × desktop/phone × light/
+  dark) with headless Chromium (Playwright) from the tree under test, over
+  FIXTURE data (`tools/visual/fixture.py`, never `orchestrator.db`) with a
+  frozen clock (`tools/visual/serve.py`), and diffs it against the committed
+  `tests/visual/golden/*.png` (`tools/visual/compare.py`). The render is
+  pixel-exact run to run, so the tolerance is tight (0.002% of pixels). An
+  intended look change re-blesses the goldens in the same diff
+  (`tools/visual/run.sh --update`); a page that throws a JS error fails; no
+  browser on the machine is a SKIP, never a failure. **Dark mode is covered
+  on `phone.html` only**: it is the one page with
+  `prefers-color-scheme` styles, so the `-dark` views of index, projects and
+  usage render exactly like their `-light` views. They are kept so a page
+  that gains dark styles is covered at once, not as evidence of dark mode.
+  The goldens are the fleet machine's render (host fonts decide
+  `monospace`), so CI skips this step: **the visual gate is enforced on the
+  fleet machine only**.
+- **Before | after | diff in the pipeline.** For a task on this repo whose
+  diff touches the UI, the gate runs `ui_evidence.capture` after
+  `verify_cmd` passes: the views rendered from the worktree and from the
+  task's merge base (`git archive`, cached per sha), a cropped
+  before|after|diff panel per changed view, a contact sheet, and new JS
+  errors. It reuses Rule 7d's path: `evidence.publish` (the `arc-evidence`
+  branch) and one PR comment with the images inline; `evidence.*` events
+  carry `surface="ui"`. Failure contract as Rule 7d: a dashboard that will
+  not start fails the gate in `required` mode; no browser is
+  `evidence.unavailable`.
+- **Reviewers are told the truth about what they can see.** Both review
+  prompts get a VISUAL clause for a UI diff (`_visual_review_prose`: a
+  visible regression is blocking; no evidence and no golden update for a
+  visible change is blocking). `drivers.sees_images` decides the evidence
+  block: a seeing reviewer is told to LOOK (reasonix is told to call
+  `view_image`, never decode PNG bytes); GLM-5.3 on opencode is told it
+  CANNOT see images and judges the numbers and JS errors. Rule 2 is
+  unchanged: a UI diff is not rerouted to a seeing reviewer.
+
 ### Rule 8 — Dry-run before every run
 
 - Before executing a taskfile for real, run
@@ -1169,6 +1210,7 @@ Top-level Python modules (one role each):
 | `dream_rsi.py` | Dream-RSI offline policy improvement (`main.py code dream`, arXiv:2609.14858): rebuilds the *discovery tree* a run produced from `code_tasks` + `harness_runs` (`build_tree`), re-scores attempts (`attempt_score`), replays exploration policies against recorded history with Eq.1 (`replay`, `score_policies`, `improve`), and offers an LLM policy-development hook (`propose_source`, `compile_policy` — sandboxed) — no model calls, no git. Prose: [docs/dream-rsi.md](docs/dream-rsi.md) |
 | `dossier.py` | The task dossier (Rule 4d): durable per-task handoff record (`task_dossier` table) — attempt outcomes, harvested `.arc/handoff.md` sections, model changes, operator notes; `render` is the prompt block every agent run starts with, `main.py code context` prints it |
 | `evidence.py` | Visual evidence (Rule 7d): screenshots from the fixed anchor cameras, a flythrough video (Godot movie writer → mp4 + gif), the scripted playtest recorded, before/after/diff against the task's merge base, blank-render detection; publishes to the game repo's `arc-evidence` branch and renders the PR comment and reviewer prompt block. Never writes into the worktree |
+| `ui_evidence.py` | Dashboard visual evidence (Rule 7e): before/after screenshots of every dashboard view for a UI diff (worktree vs merge base, via `tools/visual/`), cropped before\|after\|diff panels, contact sheet, new JS errors; reviewer prompt block that says whether the reviewer can see images; PR comment markdown. Publishes through `evidence.publish` |
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `fleetwatch.py` | Fleet watchdog (`deploy/arc-watchdog.service`, always on): records the argv/cwd/env of every live `code run`, re-runs any that died with unfinished work (the normal resume path), holds chained taskfiles until `chain_status` is ready, never overrules a `run.stopped` (operator Stop), and parks a taskfile after repeated quick exits. Never kills a run or touches git. State: `logs/watchdog/` |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
@@ -1198,7 +1240,8 @@ Everything else at the top level:
 | `start.sh` / `stop.sh` / `restart.sh` | Start/stop/restart the dashboard. With the `arc-dashboard.service` user unit installed they drive the unit (`systemctl --user …`, `deploy/dashboard-unit.sh`) and stop any `main.py serve` started outside it — the unit carries the token; otherwise `nohup .venv/bin/python main.py serve` → `logs/server.log`. Never touch an orchestrator process ([docs/runbook.md](docs/runbook.md) § 1) |
 | `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the prose behind `graph_shapes.PATTERNS` (the planner is handed the catalogue from code, not the doc) |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
-| `requirements.txt` | Python dependencies (openai, python-dotenv) — install into `.venv`; the system `python3` lacks them |
+| `tools/visual/` | Dashboard screenshot tooling (Rule 7e): `fixture.py`, `serve.py`, `capture.py`, `compare.py`, `run.sh` (golden regression, run by `check.sh`); goldens in `tests/visual/golden/` |
+| `requirements.txt` | Python dependencies (openai, python-dotenv, playwright) — install into `.venv`; the system `python3` lacks them |
 
 State and external directories (not in git):
 

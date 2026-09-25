@@ -16,8 +16,12 @@ Two jobs:
 
 ## Install
 
-`playwright` is listed in `requirements.txt`, so a normal venv setup gets the
-Python API:
+`playwright` is pinned in `requirements.txt` (`playwright==1.63.0`), so a
+normal venv setup gets the Python API. The pin is exact on purpose: each
+Playwright release bundles its own Chromium build, and a different build
+renders glyph edges differently, so **upgrading Playwright means re-blessing
+every golden** (`tools/visual/run.sh --update`) in the same change, after
+looking at the panels.
 
 ```bash
 ./.venv/bin/python -m pip install -r requirements.txt
@@ -154,8 +158,115 @@ So:
 If a screenshot does land in a commit, treat it as a bug in the capture tool,
 not as something to delete by hand in the branch.
 
-## Not yet wired
+## The capture: `tools/visual/`
 
-This prerequisite only makes the tool available, proven and documented.
-Nothing in the pipeline calls Playwright yet — the capture/diff helper, the PR
-screenshot surfacing, and the reviewer instructions are separate tasks.
+| File | Job |
+|---|---|
+| `fixture.py` | A fixed world: two taskfiles, task rows in every status the UI colours differently, harness runs and an event log, every timestamp pinned before `FROZEN_NOW` (2026-09-20 12:00 UTC). Never touches `orchestrator.db`. |
+| `serve.py` | Serves ONE checkout's dashboard over that fixture on a free port: every config path under the tree is rewritten into the fixture dir, `HOME` points into it, gh tokens are dropped, `/proc` "live runs" are reported empty, and `time.time()` is pinned to `FROZEN_NOW`. It builds `dashboard.Handler` directly — `main.py serve` would also arm the daily audit, the captain drain and the studio autopilot. |
+| `capture.py` | Every view — `index`, `projects` (the Projects tab), `usage`, `phone` × desktop 1440x900 / phone 390x844 × light / dark — screenshotted headless (full page, clipped at 2400 px). The browser clock is pinned to the same instant, animations and the caret are frozen, locale/time zone fixed. Records every JavaScript error the pages throw. Exit 3 = this machine cannot capture. |
+| `compare.py` | Golden diff with a tolerance (PASS / DIFF / MISSING / NO-BASELINE). ffmpeg decodes the PNGs; no imaging library needed. `--panels` draws captioned golden\|now\|diff images of every DIFF. |
+| `run.sh` | capture → compare against `tests/visual/golden/`. `--update` re-blesses. |
+
+**Determinism is measured, not assumed:** repeated captures of the same tree
+differ by **0 pixels**. The first version let the server clock tick, and the
+header's "updated HH:MM:SS" moved by a second between two runs — that is why
+the server clock is stopped, not merely started at `FROZEN_NOW`.
+
+**The tolerance is tight on purpose** (threshold 8 levels per channel,
+tolerance 0.002% of pixels ≈ 26 px of a desktop page). Measured: dropping ONE
+letter from the "Overview" tab changes 0.076% of the desktop page, so the
+first draft's 0.2% tolerance passed a visible typo.
+
+## The regression gate (check.sh)
+
+`check.sh`'s "visual regression" step runs `tools/visual/run.sh` (~8 s). A
+diff that changes how a page looks fails it until the goldens are re-blessed
+**in the same diff** — `tools/visual/run.sh --update` — after LOOKING at the
+golden|now|diff panels it writes to `logs/visual/check-diff/compare/`. A
+machine without Playwright/Chromium prints `SKIP visual regression` and
+passes. A page that throws a JavaScript error while rendering the fixture
+fails the step.
+
+Goldens depend on this box's Chromium build and fonts; upgrading Playwright
+(see the pin above) or the fonts is a legitimate re-bless.
+
+**Dark mode is covered on `phone.html` only.** It is the one page with
+`prefers-color-scheme` styles; `index.html` and `usage.html` have a single
+dark theme, so their `-dark` goldens are pixel-identical to their `-light`
+ones. Those views stay in the matrix so a page that gains light/dark styles
+is covered the moment it does, but today they prove nothing about dark mode.
+
+### Where the gate runs: the fleet machine only, not CI
+
+The pages ask for `ui-monospace, monospace`, and fontconfig resolves that per
+host: **Adwaita Mono** on the fleet box (`fc-match monospace`), **DejaVu Sans
+Mono** on GitHub's Ubuntu runner. The goldens are the fleet box's render, and
+a different font is not a small change — measured by re-rendering with
+`monospace` mapped to another font: the Overview page moved 3.6% of its
+pixels and the Usage page 100%, against a 0.002% tolerance. Installing
+Chromium on CI would therefore fail every view on every pull request.
+
+So `tools/visual/run.sh` **skips when `GITHUB_ACTIONS` is set** and says so
+(`SKIP visual regression: CI renders with different fonts ...`), and
+`.github/workflows/check.yml` does not install a browser. The visual gate is
+enforced where the fleet runs `check.sh`: in every task worktree on the
+fleet machine, and by the operator.
+
+## In the pipeline (AGENTS.md Rule 7e): `ui_evidence.py`
+
+For a task whose worktree is this repo and whose diff touches `static/` or
+`dashboard.py`, the gate — after `verify_cmd` passes — runs
+`ui_evidence.capture`:
+
+- **after**: every view rendered from the task worktree;
+- **before**: the same views rendered from the task's **merge base**,
+  `git archive`d into a temp dir (no worktree, no ref moved), cached per sha
+  under `logs/evidence/_ui_baseline/`;
+- **compare**: per view, the share of changed pixels and the box around them;
+  a changed view gets a captioned before|after|diff panel **cropped to the
+  region that changed** (a 1440 px row shrunk into a 640 px panel is
+  unreadable). A page that grew is padded and compared row for row, not
+  reported as 100% changed;
+- a contact sheet of every view, and any JavaScript error the merge base did
+  not throw.
+
+The manifest has evidence.py's shape (`kind: "ui"`), so the same
+`evidence.publish` pushes it to the orphan `arc-evidence` branch and
+`post_pr_evidence` comments it onto the PR — before|after|diff inline, every
+full-page shot in a collapsed block. `ui_evidence.presenter(manifest)` picks
+the presenter (review images, prompt block, PR markdown) for a dashboard or a
+game capture. Captures live under `logs/evidence/<project>/<task>/x<attempt>/`,
+never in the worktree.
+
+**Do the images render on the PR?** This repo is public (`gh repo view --json
+visibility` → `PUBLIC`), so `blob/arc-evidence/...?raw=true` redirects to
+`raw.githubusercontent.com` and renders for anyone. For a private repo the
+same link renders only for signed-in viewers with access.
+
+### Reviewers: who can actually see
+
+- `drivers.sees_images(driver)` is the capability. `reasonix` (DeepSeek) and
+  the subscription harnesses (claude, codex, cursor, agy, gemini) consume
+  `driver.images`; `opencode` (GLM-5.3) does not — ARC rejects image input
+  for GLM (`400 unsupported multimodal content: image_url`, 2026-09-18).
+- A seeing reviewer's prompt says to LOOK at each image and that a visible
+  regression is BLOCKING. A blind reviewer's prompt says plainly **YOU CANNOT
+  SEE IMAGES**: it judges the numbers (which views changed, how much) and the
+  JavaScript errors; the screenshots are on the PR for the human, and the
+  golden test is the deterministic gate.
+- **The view_image hazard.** reasonix has a `view_image` tool that feeds real
+  pixels to DeepSeek, but asked about a PNG without being told to use it, it
+  decoded the bytes with a python one-liner and never saw the image. So
+  `ReasonixDriver.argv` appends: call `view_image` on EACH file, do NOT read
+  the PNG bytes with bash or python.
+- Both review prompts get a **VISUAL** clause for any diff touching the UI
+  (`code_tasks._visual_review_prose`): a UI change needs visual evidence and,
+  when the look changes on purpose, re-blessed goldens; no evidence and no
+  golden update for a visible change is a blocking issue. Non-UI prompts are
+  byte-identical to before.
+
+Not done: routing a UI diff to a seeing reviewer when the paired reviewer is
+blind (the `modality-aware-review-routing` task — it relaxes Rule 2 and needs
+an operator decision). A DeepSeek-implemented UI change is still reviewed by
+GLM, which is told it is blind; the human reads the PR comment.
