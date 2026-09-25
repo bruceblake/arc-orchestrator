@@ -74,6 +74,25 @@ class StableIds(Case):
         c.close()
         self.assertEqual(agentboard.canonical_task("probe-x2", project=P), "probe")
 
+    def test_two_projects_sharing_an_id_do_not_keep_the_suffix(self):
+        c = sqlite3.connect(config.DB_PATH)
+        with c:
+            c.execute("CREATE TABLE IF NOT EXISTS code_tasks(id TEXT, taskfile TEXT, worktree TEXT)")
+            c.execute("INSERT INTO code_tasks VALUES('probe-x2','other.json','')")
+            c.execute("INSERT INTO code_tasks VALUES('probe-x2','else.json','')")
+        c.close()
+        self.assertEqual(agentboard.canonical_task("probe-x2"), "probe")
+
+    def test_a_task_directory_named_like_the_project_is_not_this_project(self):
+        wt = str(self.root / "worktrees" / "other" / P)
+        c = sqlite3.connect(config.DB_PATH)
+        with c:
+            c.execute("CREATE TABLE IF NOT EXISTS code_tasks(id TEXT, taskfile TEXT, worktree TEXT)")
+            c.execute("INSERT INTO code_tasks VALUES(?,?,?)",
+                      ("probe-x2", "other.json", wt))
+        c.close()
+        self.assertEqual(agentboard.canonical_task("probe-x2", project=P), "probe")
+
     def test_a_real_task_id_that_ends_like_a_suffix_is_kept_in_this_project(self):
         # A code_tasks row id probe-x2 in THIS project must still be kept.
         c = sqlite3.connect(config.DB_PATH)
@@ -156,6 +175,32 @@ class Delivery(Case):
         d = agentboard.digest_for(P, task="doors", role="implementer", model="GLM-5.3")
         self.assertIn("check the hinges", d)
         self.assertIn("pinging @doors-x2 please check", d)
+
+    def test_a_legacy_dm_reaches_the_agent_when_another_project_owns_the_suffix(self):
+        c = sqlite3.connect(config.DB_PATH)
+        with c:
+            c.execute("CREATE TABLE IF NOT EXISTS code_tasks(id TEXT, taskfile TEXT, worktree TEXT)")
+            c.execute("INSERT INTO code_tasks VALUES('doors-x2','other.json','')")
+        c.close()
+        with agentboard._lock:
+            agentboard._insert(agentboard._db(P), {
+                "id": "leg1", "project": P, "channel": "dm:doors-x2",
+                "ts": agentboard.time.time(), "author": "operator",
+                "author_model": "", "author_role": "operator",
+                "author_task": "", "kind": "note", "body": "check the hinges",
+                "mentions": ["doors-x2"], "reply_to": None, "refs": {}, "state": ""})
+        d = agentboard.digest_for(P, task="doors", role="implementer", model="m")
+        self.assertIn("check the hinges", d)
+
+    def test_the_driver_id_uses_the_worktree_not_another_projects_row(self):
+        import drivers
+        c = sqlite3.connect(config.DB_PATH)
+        with c:
+            c.execute("CREATE TABLE IF NOT EXISTS code_tasks(id TEXT, taskfile TEXT, worktree TEXT)")
+            c.execute("INSERT INTO code_tasks VALUES('doors-x2','other.json','')")
+        c.close()
+        self.assertEqual(drivers._agent_id("doors-x2", "reviewer", self.wt),
+                         "doors/reviewer")
 
 
 class CliFromAnyWorktree(Case):

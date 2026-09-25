@@ -389,13 +389,15 @@ def _tier_rank(model):
 
 
 
-def _agent_id(task_id, role):
+def _agent_id(task_id, role, worktree=None):
     """The stable board ID (`<task>/<role>`) of the agent this run belongs to.
     Stamped on driver.start so the dashboard can show one identity across
-    fix rounds, usage swaps and escalations. Never raises."""
+    fix rounds, usage swaps and escalations. The worktree scopes the id:
+    another project's row must not keep an attempt suffix. Never raises."""
     try:
         import agentboard
-        return agentboard.agent_id(task_id, role) if task_id else None
+        project = agentboard.infer_project(worktree)[0] if worktree else None
+        return agentboard.agent_id(task_id, role, project=project) if task_id else None
     except Exception:  # noqa: BLE001
         return None
 
@@ -1803,7 +1805,7 @@ class Driver:
                         events.emit("driver.start", harness=self.harness,
                                     model=self.model, role=self.role,
                                     task=task_id, attempt=attempt,
-                                    agent=_agent_id(task_id, self.role),
+                                    agent=_agent_id(task_id, self.role, worktree),
                                     session_id=sid or None,
                                     pid=os.getpid())
                         return await self._once(prompt, worktree, sid,

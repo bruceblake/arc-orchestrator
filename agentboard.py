@@ -189,6 +189,21 @@ CLAIM_TTL_S = 4 * 3600.0   # an agent's own claim line: one long attempt
 _ROLE_ALIASES = {"pr_reviewer": "pr-reviewer", "pr_review": "pr-reviewer"}
 
 
+def _worktree_project(wt):
+    """The project directory of a worktree, or None if it is not one of ours.
+
+    Only the first path component under WORKTREE_ROOT counts. A task
+    directory that happens to be named like another project must not match.
+    """
+    if not wt:
+        return None
+    try:
+        rel = Path(wt).resolve().relative_to(Path(config.WORKTREE_ROOT).resolve())
+    except (ValueError, OSError):
+        return None
+    return rel.parts[0] if rel.parts else None
+
+
 def _is_task_row(task_id, project=None, taskfile=None):
     """A code_tasks row with exactly this id belonging to project/taskfile:
     then `-x2` is part of the real id."""
@@ -206,26 +221,24 @@ def _is_task_row(task_id, project=None, taskfile=None):
                 proj, _ = infer_project()
                 if proj:
                     project = proj
-                else:
+                elif len(rows) == 1:
+                    # One row and no project to scope it: keep the id. Two
+                    # projects sharing the id is ambiguous, so strip.
                     return True
-            root = Path(config.WORKTREE_ROOT)
+                else:
+                    return False
             for r in rows:
                 tf = r["taskfile"] or ""
                 if taskfile and (tf == taskfile or Path(tf).name == Path(taskfile).name or Path(tf).stem == Path(taskfile).stem):
                     return True
                 if project:
+                    wt_proj = _worktree_project(r["worktree"] or "")
+                    if wt_proj:
+                        if wt_proj == project:
+                            return True
+                        continue
                     if Path(tf).stem == project or tf == project:
                         return True
-                    wt = r["worktree"] or ""
-                    if wt:
-                        try:
-                            rel = Path(wt).resolve().relative_to(root.resolve())
-                            if rel.parts and rel.parts[0] == project:
-                                return True
-                        except (ValueError, OSError):
-                            pass
-                        if project in Path(wt).parts:
-                            return True
             return False
     except sqlite3.Error:
         return False
@@ -447,7 +460,7 @@ def _targets(agent, model=""):
     return t
 
 
-def _addressed(msg, agent, model=""):
+def _addressed(msg, agent, model="", project=None):
     """Mentions this agent/its task/its model/@all, a DM to it (or to its
     task), or a post by an OUTSIDER in its task channel.
 
@@ -457,7 +470,7 @@ def _addressed(msg, agent, model=""):
     the task's own agents (`<task>/...`, the orchestrator's status lines
     included) are not addressed back to it."""
     task, _ = split_agent(agent)
-    chan = canonical_channel(msg.get("channel") or "")
+    chan = canonical_channel(msg.get("channel") or "", project=project)
     if chan == agent or (chan.startswith("dm:")
                          and chan[3:] in _targets(agent, model) - {"all"}):
         return True
@@ -465,7 +478,7 @@ def _addressed(msg, agent, model=""):
             (msg.get("author") or "").startswith(f"{task}/")
             or (msg.get("author_task") or "") == task):
         return True
-    msg_mentions = {canonical_agent(m) for m in msg.get("mentions") or ()}
+    msg_mentions = {canonical_agent(m, project=project) for m in msg.get("mentions") or ()}
     return bool(_targets(agent, model) & msg_mentions)
 
 
@@ -479,7 +492,7 @@ def inbox(project, agent, since_ts=None, model=""):
         args.append(float(since_ts))
     out = []
     for m in _select(project, where, args):
-        if _addressed(m, agent, model) or (
+        if _addressed(m, agent, model, project) or (
                 task and m["kind"] == "question" and m["state"] == "open"
                 and m["channel"] == f"task:{task}"):
             out.append(m)
@@ -756,14 +769,14 @@ def digest_for(project, *, task, role, model, files_hint=(), limit_chars=3000,
     sections = []
     # A project-channel ping is a broadcast: it reaches every reader, once
     # (the pipeline marks the inbox read when it delivers a digest).
-    mine = [m for m in msgs if (_addressed(m, agent, model) or (
+    mine = [m for m in msgs if (_addressed(m, agent, model, project) or (
                 m["kind"] == "ping" and m["channel"] == "project"))
             and unread(m)
             and not (m["kind"] == "question" and m["state"] == "open")]
     shown = mine[:8] if mark_seen else mine[-8:]
     sections.append(("Unread mentions and DMs for you:", [_fmt(m) for m in shown]))
     questions = [m for m in msgs if m["kind"] == "question" and m["state"] == "open"
-                 and (_addressed(m, agent, model) or m["channel"] == f"task:{task}")]
+                 and (_addressed(m, agent, model, project) or m["channel"] == f"task:{task}")]
     sections.append(("Open questions addressed to you (answer with kind=answer, "
                      "reply_to=<id>):", [_fmt(m) for m in questions[-6:]]))
     live = [c for c in claims(project) if c["author"] != agent
