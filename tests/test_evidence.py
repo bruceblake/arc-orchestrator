@@ -410,6 +410,7 @@ class ContactSheet(unittest.TestCase):
                       "a scene render has no name")
         self.assertEqual(len(pairs), 2, "a scene render has no tile")
 
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not installed")
     def test_an_image_over_two_megabytes_is_resized(self):
         """The PR embeds these inline; GitHub silently drops oversized blobs."""
         from studio.evaluation import palette
@@ -778,6 +779,7 @@ class CaptureWiring(unittest.TestCase):
         config.EVIDENCE_DIR = self.d / "ev"
         self.addCleanup(setattr, config, "EVIDENCE_DIR", old)
         with unittest.mock.patch.object(evidence, "_require_tools"), \
+                unittest.mock.patch.object(evidence, "contact_sheet", return_value=None), \
                 unittest.mock.patch("studio.engine.godot.import_assets"), \
                 unittest.mock.patch.object(evidence, "_cameras",
                                            return_value=[{"name": "overview"},

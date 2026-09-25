@@ -739,6 +739,17 @@ class PerNodeTimeout(unittest.TestCase):
         self.assertEqual(run(g)["results"]["n"], {"ok": True})
         self.assertEqual(len(calls), 2)
 
+    def test_an_inner_timeout_on_an_unlimited_node_is_not_rewritten(self):
+        g = Graph("inner-timeout")
+
+        async def node(ctx):
+            raise asyncio.TimeoutError()
+
+        g.node("n", node)
+        g.start("n")
+        with self.assertRaises(asyncio.TimeoutError):
+            run(g)
+
 
 class ErrorHandlerNodes(unittest.TestCase):
     """on_error routes a failure to a node instead of draining the graph."""

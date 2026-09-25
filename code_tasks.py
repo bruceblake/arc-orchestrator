@@ -1400,6 +1400,29 @@ def _verdict_dict(obj, flag):
     return out
 
 
+_MERGE_WAIT_STATUSES = frozenset({"BLOCKED", "UNSTABLE", "UNKNOWN"})
+
+
+def _merge_should_wait(note, status, mergeable):
+    """True when GitHub is not ready, rather than the files overlapping.
+
+    A blocked or still-calculating pull request used to be stored as
+    ``conflict``. That stops the task and everything waiting on it, for a
+    check that has not finished. ``--auto`` in the gh message is the same
+    case. An auth failure is a real stop, even if the status is still unknown.
+    """
+    low = (note or "").lower()
+    if ("not logged" in low or "authentication" in low
+            or "resource not accessible" in low or "http 401" in low
+            or "http 403" in low):
+        return False
+    if ((status or "").upper() in _MERGE_WAIT_STATUSES
+            or (mergeable or "").upper() == "UNKNOWN"):
+        return True
+    return ("--auto" in low or "required status check" in low
+            or "still being calculated" in low)
+
+
 def _parse_verdict(text):
     """Last balanced span carrying a "pass" key wins.
 
@@ -3585,7 +3608,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 return {"merged": True, "pr": None,
                         "verdict": gate_res.get("verdict")}
             state = await gitstore.pr_state(repo, number)
-            if state.get("mergeable") == "CONFLICTING":
+            status = (state.get("mergeStateStatus") or "").upper()
+            mergeable = (state.get("mergeable") or "").upper()
+            # DIRTY is a real overlap; BEHIND is a base that moved. Both are
+            # what sync_with_base is for. CONFLICTING is the older field for
+            # the same overlap. BLOCKED / UNSTABLE / UNKNOWN are checks or
+            # GitHub still calculating — not a file conflict.
+            if mergeable == "CONFLICTING" or status in ("DIRTY", "BEHIND"):
                 # Try to resolve it before giving up. Most conflicts here are
                 # not a disagreement about the code at all — they are a base
                 # branch that moved on under a task that took twenty minutes,
@@ -3631,6 +3660,18 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 ok, note = True, "already merged"
             else:
                 ok, note = await gitstore.merge_pr(repo, number)
+            if not ok and _merge_should_wait(note, status, mergeable):
+                waits = int((ctx.get("results", {}).get(f"pr_merge_{tid}") or {}
+                             ).get("waits") or 0) + 1
+                if waits <= config.PR_MAX_RESYNCS:
+                    if waits > 1:
+                        await asyncio.sleep(min(60, 15 * (waits - 1)))
+                    events.emit("task.merge_wait", task=tid, pr=number,
+                                waits=waits, reason=note[:200])
+                    return {"merged": False, "waiting": True, "waits": waits,
+                            "pr": number}
+                note = (f"still not mergeable after {waits - 1} wait(s): "
+                        f"{note}")
             if not ok:
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "conflict", error=note, finished=True)
@@ -3783,6 +3824,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # longer covers what is on it. Back to review, not straight to merge.
         g.edge(f"pr_merge_{tid}", f"pr_fanout_{tid}",
                when=lambda r, c: bool(r.get("resynced")), on_drain=True)
+        # Checks still running, or GitHub has not computed mergeability.
+        # Retry the merge; do not record a file conflict.
+        g.edge(f"pr_merge_{tid}", f"pr_merge_{tid}",
+               when=lambda r, c: bool(r.get("waiting")), on_drain=True)
         # An inconclusive round reached no verdict: every reviewer crashed and
         # nobody read the diff. Retry the REVIEW — sending the implementer back
         # to fix issues that do not exist wastes a model and burns a real round.

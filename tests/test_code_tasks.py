@@ -2502,6 +2502,11 @@ class AConflictingPullRequestIsRetried(unittest.TestCase):
         self.assertFalse(self._fires("pr_merge_t1", "pr_review_t1",
                                      {"merged": False, "reason": "conflict"}))
 
+    def test_a_merge_that_is_waiting_on_checks_retries_itself(self):
+        r = {"merged": False, "waiting": True, "waits": 1}
+        self.assertTrue(self._fires("pr_merge_t1", "pr_merge_t1", r))
+        self.assertFalse(self._fires("pr_merge_t1", "pr_fanout_t1", r))
+
     def test_the_resync_budget_is_positive_and_finite(self):
         # Each resync rewrites the branch and costs a fresh review round, so
         # it must be bounded — but the operator has said tokens are not the
@@ -3229,6 +3234,46 @@ class AnExternallyMergedPullRequestIsNotAConflict(unittest.TestCase):
         self.assertTrue(out["merged"])
         self.assertEqual(calls, ["merge_pr"])
         self.assertIsNone(ev.first("task.merged_externally"))
+
+    def test_pending_checks_wait_instead_of_recording_a_conflict(self):
+        out, calls, ev = self._run_merge(
+            {"state": "OPEN", "mergeable": "MERGEABLE",
+             "mergeStateStatus": "BLOCKED"},
+            (False, "gh pr merge failed: not mergeable; add the --auto flag"))
+        self.assertTrue(out.get("waiting"))
+        self.assertEqual(out["waits"], 1)
+        self.assertEqual(calls, ["merge_pr"])
+        self.assertIsNone(ev.first("task.conflict"))
+        self.assertIsNotNone(ev.first("task.merge_wait"))
+
+    def test_a_permission_failure_is_still_a_conflict(self):
+        out, _calls, ev = self._run_merge(
+            {"state": "OPEN", "mergeable": "UNKNOWN",
+             "mergeStateStatus": "UNKNOWN"},
+            (False, "gh pr merge failed: Resource not accessible by integration"))
+        self.assertFalse(out.get("waiting"))
+        self.assertIsNotNone(ev.first("task.conflict"))
+
+    def test_a_dirty_pr_is_resynced_instead_of_left_conflicting(self):
+        import asyncio as aio
+        g = self._graph()
+        gs = code_tasks.gitstore
+        saved = (gs.pr_state, gs.sync_with_base, gs.push_task_branch)
+        gs.pr_state = lambda repo, n: aio.sleep(0, result={
+            "state": "OPEN", "mergeable": "UNKNOWN",
+            "mergeStateStatus": "DIRTY"})
+        gs.sync_with_base = lambda wt, base: aio.sleep(0, result=(True, [], "ok"))
+        gs.push_task_branch = lambda repo, tid: aio.sleep(0, result=(True, ""))
+        try:
+            with capture_events() as ev:
+                out = aio.run(g.nodes["pr_merge_t1"].fn(
+                    {"results": {"pr_review_t1": {"pr": 7, "approved": True},
+                                 "alloc_t1": {"worktree": "/tmp/wt"}},
+                     "runs": {}}))
+        finally:
+            gs.pr_state, gs.sync_with_base, gs.push_task_branch = saved
+        self.assertTrue(out.get("resynced"))
+        self.assertIsNone(ev.first("task.conflict"))
 
 
 class PlanAmendmentWiring(unittest.TestCase):
