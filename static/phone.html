@@ -195,7 +195,7 @@ button.act.rvok { border-color: var(--ok); color: var(--ok); font-weight: 700; }
 <main>
 
 <section id="view-now" class="view on" aria-label="Now">
-  <h1>Now <span id="pulse" class="pulse">…</span> <span id="stale" class="stale">stale data</span></h1>
+  <h1>Now <span id="pulse" class="pulse">…</span> <span id="stale" class="stale">stale data</span> <button type="button" class="pill" id="auth-lock" aria-label="dashboard token: lock state" onclick="authClick()">actions: …</button></h1>
   <p class="sub" id="nowsub">loading…</p>
   <div class="figs" id="figs"></div>
   <div class="alert" id="alert" role="status"></div>
@@ -859,26 +859,8 @@ async function j(url) {
   return res.json();
 }
 
-function authHeaders() {
-  var t = null;
-  try { t = localStorage.getItem("arc.dashboard.token"); } catch (e) {}
-  return t ? {"Authorization": "Bearer " + t} : {};
-}
-
-async function jpost(u, body) {
-  var send = function () {
-    return fetch(u, {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, authHeaders()), body: JSON.stringify(body)});
-  };
-  var r = await send();
-  if (r.status === 401 && typeof prompt === "function") {
-    var t = prompt("Dashboard token (ARC_DASHBOARD_TOKEN):");
-    if (t && String(t).trim()) {
-      try { localStorage.setItem("arc.dashboard.token", String(t).trim()); } catch (e) {}
-      r = await send();
-    }
-  }
-  return {code: r.status, body: await r.json()};
-}
+// authHeaders / jpost / the token lock live in common.js, shared with the
+// desktop page: one prompt, one stale-token rule, one #auth-lock pill.
 
 async function poll() {
   var res = await Promise.all([

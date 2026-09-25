@@ -153,8 +153,8 @@ PYEOF
     if [ -f tests/render_check.mjs ] && curl -sf -m 2 -o /dev/null "http://localhost:8787/api/health"; then
         d=$(mktemp -d)
         if curl -sf -m 5 "http://localhost:8787/api/health" > "$d/h.json" \
-           && curl -sf -m 5 "http://localhost:8787/api/projects" > "$d/p.json" \
-           && f=$(curl -sf -m 5 "http://localhost:8787/api/projects" | "$PY" -c "import json,sys;ps=json.load(sys.stdin)['projects'];print(ps[0]['file'] if ps else '')") \
+           && curl -sf -m 15 "http://localhost:8787/api/projects" > "$d/p.json" \
+           && f=$(curl -sf -m 15 "http://localhost:8787/api/projects" | "$PY" -c "import json,sys;ps=json.load(sys.stdin)['projects'];print(ps[0]['file'] if ps else '')") \
            && curl -sf -m 5 "http://localhost:8787/api/project?file=$f" > "$d/d.json"; then
             if ! node tests/render_check.mjs "$d/h.json" "$d/p.json" "$d/d.json" 2>&1 | tail -12; then
                 echo "FAIL: the dashboard JS throws on real data"; rc=1

@@ -1168,7 +1168,7 @@ Everything else at the top level:
 | `static/index.html` | Dashboard web UI (desktop) |
 | `static/usage.html` | Dashboard usage/tokens view |
 | `static/phone.html` | Small-screen dashboard page (add `/phone.html` to the URL) |
-| `start.sh` / `stop.sh` | Start/stop the dashboard (`nohup .venv/bin/python main.py serve` → `logs/server.log`; `pkill -f "main\.py serve"` — never touches an orchestrator process) |
+| `start.sh` / `stop.sh` / `restart.sh` | Start/stop/restart the dashboard. With the `arc-dashboard.service` user unit installed they drive the unit (`systemctl --user …`, `deploy/dashboard-unit.sh`) and stop any `main.py serve` started outside it — the unit carries the token; otherwise `nohup .venv/bin/python main.py serve` → `logs/server.log`. Never touch an orchestrator process ([docs/runbook.md](docs/runbook.md) § 1) |
 | `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the prose behind `graph_shapes.PATTERNS` (the planner is handed the catalogue from code, not the doc) |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
 | `requirements.txt` | Python dependencies (openai, python-dotenv) — install into `.venv`; the system `python3` lacks them |

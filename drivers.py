@@ -14,6 +14,7 @@ ValueError (Kimi-K3 retired by operator decision 2026-09-12).
 """
 import asyncio
 import contextlib
+import contextvars
 import json
 import logging
 import os
@@ -446,6 +447,18 @@ def usage_substitute(model, harness, role="implementer", exclude=(),
         ("planner",) if allow_planner else ())
     if not config.USAGE_SWAP or role not in roles:
         return None
+    ranked = _swap_candidates(model, harness, role, exclude, avoid_families,
+                              other_harness_only=True)
+    return ranked[0] if ranked else None
+
+
+def _swap_candidates(model, harness, role, exclude=(), avoid_families=(),
+                     other_harness_only=True):
+    """Every seat that may take over `model`'s attempt, best first.
+
+    The rules both swaps share: the candidate holds `role` on the roster,
+    sits at the same tier or above (Rule 1), is in none of `avoid_families`
+    (Rule 2), and its plan window is not known to be spent."""
     now = time.time()
     skip = set(exclude)
     skip.add(model)
@@ -453,7 +466,9 @@ def usage_substitute(model, harness, role="implementer", exclude=(),
     floor = _tier_rank(model)
     ranked = []
     for candidate, cand_harness in config.MODEL_HARNESS.items():
-        if candidate in skip or cand_harness == harness:
+        if candidate in skip:
+            continue
+        if other_harness_only and cand_harness == harness:
             continue
         if not config.model_may(candidate, role):
             continue
@@ -468,10 +483,63 @@ def usage_substitute(model, harness, role="implementer", exclude=(),
         else:
             rank = _SWAP_PREFERENCE.get(cand_harness, 6)
         ranked.append((rank, candidate))
-    if not ranked:
-        return None
     ranked.sort()
-    return ranked[0][1]
+    return [c for _r, c in ranked]
+
+
+class CapSwap(Exception):
+    """Raised out of a lease wait: another seat has room for this attempt."""
+
+    def __init__(self, to_model, waited_s, lease):
+        super().__init__(f"cap swap to {to_model} after {waited_s:.0f}s on {lease}")
+        self.to_model, self.waited_s, self.lease = to_model, waited_s, lease
+
+
+_CAP_SWAP_ROLES = ("implementer", "reviewer", "pr_reviewer")
+
+
+def cap_substitute(model, harness, role="implementer", exclude=(),
+                   avoid_families=(), usage=None):
+    """A seat with a FREE slot right now that may take `model`'s attempt.
+
+    `usage_substitute` answers "whose plan is not spent?"; this answers "who
+    is idle while `model` is full?". Measured 2026-09-25 on the studio fleet:
+    GLM-5.3 logged 5254 cap-waits in 24 h while two hard-tier seats
+    (Cursor-Grok-4.7, Antigravity-Gemini) sat free for ~30 seat-hours each.
+    The rules are the usage swap's, so routing stays governed:
+
+    * Rule 1 -- same tier or above. A hard GLM task never moves to DeepSeek
+      (medium) no matter how idle DeepSeek is; a medium task may move up.
+    * Rule 2 -- never into `avoid_families`: an implementer's caller passes
+      the planned reviewer's family, a reviewer's caller the implementer's.
+      The review node re-derives the reviewer from the model that ACTUALLY
+      wrote the code (`code_tasks.wrote_the_code`), so the pairing holds.
+    * The planner never moves (the plan is one seat on purpose).
+
+    Headroom is the lease table's view -- the same one `_lease_acquire`
+    enforces -- on both the model's cap and its harness pool (Rule 6).
+    """
+    if config.CAP_SWAP_AFTER <= 0 or role not in _CAP_SWAP_ROLES:
+        return None
+    if usage is None:
+        try:
+            usage = _lease_db().lease_usage()
+        except Exception:
+            return None
+    for cand in _swap_candidates(model, harness, role, exclude, avoid_families,
+                                 other_harness_only=False):
+        h = config.MODEL_HARNESS.get(cand)
+        if usage.get(cand, 0) >= config.driver_limit(cand):
+            continue
+        if h and usage.get(f"harness:{h}", 0) >= config.harness_limit(h):
+            continue
+        return cand
+    return None
+
+
+# (model, harness, role, tried, avoid_families) for the attempt being run in
+# this asyncio task; set by Driver.run, read by the lease wait.
+_cap_swap_ctx = contextvars.ContextVar("arc_cap_swap_ctx", default=None)
 
 
 async def wait_for_usage_reset(harness, model, task_id, until, budget_s):
@@ -569,12 +637,14 @@ def _slot_subscription(model):
 async def _lease_wait_loop(model, task_id, emit_ctx, cap, shown, deadline, sub,
                            interactive=False):
     waits = 0
+    t0 = time.monotonic()
     while True:
         limit = config.driver_limit(model, interactive) if cap is None else cap
         in_use = _lease_db().acquire_driver_lease(
             model, os.getpid(), task_id, limit, config.DRIVER_LEASE_TTL)
         if in_use is None:
             return
+        _maybe_cap_swap(model, t0, waits)
         if time.monotonic() >= deadline:
             events.emit("driver.cap_timeout", model=shown, task=task_id,
                         in_use=in_use, cap=limit,
@@ -593,6 +663,23 @@ async def _lease_wait_loop(model, task_id, emit_ctx, cap, shown, deadline, sub,
             await sub.wait_async(nap)   # returns early the moment a slot frees
         else:
             await asyncio.sleep(nap)
+
+
+def _maybe_cap_swap(lease, t0, waits):
+    """Raise CapSwap when this wait has lasted CAP_SWAP_AFTER and a seat is free.
+
+    Checked about once a minute (every third 20 s poll) so a long queue does
+    not hammer the lease table."""
+    ctx = _cap_swap_ctx.get()
+    if ctx is None or config.CAP_SWAP_AFTER <= 0 or waits % 3:
+        return
+    waited = time.monotonic() - t0
+    if waited < config.CAP_SWAP_AFTER:
+        return
+    model, harness, role, tried, avoid = ctx
+    sub = cap_substitute(model, harness, role, exclude=tried, avoid_families=avoid)
+    if sub:
+        raise CapSwap(sub, waited, lease)
 
 
 def _lease_release(model, task_id):
@@ -1557,6 +1644,29 @@ class Driver:
                                _swapped_from=set(tried) | {self.model},
                                avoid_families=avoid_families)
 
+    async def _cap_swap_run(self, sw, prompt, worktree, task_id, attempt, tried,
+                            avoid_families):
+        """Hand an attempt that is still queued for a slot to an idle seat."""
+        to_h = config.MODEL_HARNESS.get(sw.to_model) or "?"
+        # Settles this attempt's driver.queued/cap_wait in every wait view.
+        events.emit("driver.cap_swap", harness=self.harness, model=self.model,
+                    role=self.role, task=task_id, attempt=attempt,
+                    to_model=sw.to_model, to_harness=to_h,
+                    waited_s=round(sw.waited_s), lease=sw.lease, pid=os.getpid())
+        log.warning("%s: no slot after %.0fs on %s; %s has room -- moving this "
+                    "attempt there", self.model, sw.waited_s, sw.lease, sw.to_model)
+        post_handoff(worktree, task_id, self.role, self.model, self.harness,
+                     (f"{self.model} was at its concurrency cap for "
+                      f"{sw.waited_s / 60:.0f} min; this attempt runs on "
+                      f"{to_h}/{sw.to_model} instead. Do not resume a "
+                      f"{self.harness} session there."),
+                     to_model=sw.to_model, to_harness=to_h)
+        other = driver_for(sw.to_model, self.role,
+                           interactive=getattr(self, "interactive", False))
+        return await other.run(prompt, worktree, session_id=None, task_id=task_id,
+                               _swapped_from=set(tried) | {self.model},
+                               avoid_families=avoid_families)
+
     async def run(self, prompt, worktree, session_id=None, task_id=None,
                   _swapped_from=None, avoid_families=()):
         attempt = 0
@@ -1586,9 +1696,18 @@ class Driver:
             events.emit("driver.queued", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
                         resume=bool(sid), pid=os.getpid())
+            token = _cap_swap_ctx.set(
+                (self.model, self.harness, self.role, frozenset(tried),
+                 frozenset(avoid_families or ())))
             try:
                 result = await self._guarded_once(continuation or prompt, worktree,
                                                   sid, task_id, attempt)
+            except CapSwap as sw:
+                # No slot was ever held, so nothing ran: the attempt moves
+                # whole. The full prompt, not `continuation` -- a session id
+                # means nothing to another harness.
+                return await self._cap_swap_run(sw, prompt, worktree, task_id,
+                                                attempt, tried, avoid_families)
             except asyncio.CancelledError:
                 # Every driver.start needs a terminal event or the dashboard
                 # counts this attempt as in-flight (and against the model's
@@ -1744,6 +1863,8 @@ class Driver:
                             exc, backoff)
                 await asyncio.sleep(backoff)
                 continue
+            finally:
+                _cap_swap_ctx.reset(token)
             events.emit("driver.done", harness=self.harness, model=self.model,
                         role=self.role, task=task_id, attempt=attempt,
                         seconds=round(result.seconds, 1),

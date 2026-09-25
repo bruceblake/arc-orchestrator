@@ -401,3 +401,115 @@ class SubscriptionSeatCaps(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SwapsOffAFullCap(unittest.TestCase):
+    """A queued attempt moves to an IDLE seat of the same tier or above.
+
+    2026-09-25, studio fleet: GLM-5.3 logged 5254 cap-waits in 24 h while
+    Cursor-Grok-4.7 and Antigravity-Gemini (the same hard tier) sat free for
+    ~30 seat-hours each. The capacity swap keeps the usage swap's rules."""
+
+    ROSTER = SwapsOffASpentPlan.ROSTER
+
+    def setUp(self):
+        drivers._usage_blocked_until.clear()
+        self.addCleanup(drivers._usage_blocked_until.clear)
+        r = self.ROSTER
+        self.patches = [
+            mock.patch.object(config, "MODEL_HARNESS", {m: v[0] for m, v in r.items()}),
+            mock.patch.object(config, "MODEL_FAMILY", {m: v[1] for m, v in r.items()}),
+            mock.patch.object(config, "MODEL_TIER", {m: v[2] for m, v in r.items()}),
+            mock.patch.object(config, "MODEL_ROLES", {m: v[3] for m, v in r.items()}),
+            mock.patch.object(config, "CAP_SWAP_AFTER", 600.0),
+            mock.patch.object(config, "driver_limit", lambda m, *a, **k: 2),
+            mock.patch.object(config, "harness_limit", lambda h: 3),
+            mock.patch.object(drivers.time, "time", lambda: NOW),
+        ]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _sub(self, model, role="implementer", usage=None, **kw):
+        return drivers.cap_substitute(model, self.ROSTER[model][0], role,
+                                      usage=usage or {}, **kw)
+
+    def test_the_first_idle_same_tier_seat_is_chosen(self):
+        self.assertEqual(self._sub("GLM-5.3"), "Cursor-Grok-4.7")
+
+    def test_a_full_seat_or_a_full_harness_pool_is_skipped(self):
+        usage = {"Cursor-Grok-4.7": 2}                 # model cap reached
+        self.assertEqual(self._sub("GLM-5.3", usage=usage), "Antigravity-Gemini")
+        usage["harness:agy"] = 3                       # its harness pool is full
+        self.assertNotIn(self._sub("GLM-5.3", usage=usage),
+                         ("Cursor-Grok-4.7", "Antigravity-Gemini"))
+
+    def test_rule_1_a_hard_attempt_never_moves_to_a_medium_seat(self):
+        full = {m: 2 for m, v in self.ROSTER.items() if v[2] == "hard"}
+        self.assertIsNone(self._sub("GLM-5.3", usage=full),
+                          "only the medium Zen seat is free; a hard task must wait")
+        # Upward is legal.
+        self.assertEqual(self._sub("Zen-Big-Pickle"), "Cursor-Grok-4.7")
+
+    def test_rule_2_the_avoided_family_is_never_the_substitute(self):
+        self.assertEqual(self._sub("GLM-5.3", avoid_families={"cursor"}),
+                         "Antigravity-Gemini")
+        self.assertEqual(self._sub("Opus", "reviewer",
+                                   avoid_families={"cursor", "google", "glm"}), "Sol")
+
+    def test_planner_and_disabled_swap_stay_put(self):
+        self.assertIsNone(self._sub("Opus", "planner"))
+        with mock.patch.object(config, "CAP_SWAP_AFTER", 0.0):
+            self.assertIsNone(self._sub("GLM-5.3"))
+
+    def test_a_spent_plan_is_not_idle(self):
+        drivers._usage_blocked_until["cursor"] = NOW + 1000
+        self.assertEqual(self._sub("GLM-5.3"), "Antigravity-Gemini")
+
+
+class CapSwapInTheLeaseWait(unittest.TestCase):
+    def test_the_wait_raises_capswap_only_after_the_threshold(self):
+        clock = [1000.0]
+        ctx = drivers._cap_swap_ctx.set(("GLM-5.3", "opencode", "implementer",
+                                         frozenset(), frozenset({"deepseek"})))
+        self.addCleanup(drivers._cap_swap_ctx.reset, ctx)
+        with mock.patch.object(config, "CAP_SWAP_AFTER", 600.0), \
+                mock.patch.object(drivers, "cap_substitute",
+                                  return_value="Cursor-Grok-4.7") as sub, \
+                mock.patch.object(drivers.time, "monotonic", lambda: clock[0]):
+            drivers._maybe_cap_swap("GLM-5.3", 1000.0, 0)      # 0 s waited
+            sub.assert_not_called()
+            clock[0] += 601
+            drivers._maybe_cap_swap("GLM-5.3", 1000.0, 1)      # not a check tick
+            sub.assert_not_called()
+            with self.assertRaises(drivers.CapSwap) as cm:
+                drivers._maybe_cap_swap("GLM-5.3", 1000.0, 3)
+        self.assertEqual(cm.exception.to_model, "Cursor-Grok-4.7")
+        self.assertEqual(sub.call_args.kwargs["avoid_families"], frozenset({"deepseek"}))
+
+    def test_no_context_means_no_swap(self):
+        with mock.patch.object(drivers, "cap_substitute") as sub:
+            drivers._maybe_cap_swap("GLM-5.3", 0.0, 3)
+        sub.assert_not_called()
+
+    def test_run_hands_the_queued_attempt_to_the_substitute(self):
+        other = ScriptedDriver(["from-cursor"])
+        other.harness = "cursor"
+        other.model = "GLM-5.3"
+        drv = ScriptedDriver(["never"])
+
+        async def full(*a, **k):
+            raise drivers.CapSwap("Cursor-Grok-4.7", 700.0, drv.model)
+
+        with TempLeaseDB(), capture_events() as ev, \
+                mock.patch.object(drv, "_guarded_once", full), \
+                mock.patch.object(drivers, "driver_for", return_value=other) as dfor:
+            result = asyncio.run(drv.run("p", Path("."), task_id="t1",
+                                         avoid_families={"glm"}))
+        self.assertEqual(result.text, "from-cursor")
+        self.assertEqual(dfor.call_args.args[:2], ("Cursor-Grok-4.7", "implementer"))
+        swaps = ev.of("driver.cap_swap")
+        self.assertEqual(len(swaps), 1)
+        self.assertEqual(swaps[0]["to_model"], "Cursor-Grok-4.7")
+        self.assertEqual(drv.calls, 0, "no slot was held, so nothing ran here")
+        self.assertIsNone(drivers._cap_swap_ctx.get(), "context must be reset")

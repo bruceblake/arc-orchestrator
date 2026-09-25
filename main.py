@@ -990,9 +990,34 @@ def cmd_board(args):
         if not agentboard.valid_channel(args.channel):
             print(f"board: invalid channel {args.channel!r}", file=sys.stderr)
             return 2
-        print(agentboard.post(project, author=args.author, channel=args.channel,
+        mid = agentboard.post(project, author=args.author, channel=args.channel,
                               kind=args.kind, body=args.body, mentions=args.mention,
-                              reply_to=args.reply_to))
+                              reply_to=args.reply_to)
+        if agentboard.stored(project, mid):
+            print(mid)
+            return 0
+        # The DB was not writable from here — a harness sandbox (Codex's
+        # workspace-write mounts everything outside the worktree read-only).
+        # The id alone used to be printed with exit 0 and the post was lost.
+        # Queue it in the worktree's .arc/board.jsonl, which the orchestrator
+        # harvests while the run is live and again when it ends.
+        wt = agentboard.worktree_root()
+        if wt is None:
+            print(f"board: could not write the board DB ({config.DB_PATH}) and "
+                  "this is not a worktree to queue the post in", file=sys.stderr)
+            return 1
+        try:
+            path = agentboard.spool(wt, channel=args.channel, kind=args.kind,
+                                    body=args.body, mentions=args.mention,
+                                    reply_to=args.reply_to, msg_id=mid)
+        except OSError as exc:
+            print(f"board: could not write the board DB or queue the post: {exc}",
+                  file=sys.stderr)
+            return 1
+        print(mid)
+        print(f"board: DB not writable from this sandbox; queued in {path} — "
+              "the orchestrator delivers it within a minute while your run is "
+              "live (under your own agent ID).", file=sys.stderr)
         return 0
     if args.board_cmd == "claims":
         for c in agentboard.claims(project):
