@@ -420,7 +420,11 @@ class _Execution:
                 # Convert BEFORE deciding retryability: a policy written as
                 # on=(GraphError,) must catch a timeout, and the raw
                 # asyncio.TimeoutError is not a GraphError.
-                if isinstance(exc, asyncio.TimeoutError):
+                # Only a node that SET a timeout can time out. An inner
+                # TimeoutError on an unlimited node (implementer's timeout is
+                # None) used to become "timed out after Nones" and drain the
+                # graph instead of being the caller's own error.
+                if isinstance(exc, asyncio.TimeoutError) and node.timeout:
                     exc = GraphError(f"node '{node.name}' timed out after {node.timeout}s")
                 retryable = (node.retry is not None
                              and isinstance(exc, node.retry.on)
