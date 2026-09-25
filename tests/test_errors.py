@@ -308,6 +308,41 @@ class TheDailyAudit(unittest.TestCase):
         self.assertEqual(seen, sorted(seen))
 
 
+class TheWatchdogIsReportedWhenItIsNotThere(unittest.TestCase):
+    """`audit.run` must ASK whether the watchdog is alive, not just what it found.
+
+    `audit_watchdog` existing in audit.py is not the same as the report the
+    operator reads containing it: the 2026-09-24 WSL restart killed the watchdog
+    and the fleet, and the daily audit stayed green because no check was wired
+    into `run()`. This pins the wiring, so deleting the call is a test failure
+    rather than a silent regression.
+    """
+
+    def test_run_includes_the_watchdog_findings(self):
+        import audit
+        orig = audit.audit_watchdog
+        audit.audit_watchdog = lambda: [{"severity": "warning", "area": "watchdog",
+                                         "what": "no fleetwatch process is alive",
+                                         "detail": "", "action": "sysctl"}]
+        try:
+            report = audit.run(store=None, with_health=False)
+        finally:
+            audit.audit_watchdog = orig
+        self.assertTrue(any(f["area"] == "watchdog" for f in report["findings"]),
+                        "audit.run dropped the watchdog findings")
+
+    def test_the_finding_reaches_the_rendered_report(self):
+        import audit
+        text = audit.render({"ts": 0, "since_s": 1,
+                             "counts": {"critical": 0, "warning": 1, "info": 0},
+                             "findings": [{
+                                 "severity": "warning", "area": "watchdog",
+                                 "what": "loginctl linger is off for this user",
+                                 "detail": "", "action": "sudo loginctl enable-linger u"}]})
+        self.assertIn("loginctl linger is off", text)
+        self.assertIn("enable-linger", text)
+
+
 class FileClashDetection(unittest.TestCase):
     """Would launching this taskfile collide with work already in flight?
 

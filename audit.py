@@ -236,6 +236,88 @@ def audit_git(repo=None, store=None):
     return out
 
 
+def _watchdog_pids():
+    """Pids running fleetwatch.py, found by argv shape like reconcile.live_runs.
+
+    A bare "does any argument mention fleetwatch.py" test is wrong in both
+    directions: `grep fleetwatch.py /proc/*/cmdline`, an editor or a reviewer's
+    `sed -n 1,200p fleetwatch.py` all carry the token and none of them is the
+    watchdog — a false negative here is exactly the alarm that gets an audit
+    muted. So the interpreter must come first (`python -u fleetwatch.py`), the
+    same discipline reconcile.live_runs uses for `main.py code run`.
+    """
+    pids = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            argv = [a for a in (entry / "cmdline").read_bytes()
+                    .decode(errors="replace").split("\0") if a]
+        except OSError:
+            continue
+        for i, arg in enumerate(argv):
+            if not Path(arg).name.startswith("python"):
+                continue
+            rest = [a for a in argv[i + 1:] if not a.startswith("-")]
+            if rest and Path(rest[0]).name == "fleetwatch.py":
+                pids.append(int(entry.name))
+            break
+    return pids
+
+
+def _linger_state():
+    """True/False for `Linger=yes`, None where loginctl cannot say.
+
+    None means "do not report": loginctl is absent on non-systemd machines
+    (containers, a dev box), and an audit that warns about a tool the host does
+    not have is noise the operator learns to skip.
+    """
+    rc, so, _ = _sh("loginctl", "show-user",
+                    os.environ.get("USER") or os.environ.get("LOGNAME") or "",
+                    "-p", "Linger")
+    if rc != 0:
+        return None
+    for line in so.splitlines():
+        if line.startswith("Linger="):
+            return line.split("=", 1)[1].strip().lower() in ("yes", "1", "true")
+    return None
+
+
+def audit_watchdog():
+    """Is the watchdog actually running, and will it come back after a reboot?
+
+    Both questions are about one failure seen twice on 2026-09-24: a WSL
+    restart killed the fleet's runs AND the watchdog, and neither came back.
+    The watchdog is a systemd USER unit, so without loginctl linger it is torn
+    down when the last login session ends — a restart is exactly that — and
+    nothing resumes the runs it was holding, which is how seven rows sat at
+    `running` forever. No other check can see this: the rest of the audit
+    reports on work, and this reports on the absence of the thing that drives
+    it.
+    """
+    out = []
+    try:
+        import reconcile
+        n_live = len(reconcile.live_runs())
+    except Exception:
+        n_live = 0
+    if not _watchdog_pids():
+        out.append(_finding(
+            "warning", "watchdog", "no fleetwatch process is alive",
+            f"{n_live} code run(s) alive with nothing to resume them if they die",
+            "systemctl --user start arc-watchdog (install: cp "
+            "deploy/arc-watchdog.service ~/.config/systemd/user/ && systemctl "
+            "--user enable --now arc-watchdog)"))
+    if _linger_state() is False:
+        user = os.environ.get("USER") or os.environ.get("LOGNAME") or "$USER"
+        out.append(_finding(
+            "warning", "watchdog", "loginctl linger is off for this user",
+            "a user unit is stopped when the last session ends, so the watchdog "
+            "does not survive a logout or a WSL restart",
+            f"sudo loginctl enable-linger {user}"))
+    return out
+
+
 def audit_leases(store):
     out = []
     try:
@@ -1119,6 +1201,7 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
     findings += audit_pr_collisions(store)
     findings += audit_invariants(store)
     findings += audit_roster()
+    findings += audit_watchdog()
     findings += audit_tasks_backup(snapshot=snapshot)
     findings += audit_db_backup(snapshot=snapshot)
     findings += audit_logs()

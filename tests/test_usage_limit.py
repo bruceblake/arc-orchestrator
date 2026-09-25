@@ -370,24 +370,25 @@ class ExitClassification(unittest.TestCase):
         self.assertEqual(cm.exception.resets_at, 1790012345)
 
 
-class SubscriptionSeatsAreUncapped(unittest.TestCase):
+class SubscriptionSeatCaps(unittest.TestCase):
     PROBE = ("import config, json; print(json.dumps({"
              "'claude': config.harness_limit('claude'),"
              "'codex': config.harness_limit('codex'),"
              "'claude_driver': config.driver_limit('Claude-Opus-5.5', True),"
              "'openai_driver': config.driver_limit(config.STUDIO_OPENAI_MODEL, True)}))")
 
-    def test_default_is_the_subscription_cap(self):
+    def test_defaults_are_the_per_seat_caps(self):
         caps = json.loads(in_studio(self.PROBE))
-        for k, v in caps.items():
-            self.assertGreaterEqual(v, 16, f"{k} is still capped: {caps}")
+        self.assertEqual(caps, {"claude": 2, "codex": 4,
+                                "claude_driver": 2, "openai_driver": 4})
 
-    def test_operator_can_restore_a_single_seat(self):
-        import os
-        with mock.patch.dict(os.environ, {"ARC_SUBSCRIPTION_SESSION_CAP": "1"}):
-            caps = json.loads(in_studio(self.PROBE))
-        self.assertEqual(caps, {"claude": 1, "codex": 1,
-                                "claude_driver": 1, "openai_driver": 1})
+    def test_driver_limit_env_overrides_one_family(self):
+        caps = json.loads(in_studio(
+            self.PROBE, ARC_DRIVER_LIMIT_ANTHROPIC="1", ARC_DRIVER_LIMIT_OPENAI="1"))
+        self.assertEqual(caps["claude_driver"], 1)
+        self.assertEqual(caps["openai_driver"], 1)
+        self.assertEqual(caps["claude"], 2)
+        self.assertEqual(caps["codex"], 4)
 
     def test_api_profile_is_bound_by_the_opencode_pool_not_the_model(self):
         caps = json.loads(in_studio(

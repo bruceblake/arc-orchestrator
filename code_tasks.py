@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -623,6 +624,31 @@ async def _changed_files(wt, base):
 def _harness_of(model):
     """The local harness that runs this model, from the roster."""
     return config.MODEL_HARNESS.get(model, "opencode")
+
+
+def _seat_blocked(model, usage):
+    """True when this harness has a recent driver.usage_limit still in force."""
+    harness = _harness_of(model)
+    if usage.get(f"usage_limit:{harness}"):
+        return True
+    return drivers._usage_blocked_until.get(harness, 0) > time.time()
+
+
+def _reviewer_rank(model, usage):
+    """Lower sorts first: DeepSeek, GLM, other seats, then Claude.
+
+    A full or usage-blocked seat sorts after every free seat.
+    Among subscription seats the least contended (most headroom) wins.
+    """
+    fam = config.MODEL_FAMILY.get(model)
+    pressure = _reviewer_pressure(model, usage)
+    order = {"deepseek": 0, "glm": 1, "anthropic": 3}.get(fam, 2)
+    return (
+        1 if _seat_blocked(model, usage) or pressure >= 1.0 else 0,
+        order,
+        pressure,
+        -_tier_rank(model),
+    )
 
 
 def _reviewer_pressure(model, usage):
@@ -1548,7 +1574,7 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
                 continue
         except (KeyError, ValueError):
             continue
-        if _reviewer_pressure(m, usage) >= 1.0:
+        if _reviewer_pressure(m, usage) >= 1.0 or _seat_blocked(m, usage):
             continue
         try:
             _driver(m, "reviewer", pol)
@@ -1557,8 +1583,9 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
         fit.append(m)
     if not fit:
         return planned, "planned_full_no_alternative"
-    # Least contended first; on a tie the stronger reviewer.
-    fit.sort(key=lambda m: (_reviewer_pressure(m, usage), -_tier_rank(m)))
+    # Free ARC seats, then the subscription seat with the most headroom.
+    # Claude sorts last so the smallest plan is not spent on routine review.
+    fit.sort(key=lambda m: _reviewer_rank(m, usage))
     return fit[0], "planned_full_fallback"
 
 
@@ -1714,6 +1741,61 @@ def _amendment_validator(taskfile, pol):
             except OSError:
                 pass
     return validate
+
+
+def _resume_pr_start(repo, tid, *, known_open=False):
+    """Choose the safe resume node for an open PR: gate if edits are pending.
+
+    Any gh failure returns None: resume then follows today's alloc path.
+    Called from build_code_graph, which production invokes inside a running
+    loop, so the probe runs on a private loop when one is already going.
+    """
+    async def _check():
+        if not known_open:
+            number, _url, state = await gitstore.find_pr(
+                repo, tid, state="open", wait_quota=False)
+            if not number or (state or "").upper() != "OPEN":
+                return None
+        try:
+            wt = await gitstore.existing_worktree(repo, tid)
+        except Exception:
+            return "gate"  # the PR was found, but cleanliness is unknown
+        if wt is None:
+            return "publish"  # publish handles a missing worktree
+        try:
+            rc, dirty, _ = await gitstore._git(
+                ["status", "--porcelain", "--untracked-files=all", "--", ".",
+                 *(f":(exclude){p}" for p in
+                   (*gitstore.CHANNEL_FILES, *gitstore.RUNTIME_PATHS))],
+                cwd=wt, check=False)
+        except Exception:
+            return "gate"  # cannot prove the worktree is clean
+        return "gate" if rc != 0 or dirty.strip() else "publish"
+
+    try:
+        try:
+            asyncio.get_running_loop()
+            in_loop = True
+        except RuntimeError:
+            in_loop = False
+        if not in_loop:
+            return asyncio.run(_check())
+        box = {}
+
+        def _thread():
+            try:
+                box["v"] = asyncio.run(_check())
+            except Exception as exc:
+                box["e"] = exc
+
+        th = threading.Thread(target=_thread, daemon=True)
+        th.start()
+        th.join()
+        if box.get("e") is not None:
+            return "gate" if known_open else None
+        return box.get("v")
+    except Exception:
+        return "gate" if known_open else None
 
 
 def build_code_graph(store, taskset, taskfile="", policy=None):
@@ -1905,6 +1987,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
     # tasks collapse into skip stubs, failed/conflict/stale/pending tasks run
     # again — failed ones one tier higher, conflict ones keeping their model.
     prior = {}
+    resume_start = {}
     if taskfile and store is not None:
         try:
             prior = {r["id"]: r for r in store.code_tasks_for(taskfile)}
@@ -1952,8 +2035,22 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
 
         higher = {tid: m for tid in retried
                   if (m := start_model(tid)) != _baseline(tid)}
+        # A reboot leaves the row 'running' (then stale-reset writes 'failed')
+        # while the PR is still open. Re-attach, but verify unfinished local
+        # edits before publish can commit them.
+        for tid in retried:
+            known_open = prior[tid].get("status") in ("in_review", "conflict")
+            try:
+                start = _resume_pr_start(repo, tid, known_open=known_open)
+                if start:
+                    resume_start[tid] = start
+            except Exception:
+                log.warning("resume %s: open-PR probe failed", tid)
         events.emit("run.resume", taskfile=taskfile, skipped_merged=skipped,
-                    retried=retried, escalated_on_resume=higher)
+                    retried=retried, escalated_on_resume=higher,
+                    reattached_open_pr=sorted(tid for tid in resume_start
+                                              if prior[tid].get("status") not in
+                                              ("in_review", "conflict")))
 
     def wire_deps(t, target):
         """Gate `target` on EVERY dependency merging, not just the last one.
@@ -2886,13 +2983,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             impl_fam = config.MODEL_FAMILY.get(
                 wrote_the_code(ctx, tid, cur_model(ctx), store))
             pool = _eligible_pr_reviewers(impl_fam, pol)
-            # Least-contended first; contention is whichever ceiling binds
-            # first, the model's own cap or its harness's (_reviewer_pressure).
+            # Free DeepSeek, then GLM, then the subscription seat with the
+            # most headroom; full or usage-blocked seats sort last.
             try:
                 usage = store.lease_usage()
             except Exception:
                 usage = {}
-            pool.sort(key=lambda m: (_reviewer_pressure(m, usage), usage.get(m, 0)))
+            pool.sort(key=lambda m: _reviewer_rank(m, usage))
             crashed_before = set(prior_r.get("crashed_models") or prior_r.get("crashed") or []) \
                 if prior_r.get("inconclusive") else set()
             if crashed_before:
@@ -3406,10 +3503,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                and f"alloc_{i}" not in c.get("results", {}))
         g.edge(f"publish_{tid}", f"pr_merge_{tid}",
                when=lambda r, c: bool(r.get("empty")), on_drain=True)
-        # in_review resumes at publish, which finds the already-open PR and
-        # hands it straight to pr_review — restarting at alloc would discard a
-        # pushed branch and an open pull request.
-        first = "publish" if prior_status in ("conflict", "in_review") else "alloc"
+        # A clean open PR resumes at publish. Pending local edits first run
+        # through the verify gate and cross-family review; publish must not
+        # commit an interrupted PR rework without those checks.
+        first = resume_start.get(tid) or (
+            "publish" if prior_status in ("conflict", "in_review") else "alloc")
         if t["deps"]:
             # Wait for EVERY dep's PR to MERGE into the base branch, not just
             # to open — otherwise a dependent branches from a base that lacks
