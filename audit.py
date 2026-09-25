@@ -260,6 +260,99 @@ def audit_leases(store):
     return out
 
 
+def board_health_findings(project=None, since_hours=24):
+    """Coordinate means USING the board; Rule 4c.
+
+    Reads agentboard.board_health and turns it into findings with actions.
+    Every threshold is deliberately loose — a report that fires on a quiet
+    project is a report nobody reads twice. An unreadable board is INFO, not
+    a warning: a tree predating the board is not a defect.
+    """
+    out = []
+    try:
+        import agentboard
+    except Exception:  # noqa: BLE001
+        return out
+    projects = [project] if project else [p["project"] for p in agentboard.projects()]
+    for proj in projects:
+        try:
+            h = agentboard.board_health(proj, since_hours=since_hours)
+        except Exception as exc:  # noqa: BLE001
+            out.append(_finding("info", "board", f"{proj}: board health unreadable",
+                                str(exc)[:200], ""))
+            continue
+        out.extend(_board_findings(proj, h, since_hours))
+    return out
+
+
+def _board_findings(proj, h, since_hours):
+    out = []
+    kindline = ", ".join(f"{k} {v}" for k, v in list(h["by_kind"].items())[:6])
+    agentline = ", ".join(f"{a} {n}" for a, n in list(h["by_agent"].items())[:6])
+    out.append(_finding(
+        "info", "board", f"{proj}: {h['posts']} board post(s) in {since_hours:g}h",
+        (f"kinds: {kindline}\nagents: {agentline}") if h["posts"] else "", ""))
+
+    if h["posts"] and h["tasks"]:
+        if h["claim_share"] < 0.5:
+            out.append(_finding(
+                "warning", "board",
+                f"{proj}: only {h['claim_share']:.0%} of tasks posted a claim",
+                f"{h['claimed']}/{h['tasks']} task(s) leased the files they were "
+                "expected to touch",
+                "a task that never claims cannot be warned off a sibling's "
+                "files; check the CLAIM CONFLICTS block reaches the "
+                "implementer prompt"))
+        if h["result_share"] < 0.5:
+            out.append(_finding(
+                "warning", "board",
+                f"{proj}: only {h['result_share']:.0%} of tasks posted a result",
+                f"{h['resulted']}/{h['tasks']} task(s) posted kind=result — the "
+                "next agent cannot tell who knows what",
+                "a result must list the files it changed in refs.files, so "
+                "`agentboard.expertise` can route a question to it"))
+
+    if h["unanswered"]:
+        oldest = max(q["age_s"] for q in h["unanswered"])
+        worst = ", ".join(f"#{q['id']} {q['author']} ({q['age_s'] / 3600:.1f}h)"
+                          for q in h["unanswered"][:5])
+        out.append(_finding(
+            "warning" if oldest > 4 * 3600 else "info", "board",
+            f"{proj}: {len(h['unanswered'])} unanswered question(s)",
+            f"oldest {oldest / 3600:.1f}h: {worst}",
+            "answer with kind=answer and reply_to=<id>; until someone does, "
+            "the asker is blocked or guessing"))
+
+    if h["median_answer_s"] is not None and h["median_answer_s"] > 2 * 3600:
+        out.append(_finding(
+            "info", "board",
+            f"{proj}: median question answer takes "
+            f"{h['median_answer_s'] / 60:.0f} min",
+            f"{h['answered']} answered in the window",
+            "a prompt cannot wait for a reply; if a question must be answered "
+            "before the next attempt, post kind=blocker so the captain sees it"))
+
+    for c in h["claim_conflicts"][:5]:
+        out.append(_finding(
+            "warning", "board",
+            f"{proj}: {c['a']} and {c['b']} claim overlapping files",
+            ", ".join(c["paths"][:6]),
+            "they were pinged when the second claim landed; if both are still "
+            "editing, one must release — `main.py board claims` shows every "
+            "live lease"))
+
+    for d in h["deaf"][:8]:
+        out.append(_finding(
+            "warning", "board",
+            f"{proj}: {d['agent']} read its inbox but never replied",
+            f"{d['pending']} mention(s) delivered to its prompt, last "
+            f"{d['since_s'] / 3600:.1f}h ago, no answer or acknowledgement since",
+            "the digest is delivered WITH the prompt, so the agent saw it — "
+            "either it ignored the mention or answered elsewhere; a mention "
+            "needing a reply should be kind=question, answered next round"))
+    return out
+
+
 def audit_gates(store=None, tasks_dir=None, repo=None):
     """Gates that pass WITHOUT the work being done.
 
@@ -795,6 +888,7 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
     findings += audit_pr_collisions(store)
     findings += audit_invariants(store)
     findings += audit_roster()
+    findings += board_health_findings(since_hours=max(1.0, since_s / 3600.0))
     findings += audit_tasks_backup(snapshot=snapshot)
     findings += audit_db_backup(snapshot=snapshot)
     findings += audit_logs()

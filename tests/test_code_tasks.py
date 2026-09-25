@@ -3128,6 +3128,49 @@ class AgentBoardWiring(unittest.TestCase):
         st = [m for m in self._msgs(channel="task:bw1") if m["kind"] == "status"]
         self.assertTrue(st and "implementing" in st[0]["body"])
 
+    def test_the_etiquette_checklist_is_short_and_has_examples(self):
+        """Every prompt carrying it pays for it out of the task's own
+        attention, so it stays a checklist with concrete JSON examples."""
+        e = code_tasks.BOARD_ETIQUETTE
+        self.assertLess(len(e), 900, "the checklist must not crowd out the task")
+        for kind in ("claim", "question", "answer", "result", "blocker"):
+            self.assertIn(f'"kind":"{kind}"', e)
+        # The interface question names a task and mentions it; the answer
+        # points at a file:line rather than describing prose.
+        self.assertIn("mentions", e)
+        self.assertIn(".py:", e)
+        self.assertIn("refs", e)
+
+    def test_all_three_agent_roles_are_told_the_etiquette(self):
+        t = code_tasks.load_taskfile(taskfile([{
+            "id": "bw1", "title": "T", "prompt": "do it", "verify_cmd": "true",
+            "model": "GLM-5.3", "reviewer": "deepseek",
+            "files_hint": ["pkg/a.py"]}], repo=self.repo))["tasks"]["bw1"]
+        for prompt in (code_tasks._impl_prompt(t, None, board="BOARD"),
+                       code_tasks._review_prompt(t, "DIFF", board="BOARD"),
+                       code_tasks._pr_review_prompt(t, "DIFF", 1, 1, [],
+                                                     board="BOARD")):
+            self.assertIn("BOARD", prompt)
+            self.assertIn(code_tasks.BOARD_ETIQUETTE, prompt)
+
+    def test_the_implementer_prompt_is_what_ingest_compares_against(self):
+        """A body that is a bare copy of the prompt it was given is refused,
+        so the node must RECORD the prompt before the run — otherwise the
+        check silently never fires."""
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
+                capture_events():
+            self._implement(self._graph())
+        [prompt] = self.prompts
+        body = " ".join(prompt.split())
+        line = {"kind": "status", "body": body}
+        with mock.patch.object(code_tasks, "_driver",
+                               lambda m, r, p: self._drv(line=line)), \
+                capture_events():
+            self._implement(self._graph(), {"implement_bw1": 1})
+        errs = [m for m in self._msgs(kinds=["error"])]
+        self.assertTrue(errs, "the echoed prompt must come back as an error post")
+        self.assertIn("bare copy of your prompt", errs[0]["body"])
+
     def test_ingest_happens_after_a_crash(self):
         line = {"kind": "note", "body": "half-way: the parser is done"}
         with mock.patch.object(code_tasks, "_driver",

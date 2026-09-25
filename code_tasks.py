@@ -532,10 +532,21 @@ def _make_chain_wait(store, taskfile, after_keys):
 
 
 BOARD_ETIQUETTE = (
-    "COORDINATE ON THE BOARD: before editing files outside the files you are "
-    "expected to touch, check live claims (`./py main.py board claims`) and "
-    "post a claim for them; ask a question with @mentions instead of guessing "
-    "another task's interface; post a result line when you are done.\n")
+    "COORDINATE ON THE BOARD — one JSON line per post in .arc/board.jsonl\n"
+    "- claim shared files before editing (live claims: `./py main.py board "
+    "claims`): {\"kind\":\"claim\",\"body\":\"claiming audit.py\","
+    "\"refs\":{\"paths\":[\"audit.py\"]}}; a CLAIM CONFLICTS block above means "
+    "ASK first.\n"
+    "- ask instead of guessing an interface: {\"kind\":\"question\",\"channel\":"
+    "\"task:<id>\",\"body\":\"@<id> is plan_tasks() sync?\",\"mentions\":[\"<id>\"]}\n"
+    "- answer with evidence, not prose: {\"kind\":\"answer\",\"reply_to\":\"<id>\","
+    "\"body\":\"async — code_tasks.py:1564\"}\n"
+    "- post a result with the files you changed: {\"kind\":\"result\",\"body\":"
+    "\"validation added\",\"refs\":{\"files\":[\"agentboard.py\"]}}\n"
+    "- blocked past 2 fix rounds: {\"kind\":\"blocker\",\"body\":\"...\"} — the "
+    "captain acts on blockers.\n"
+    "Mentions must name a real task id, model, or @all/@captain/@operator; a "
+    "bare copy of this prompt is rejected as an 'error' post.\n")
 
 
 def _impl_prompt(t, feedback, hints="", roster=None, board="", contract="",
@@ -1075,7 +1086,7 @@ def _review_prompt(t, diff, impact="", roster=None, board="", contract="",
         p += ("A code change MUST come with tests that would FAIL without it. "
               "Documentation-only changes are exempt.\n")
     if board:
-        p += "\n" + board
+        p += "\n" + board + "\n" + BOARD_ETIQUETTE
     if roster:
         p += plan_amend.prompt_block(roster)
     if contract:
@@ -1187,7 +1198,7 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
           "something. Be specific — name the file and line, say what is wrong "
           "and what would fix it. Vague objections waste a whole round.\n\n")
     if board:
-        p += "\n" + board
+        p += "\n" + board + "\n" + BOARD_ETIQUETTE
     if roster:
         p += plan_amend.prompt_block(roster)
     if contract:
@@ -1535,6 +1546,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             errors.capture(exc, task=tid, model=model, node=f"board_{tid}",
                            role=role)
         return text or board.prompt_block(wt, project=project_slug, task=tid)
+
+    def note_prompt(tid, role, prompt):
+        """Remember the prompt so ingest can refuse a board line that is a
+        bare copy of it (`agentboard.record_prompt` / `_copies_prompt`)."""
+        try:
+            agentboard.record_prompt(project_slug, task=tid, role=role,
+                                     text=prompt)
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"board_{tid}", role=role)
 
     def board_ingest(tid, wt, role, model):
         """Land what the agent wrote to .arc/board.jsonl on the board. Runs
@@ -1978,11 +1998,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # checkpoint written in the `finally` below must name the model
             # that ran — on the crash path exactly as on the success path.
             ran = {"model": model}
+            prompt = _impl_prompt(t, feedback, hints, roster, thread,
+                                  project_contract.role_block(wt, "implementer"),
+                                  dossier=dossier_block(tid, "implementer"))
+            note_prompt(tid, "implementer", prompt)
             try:
                 res = await driver.run(
-                    _impl_prompt(t, feedback, hints, roster, thread,
-                                 project_contract.role_block(wt, "implementer"),
-                                 dossier=dossier_block(tid, "implementer")), wt,
+                    prompt, wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
                     avoid_families={reviewer_for(t, model)})
                 ran["model"] = getattr(res, "model", None) or model
@@ -2284,12 +2306,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             if shown:
                 driver.images = evidence.review_images(shown)
             try:
+                prompt = _review_prompt(t, diff, impact, roster,
+                                        board_digest(tid, wt, "reviewer", driver.model)
+                                        + evidence.prompt_block(shown),
+                                        project_contract.role_block(wt, "reviewer"),
+                                        dossier=dossier_block(tid, "reviewer"))
+                note_prompt(tid, "reviewer", prompt)
                 res = await driver.run(
-                    _review_prompt(t, diff, impact, roster,
-                                   board_digest(tid, wt, "reviewer", driver.model)
-                                   + evidence.prompt_block(shown),
-                                   project_contract.role_block(wt, "reviewer"),
-                                   dossier=dossier_block(tid, "reviewer")),
+                    prompt,
                     wt, task_id=f"{tid}-x{attempt}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
@@ -2710,13 +2734,16 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 shown = gate_evidence(ctx)
                 if shown:
                     drv.images = evidence.review_images(shown)
+                prompt = _pr_review_prompt(
+                    t, it["diff"], it["n_reviewers"], it["round"],
+                    it["prior_issues"], impact, roster,
+                    board_digest(tid, wt, "pr-reviewer", model)
+                    + evidence.prompt_block(shown),
+                    project_contract.role_block(wt, "reviewer"),
+                    dossier=dossier_block(tid, "pr-reviewer"))
+                note_prompt(tid, "pr-reviewer", prompt)
                 res = await drv.run(
-                    _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
-                                      it["prior_issues"], impact, roster,
-                                      board_digest(tid, wt, "pr-reviewer", model)
-                                      + evidence.prompt_block(shown),
-                                      project_contract.role_block(wt, "reviewer"),
-                                      dossier=dossier_block(tid, "pr-reviewer")),
+                    prompt,
                     wt, task_id=f"{tid}-pr{it['round']}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
