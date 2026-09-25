@@ -139,16 +139,28 @@ class TheTokenNeverReachesAChild(unittest.TestCase):
 
     def test_every_dashboard_subprocess_passes_the_scrubbed_env(self):
         import ast
-        tree = ast.parse(Path(dashboard.__file__).read_text())
+        import captain
+        import fleetwatch
         bare = []
-        for node in ast.walk(tree):
-            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                    and isinstance(node.func.value, ast.Name)
-                    and node.func.value.id == "subprocess"
-                    and node.func.attr in ("run", "Popen", "call", "check_call", "check_output")):
-                if not any(k.arg == "env" for k in node.keywords):
-                    bare.append(node.lineno)
+        for mod in (dashboard, captain, fleetwatch):
+            tree = ast.parse(Path(mod.__file__).read_text())
+            for node in ast.walk(tree):
+                if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                        and isinstance(node.func.value, ast.Name)
+                        and node.func.value.id == "subprocess"
+                        and node.func.attr in ("run", "Popen", "call", "check_call",
+                                               "check_output")):
+                    if not any(k.arg == "env" for k in node.keywords):
+                        bare.append(f"{Path(mod.__file__).name}:{node.lineno}")
         self.assertEqual(bare, [], "subprocess calls inheriting os.environ (and the token)")
+
+    def test_the_captain_queue_drain_run_env_lacks_the_token(self):
+        import captain
+        with mock.patch.object(captain.subprocess, "Popen") as po:
+            captain._spawn_detached(["true"], "captain-test.log")
+        env = po.call_args.kwargs["env"]
+        self.assertNotIn("ARC_DASHBOARD_TOKEN", env)
+        self.assertEqual((env["ARC_KEEP_ME"], env["PYTHONUNBUFFERED"]), ("1", "1"))
 
     def test_a_driver_harness_env_lacks_the_token(self):
         import asyncio

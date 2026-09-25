@@ -137,7 +137,7 @@ def _locked(project):
 # --- builds ---------------------------------------------------------------------
 def _git(repo, *args, timeout=30):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, env=config.child_env())
 
 
 def _repo(project):

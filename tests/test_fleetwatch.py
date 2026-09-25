@@ -14,6 +14,8 @@ import config  # noqa: E402
 import fleetwatch  # noqa: E402
 from store import Store  # noqa: E402
 
+_REAL_LAUNCH = fleetwatch._launch
+
 
 class WatchdogTick(unittest.TestCase):
     def setUp(self):
@@ -108,6 +110,29 @@ class WatchdogTick(unittest.TestCase):
             fleetwatch.tick(self.store)
         rec = fleetwatch._load("runs.json", {})[self.tf]
         self.assertNotIn("--force", rec["argv"])
+
+    def test_the_dashboard_token_is_never_recorded_or_replayed(self):
+        env = {"ARC_DASHBOARD_TOKEN": "s3cret", "ARC_KEEP_ME": "1"}
+        self.live = [{"pid": 7, "taskfile": self.tf}]
+        with mock.patch.object(fleetwatch, "_proc_launch", lambda pid: (
+                ["python", "main.py", "code", "run", self.tf], "/", dict(env))):
+            fleetwatch.tick(self.store)
+        self.assertNotIn("s3cret", (fleetwatch.STATE_DIR / "runs.json").read_text())
+        self.assertEqual(fleetwatch._load("runs.json", {})[self.tf]["env"], {"ARC_KEEP_ME": "1"})
+
+    def test_a_token_left_in_an_old_record_is_scrubbed(self):
+        self._record(env={"ARC_DASHBOARD_TOKEN": "s3cret", "ARC_KEEP_ME": "1"})
+        self._row("a", "failed")
+        fleetwatch.tick(self.store)
+        self.assertNotIn("s3cret", (fleetwatch.STATE_DIR / "runs.json").read_text())
+
+    def test_a_relaunch_never_passes_the_token(self):
+        rec = {"argv": ["true"], "cwd": "/",
+               "env": {"ARC_DASHBOARD_TOKEN": "s3cret", "ARC_KEEP_ME": "1"}}
+        with mock.patch.object(fleetwatch.subprocess, "Popen") as po:
+            po.return_value.pid = 1
+            _REAL_LAUNCH(self.tf, rec)
+        self.assertEqual(po.call_args.kwargs["env"], {"ARC_KEEP_ME": "1"})
 
 
 class DurableTaskfileCopies(unittest.TestCase):

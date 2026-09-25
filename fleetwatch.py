@@ -295,7 +295,7 @@ def _launch(tf, rec):
     out = STATE_DIR / "runs" / f"{Path(tf).stem}-{time.strftime('%Y%m%d-%H%M%S')}.log"
     out.parent.mkdir(parents=True, exist_ok=True)
     fh = open(out, "ab")
-    proc = subprocess.Popen(rec["argv"], cwd=rec["cwd"], env=rec["env"],
+    proc = subprocess.Popen(rec["argv"], cwd=rec["cwd"], env=config.child_env(rec["env"]),
                             stdin=subprocess.DEVNULL, stdout=fh, stderr=fh,
                             start_new_session=True)
     fh.close()
@@ -304,6 +304,9 @@ def _launch(tf, rec):
 
 def tick(store):
     runs = _load("runs.json", {})
+    for rec in runs.values():
+        if isinstance(rec.get("env"), dict):
+            rec["env"] = config.child_env(rec["env"])
     ignore = set(_load("ignore.json", []))
     live = {}
     for r in reconcile.live_runs():
@@ -321,7 +324,7 @@ def tick(store):
         if rec.get("pid") != r["pid"]:
             rec.update(started=_now())
         # --force is a one-off human override; never replay it.
-        rec.update(argv=[a for a in argv if a != "--force"], cwd=cwd, env=env,
+        rec.update(argv=[a for a in argv if a != "--force"], cwd=cwd, env=config.child_env(env),
                    pid=r["pid"], last_seen=_now(), parked=False)
         rec.setdefault("quick_fails", 0)
         keep_taskfile(tf, rec)

@@ -400,7 +400,7 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
 
 async def _git(args, cwd, check=True):
     proc = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=str(cwd),
+        "git", *args, cwd=str(cwd), env=config.child_env(),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
@@ -429,7 +429,7 @@ async def _git_bytes(args, cwd, check=True):
     for a checkpoint. Only the stderr is decoded, for the error message.
     """
     proc = await asyncio.create_subprocess_exec(
-        "git", *args, cwd=str(cwd),
+        "git", *args, cwd=str(cwd), env=config.child_env(),
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
@@ -870,7 +870,7 @@ async def github_status(repo):
     info["gh_installed"] = True
     try:
         proc = await asyncio.create_subprocess_exec(
-            "gh", "auth", "status", cwd=str(repo),
+            "gh", "auth", "status", cwd=str(repo), env=config.child_env(),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         try:
             await asyncio.wait_for(proc.communicate(), 60)
@@ -955,7 +955,7 @@ async def _gh_raw(args, cwd, timeout=180):
     """Run gh once; returns (rc, stdout, stderr). Never raises."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            "gh", *args, cwd=str(cwd),
+            "gh", *args, cwd=str(cwd), env=config.child_env(),
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
         out, err = await asyncio.wait_for(proc.communicate(), timeout)
         return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")

@@ -42,7 +42,7 @@ or
 
 def _gh(args, cwd):
     p = subprocess.run(["gh", *args], cwd=cwd, capture_output=True, text=True,
-                       timeout=config.GH_TIMEOUT)
+                       timeout=config.GH_TIMEOUT, env=config.child_env())
     if p.returncode != 0:
         raise RuntimeError(f"gh {' '.join(args)}: {(p.stderr or p.stdout).strip()[:300]}")
     return p.stdout
@@ -69,7 +69,8 @@ def ensure_labels(repo):
             (config.PR_MANUAL_REJECTED_LABEL, "cf222e", "Manual review: send it back")):
         subprocess.run(["gh", "label", "create", name, "--color", color,
                         "--description", desc, "--force"], cwd=repo,
-                       capture_output=True, text=True, timeout=config.GH_TIMEOUT)
+                       capture_output=True, text=True, timeout=config.GH_TIMEOUT,
+                       env=config.child_env())
 
 
 def build(repo, number):

@@ -151,7 +151,8 @@ def enabled(repo):
     if key not in _enabled_cache:
         try:
             url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=key,
-                                 capture_output=True, text=True, timeout=10).stdout
+                                 capture_output=True, text=True, timeout=10,
+                                 env=config.child_env()).stdout
         except (OSError, subprocess.SubprocessError):
             url = ""
         _enabled_cache[key] = "github.com" in url
