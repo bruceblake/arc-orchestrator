@@ -1826,6 +1826,20 @@ async def open_task_issues(store, taskset, taskfile):
                 out[tid] = n
                 if had and recorded:
                     await one("model", tid, gh_issues.set_model(repo, n, recorded))
+                # A resume that re-attaches to an already-open PR may never
+                # publish again (no worktree, or nothing new to commit). The
+                # keyword has to be on the PR body or a merge leaves the issue
+                # open. sync_taskfile already does this; run start must too.
+                if row.get("status") in ("in_review", "conflict"):
+                    found = await one(
+                        "find_pr", tid,
+                        gitstore.find_pr(repo, tid, state="open"))
+                    if found and found[0]:
+                        number, url, _state = found
+                        await one("pr_closes", tid, gh_issues.ensure_pr_closes(
+                            repo, number, n, epic))
+                        await one("link_pr", tid, gh_issues.link_pr(
+                            repo, n, number, url or ""))
             refreshed = await one("epic", "", gh_issues.ensure_epic(repo, name, taskfile))
             if refreshed is not None:
                 out[""] = refreshed

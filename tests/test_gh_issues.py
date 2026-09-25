@@ -369,6 +369,22 @@ class Wiring(Base):
             out = self.run_(g.nodes[name].fn(ctx))
         return out, ev
 
+    def test_run_start_adds_closes_to_an_open_pr(self):
+        ts = code_tasks.load_taskfile(self.tf)
+        store = FakeStore(prior=[{"id": "t1", "status": "in_review",
+                                  "model": "GLM-5.3"}])
+        self.gh.pulls[9] = {"body": "already open, no keyword"}
+
+        async def find_pr(repo, tid, state="open"):
+            return 9, "https://github.com/o/r/pull/9", "OPEN"
+
+        with mock.patch.object(gitstore, "find_pr", find_pr):
+            out = self.run_(code_tasks.open_task_issues(store, ts, str(self.tf)))
+        self.assertIn("Closes #" + str(out["t1"]), self.gh.pulls[9]["body"])
+        linked = [c for c in self.gh.comments(out["t1"])
+                  if c.startswith("**pull request opened**")]
+        self.assertEqual(len(linked), 1)
+
     def test_run_start_opens_epic_and_unmerged_tasks(self):
         ts = code_tasks.load_taskfile(self.tf)
         store = FakeStore(prior=[{"id": "t1", "status": "merged"}])
