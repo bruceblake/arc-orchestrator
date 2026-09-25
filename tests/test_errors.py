@@ -938,10 +938,26 @@ class TheDatabaseIsBackedUp(unittest.TestCase):
     integrity-checked before it counts. A backup nobody verified is a hope.
     """
 
+    @staticmethod
+    def _rmtree(path):
+        """Drop the temp dir even if sqlite recreates a file mid-delete.
+
+        A WAL/SHM sidecar can appear after scandir and before rmdir, and
+        shutil then raises ENOTEMPTY. ignore_errors leaves the directory
+        behind; a short retry removes the file that showed up late.
+        """
+        import shutil, time
+        for _ in range(5):
+            shutil.rmtree(path, ignore_errors=True)
+            if not os.path.exists(path):
+                return
+            time.sleep(0.05)
+        shutil.rmtree(path, ignore_errors=True)
+
     def setUp(self):
-        import shutil, sqlite3
+        import sqlite3
         self.dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.addCleanup(self._rmtree, self.dir)
         self.db = os.path.join(self.dir, "orch.db")
         con = sqlite3.connect(self.db)
         con.execute("PRAGMA journal_mode=WAL")
@@ -966,8 +982,12 @@ class TheDatabaseIsBackedUp(unittest.TestCase):
     def test_the_copy_restores_the_same_rows(self):
         import audit, sqlite3
         audit.audit_db_backup(db_path=self.db, snapshot=True)
-        rows = sqlite3.connect(str(self._backups()[0])).execute(
-            "SELECT id, status FROM code_tasks ORDER BY id").fetchall()
+        con = sqlite3.connect(str(self._backups()[0]))
+        try:
+            rows = con.execute(
+                "SELECT id, status FROM code_tasks ORDER BY id").fetchall()
+        finally:
+            con.close()
         self.assertEqual(rows, [("a", "merged"), ("b", "failed"), ("c", "merged")])
 
     def test_never_backed_up_is_a_warning_not_silence(self):
