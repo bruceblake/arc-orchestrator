@@ -96,12 +96,12 @@
     },
     {
       "name": "projects-desktop-light",
-      "changed": 0.0034375,
+      "changed": 0.0034598765432098766,
       "box": [
         117,
-        134,
+        93,
         393,
-        31
+        72
       ],
       "side_by_side": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/compare/projects-desktop-light.png",
       "before": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-synth/before/projects-desktop-light.png"
