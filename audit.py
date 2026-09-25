@@ -583,7 +583,8 @@ def audit_invariants(store=None, repo=None):
     """
     if store is None:
         return []
-    repo = Path(repo or config.ROOT)
+    explicit_repo = repo is not None
+    repo = Path(repo or config.ROOT).resolve()
     try:
         rows = [dict(r) for r in store.code_tasks_all()]
     except Exception as exc:
@@ -596,48 +597,101 @@ def audit_invariants(store=None, repo=None):
         return [_finding("info", "invariants", "cannot read the process table",
                          "", "skipping invariant checks rather than guessing")]
 
-    rc, raw, _ = _sh("gh", "pr", "list", "--state", "open", "--json",
-                     "number,headRefName", cwd=repo, timeout=25)
-    prs, pr_known = {}, rc == 0
-    if pr_known:
+    # The database spans repos. Checking a game task against the orchestrator
+    # repo's PR list labels a real open game PR as stranded. A missing taskfile
+    # cannot prove a historical row's repo, so skip its git/PR checks.
+    def task_repo(row):
+        """The row's repo from its own taskfile, or None when it does not prove one."""
+        path = Path(row.get("taskfile") or "")
         try:
-            prs = {p["headRefName"]: p["number"] for p in (json.loads(raw) if raw.strip() else [])}
-        except ValueError:
-            pr_known = False
-    rc, wt, _ = _sh("git", "worktree", "list", "--porcelain", cwd=repo)
-    trees = {Path(ln.split(" ", 1)[1]).name for ln in wt.splitlines()
-             if ln.startswith("worktree ")}
+            return Path(json.loads(path.read_text())["project"]["repo"]).resolve()
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    row_repos = {id(row): task_repo(row) for row in rows}
+    unproven = {r.get("id") for r in rows if row_repos[id(r)] is None}
+    if explicit_repo:
+        # An explicit repo is the caller naming the checkout to inspect, so an
+        # unreadable taskfile is still CHECKED against it. That is an inspection
+        # choice, not proof that the row belongs there — `unproven` remembers
+        # which rows the taskfile could not place.
+        for r in rows:
+            row_repos[id(r)] = row_repos[id(r)] or repo
+    repos = {repo} | {target for target in row_repos.values() if target is not None}
+    # Multiple local clones/worktrees may point at one GitHub repo. Group by
+    # remote so an open PR is not reported as unknown in every other clone.
+    keys = {}
+    groups = {}
+    for target in repos:
+        rc, remote, _ = _sh("git", "remote", "get-url", "origin", cwd=target)
+        key = remote.strip() if rc == 0 and remote.strip() else str(target)
+        keys[target] = key
+        groups.setdefault(key, []).append(target)
+    prs_by_repo, trees_by_repo = {}, {}
+    for key, targets in groups.items():
+        target = min(targets, key=str)
+        rc, raw, _ = _sh("gh", "pr", "list", "--state", "open", "--json",
+                         "number,headRefName", cwd=target, timeout=25)
+        if rc == 0:
+            try:
+                prs_by_repo[key] = {
+                    p["headRefName"]: p["number"]
+                    for p in (json.loads(raw) if raw.strip() else [])}
+            except ValueError:
+                pass
+        trees_by_repo[key] = set()
+        for target in targets:
+            rc, wt, _ = _sh("git", "worktree", "list", "--porcelain", cwd=target)
+            if rc == 0:
+                trees_by_repo[key].update(
+                    Path(ln.split(" ", 1)[1]).name for ln in wt.splitlines()
+                    if ln.startswith("worktree "))
 
     out = []
     for r in rows:
         tid, st = r.get("id"), r.get("status")
+        target = row_repos[id(r)]
+        key = keys.get(target)
+        prs = prs_by_repo.get(key)
         if st == "running" and r.get("taskfile") not in live_tf:
             out.append(_finding(
                 "warning", "invariants", f"{tid}: status 'running' but no run is alive",
                 "", "its run died without settling the row — "
                     "main.py code reconcile --apply resets it"))
-        if pr_known and st == "in_review" and f"task/{tid}" not in prs:
+        if prs is not None and st == "in_review" and f"task/{tid}" not in prs:
             out.append(_finding(
                 "warning", "invariants", f"{tid}: status 'in_review' but no PR is open",
                 "", "it cannot progress: re-run its project so publish "
                     "re-opens or re-attaches the PR"))
-        if st == "merged" and tid in trees:
+        if st == "merged" and key is not None and tid in trees_by_repo.get(key, set()):
             out.append(_finding(
                 "info", "invariants", f"{tid}: merged but its worktree remains",
                 "", "main.py code reconcile --apply removes it"))
-        if pr_known and st == "merged" and f"task/{tid}" in prs:
+        if prs is not None and st == "merged" and f"task/{tid}" in prs:
             out.append(_finding(
                 "warning", "invariants",
                 f"{tid}: merged but PR #{prs[f'task/{tid}']} is still open",
                 "", "the merge did not close it — close it by hand"))
-    known = {r.get("id") for r in rows}
-    for br, n in prs.items():
-        tid = br[5:] if br.startswith("task/") else None
-        if tid and tid not in known:
-            out.append(_finding(
-                "warning", "invariants",
-                f"PR #{n} is for task '{tid}', which the database does not know",
-                "", "a branch from a lost database, or a hand-made PR on a "
+    # A row whose taskfile is gone is still a task this database knows about —
+    # only its repo is unproven. Dropping it from `known` (as it would be, its
+    # repo matching no group) lets a row that DOES name the repo prove its live
+    # PR orphaned: an open PR for it is reported as "a task the database does
+    # not know" while the database holds exactly that id — the reverse of the
+    # truth. So unproven ids are suppressed everywhere rather than nowhere.
+    for key, prs in prs_by_repo.items():
+        known = {r.get("id") for r in rows if keys.get(row_repos[id(r)]) == key}
+        if not known and not explicit_repo:
+            # The default root can be a second worktree of a repo whose task
+            # rows name its primary checkout. It has no independent task
+            # inventory, so its PR list cannot prove a task was lost.
+            continue
+        for br, n in prs.items():
+            tid = br[5:] if br.startswith("task/") else None
+            if tid and tid not in known and tid not in unproven:
+                out.append(_finding(
+                    "warning", "invariants",
+                    f"PR #{n} is for task '{tid}', which the database does not know",
+                    key, "a branch from a lost database, or a hand-made PR on a "
                     "task/ branch — close it or recreate the task"))
     return out
 

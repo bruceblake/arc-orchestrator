@@ -899,6 +899,115 @@ class InvariantsCheckedAgainstReality(unittest.TestCase):
                       prs='[{"number":4,"headRefName":"task/t1"}]')
         self.assertEqual(f, [])
 
+    def test_game_pr_is_checked_in_its_own_repo(self):
+        import audit
+        import reconcile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            game = root / "game"
+            game.mkdir()
+            taskfile = root / "game.json"
+            taskfile.write_text(json.dumps({"project": {"repo": str(game)}}))
+            seen = []
+
+            def sh(*argv, **kw):
+                target = Path(kw["cwd"])
+                if argv[:2] == ("gh", "pr"):
+                    seen.append(target)
+                    prs = ([{"number": 9, "headRefName": "task/player"}]
+                           if target == game else [])
+                    return 0, json.dumps(prs), ""
+                return 0, "worktree " + str(target) + "\n", ""
+
+            rows = [{"id": "player", "status": "in_review",
+                     "taskfile": str(taskfile)}]
+            with patch.object(audit, "_sh", side_effect=sh), \
+                 patch.object(reconcile, "live_runs", return_value=[]):
+                findings = audit.audit_invariants(self._Store(rows), repo=root)
+            self.assertEqual(findings, [])
+            self.assertIn(game, seen)
+            self.assertIn(root, seen)
+
+    def test_two_clones_of_one_remote_share_known_tasks(self):
+        import audit
+        import reconcile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            primary = root / "primary"
+            clone = root / "clone"
+            primary.mkdir()
+            clone.mkdir()
+            taskfile = root / "task.json"
+            taskfile.write_text(json.dumps({"project": {"repo": str(primary)}}))
+
+            def sh(*argv, **kw):
+                if argv[:3] == ("git", "remote", "get-url"):
+                    return 0, "https://example.test/game.git\n", ""
+                if argv[:2] == ("gh", "pr"):
+                    return 0, '[{"number":9,"headRefName":"task/player"}]', ""
+                return 0, "", ""
+
+            rows = [{"id": "player", "status": "in_review",
+                     "taskfile": str(taskfile)}]
+            with patch.object(audit, "_sh", side_effect=sh), \
+                 patch.object(reconcile, "live_runs", return_value=[]):
+                findings = audit.audit_invariants(self._Store(rows), repo=clone)
+            self.assertEqual(findings, [])
+
+    def test_missing_historical_taskfile_does_not_claim_no_pr(self):
+        import audit
+        import reconcile
+        from unittest.mock import patch
+        rows = [{"id": "old-game", "status": "in_review",
+                 "taskfile": "/missing/game-taskfile.json"}]
+        with patch.object(audit, "_sh", return_value=(0, "[]", "")), \
+             patch.object(reconcile, "live_runs", return_value=[]):
+            findings = audit.audit_invariants(self._Store(rows))
+        self.assertFalse(any("no PR is open" in f["what"] for f in findings))
+
+    def test_missing_taskfile_row_is_not_claimed_unknown_by_its_open_pr(self):
+        # The row whose taskfile is gone cannot prove its repo, but it IS a task
+        # this database holds. Once another row names the repo, that repo's open
+        # PR for it must not be reported as "a task the database does not know".
+        import audit
+        import reconcile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            game = root / "game"
+            game.mkdir()
+            taskfile = root / "game.json"
+            taskfile.write_text(json.dumps({"project": {"repo": str(game)}}))
+
+            def sh(*argv, **kw):
+                target = Path(kw["cwd"])
+                if argv[:2] == ("gh", "pr"):
+                    prs = ([{"number": 9, "headRefName": "task/lost-game"}]
+                           if target == game else [])
+                    return 0, json.dumps(prs), ""
+                if argv[:3] == ("git", "remote", "get-url"):
+                    return 0, f"https://example.test/{target.name}.git", ""
+                return 0, "worktree " + str(target) + "\n", ""
+
+            rows = [
+                {"id": "live-game", "status": "merged", "taskfile": str(taskfile)},
+                {"id": "lost-game", "status": "in_review",
+                 "taskfile": "/missing/historical.json"},
+            ]
+            with patch.object(audit, "_sh", side_effect=sh), \
+                 patch.object(reconcile, "live_runs", return_value=[]):
+                findings = audit.audit_invariants(self._Store(rows), repo=root)
+        self.assertFalse(any("does not know" in f["what"] for f in findings),
+                         "the row is known; only its repo is unproven")
+
     def test_merged_with_a_still_open_pr_is_flagged(self):
         f = self._run([{"id": "t1", "status": "merged"}],
                       prs='[{"number":4,"headRefName":"task/t1"}]')
