@@ -251,6 +251,32 @@ class Issues(Base):
         self.run_(gh_issues.ensure_labels(self.repo, ["arc-task"]))
         self.assertEqual(len(self.gh.calls), n)
 
+    def test_duplicate_label_422_on_stdout_is_success(self):
+        # Live gh: stderr is only the status line; already_exists is in stdout.
+        body = ('{"message":"Validation Failed",'
+                '"errors":[{"resource":"Label","code":"already_exists",'
+                '"field":"name"}]}')
+
+        async def fake(args, cwd, timeout=180, wait_quota=True):
+            return 1, body, "gh: Validation Failed (HTTP 422)"
+
+        with mock.patch.object(gitstore, "_gh", fake):
+            self.run_(gh_issues.ensure_labels(self.repo, ["arc-task"]))
+
+    def test_label_422_without_already_exists_raises(self):
+        body = ('{"message":"Validation Failed",'
+                '"errors":[{"resource":"Label","code":"invalid",'
+                '"field":"color"}]}')
+
+        async def fake(args, cwd, timeout=180, wait_quota=True):
+            return 1, body, "gh: Validation Failed (HTTP 422)"
+
+        with mock.patch.object(gitstore, "_gh", fake):
+            with self.assertRaises(gh_issues.GhIssueError) as caught:
+                self.run_(gh_issues.ensure_labels(self.repo, ["not a color"]))
+        self.assertIn("invalid", str(caught.exception))
+        self.assertNotIn("already_exists", str(caught.exception).lower())
+
     def test_label_swap(self):
         n = self.run_(gh_issues.ensure_task_issue(self.repo, "proj", self.tf, self.task()))
         self.run_(gh_issues.set_status(self.repo, n, "running"))

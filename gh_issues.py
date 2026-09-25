@@ -206,14 +206,32 @@ async def _api(repo, method, path, fields=(), jq=None):
         args += ["--jq", jq]
     rc, out, err = await gitstore._gh(args, cwd=Path(repo).resolve())
     if rc != 0:
+        # gh puts "Validation Failed (HTTP 422)" on stderr and the JSON body
+        # (errors[].code) on stdout. `err or out` dropped already_exists.
         raise GhIssueError(f"gh api {method} {path}: "
-                           f"{(err or out).strip()[:300]}")
+                           f"{_api_error_text(err, out)[:300]}")
     if jq:
         return out.strip()
     try:
         return json.loads(out) if out.strip() else None
     except ValueError:
         return None
+
+
+def _api_error_text(err, out):
+    """Both gh streams, stderr first. Empty and duplicate chunks are dropped."""
+    parts = []
+    for raw in (err, out):
+        text = (raw or "").strip()
+        if text and text not in parts:
+            parts.append(text)
+    return "\n".join(parts)
+
+
+def _duplicate_label(text):
+    """True when a label POST failed because that name is already there."""
+    low = str(text).lower()
+    return "already_exists" in low or "already exists" in low
 
 
 def _color(name):
@@ -233,7 +251,7 @@ async def ensure_labels(repo, names):
             await _api(repo, "POST", "repos/{owner}/{repo}/labels",
                        [("name", name), ("color", _color(name))])
         except GhIssueError as exc:
-            if "already_exists" not in str(exc) and "already exists" not in str(exc):
+            if not _duplicate_label(exc):
                 raise
         _labels_done.add((key, name))
 
