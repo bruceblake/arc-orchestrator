@@ -189,22 +189,63 @@ CLAIM_TTL_S = 4 * 3600.0   # an agent's own claim line: one long attempt
 _ROLE_ALIASES = {"pr_reviewer": "pr-reviewer", "pr_review": "pr-reviewer"}
 
 
-def _is_task_row(task_id):
-    """A code_tasks row with exactly this id: then `-x2` is part of the real id."""
+def _is_task_row(task_id, project=None, taskfile=None):
+    """A code_tasks row with exactly this id belonging to project/taskfile:
+    then `-x2` is part of the real id."""
+    if not task_id:
+        return False
     try:
         with _lock:
-            return _conn().execute("SELECT 1 FROM code_tasks WHERE id=? LIMIT 1",
-                                   (task_id,)).fetchone() is not None
+            conn = _conn()
+            rows = conn.execute(
+                "SELECT taskfile, worktree FROM code_tasks WHERE id=?",
+                (task_id,)).fetchall()
+            if not rows:
+                return False
+            if not project and not taskfile:
+                proj, _ = infer_project()
+                if proj:
+                    project = proj
+                else:
+                    return True
+            root = Path(config.WORKTREE_ROOT)
+            for r in rows:
+                tf = r["taskfile"] or ""
+                if taskfile and (tf == taskfile or Path(tf).name == Path(taskfile).name or Path(tf).stem == Path(taskfile).stem):
+                    return True
+                if project:
+                    if Path(tf).stem == project or tf == project:
+                        return True
+                    wt = r["worktree"] or ""
+                    if wt:
+                        try:
+                            rel = Path(wt).resolve().relative_to(root.resolve())
+                            if rel.parts and rel.parts[0] == project:
+                                return True
+                        except (ValueError, OSError):
+                            pass
+                        if project in Path(wt).parts:
+                            return True
+            return False
     except sqlite3.Error:
         return False
 
 
-def canonical_task(task):
+def canonical_task(task, project=None, taskfile=None):
     """The task id without a driver's attempt suffix (`foo-x3`, `foo-pr2`)."""
     task = str(task or "")
-    stripped = _ATTEMPT_SUFFIX.sub("", task)
-    if stripped == task or not stripped or _is_task_row(task):
+    if not task:
+        return ""
+    if _is_task_row(task, project=project, taskfile=taskfile):
         return task
+    stripped = _ATTEMPT_SUFFIX.sub("", task)
+    if stripped == task or not stripped:
+        return task
+    if _is_task_row(stripped, project=project, taskfile=taskfile):
+        return stripped
+    next_stripped = _ATTEMPT_SUFFIX.sub("", stripped)
+    if next_stripped != stripped and next_stripped:
+        return canonical_task(stripped, project=project, taskfile=taskfile)
     return stripped
 
 
@@ -213,24 +254,31 @@ def canonical_role(role):
     return _ROLE_ALIASES.get(role, role)
 
 
-def agent_id(task, role):
+def agent_id(task, role, project=None):
     """The stable `<task>/<role>` ID of an agent (a bare role without a task)."""
-    task, role = canonical_task(task), canonical_role(role)
+    task, role = canonical_task(task, project=project), canonical_role(role)
     return f"{task}/{role}" if task else role
 
 
-def canonical_agent(agent):
-    """`foo-x3/pr_reviewer` -> `foo/pr-reviewer`; a bare role is unchanged."""
-    task, role = split_agent(agent)
-    return agent_id(task, role) if task else str(agent or "")
+def canonical_agent(agent, project=None):
+    """`foo-x3/pr_reviewer` -> `foo/pr-reviewer`; a bare task `foo-x3` -> `foo`;
+    a bare role is normalized (pr_reviewer -> pr-reviewer)."""
+    raw = str(agent or "").strip().lstrip("@")
+    if not raw:
+        return ""
+    if "/" in raw:
+        task, role = split_agent(raw)
+        return agent_id(task, role, project=project)
+    canon = canonical_task(raw, project=project)
+    return canonical_role(canon)
 
 
-def canonical_channel(channel):
+def canonical_channel(channel, project=None):
     c = str(channel or "")
     if c.startswith("task:"):
-        return "task:" + canonical_task(c[5:])
+        return "task:" + canonical_task(c[5:], project=project)
     if c.startswith("dm:"):
-        return "dm:" + canonical_agent(c[3:])
+        return "dm:" + canonical_agent(c[3:], project=project)
     return c
 
 
@@ -319,10 +367,10 @@ def post(project, *, author, channel="project", kind="note", body="",
     try:
         body = str(body or "")[:config.BOARD_BODY_MAX]
         kind = kind if kind in KINDS else "note"
-        channel = canonical_channel(channel) if valid_channel(channel) else "project"
-        author = canonical_agent(author)
+        channel = canonical_channel(channel, project=project) if valid_channel(channel) else "project"
+        author = canonical_agent(author, project=project)
         a_task, a_role = split_agent(author)
-        ments = _norm_mentions([canonical_agent(m) if "/" in str(m) else m
+        ments = _norm_mentions([canonical_agent(m, project=project)
                                 for m in list(mentions or ()) + parse_mentions(body)])
         rec = {
             "id": mid, "project": str(project or ""), "channel": channel,
@@ -331,7 +379,7 @@ def post(project, *, author, channel="project", kind="note", body="",
             "ts": float(ts if ts is not None else round(time.time(), 6)),
             "author": str(author or ""), "author_model": str(author_model or ""),
             "author_role": canonical_role(author_role or a_role),
-            "author_task": canonical_task(author_task or a_task), "kind": kind,
+            "author_task": canonical_task(author_task or a_task, project=project), "kind": kind,
             "body": body, "mentions": ments,
             "reply_to": str(reply_to) if reply_to else None,
             "refs": refs if isinstance(refs, dict) else {},
@@ -409,7 +457,7 @@ def _addressed(msg, agent, model=""):
     the task's own agents (`<task>/...`, the orchestrator's status lines
     included) are not addressed back to it."""
     task, _ = split_agent(agent)
-    chan = msg["channel"] or ""
+    chan = canonical_channel(msg.get("channel") or "")
     if chan == agent or (chan.startswith("dm:")
                          and chan[3:] in _targets(agent, model) - {"all"}):
         return True
@@ -417,7 +465,8 @@ def _addressed(msg, agent, model=""):
             (msg.get("author") or "").startswith(f"{task}/")
             or (msg.get("author_task") or "") == task):
         return True
-    return bool(_targets(agent, model) & set(msg["mentions"]))
+    msg_mentions = {canonical_agent(m) for m in msg.get("mentions") or ()}
+    return bool(_targets(agent, model) & msg_mentions)
 
 
 @_safe(list)
@@ -694,8 +743,8 @@ def digest_for(project, *, task, role, model, files_hint=(), limit_chars=3000,
     that share its timestamp tick). Unread mentions are then listed oldest
     first, and any the digest could not fit (more than eight, or over the
     char budget) stay unread for the next prompt."""
-    agent = agent_id(task, role)
-    task = canonical_task(task)
+    agent = agent_id(task, role, project=project)
+    task = canonical_task(task, project=project)
     hint =[p for p in (_norm_path(x) for x in files_hint or ()) if p]
     msgs = _select(project, "author!=?", (agent,))
     reads = _reads(project, agent)
@@ -902,7 +951,7 @@ def _project_task_ids(conn, project):
     return ids
 
 
-def unknown_mentions(mentions, known):
+def unknown_mentions(mentions, known, project=None):
     """Mentions naming nothing real: not a known task, model or role.
 
     A bare name is legal when it is in ``known``. A ``<task>/<role>`` mention
@@ -915,6 +964,8 @@ def unknown_mentions(mentions, known):
         name = str(m).strip().lstrip("@")
         if not name:
             continue
+        if project:
+            name = canonical_agent(name, project=project)
         # The HEAD decides. For a bare name head == name; for `<task>/<role>`
         # only the first half can make it real — `implementer` is a role, not
         # an address, and must not bless `@not-a-task/implementer`.
@@ -935,14 +986,18 @@ def _check_line(obj, task, project="", role="", known=None):
     if not isinstance(body, str) or not body.strip():
         return None, "missing body"
     channel = obj.get("channel") or f"task:{task}"
+    channel = canonical_channel(channel, project=project)
     if not valid_channel(channel):
         return None, f"invalid channel {channel!r}"
-    mentions = obj.get("mentions") or []
-    if not isinstance(mentions, list) or not all(isinstance(x, str) for x in mentions):
+    raw_mentions = obj.get("mentions") or []
+    if not isinstance(raw_mentions, list) or not all(isinstance(x, str) for x in raw_mentions):
         return None, "mentions must be a list of strings"
+    mentions = _norm_mentions([canonical_agent(m, project=project) for m in raw_mentions])
     if project and known is not None:
-        bad = unknown_mentions(mentions + parse_mentions(body),
-                               set(known) | {task})
+        c_task = canonical_task(task, project=project)
+        body_mentions = [canonical_agent(m, project=project) for m in parse_mentions(body)]
+        all_mentions = _norm_mentions(mentions + body_mentions)
+        bad = unknown_mentions(all_mentions, set(known) | {c_task, str(task)})
         if bad:
             return None, ("mention(s) name nothing in this project: "
                           + ", ".join("@" + b for b in bad)
@@ -978,7 +1033,8 @@ def ingest_file(project, worktree, *, task, role, model):
         end = data.rfind(b"\n") + 1  # only complete lines
         if end <= offset:
             return 0
-        author = agent_id(task, role)
+        author = agent_id(task, role, project=project)
+        c_task = canonical_task(task, project=project)
         known = known_targets(project)
         pos = offset
         for raw in data[offset:end].split(b"\n")[:-1]:
@@ -995,9 +1051,9 @@ def ingest_file(project, worktree, *, task, role, model):
                 fields, reason = _check_line(obj, task, project, role, known)
             mid = str(obj.get("id")) if isinstance(obj, dict) and obj.get("id") else digest
             if reason:
-                post(project, author=author, channel=f"task:{task}", kind="error",
+                post(project, author=author, channel=f"task:{c_task}", kind="error",
                      body=f"invalid board line ({reason}): {line[:300]}",
-                     author_model=model, author_role=role, author_task=task,
+                     author_model=model, author_role=role, author_task=c_task,
                      refs={"ingest": REL, "offset": at}, msg_id="bad-" + digest)
                 continue
             with _lock:
@@ -1011,13 +1067,13 @@ def ingest_file(project, worktree, *, task, role, model):
                 # A claim line is a LEASE, not just a message: without the
                 # board_claims row no sibling's digest ever lists it and
                 # claim_share never counts it.
-                claim(project, task=canonical_task(task), author=author,
+                claim(project, task=c_task, author=author,
                       paths=[p for p in paths if isinstance(p, str)],
                       note=fields["body"][:200], ttl_s=CLAIM_TTL_S)
                 n += 1
                 continue
             post(project, author=author, author_model=model, author_role=role,
-                 author_task=task, msg_id=mid, **fields)
+                 author_task=c_task, msg_id=mid, **fields)
             n += 1
         mark_read(project, key, REL, end)
     except Exception as exc:  # noqa: BLE001
@@ -1088,7 +1144,7 @@ def board_health(project, since_hours=24):
     live_claims = _select_claims(project, since, live_only=True)
     answered, unanswered, median_s = _questions_and_answers(msgs)
 
-    by_agent = Counter(canonical_agent(m["author"]) for m in msgs
+    by_agent = Counter(canonical_agent(m["author"], project=project) for m in msgs
                        if m["kind"] != "error")
     by_kind = Counter(m["kind"] for m in msgs)
     tasks = set()
@@ -1096,7 +1152,7 @@ def board_health(project, since_hours=24):
     for m in msgs:
         # Rows written before IDs were canonical carry `<task>-x3`: one task,
         # not one per attempt (it inflated the denominator of claim_share).
-        t = canonical_task(m["author_task"] or split_agent(m["author"])[0])
+        t = canonical_task(m["author_task"] or split_agent(m["author"])[0], project=project)
         if t:
             tasks.add(t)
             if m["kind"] == "claim":

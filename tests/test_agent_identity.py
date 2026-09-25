@@ -64,6 +64,26 @@ class StableIds(Case):
         self.assertEqual(agentboard.canonical_task("probe-x2"), "probe-x2")
         self.assertEqual(agentboard.canonical_task("probe-x2-x5"), "probe-x2")
 
+    def test_different_project_task_row_does_not_stop_canonicalizing_attempt(self):
+        # A code_tasks row id probe-x2 in a DIFFERENT project/taskfile must NOT
+        # stop task probe attempt 2 in this project from canonicalizing to probe.
+        c = sqlite3.connect(config.DB_PATH)
+        with c:
+            c.execute("CREATE TABLE IF NOT EXISTS code_tasks(id TEXT, taskfile TEXT, worktree TEXT)")
+            c.execute("INSERT INTO code_tasks VALUES('probe-x2','other.json','')")
+        c.close()
+        self.assertEqual(agentboard.canonical_task("probe-x2", project=P), "probe")
+
+    def test_a_real_task_id_that_ends_like_a_suffix_is_kept_in_this_project(self):
+        # A code_tasks row id probe-x2 in THIS project must still be kept.
+        c = sqlite3.connect(config.DB_PATH)
+        with c:
+            c.execute("CREATE TABLE IF NOT EXISTS code_tasks(id TEXT, taskfile TEXT, worktree TEXT)")
+            c.execute(f"INSERT INTO code_tasks VALUES('probe-x2', '{P}.json', '')")
+        c.close()
+        self.assertEqual(agentboard.canonical_task("probe-x2", project=P), "probe-x2")
+        self.assertEqual(agentboard.canonical_task("probe-x2-x5", project=P), "probe-x2")
+
     def test_a_driver_board_post_lands_in_the_task_channel_under_the_stable_id(self):
         # drivers.py posts with its run name (task_id=f"{tid}-x{attempt}").
         board.post(self.wt, task="doors-x3", role="reviewer", model="GPT-6-Sol",
@@ -127,6 +147,16 @@ class Delivery(Case):
         d = agentboard.digest_for(P, task="doors-x2", role="implementer", model="m")
         self.assertIn("your agent ID is doors/implementer", d)
 
+    def test_dm_and_mention_with_attempt_suffix_delivered_to_implementer(self):
+        # dm:doors-x2 and a mention doors-x2 are delivered to doors/implementer
+        agentboard.post(P, author="operator", channel="dm:doors-x2",
+                        body="check the hinges")
+        agentboard.post(P, author="operator", channel="project",
+                        body="pinging @doors-x2 please check")
+        d = agentboard.digest_for(P, task="doors", role="implementer", model="GLM-5.3")
+        self.assertIn("check the hinges", d)
+        self.assertIn("pinging @doors-x2 please check", d)
+
 
 class CliFromAnyWorktree(Case):
     """The exact command the prompt hands an agent, run the way a harness
@@ -172,6 +202,26 @@ class ClaimLines(Case):
         other = agentboard.digest_for(P, task="locks", role="implementer",
                                       model="m", files_hint=["scripts/door.gd"])
         self.assertIn("doors/implementer holds scripts/door.gd", other)
+
+    def test_ingest_line_mentioning_driver_run_accepted_not_unknown(self):
+        # a .arc/board.jsonl line mentioning @doors-x1/implementer is ingested, not rejected as unknown
+        c = sqlite3.connect(config.DB_PATH)
+        with c:
+            c.execute("CREATE TABLE IF NOT EXISTS code_tasks(id TEXT, taskfile TEXT, worktree TEXT)")
+            c.execute(f"INSERT INTO code_tasks VALUES('doors', '{P}.json', '{self.wt}')")
+        c.close()
+        (self.wt / ".arc").mkdir(exist_ok=True)
+        line = json.dumps({"body": "ping @doors-x1/implementer ready for review"})
+        (self.wt / ".arc" / "board.jsonl").write_text(line + "\n")
+        n = agentboard.ingest_file(P, self.wt, task="doors", role="reviewer",
+                                   model="m")
+        self.assertEqual(n, 1)
+        errs = self.msgs(kind="error")
+        self.assertEqual(errs, [], f"unexpected errors: {errs}")
+        msgs = self.msgs(author="doors/reviewer")
+        self.assertTrue(any("ready for review" in m["body"] for m in msgs))
+        stored = [m for m in msgs if "ready for review" in m["body"]][0]
+        self.assertEqual(stored["mentions"], ["doors/implementer"])
 
 
 class DashboardAgentsView(Case):

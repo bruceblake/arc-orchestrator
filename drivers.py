@@ -407,11 +407,11 @@ def post_handoff(worktree, task_id, role, model, harness, body, **refs):
     carry the attempt suffix (``<tid>-x3``, ``<tid>-pr2``). Never raises."""
     try:
         import agentboard
-        tid = agentboard.canonical_task(task_id)
         project = agentboard.infer_project(worktree)[0]
+        tid = agentboard.canonical_task(task_id, project=project)
         if not project or not tid:
             return None
-        who = agentboard.agent_id(tid, role)
+        who = agentboard.agent_id(tid, role, project=project)
         return agentboard.post(
             project, author=f"{tid}/orchestrator", channel=f"task:{tid}",
             kind="handoff", body=body, mentions=[who], author_model=model,
