@@ -277,6 +277,54 @@ class Presenting(unittest.TestCase):
         self.assertEqual(rows["b"]["size"], {"before": [64, 40], "after": [64, 44]})
 
 
+class NoVisibleChangeFlag(unittest.TestCase):
+    """"No view changed" is only an alarm when the diff touched UI files."""
+
+    def _capture(self, changed):
+        d = _tmp(self)
+        wt = d / "wt"
+        (wt / "static").mkdir(parents=True)
+        shot = d / "shot.png"
+        _png(shot, GREY)
+
+        def run_capture(tree, out, timeout=None):
+            Path(out).mkdir(parents=True, exist_ok=True)
+            p = Path(out) / "index-desktop-dark.png"
+            shutil.copyfile(shot, p)
+            return {"shots": [str(p)], "page_errors": {}}
+        base = d / "base"
+        base.mkdir()
+        shutil.copyfile(shot, base / "index-desktop-dark.png")
+        with mock.patch.object(ui_evidence, "run_capture", run_capture), \
+                mock.patch.object(ui_evidence, "baseline", lambda wt, sha, timeout=None: (base, {})), \
+                mock.patch.object(evidence, "merge_base", lambda wt, b: "abc"), \
+                mock.patch.object(evidence, "contact_sheet", lambda *a, **k: None):
+            return ui_evidence.capture(wt, d / "out", base="main", changed=changed)
+
+    def test_ui_diff_with_no_changed_view_is_flagged(self):
+        m = self._capture(["static/index.html"])
+        self.assertTrue(m.get("no_visible_change"))
+
+    def test_non_ui_diff_is_not_flagged(self):
+        m = self._capture(["config.py"])
+        self.assertFalse(m.get("no_visible_change"))
+        self.assertEqual(m["warnings"], [])
+
+
+class CropWindow(unittest.TestCase):
+    def test_a_small_change_is_centred_with_context(self):
+        x, y, w, h = ui_evidence.crop_rect((700, 500, 20, 10), 1440, 2000)
+        self.assertTrue(x <= 700 and x + w >= 720 and y <= 500 and y + h >= 510)
+        self.assertGreaterEqual(w, 720)
+
+    def test_a_change_taller_than_the_window_shows_where_it_starts(self):
+        """A wrapped tab shifts the whole page below it: the cause is at the
+        top of the box, and centring the window cropped it away."""
+        x, y, w, h = ui_evidence.crop_rect((0, 245, 390, 1700), 390, 2400)
+        self.assertLessEqual(y, 245)
+        self.assertEqual(h, 1400)
+
+
 class ReviewerPrompts(unittest.TestCase):
     T = {"id": "t1", "title": "T", "prompt": "spec", "verify_cmd": "true"}
     UI = "diff --git a/static/index.html b/static/index.html\n+<b>x</b>\n"

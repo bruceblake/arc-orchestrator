@@ -184,8 +184,14 @@ def _size(path):
 def _span(lo, length, want, total, lo_min):
     """[start, size) of a window of `want` (at least lo_min) around lo..lo+length."""
     size = min(total, max(lo_min, min(want, length + 2 * _CROP_PAD)))
-    start = max(0, min(lo + length // 2 - size // 2, total - size))
-    return start, size
+    if length + 2 * _CROP_PAD > size:
+        # The change is bigger than the window: show where it STARTS. A
+        # layout shift's cause is at the top of its box (a tab that wrapped
+        # pushes everything below it); centring cropped the cause away.
+        start = max(0, lo - _CROP_PAD)
+    else:
+        start = lo + length // 2 - size // 2
+    return max(0, min(start, total - size)), size
 
 
 def crop_rect(box, width, height):
@@ -332,7 +338,7 @@ def capture(worktree, out_dir, *, base=None, project="", changed=(), timeout=Non
                                     f"base did not: {errs[0]}")
     manifest["changed_views"] = [c["name"] for c in manifest["compare"]
                                  if c.get("changed") and c["changed"] > MIN_CHANGE]
-    if manifest["compare"] and not manifest["changed_views"]:
+    if manifest["compare"] and manifest["ui_files"] and not manifest["changed_views"]:
         manifest["no_visible_change"] = True
         manifest["warnings"].append(
             "NO VISIBLE CHANGE: this diff touches " + ", ".join(manifest["ui_files"][:5])
