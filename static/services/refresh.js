@@ -58,6 +58,26 @@ function sinceStamp(secondsAgo) {
   return String(Math.round(Date.now() / 1000 - n));
 }
 
+function bootPolls() {
+  // The inline boot block must stay under 20 lines. A missing panel
+  // script must not throw and skip every poll scheduled after it.
+  const schedule = (typeof every === "function") ? every : function(fn, ms, delay) {
+    setTimeout(function() { fn(); setInterval(fn, ms); }, delay || 0);
+  };
+  const run = (fn, ms, delay) => { if (typeof fn === "function") schedule(fn, ms, delay); };
+  run(typeof pollWorkStatus === "function" ? pollWorkStatus : null, 5000, 600);
+  run(typeof pollFleet === "function" ? pollFleet : null, 5000, 1600);
+  run(typeof pollSlots === "function" ? pollSlots : null, 3000, 400);
+  run(typeof pollErrors === "function" ? pollErrors : null, 15000, 2000);
+  run(typeof pollActivity === "function" ? pollActivity : null, 10000, 2200);
+  run(typeof pollAgents === "function" ? pollAgents : null, 4500, 800);
+  run(typeof pollHealth === "function" ? pollHealth : null, 6000, 2400);
+  run(typeof pollEvents === "function" ? pollEvents : null, 8000, 1200);
+  run(typeof pollGithub === "function" ? pollGithub : null, 20000, 800);
+  run(typeof pollTopos === "function" ? pollTopos : null, 30000, 2000);
+  if (typeof startClock === "function") startClock();
+}
+
 function startClock() {
   setInterval(() => {
     document.querySelectorAll("[data-since]").forEach(el => {
