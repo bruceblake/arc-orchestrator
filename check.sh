@@ -75,7 +75,17 @@ step "unit tests"
 # ARC_ALLOW_SAME_FAMILY_REVIEW is deliberately left set: the "taskfile validity"
 # step validates the operator's real ~/tasks files, authored for whichever
 # review mode the fleet is running.
-TESTENV=(env -u ARC_ESCALATION_PATH)
+#
+# ARC_FLEET is unset for the SAME reason, and it cost a gate: config.py derives
+# the whole roster at import time from it, so a shell (or an orchestrator
+# process) with ARC_FLEET=studio exported makes the LOCAL-fleet invariants
+# below fail — "local is the two-model fleet", "no studio model is routable
+# locally" and the ARC_* docs-truth scan: 9 failures with the var set, 0
+# without, reproduced on a PRISTINE tree. The tests are right; the gate must
+# run them under the local fleet. The "taskfile validity" step below still gets
+# the right fleet per file — it sets ARC_FLEET explicitly per taskfile
+# (project.fleet).
+TESTENV=(env -u ARC_ESCALATION_PATH -u ARC_FLEET)
 if ! "${TESTENV[@]}" "$PY" -m unittest discover -s tests -t tests 2>&1 | tail -20; then
     echo "FAIL: unit tests"; rc=1
 fi
