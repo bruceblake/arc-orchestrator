@@ -7,6 +7,7 @@ Type=simple
 WorkingDirectory=/home/proxyie/arc-orchestrator
 ExecStart=/home/proxyie/arc-orchestrator/.venv/bin/python -u main.py captain --autopilot
 Environment=PYTHONUNBUFFERED=1
+Environment=PATH=/home/proxyie/.local/bin:/usr/local/bin:/usr/bin:/bin
 # Pause without stopping: touch logs/captain/autopilot.pause (or the
 # dashboard's Pause button). Resumes it queues are detached runs, not part of
 # this service: restarting the captain must never take them down with it.

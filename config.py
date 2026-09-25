@@ -162,6 +162,26 @@ def agy_bin():
     return found or str(Path.home() / ".local" / "bin" / "agy")
 
 
+def opencode_serve_bin():
+    """The `opencode serve` binary (OpencodeDriver's only path).
+
+    systemd and other non-login services carry a minimal PATH, so a bare name
+    fails with FileNotFoundError when the install lives under ~/.local/bin.
+    Prefer an explicit env override, then PATH, then the usual user-local
+    install, then the bare name for hermetic tests.
+    """
+    env = os.getenv("ARC_OPENCODE_SERVE_BIN")
+    if env:
+        return env
+    found = shutil.which("opencode")
+    if found:
+        return found
+    local = Path.home() / ".local" / "bin" / "opencode"
+    if local.is_file():
+        return str(local)
+    return "opencode"
+
+
 # Codex sandbox policy for fleet runs. `workspace-write` lets the agent edit
 # the task's git worktree and nothing outside it, and `codex exec` is
 # non-interactive so there is no approval prompt to block on. The looser
@@ -806,8 +826,8 @@ CHAIN_TIMEOUT = float(os.getenv("ARC_CHAIN_TIMEOUT", str(12 * 3600)))
 # spawn on 2026-09-16 (task opencode-serve-only) — the process and its warm
 # cache are now reused across attempts and tasks instead of paying a cold start
 # per attempt. ARC_OPENCODE_SERVE_BIN names the binary so tests can point it at
-# a stub script.
-OPENCODE_SERVE_BIN = os.getenv("ARC_OPENCODE_SERVE_BIN", "opencode")
+# a stub script; when unset, opencode_serve_bin() resolves it (see above).
+OPENCODE_SERVE_BIN = opencode_serve_bin()
 # How long start_server() waits for the server to answer before it kills the
 # process and reports a startup failure. Measured 2026-09-16 (opencode
 # 1.18.29): a cold start prints its listening line and answers GET
