@@ -856,7 +856,7 @@ the gate node runs `evidence.capture` right after `verify_cmd` passes:
   alone, its visible geometry's world AABB probed, and cameras auto-framed
   around it (`frame_cameras`: overview/top/front/side, every corner in
   frame), rendered after AND at the merge base with the SAME cameras, diffed,
-  plus an orbit video. The fixed cameras only ever see the main scene: PR #19
+  plus an orbit video (`ARC_EVIDENCE_SCENE_SECONDS`, default 6). The fixed cameras only ever see the main scene: PR #19
   of prison-escape-test added a lab scene and every comparison read 0.0%.
   A scene that will not load alone is a warning, not a gate failure.
 - **The playtest is recorded watchable**: `tools/playtest.gd` runs through a
