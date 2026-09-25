@@ -29,7 +29,7 @@ from collections import OrderedDict
 from datetime import date as _date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import config
 import dashboard_services
@@ -2608,10 +2608,18 @@ def _playtest_launch(body):
     if project is None:
         return {"error": "unknown studio project"}, 404
     build = (body or {}).get("build")
-    if not isinstance(build, str) or build not in [b["id"] for b in playtest.builds(project)]:
+    rows = {b["id"]: b for b in playtest.builds(project)}
+    if not isinstance(build, str) or build not in rows:
         return {"error": "unknown build for this project"}, 404
+    # Optional: which scene to open. Byte-identical to one of THIS build's
+    # scenes (read from its git tree), or absent for the game's main scene.
+    scene = (body or {}).get("scene") or None
+    if scene is not None and (not isinstance(scene, str)
+                              or scene not in (rows[build].get("scenes") or [])):
+        return {"error": "unknown scene for this build"}, 404
     try:
-        return {"ok": True, "session": playtest.launch(project, build, wait=False)}, 200
+        return {"ok": True, "session": playtest.launch(project, build, wait=False,
+                                                        scene=scene)}, 200
     except playtest.Unavailable as exc:
         return {"error": str(exc)}, 409
     except KeyError:
@@ -3659,7 +3667,7 @@ def _evidence_url(root, p):
         rel = Path(p).resolve().relative_to(root)
     except (ValueError, OSError):
         return None
-    return "/api/evidence-file?path=" + str(rel)
+    return "/api/evidence-file?path=" + quote(rel.as_posix())
 
 
 def _timeline_evidence(tid):
@@ -5709,6 +5717,11 @@ class Handler(BaseHTTPRequestHandler):
                         "next_offset": (offset + limit) if more else None,
                     }
                 return self._json(body, conditional=True)
+            if u.path.startswith("/api/reviews"):
+                import review_routes         # human checkpoints: review_routes.py
+                if u.path in review_routes.GET_ROUTES:
+                    obj, code = review_routes.GET_ROUTES[u.path](parse_qs(u.query))
+                    return self._json(obj, code)
             if u.path == "/api/graph-shapes":
                 # The graph BETWEEN tasks: the pattern catalogue the planner
                 # chooses from, every taskfile classified by the shape its deps
@@ -5849,6 +5862,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, code)
             if u.path in _PLAYTEST_POSTS:
                 obj, code = _PLAYTEST_POSTS[u.path](body)
+                return self._json(obj, code)
+            import review_routes             # human checkpoints: review_routes.py
+            if u.path in review_routes.POST_ROUTES:
+                obj, code = review_routes.POST_ROUTES[u.path](body)
                 return self._json(obj, code)
             if u.path == "/api/projects/create":
                 obj, code = _create_project(body)

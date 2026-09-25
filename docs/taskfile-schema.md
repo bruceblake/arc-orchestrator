@@ -47,6 +47,7 @@ also exits with `repo not found: <path>` if `project.repo` does not exist
 | `project.title` | no | Short informational label; defaults to `""`. Never shown to the implementing agents. |
 | `project.tasks` | yes | JSON array of task objects. `load_taskfile` imposes no count limit and accepts an empty array (such a run is a no-op); the 1–50 requirement lives only in the dashboard's create-project endpoint, and the planner aims for 2–6. |
 | `project.after` | no | List of taskfile paths this project chains on (see "Project chaining" below). `[]`/absent = start immediately. |
+| `project.human_review` | no | `true` = every task's pull request, once the fleet's reviewers approve it, WAITS for a human decision before it merges (a human checkpoint; see "Human checkpoints" below). `false` = never wait. Absent = the fleet-wide `ARC_PR_MANUAL_REVIEW` decides. Must be a boolean (`ValueError` otherwise). |
 | `project.pattern` | no | The planner's label for the shape of the graph between tasks: a `graph_shapes.PATTERNS` id (`single`, `chain`, `fanout`, `diamond`, `router`, `debate`, `hierarchical`). Aliases such as `fan-out-fan-in` are normalized by the loader; an unknown name is kept and logged. A label only — `deps` are the graph; `code_tasks.describe` reports the shape the deps actually form and flags a mismatch. See [graph-patterns.md](graph-patterns.md). |
 
 ### Project chaining (`project.after`)
@@ -93,6 +94,36 @@ its first worktree.
 - `code status` reports every taskfile in `~/tasks` that declares `after`
   under a `chains` key: `{taskfile, after, ready, waiting, failed}`.
 
+### Human checkpoints (`human_review`)
+
+A game is judged by playing it, so a project can make a person the last
+gate. With `human_review` on, `pr_review` (after the fleet's reviewers all
+approve) calls `code_tasks._await_manual_review`, which records a hold in the
+`manual_reviews` table (`manual_review.py`) and waits — no model time is
+spent — until a human decides:
+
+- **Dashboard → "Needs you"** (desktop tab, and the phone page's Review
+  view): each held PR with its evidence inline (before | after | difference
+  per camera, screenshots, flythrough and playtest videos, evidence
+  warnings), the fleet reviewers' verdicts, **▶ Play this build** (and main)
+  on the PC's display with a scene picker, and **Approve** / **Request
+  changes**. The request-changes comment is required and becomes the
+  implementer's feedback exactly like a reviewer's issue; a new PR round
+  follows. Routes: `GET /api/reviews`, `POST /api/reviews/decide`
+  (`review_routes.py`, behind `_refuse_post` and the dashboard token).
+- **GitHub labels**: `manual-approved`, or `manual-rejected` plus a comment.
+
+Resolution per task: the task's own `human_review`, else
+`project.human_review`, else `ARC_PR_MANUAL_REVIEW`. A decision made while
+the run is down is kept and applied when it resumes to that PR round.
+`ARC_PR_MANUAL_TIMEOUT` (default 0 = wait forever) turns into a
+*rejection*, never a merge.
+
+```json
+{"project": {"name": "prison-escape-test", "repo": "...", "human_review": true,
+             "tasks": [{"id": "docs-readme", "human_review": false, ...}, ...]}}
+```
+
 ## 2. Per-task fields
 
 | Field | Type | Default | Meaning |
@@ -106,6 +137,7 @@ its first worktree.
 | `files_hint` | list of strings | `[]` | Repo-relative paths the task expects to touch. Injected into the implementer prompt as `Files you are expected to touch: ...`. Informational (not enforced), but keep **disjoint between dep-independent (parallel) tasks** — two agents editing the same file is the main cause of `conflict` merge failures. |
 | `probe_cmd` | string | `""` | Optional. A shell command run in the task's worktree **after its gate passes**; the last top-level JSON object it prints is the task's **verdict**, stored on the row (`code_tasks.verdict`) and emitted as `task.verdict`. A probe that exits non-zero or prints no JSON object fails the gate — a branch skipped because the probe crashed would be a bug disguised as a decision. Dependents read the verdict through `when`. |
 | `when` | object | absent | Optional. Run this task **only if** a dependency's verdict satisfies a condition; otherwise the task and everything downstream of it are recorded `skipped` (a terminal status that counts as complete). Shape: `{"dep": "<id, also in deps>", "key": "<verdict field, dotted ok>", <one operator>}` with operator one of `"equals": v`, `"not_equals": v`, `"in": [..]`, `"truthy": bool`, `"exists": bool`. The named dep must have a `probe_cmd`. Wired as `Edge(when=)` on the release edge (`pr_merge_<dep>` or the join → `alloc_<task>`), with a `skip_<task>` node on the complement. This is the one-taskfile **router** (see [graph-patterns.md](graph-patterns.md) § 4). |
+| `human_review` | bool | absent | Optional. Overrides `project.human_review` for this task: `true` holds its fleet-approved PR for a human decision, `false` lets it merge on the fleet's approval. Must be a boolean. |
 | `evidence` | boolean | absent (= `true`) | Rule 7d opt-out. `false` skips visual evidence capture for this task even in a Godot worktree (`evidence.enabled_for`) — for documentation-only work. Any non-boolean is rejected. |
 | `visual` | boolean | absent (= `true`) | `false` marks a task whose change is not meant to be seen (a refactor, a test, a gameplay constant). Evidence is still captured and a visible regression still blocks, but the reviewer is not told to reject an unchanged picture. Recorded as `non_visual` in the evidence manifest, so a resumed review reads it too. Any non-boolean is rejected. |
 | `deps` | list of strings | `[]` | Ids of tasks whose merged output this task needs (the id is the canonical key). One dep: the runner wires `pr_merge_<dep> → alloc_<task>`. Two or more: a gather node (`join_<task>`) waits for **every** listed dep's PR to merge before the task allocates its worktree — a real join, order irrelevant (`code_tasks.build_code_graph`, `wire_deps`). The worktree always branches from `main`, so it inherits every earlier merge. |
