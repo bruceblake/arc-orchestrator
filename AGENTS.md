@@ -865,15 +865,42 @@ the gate node runs `evidence.capture` right after `verify_cmd` passes:
   `gitstore.diff_full` rule; siblings' merges are not this task's change),
   with the share of pixels changed. Near-solid frames are flagged as blank
   renders.
+- **Every scene the diff changes, rendered on its own**
+  (`evidence.capture_scenes`): each `.tscn` the diff adds or modifies, plus
+  each scene that references (`ext_resource path=`) a changed
+  `.gd`/`.tscn`/`.tres` — tests/ and tools/ excluded, capped at
+  `ARC_EVIDENCE_MAX_SCENES` (default 6, the rest listed). Each is loaded
+  alone, its visible geometry's world AABB probed, and cameras auto-framed
+  around it (`frame_cameras`: overview/top/front/side, every corner in
+  frame), rendered after AND at the merge base with the SAME cameras, diffed,
+  plus an orbit video (`ARC_EVIDENCE_SCENE_SECONDS`, default 6). The fixed cameras only ever see the main scene: PR #19
+  of prison-escape-test added a lab scene and every comparison read 0.0%.
+  A scene that will not load alone is a warning, not a gate failure.
+- **The playtest is recorded watchable**: `tools/playtest.gd` runs through a
+  wrapper that extends it and adds inspection light, an overhead chase camera
+  on the player and a cutaway of geometry above its head (visibility only —
+  the playtest itself is unchanged); the bare script is the fallback.
 
 That evidence goes to every place a decision is made:
 
 - the **pre-merge reviewer** and **every PR reviewer** get the images attached
-  (drivers' `images`) and an evidence block in the prompt that makes a visible
-  regression a blocking issue, exactly like a failing test;
-- the **pull request** gets a comment with the comparisons, screenshots and
-  videos inline — pushed to the game repo's orphan `arc-evidence` branch
-  (`ARC_EVIDENCE_BRANCH`) so a private repo renders them for its viewers;
+  (drivers' `images` — the changed scenes' most-changed before|after|diff
+  panels FIRST, then the contact sheet) and an evidence block in the prompt
+  that makes a visible regression AND a change that is not visible in the
+  evidence blocking issues, unless the task is marked `"visual": false`. A
+  review resumed past its gate reads the newest capture on disk
+  (`evidence.latest_manifest`). Only harnesses that attach images (claude,
+  codex, cursor, agy, gemini) actually see them; opencode and reasonix get
+  the paths and the per-scene % changed as text;
+- the **pull request** gets a comment that LEADS with the changed scenes (a
+  table with % changed per scene, then each scene's most-changed panel, its
+  orbit GIF + mp4 link), then the contact sheet, playtest/flythrough GIFs
+  (mp4 linked — mp4 never plays inline) and the main scene's cameras. Files
+  are pushed to the game repo's orphan `arc-evidence` branch
+  (`ARC_EVIDENCE_BRANCH`) and linked as `github.com/<repo>/blob/<branch>/<path>?raw=true`:
+  GitHub does not camo-proxy those, so a viewer's own session loads them in a
+  private repo (anonymous requests 404; `raw.githubusercontent.com` without
+  a token does too);
 - the **agent board** gets a `kind: "evidence"` post (`board.py`);
 - the **human** gets it in the dashboard's **Needs you** queue next to
   Approve / Request changes (Rule 5, manual review), with a **Play this

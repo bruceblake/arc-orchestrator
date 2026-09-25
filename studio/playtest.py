@@ -296,13 +296,15 @@ def ensure_snapshot(project, build_id, *, do_import=True):
     tmp = snap.with_name(f"{snap.name}.tmp-{secrets.token_hex(3)}")
     try:
         clone = ["git", "clone", "-q", "--local", "--no-checkout", str(repo), str(tmp)]
-        p = subprocess.run(clone, capture_output=True, text=True, timeout=300)
+        p = subprocess.run(clone, capture_output=True, text=True, timeout=300,
+                           env=config.child_env())
         if p.returncode != 0 and "cross-device" in (p.stderr or "").lower():
             # --local hardlinks the objects, which cannot cross filesystems
             # (ARC_STUDIO_DIR on another mount than the game repo). Copy.
             shutil.rmtree(tmp, ignore_errors=True)
             p = subprocess.run(clone[:4] + ["--no-hardlinks"] + clone[4:],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, timeout=600,
+                               env=config.child_env())
         if p.returncode != 0:
             raise Unavailable(f"could not snapshot {build_id}: "
                               f"{(p.stderr or p.stdout).strip()[:500]}")
@@ -310,7 +312,8 @@ def ensure_snapshot(project, build_id, *, do_import=True):
                  # The snapshot must never be able to push back to the blessed clone.
                  ["git", "-C", str(tmp), "remote", "remove", "origin"])
         for argv in steps:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=300,
+                               env=config.child_env())
             if p.returncode != 0:
                 raise Unavailable(f"could not snapshot {build_id}: "
                                   f"{(p.stderr or p.stdout).strip()[:500]}")
@@ -493,7 +496,7 @@ def play_env(display, userdata):
     nothing (config.STUDIO_DISPLAY finds WSLg's :0 on its own). WSLg's audio
     server is wired in the same way when the caller's environment lacks it.
     """
-    env = dict(os.environ, DISPLAY=display, XDG_DATA_HOME=str(userdata))
+    env = config.child_env(DISPLAY=display, XDG_DATA_HOME=str(userdata))
     if not env.get("PULSE_SERVER") and Path(WSLG_PULSE).exists():
         env["PULSE_SERVER"] = "unix:" + WSLG_PULSE
     return env

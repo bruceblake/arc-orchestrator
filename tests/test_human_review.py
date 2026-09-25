@@ -251,6 +251,10 @@ class TestScenesAndDisplay(PlaytestCase):
             obj, code = dashboard._playtest_launch(
                 {"project": "game", "build": "task/foo", "scene": "res://scenes/prison.tscn"})
             self.assertEqual(code, 200, obj)
+            # The dashboard launches with wait=False: the snapshot is made on a
+            # thread that must finish before teardown removes its directory.
+            for t in list(playtest._PREPARING.values()):
+                t.join(30)
             s = playtest.launch("game", "task/foo", scene="res://scenes/prison.tscn")
         self.assertEqual(s["scene"], "res://scenes/prison.tscn")
         argv = sleeper.calls[-1][0]
@@ -275,6 +279,14 @@ class TestDisplayFallback(unittest.TestCase):
             self.assertEqual(config._studio_display(), "")
         with mock.patch.dict(os.environ, dict(env, DISPLAY=":5"), clear=True):
             self.assertEqual(config._studio_display(), ":5")
+
+    def test_a_played_build_does_not_inherit_the_dashboard_token(self):
+        """The game is agent-written code started by the dashboard."""
+        from studio import playtest
+        with mock.patch.dict(os.environ, {"ARC_DASHBOARD_TOKEN": "s3cret"}):
+            env = playtest.play_env(":0", "/tmp/ud")
+        self.assertNotIn("ARC_DASHBOARD_TOKEN", env)
+        self.assertEqual((env["DISPLAY"], env["XDG_DATA_HOME"]), (":0", "/tmp/ud"))
 
 
 if __name__ == "__main__":

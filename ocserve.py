@@ -258,7 +258,7 @@ def start_server(binary=None, port=None, startup_timeout=None, cwd=None,
         startup_timeout = config.OPENCODE_SERVE_STARTUP_TIMEOUT
     port = port or _free_port()
     argv = [binary, "serve", "--port", str(port)]
-    child_env = dict(os.environ, **(env or {}))
+    child_env = config.child_env(None, **(env or {}))
     log.info("ocserve: starting %s", " ".join(argv))
     log_fh = tempfile.NamedTemporaryFile(
         prefix="ocserve-server-", suffix=".log", delete=False)

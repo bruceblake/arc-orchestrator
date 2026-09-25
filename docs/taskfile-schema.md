@@ -138,6 +138,8 @@ the run is down is kept and applied when it resumes to that PR round.
 | `probe_cmd` | string | `""` | Optional. A shell command run in the task's worktree **after its gate passes**; the last top-level JSON object it prints is the task's **verdict**, stored on the row (`code_tasks.verdict`) and emitted as `task.verdict`. A probe that exits non-zero or prints no JSON object fails the gate — a branch skipped because the probe crashed would be a bug disguised as a decision. Dependents read the verdict through `when`. |
 | `when` | object | absent | Optional. Run this task **only if** a dependency's verdict satisfies a condition; otherwise the task and everything downstream of it are recorded `skipped` (a terminal status that counts as complete). Shape: `{"dep": "<id, also in deps>", "key": "<verdict field, dotted ok>", <one operator>}` with operator one of `"equals": v`, `"not_equals": v`, `"in": [..]`, `"truthy": bool`, `"exists": bool`. The named dep must have a `probe_cmd`. Wired as `Edge(when=)` on the release edge (`pr_merge_<dep>` or the join → `alloc_<task>`), with a `skip_<task>` node on the complement. This is the one-taskfile **router** (see [graph-patterns.md](graph-patterns.md) § 4). |
 | `human_review` | bool | absent | Optional. Overrides `project.human_review` for this task: `true` holds its fleet-approved PR for a human decision, `false` lets it merge on the fleet's approval. Must be a boolean. |
+| `evidence` | boolean | absent (= `true`) | Rule 7d opt-out. `false` skips visual evidence capture for this task even in a Godot worktree (`evidence.enabled_for`) — for documentation-only work. Any non-boolean is rejected. |
+| `visual` | boolean | absent (= `true`) | `false` marks a task whose change is not meant to be seen (a refactor, a test, a gameplay constant). Evidence is still captured and a visible regression still blocks, but the reviewer is not told to reject an unchanged picture. Recorded as `non_visual` in the evidence manifest, so a resumed review reads it too. Any non-boolean is rejected. |
 | `deps` | list of strings | `[]` | Ids of tasks whose merged output this task needs (the id is the canonical key). One dep: the runner wires `pr_merge_<dep> → alloc_<task>`. Two or more: a gather node (`join_<task>`) waits for **every** listed dep's PR to merge before the task allocates its worktree — a real join, order irrelevant (`code_tasks.build_code_graph`, `wire_deps`). The worktree always branches from `main`, so it inherits every earlier merge. |
 
 ### Model routing (tier table, `config.IMPLEMENT_TIERS`)
@@ -317,6 +319,9 @@ to the implementer with the issue list.
     files need not exist yet — waiting is a runtime state, not a validation
     error — but a cycle among existing files is rejected at graph build
     (`ValueError: project.after cycle detected: ...`).
+11. **`evidence` / `visual` are booleans** when present:
+    `ValueError: task {tid}: visual must be true or false` (same for
+    `evidence`). An absent key stays absent on the loaded task (the default).
 
 Not checked by the loader (know where these live):
 

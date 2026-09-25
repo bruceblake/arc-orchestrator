@@ -97,6 +97,84 @@ class TokenFromTheEnvFile(unittest.TestCase):
         env = ex.call_args.args[2]
         self.assertEqual(env["ARC_DASHBOARD_TOKEN"], "s3cret")
 
+    def test_graceful_reexec_keeps_a_token_loaded_from_the_env_file(self):
+        self.file.write_text("ARC_DASHBOARD_TOKEN=s3cret\n")
+        self.assertIsNone(dashboard._ensure_token())
+        os.environ.pop("ARC_DASHBOARD_TOKEN", None)
+        with mock.patch.object(dashboard.os, "execve") as ex, \
+                mock.patch.object(dashboard.logging, "shutdown"):
+            dashboard._graceful_reexec()
+        self.assertEqual(ex.call_args.args[2]["ARC_DASHBOARD_TOKEN"], "s3cret")
+
+
+class TheTokenNeverReachesAChild(unittest.TestCase):
+    """_ensure_token exports the token for the re-exec; nothing the dashboard
+    or a driver spawns may inherit it — a harness that runs `env` writes its
+    environment into logs/harness/*.jsonl, served unauthenticated."""
+
+    def setUp(self):
+        p = mock.patch.dict(os.environ, {"ARC_DASHBOARD_TOKEN": "s3cret", "ARC_KEEP_ME": "1"})
+        p.start()
+        self.addCleanup(p.stop)
+        self._dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self._dir.cleanup)
+        self.addCleanup(setattr, config, "ROOT", config.ROOT)
+        config.ROOT = self._dir.name
+
+    def _child_env_of(self, proc_env_json):
+        return json.loads(Path(proc_env_json).read_text())
+
+    def test_a_spawned_child_env_lacks_the_token(self):
+        out = Path(self._dir.name) / "env.json"
+        code = f"import json,os; open({str(out)!r},'w').write(json.dumps(dict(os.environ)))"
+        proc, _ = dashboard._spawn_logged([dashboard.sys.executable, "-c", code], "child.log",
+                                          env_extra={"ARC_EXTRA": "x"})
+        proc.wait(30)
+        env = self._child_env_of(out)
+        self.assertNotIn("ARC_DASHBOARD_TOKEN", env)
+        self.assertEqual((env["ARC_KEEP_ME"], env["ARC_EXTRA"], env["PYTHONUNBUFFERED"]),
+                         ("1", "x", "1"))
+        self.assertEqual(os.environ["ARC_DASHBOARD_TOKEN"], "s3cret",
+                         "the dashboard's own environment keeps it for the re-exec")
+
+    def test_every_dashboard_subprocess_passes_the_scrubbed_env(self):
+        import ast
+        tree = ast.parse(Path(dashboard.__file__).read_text())
+        bare = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Name)
+                    and node.func.value.id == "subprocess"
+                    and node.func.attr in ("run", "Popen", "call", "check_call", "check_output")):
+                if not any(k.arg == "env" for k in node.keywords):
+                    bare.append(node.lineno)
+        self.assertEqual(bare, [], "subprocess calls inheriting os.environ (and the token)")
+
+    def test_a_driver_harness_env_lacks_the_token(self):
+        import asyncio
+        import drivers
+
+        async def run(env):
+            proc = await drivers.spawn(
+                [dashboard.sys.executable, "-c", "import json,os; print(json.dumps(dict(os.environ)))"],
+                cwd=self._dir.name, env=env)
+            out, _ = await proc.communicate()
+            return json.loads(out)
+        inherited = asyncio.run(run(None))
+        explicit = asyncio.run(run(dict(os.environ, PWD=self._dir.name)))
+        for env in (inherited, explicit):
+            self.assertNotIn("ARC_DASHBOARD_TOKEN", env)
+            self.assertEqual(env["ARC_KEEP_ME"], "1")
+
+    def test_the_opencode_server_env_lacks_the_token(self):
+        import ocserve
+        with mock.patch.object(ocserve.subprocess, "Popen", side_effect=OSError("stop")) as po, \
+                self.assertRaises(Exception):
+            ocserve.start_server(binary="opencode", port=1, env={"OPENCODE_CONFIG": "c"})
+        env = po.call_args.kwargs["env"]
+        self.assertNotIn("ARC_DASHBOARD_TOKEN", env)
+        self.assertEqual(env["OPENCODE_CONFIG"], "c")
+
 
 class AuthRoute(unittest.TestCase):
     def setUp(self):

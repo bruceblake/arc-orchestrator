@@ -37,6 +37,7 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -83,9 +84,34 @@ def enabled_for(worktree, task=None):
     return is_godot_project(worktree)
 
 
+def non_visual(task):
+    """True for a task marked `"visual": false`: its change is not meant to
+    be seen, so the reviewer is not told to reject an unchanged picture."""
+    return task is not None and task.get("visual") is False
+
+
 def run_dir(project, task_id, attempt):
     return (Path(config.EVIDENCE_DIR) / _slug(project) / _slug(task_id)
             / f"x{int(attempt)}")
+
+
+def latest_manifest(project, task_id):
+    """The newest attempt's manifest for a task, or None (read-only)."""
+    tdir = Path(config.EVIDENCE_DIR) / _slug(project) / _slug(task_id)
+    try:
+        attempts = sorted((p for p in tdir.glob("x*") if p.name[1:].isdigit()),
+                          key=lambda p: int(p.name[1:]))
+    except OSError:
+        return None
+    for adir in reversed(attempts):
+        try:
+            m = json.loads((adir / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(m, dict):
+            m.setdefault("attempt", int(adir.name[1:]))
+            return m
+    return None
 
 
 def _slug(s):
@@ -195,6 +221,84 @@ func _ensure_inspection_light(root: Node) -> void:
 '''
 
 
+# The scripted playtest, recorded so a reviewer can SEE the route. It extends
+# the game's own tools/playtest.gd (so the route, the input and the pass/fail
+# are exactly the game's), and only adds what a recording needs: neutral light
+# when the scene brings none (an unlit graybox records as black) and a chase
+# camera over the player (a first-person view of a grey wall shows nothing).
+PLAYTEST_WRAPPER = """extends "res://tools/playtest.gd"
+# Written by arc-orchestrator evidence.py into a temp dir; never committed.
+
+func _initialize() -> void:
+\t_arc_follow()
+\tsuper()
+
+
+func _arc_follow() -> void:
+\tawait process_frame
+\tawait process_frame
+\tvar root := get_root()
+\tif root.find_children("*", "Light3D", true, false).is_empty():
+\t\tvar sun := DirectionalLight3D.new()
+\t\tsun.name = "EvidenceInspectionSun"
+\t\tsun.rotation_degrees = Vector3(-50.0, 35.0, 0.0)
+\t\tsun.light_energy = 1.2
+\t\tsun.shadow_enabled = true
+\t\troot.add_child(sun)
+\tif root.find_children("*", "WorldEnvironment", true, false).is_empty():
+\t\tvar env := Environment.new()
+\t\tvar sky := Sky.new()
+\t\tsky.sky_material = ProceduralSkyMaterial.new()
+\t\tenv.background_mode = Environment.BG_SKY
+\t\tenv.sky = sky
+\t\tenv.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+\t\tenv.ambient_light_energy = 0.6
+\t\tvar we := WorldEnvironment.new()
+\t\twe.environment = env
+\t\troot.add_child(we)
+\tvar cam := Camera3D.new()
+\tcam.name = "EvidenceChaseCamera"
+\troot.add_child(cam)
+\tcam.make_current()
+\tprint("EVIDENCE_PLAYTEST_CAMERA")
+\tvar tick := 0
+\twhile true:
+\t\tvar target := _arc_player(root)
+\t\tif target != null and target.is_inside_tree():
+\t\t\tvar p: Vector3 = target.global_position
+\t\t\tif tick % 30 == 0:
+\t\t\t\t_arc_cutaway(root, p.y + 1.9)
+\t\t\tcam.look_at_from_position(p + Vector3(0.0, 11.0, 8.0), p, Vector3.UP)
+\t\tif not cam.current:
+\t\t\tcam.make_current()
+\t\ttick += 1
+\t\tawait process_frame
+
+
+# Cutaway: geometry lying wholly above the player's head (ceilings, roofs) is
+# hidden from the RECORDING so the overhead camera sees the route inside a
+# building. Visibility is not collision: the playtest itself is unchanged.
+func _arc_cutaway(root: Node, above: float) -> void:
+\tfor n in root.find_children("*", "GeometryInstance3D", true, false):
+\t\tvar gi := n as GeometryInstance3D
+\t\tif gi != null and gi.visible:
+\t\t\tvar box: AABB = gi.global_transform * gi.get_aabb()
+\t\t\tif box.position.y >= above:
+\t\t\t\tgi.visible = false
+
+
+func _arc_player(root: Node) -> Node3D:
+\tfor n in get_nodes_in_group("player"):
+\t\tif n is Node3D:
+\t\t\treturn n as Node3D
+\tvar bodies := root.find_children("*", "CharacterBody3D", true, false)
+\tfor b in bodies:
+\t\tif str(b.name).to_lower().contains("player"):
+\t\t\treturn b as Node3D
+\treturn (bodies[0] as Node3D) if not bodies.is_empty() else null
+"""
+
+
 # --- running things ---------------------------------------------------------
 
 def _display():
@@ -301,8 +405,12 @@ def _cameras(project):
     return [c.to_dict() for c in camera_system.load_anchors(project)]
 
 
-def _render_shots(project, cameras, out_dir, scratch, *, timeout, log=None):
-    """One PNG per camera via the studio render harness, run from `scratch`."""
+def _render_shots(project, cameras, out_dir, scratch, *, timeout, log=None,
+                  scene=None):
+    """One PNG per camera via the studio render harness, run from `scratch`.
+
+    `scene` (res:// path) renders that scene instead of the main scene: how a
+    changed lab scene is photographed on its own (see capture_scenes)."""
     from studio.engine import godot
     out_dir.mkdir(parents=True, exist_ok=True)
     harness = Path(scratch) / "render.gd"
@@ -314,7 +422,7 @@ def _render_shots(project, cameras, out_dir, scratch, *, timeout, log=None):
     args = ["--rendering-driver", "opengl3", "--resolution",
             config.EVIDENCE_RESOLUTION, "--script", str(harness),
             "--", str(cam_file), str(out_dir)]
-    scene = main_scene(project)
+    scene = main_scene(project) if scene is None else scene
     if scene:
         args.append(scene)
     rc, out = _godot(project, args, timeout=timeout, log=log)
@@ -378,12 +486,33 @@ def _playtest(project, out_dir, scratch, *, timeout, log=None):
     if not (Path(project) / "tools" / "playtest.gd").is_file():
         return None, None, _NO_PLAYTEST
     avi = Path(scratch) / "playtest.avi"
-    rc, out = _godot(project, ["--rendering-driver", "opengl3", "--resolution",
-                               config.EVIDENCE_RESOLUTION, "--write-movie", str(avi),
-                               "--fixed-fps", str(config.EVIDENCE_FPS),
-                               "--script", "res://tools/playtest.gd"], timeout=timeout,
-                     log=log)
-    note = None if rc == 0 else f"the playtest exited {rc} while being recorded"
+    # Recorded through PLAYTEST_WRAPPER: the same script, plus inspection light
+    # and a chase camera. The bare script recorded a graybox with no light
+    # through a first-person camera — a 35 KB gif of black frames. A playtest
+    # the wrapper cannot extend, or that exits non-zero under it, is recorded
+    # bare too; the wrapper's recording is kept only if the bare run leaves
+    # no video.
+    wrapper = Path(scratch) / "playtest_evidence.gd"
+    wrapper.write_text(PLAYTEST_WRAPPER, encoding="utf-8")
+    wrapped_avi = Path(scratch) / "playtest_wrapped.avi"
+    wrapped = None
+    for script in (str(wrapper), "res://tools/playtest.gd"):
+        avi.unlink(missing_ok=True)
+        rc, out = _godot(project, ["--rendering-driver", "opengl3", "--resolution",
+                                   config.EVIDENCE_RESOLUTION, "--write-movie", str(avi),
+                                   "--fixed-fps", str(config.EVIDENCE_FPS),
+                                   "--script", script], timeout=timeout, log=log)
+        note = None if rc == 0 else f"the playtest exited {rc} while being recorded"
+        if script != str(wrapper):
+            break
+        if rc == 0 and "EVIDENCE_PLAYTEST_CAMERA" in out:
+            break
+        if avi.exists() and avi.stat().st_size > 0:
+            os.replace(avi, wrapped_avi)
+            wrapped = (rc, note)
+    if (not avi.exists() or avi.stat().st_size == 0) and wrapped:
+        os.replace(wrapped_avi, avi)
+        rc, note = wrapped
     shots_src = Path(project) / "studio_shots"
     if shots_src.is_dir():
         dest = out_dir / "playtest_shots"
@@ -744,6 +873,427 @@ def baseline(project, repo, sha, *, timeout, log=None):
     return dest, "captured", ""
 
 
+# --- changed scenes ---------------------------------------------------------
+#
+# The fixed anchor cameras photograph the MAIN scene. A task that adds a lab
+# scene, or changes a script only a lab scene uses, is invisible to them: PR
+# #19 of prison-escape-test changed scenes/labs/security_cameras.tscn and every
+# comparison read 0.0% — four shots of an unchanged prison yard. So every
+# scene the diff adds or changes, and every scene that instances a changed
+# script or scene, is rendered on its own: loaded alone, framed on the
+# bounds of what it draws, before (at the merge base) and after, with the
+# SAME cameras on both sides so the difference panel means something.
+
+# Loads ONE scene and writes the world-space bounds of every visible
+# GeometryInstance3D (nodes built in _ready included), so the cameras can be
+# placed around what the scene actually draws.
+SCENE_PROBE = '''extends SceneTree
+# Written by arc-orchestrator evidence.py into a temp dir; never committed.
+#   godot --path <project> --script <this> -- <scene> <out.json>
+
+func _initialize() -> void:
+\tvar args := OS.get_cmdline_user_args()
+\tif args.size() < 2:
+\t\tpush_error("usage: probe.gd -- <scene> <out.json>")
+\t\tquit(2)
+\t\treturn
+\tvar packed: PackedScene = load(args[0]) as PackedScene
+\tif packed == null:
+\t\tpush_error("cannot load scene: " + args[0])
+\t\tquit(2)
+\t\treturn
+\tvar inst: Node = packed.instantiate()
+\tif inst == null:
+\t\tpush_error("cannot instantiate scene: " + args[0])
+\t\tquit(2)
+\t\treturn
+\tget_root().add_child(inst)
+\tawait process_frame
+\tawait process_frame
+\tvar nodes: Array = inst.find_children("*", "GeometryInstance3D", true, false)
+\tif inst is GeometryInstance3D:
+\t\tnodes.append(inst)
+\tvar boxes: Array = []
+\tfor n in nodes:
+\t\tvar gi := n as GeometryInstance3D
+\t\tif gi == null or not gi.is_visible_in_tree():
+\t\t\tcontinue
+\t\tvar box: AABB = gi.global_transform * gi.get_aabb()
+\t\tvar vals: Array = [box.position.x, box.position.y, box.position.z,
+\t\t\t\tbox.size.x, box.size.y, box.size.z]
+\t\tvar ok := true
+\t\tfor v in vals:
+\t\t\tif not is_finite(float(v)):
+\t\t\t\tok = false
+\t\tif ok and box.size.length() > 0.0:
+\t\t\tboxes.append(vals)
+\t\tif boxes.size() >= 4000:
+\t\t\tbreak
+\tvar canvas: int = inst.find_children("*", "CanvasItem", true, false).size()
+\tif inst is CanvasItem:
+\t\tcanvas += 1
+\tvar f := FileAccess.open(args[1], FileAccess.WRITE)
+\tif f == null:
+\t\tpush_error("cannot write " + args[1])
+\t\tquit(2)
+\t\treturn
+\tf.store_string(JSON.stringify({"boxes": boxes, "canvas_items": canvas}))
+\tf.close()
+\tprint("EVIDENCE_PROBE_OK ", boxes.size())
+\tquit(0)
+'''
+
+_SCENE_EXCLUDED = ("tests/", "tools/", ".godot/", "addons/", ".arc/")
+
+
+def parse_name_status(text):
+    """{path: 'A'|'M'|'D'} from `git diff --name-status --no-renames` output."""
+    out = {}
+    for line in (text or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2 and parts[0]:
+            out[parts[-1].strip()] = parts[0][0]
+    return out
+
+
+def scene_texts(worktree):
+    """{relative .tscn path: text} for every scene a player could be shown."""
+    root = Path(worktree)
+    out = {}
+    for p in sorted(root.rglob("*.tscn")):
+        rel = p.relative_to(root).as_posix()
+        if rel.startswith(_SCENE_EXCLUDED) or "/." in "/" + rel:
+            continue
+        try:
+            out[rel] = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+    return out
+
+
+def changed_scenes(status, texts, *, limit=None):
+    """The scenes whose look this diff changes, most direct first.
+
+    `status` is {path: A|M|D} (parse_name_status plus untracked files as A),
+    `texts` is scene_texts() of the AFTER tree. A scene is included when:
+      added     the diff adds it
+      changed   the diff modifies it
+      dependent it references (ext_resource path="res://...") a script, scene
+                or resource the diff adds or modifies
+    Tests and tools are never shown (a test scene is not what a player sees),
+    and a deleted scene has no "after" to render. Returns
+    (rendered, skipped): the first `limit` entries and the rest, each
+    {"path", "res", "status", "why"}."""
+    limit = config.EVIDENCE_MAX_SCENES if limit is None else limit
+    touched = sorted(p for p, st in (status or {}).items()
+                     if st in ("A", "M") and _is_gameplay(p))
+    direct, dependent = [], []
+    for rel in sorted(texts or {}):
+        if rel.startswith(_SCENE_EXCLUDED):
+            continue
+        st = (status or {}).get(rel)
+        if st in ("A", "M"):
+            direct.append({"path": rel, "res": "res://" + rel,
+                           "status": "added" if st == "A" else "changed",
+                           "why": "added by this diff" if st == "A"
+                           else "modified by this diff"})
+            continue
+        uses = [p for p in touched if p != rel
+                and (f'path="res://{p}"' in texts[rel])]
+        if uses:
+            dependent.append({"path": rel, "res": "res://" + rel,
+                              "status": "dependent",
+                              "why": "uses " + ", ".join(uses[:3])
+                              + (f" (+{len(uses) - 3} more)" if len(uses) > 3 else "")})
+    direct.sort(key=lambda e: (e["status"] != "added", e["path"]))
+    every = direct + dependent
+    return every[:max(0, limit)], every[max(0, limit):]
+
+
+def scene_bounds(boxes, *, outlier=50.0):
+    """{"position", "size"}: the union of `boxes` ([x, y, z, sx, sy, sz]).
+
+    A box whose longest side is more than `outlier` times the median longest
+    side is left out — a 2 km ground plane under a 20 m room would otherwise
+    frame the room as a speck. None when there is nothing 3D to frame."""
+    valid = []
+    for b in boxes or []:
+        try:
+            v = [float(x) for x in b]
+        except (TypeError, ValueError):
+            continue
+        if len(v) == 6 and all(math.isfinite(x) for x in v) and max(v[3:]) > 0:
+            valid.append(v)
+    if not valid:
+        return None
+    sides = sorted(max(b[3:]) for b in valid)
+    med = sides[len(sides) // 2]
+    keep = [b for b in valid if max(b[3:]) <= outlier * med] or valid
+    lo = [min(b[i] for b in keep) for i in range(3)]
+    hi = [max(b[i] + b[i + 3] for b in keep) for i in range(3)]
+    return {"position": [round(x, 4) for x in lo],
+            "size": [round(h - l, 4) for l, h in zip(lo, hi)]}
+
+
+# Views around a scene's bounds: (name, direction from the centre). "top" is
+# tilted a hair off vertical so look_at has a defined up; the elevated views
+# see over the walls of a room, which a level view cannot.
+FRAME_VIEWS = (("overview", (1.0, 1.1, 1.0)),
+               ("top", (0.0, 1.0, 0.02)),
+               ("front", (0.0, 0.7, 1.0)),
+               ("side", (1.0, 0.7, 0.0)))
+
+
+def _norm(v):
+    n = math.sqrt(sum(x * x for x in v)) or 1.0
+    return [x / n for x in v]
+
+
+def _center(bounds):
+    return [p + s / 2 for p, s in zip(bounds["position"], bounds["size"])]
+
+
+def _cross(a, b):
+    return [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]]
+
+
+def _dot(a, b):
+    return sum(x * y for x, y in zip(a, b))
+
+
+def _corners(bounds):
+    p, s = bounds["position"], bounds["size"]
+    return [[p[0] + s[0] * i, p[1] + s[1] * j, p[2] + s[2] * k]
+            for i in (0, 1) for j in (0, 1) for k in (0, 1)]
+
+
+def view_basis(direction):
+    """(u, right, up) of a camera placed along `direction` from its target and
+    looking back at it, with world +Y as up — Godot's look_at convention."""
+    u = _norm(direction)
+    fwd = [-x for x in u]
+    right = _norm(_cross(fwd, [0.0, 1.0, 0.0]))
+    up = _cross(right, fwd)
+    return u, right, up
+
+
+def fit_distance(bounds, direction, *, fov=50.0, aspect=16 / 9, margin=1.08):
+    """Smallest distance from the bounds' centre, along `direction`, at which
+    all eight corners are inside the frame (with `margin` of air).
+
+    `fov` is Godot's vertical Camera3D.fov (keep_aspect = KEEP_HEIGHT); the
+    horizontal half-angle follows from `aspect`. For a corner at camera-space
+    offset (x, y) and depth z toward the camera, it is in frame when
+    |x| <= (d - z)·tan(h/2) and |y| <= (d - z)·tan(v/2) — so d is the largest
+    z + |x|/tan(h/2) (or |y|/tan(v/2)) over the corners. A tight fit, unlike a
+    bounding sphere, which frames a flat 20 m room at ~60% of the picture."""
+    c = _center(bounds)
+    u, right, up = view_basis(direction)
+    tv = math.tan(math.radians(fov) / 2)
+    th = tv * aspect
+    d = 0.0
+    for corner in _corners(bounds):
+        o = [a - b for a, b in zip(corner, c)]
+        x, y, z = _dot(o, right) * margin, _dot(o, up) * margin, _dot(o, u)
+        d = max(d, z + abs(x) / th, z + abs(y) / tv)
+    # Never inside the box, and never so close a degenerate box fills nothing.
+    return max(d, 1.0, max(bounds["size"]) * 0.5 + 0.5)
+
+
+def in_frame(camera, point, *, aspect=16 / 9):
+    """Whether `point` projects inside `camera`'s picture (tests use this)."""
+    pos, look = camera["position"], camera["look_at"]
+    u, right, up = view_basis([a - b for a, b in zip(pos, look)])
+    o = [a - b for a, b in zip(point, pos)]
+    depth = -_dot(o, u)
+    if depth <= 0:
+        return False
+    tv = math.tan(math.radians(camera.get("fov", 70.0)) / 2)
+    return (abs(_dot(o, right)) <= depth * tv * aspect + 1e-6
+            and abs(_dot(o, up)) <= depth * tv + 1e-6)
+
+
+def frame_cameras(bounds, *, fov=50.0, aspect=16 / 9, margin=1.08, views=FRAME_VIEWS):
+    """Cameras (camera_system dicts) that each show ALL of `bounds`.
+
+    Every camera looks at the centre from its own `fit_distance`, so every
+    corner of the box is inside its view and the content fills the frame. A
+    scene with no 3D content (a 2D/UI scene) gets one "screen" camera: its
+    canvas draws regardless of where the 3D camera points."""
+    if not bounds:
+        return [{"name": "screen", "position": [0.0, 0.0, 10.0],
+                 "look_at": [0.0, 0.0, 0.0], "fov": 70.0, "kind": "auto"}]
+    c = _center(bounds)
+    out = []
+    for name, direction in views:
+        u = _norm(direction)
+        d = fit_distance(bounds, direction, fov=fov, aspect=aspect, margin=margin)
+        out.append({"name": name,
+                    "position": [round(c[i] + u[i] * d, 4) for i in range(3)],
+                    "look_at": [round(x, 4) for x in c], "fov": fov,
+                    "kind": "auto"})
+    return out
+
+
+def orbit_cameras(bounds, *, n=8, elevation=40.0, fov=50.0, aspect=16 / 9,
+                  margin=1.08):
+    """n+1 keyframes circling the bounds (the last closes the loop), for the
+    per-scene orbit video: every side of the scene, not one angle of it."""
+    if not bounds:
+        return frame_cameras(None)
+    c = _center(bounds)
+    el = math.radians(elevation)
+    dirs = [[math.cos(el) * math.cos(2 * math.pi * i / n), math.sin(el),
+             math.cos(el) * math.sin(2 * math.pi * i / n)] for i in range(n + 1)]
+    # One radius for the whole orbit (the widest any keyframe needs), so the
+    # camera circles instead of bobbing in and out.
+    d = max(fit_distance(bounds, u, fov=fov, aspect=aspect, margin=margin)
+            for u in dirs)
+    out = []
+    for i, u in enumerate(dirs):
+        out.append({"name": f"orbit{i}",
+                    "position": [round(c[k] + u[k] * d, 4) for k in range(3)],
+                    "look_at": [round(x, 4) for x in c], "fov": fov})
+    return out
+
+
+def _probe_scene(project, res, scratch, *, timeout, log=None):
+    """(bounds|None, canvas_items) of one scene, from SCENE_PROBE."""
+    harness = Path(scratch) / "probe.gd"
+    harness.write_text(SCENE_PROBE, encoding="utf-8")
+    out_json = Path(scratch) / "probe.json"
+    out_json.unlink(missing_ok=True)
+    rc, out = _godot(project, ["--rendering-driver", "opengl3", "--resolution",
+                               "320x180", "--script", str(harness), "--", res,
+                               str(out_json)], timeout=timeout, log=log)
+    if "EVIDENCE_PROBE_OK" not in out or not out_json.exists():
+        from studio.engine import godot
+        raise EvidenceError(f"could not load {res} (godot rc={rc}):\n"
+                            + "\n".join(godot.output_errors(out)[:10] or [out[-800:]]))
+    data = json.loads(out_json.read_text(encoding="utf-8"))
+    return scene_bounds(data.get("boxes")), int(data.get("canvas_items") or 0)
+
+
+@contextlib.contextmanager
+def _detached(repo, sha, *, timeout):
+    """A throwaway detached worktree of `repo` at `sha`, assets imported."""
+    with tempfile.TemporaryDirectory(prefix="arc-evidence-before-") as tmp:
+        wt = Path(tmp) / "wt"
+        _git(["worktree", "add", "--detach", str(wt), sha], repo)
+        try:
+            if is_godot_project(wt):
+                from studio.engine import godot
+                godot.import_assets(wt, timeout=timeout)
+            yield wt
+        finally:
+            _git(["worktree", "remove", "--force", str(wt)], repo, check=False)
+
+
+def _scene_video(project, res, cams, out_stem, scratch, *, timeout, log=None):
+    """An orbit around one scene, recorded like the flythrough."""
+    harness = Path(scratch) / "capture.gd"
+    harness.write_text(CAPTURE_HARNESS, encoding="utf-8")
+    cam_file = Path(scratch) / "orbit_cameras.json"
+    cam_file.write_text(json.dumps({"cameras": cams}), encoding="utf-8")
+    avi = Path(scratch) / (out_stem.name + ".avi")
+    rc, out = _godot(project, ["--rendering-driver", "opengl3", "--resolution",
+                               config.EVIDENCE_RESOLUTION, "--write-movie", str(avi),
+                               "--fixed-fps", str(config.EVIDENCE_FPS),
+                               "--script", str(harness), "--", str(cam_file),
+                               str(config.EVIDENCE_SCENE_SECONDS), res],
+                     timeout=timeout, log=log)
+    if not avi.exists() or "EVIDENCE_CAPTURE_OK" not in out:
+        raise EvidenceError(f"orbit recording of {res} failed (godot rc={rc})")
+    return _video(avi, out_stem)
+
+
+def max_changed(rows):
+    """The largest measured change among compare rows, or None."""
+    vals = [r["changed"] for r in rows or [] if r.get("changed") is not None]
+    return max(vals) if vals else None
+
+
+def capture_scenes(worktree, out_dir, scratch, *, repo=None, sha=None,
+                   timeout, log=None, limit=None):
+    """Render every scene the diff changes, auto-framed, before and after.
+
+    Returns (entries, skipped, warnings). An entry is the changed_scenes()
+    dict plus bounds, cameras, shots (after), before, compare rows,
+    max_changed, video and error. A scene that will not load alone (it needs
+    a parent that provides something) is a WARNING on that entry, not a gate
+    failure: the verify gate judges behaviour, this only shows it."""
+    worktree, out_dir = Path(worktree), Path(out_dir)
+    ref = sha or "HEAD"
+    status = parse_name_status(_git(["diff", "--name-status", "--no-renames", ref],
+                                    worktree, check=False))
+    for rel in _untracked(worktree):
+        status.setdefault(rel, "A")
+    picked, skipped = changed_scenes(status, scene_texts(worktree), limit=limit)
+    warnings = []
+    if skipped:
+        warnings.append(f"{len(skipped)} more changed scene(s) not rendered "
+                        f"(ARC_EVIDENCE_MAX_SCENES={len(picked)}): "
+                        + ", ".join(e["path"] for e in skipped[:6]))
+    for e in picked:
+        sdir = out_dir / "scenes" / _slug(e["path"][:-len(".tscn")])
+        e.update({"dir": str(sdir), "shots": [], "before": [], "compare": [],
+                  "max_changed": None, "error": ""})
+        try:
+            bounds, canvas = _probe_scene(worktree, e["res"], scratch,
+                                          timeout=timeout, log=log)
+            e["bounds"], e["canvas_items"] = bounds, canvas
+            e["cameras"] = frame_cameras(bounds)
+            shots = _render_shots(worktree, e["cameras"], sdir / "after", scratch,
+                                  timeout=timeout, log=log, scene=e["res"])
+            e["shots"] = [str(s) for s in shots]
+        except (EvidenceError, OSError, ValueError) as exc:
+            e["error"] = str(exc).splitlines()[0][:300]
+            warnings.append(f"scene {e['path']} did not render: {e['error']}")
+            continue
+        for s in shots:
+            share = blank_share(s)
+            if share is not None and share >= config.EVIDENCE_BLANK_SHARE:
+                warnings.append(f"scene {e['path']} view '{s.stem}' is a nearly "
+                                f"solid frame ({share:.0%} one colour)")
+        if bounds:
+            try:
+                mp4, gif = _scene_video(worktree, e["res"], orbit_cameras(bounds),
+                                        sdir / "orbit", scratch, timeout=timeout,
+                                        log=log)
+                e["video"] = {"mp4": str(mp4), "gif": str(gif)}
+            except EvidenceError as exc:
+                warnings.append(str(exc).splitlines()[0][:300])
+    want_before = [e for e in picked if e.get("shots") and e["status"] != "added"]
+    if want_before and repo and sha:
+        head = _git(["rev-parse", "HEAD"], worktree, check=False)
+        try:
+            with _detached(repo, sha, timeout=timeout) as before_wt:
+                for e in want_before:
+                    if not (before_wt / e["path"]).is_file():
+                        e["status"], e["why"] = "added", "not present at the branch point"
+                        continue
+                    sdir = Path(e["dir"])
+                    try:
+                        before = _render_shots(before_wt, e["cameras"], sdir / "before",
+                                               scratch, timeout=timeout, log=log,
+                                               scene=e["res"])
+                    except EvidenceError as exc:
+                        warnings.append(f"scene {e['path']} did not render at the "
+                                        f"branch point: {str(exc).splitlines()[0][:200]}")
+                        continue
+                    e["before"] = [str(b) for b in before]
+                    e["compare"] = compare(sdir / "before",
+                                           [Path(s) for s in e["shots"]],
+                                           sdir / "compare", before_sha=sha,
+                                           after_sha=head)
+                    e["max_changed"] = max_changed(e["compare"])
+        except (EvidenceError, subprocess.SubprocessError, OSError) as exc:
+            warnings.append(f"no branch-point render of the changed scenes: "
+                            f"{str(exc)[:200]}")
+    return picked, skipped, warnings
+
+
 # --- capture ----------------------------------------------------------------
 
 def _cover(manifest, kind, status, reason=""):
@@ -794,9 +1344,12 @@ def no_visible_change(compare_rows, gameplay, scenes, *, min_change=None):
 
     True only when ALL of these hold (Rule 7d — the flag a reviewer needs): the
     diff touches a .gd/.tscn/.tres outside tests/ and tools/, there is at least
-    one camera comparison to read, EVERY comparison moved less than
-    `config.EVIDENCE_MIN_CHANGE` of its pixels, and no scene render exists to
-    show the change instead.
+    one comparison to read, and EVERY comparison moved less than
+    `config.EVIDENCE_MIN_CHANGE` of its pixels. When changed scenes were
+    rendered, THEIR before/after comparisons are the ones judged (the main
+    scene's fixed cameras are expected to read 0% for a change in a lab
+    scene), and a rendered scene with no comparison — a new scene — shows the
+    change by existing, so the flag stays off.
 
     Every clause guards against a false alarm. With no comparison row there is
     nothing that could have been unchanged (the coverage table says why there
@@ -804,9 +1357,20 @@ def no_visible_change(compare_rows, gameplay, scenes, *, min_change=None):
     render is another look at the same change — a scene entry with no image on
     disk is not a render, so it does not count (see `scene_shots`)."""
     min_change = config.EVIDENCE_MIN_CHANGE if min_change is None else min_change
-    if not any(_is_gameplay(p) for p in (gameplay or [])) or scene_shots(scenes):
+    if not any(_is_gameplay(p) for p in (gameplay or [])):
         return False
-    rows = list(compare_rows or [])
+    if scene_shots(scenes):
+        # The changed scenes ARE the evidence: the main scene's fixed cameras
+        # are expected to read 0% when a lab scene changed. A scene rendered
+        # with nothing to compare against (it is new, or its branch-point
+        # render failed) shows the change by existing, so it is not "no
+        # change"; a scene whose before/after moved nothing is.
+        drawn = [sc for sc in scenes or [] if scene_shots([sc])]
+        if any(not sc.get("compare") for sc in drawn):
+            return False
+        rows = [r for sc in drawn for r in sc["compare"]]
+    else:
+        rows = list(compare_rows or [])
     if not rows:
         return False
     return all(c.get("changed") is not None and c["changed"] < min_change
@@ -814,8 +1378,12 @@ def no_visible_change(compare_rows, gameplay, scenes, *, min_change=None):
 
 
 def capture(worktree, out_dir, *, repo=None, base=None, project="",
-            timeout=None):
+            timeout=None, non_visual=False):
     """Capture every kind of evidence for `worktree` into `out_dir`.
+
+    `non_visual` (the task's `"visual": false`) is recorded in the manifest,
+    where prompt_block reads it — also when a resumed review loads the
+    manifest back from disk.
 
     Returns the manifest dict (also written to out_dir/manifest.json).
     Raises EvidenceUnavailable when this machine cannot capture at all, and
@@ -831,10 +1399,12 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
     started = time.time()
     glog = []                      # raw output of EVERY render call
     manifest = {"worktree": str(worktree), "project": project,
+                "out_dir": str(out_dir),
                 "head": _git(["rev-parse", "HEAD"], worktree,
                              check=False),
                 "shots": [], "videos": {}, "compare": [], "warnings": [],
-                "coverage": {}, "godot_errors": []}
+                "coverage": {}, "godot_errors": [],
+                "non_visual": bool(non_visual)}
     with tempfile.TemporaryDirectory(prefix="arc-evidence-") as scratch, \
             _leave_no_trace(worktree):
         godot.import_assets(worktree, timeout=timeout)
@@ -898,7 +1468,9 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
             if bdir:
                 # Cached renders and fresh ones both land here.
                 bstatus, breason = "captured", ""
-            _cover(manifest, "baseline", bstatus, breason or f"no baseline at {sha[:10]}")
+            _cover(manifest, "baseline", bstatus,
+                   "" if bstatus == "captured"
+                   else (breason or f"no baseline at {sha[:10]}"))
             manifest["baseline"] = {"sha": sha, "dir": str(bdir) if bdir else None,
                                     "status": bstatus, "reason": breason}
             if bdir:
@@ -914,6 +1486,25 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
     else:
         _cover(manifest, "baseline", "skipped", "no merge base")
         _cover(manifest, "compare", "skipped", "no merge base")
+    # Every scene the diff changes, rendered on its own and framed on its
+    # content, before and after (the fixed cameras only ever see the main
+    # scene). Its own scratch dir: the one above is gone by now.
+    sha = (manifest.get("baseline") or {}).get("sha") or None
+    with tempfile.TemporaryDirectory(prefix="arc-evidence-scenes-") as scratch, \
+            _leave_no_trace(worktree):
+        picked, skipped, swarn = capture_scenes(
+            worktree, out_dir, scratch, repo=repo, sha=sha, timeout=timeout,
+            log=glog)
+    manifest["scenes"] = picked
+    manifest["scenes_skipped"] = [e["path"] for e in skipped]
+    manifest["warnings"] += swarn
+    compared = [e for e in picked if e.get("compare")]
+    _cover(manifest, "scene_compare",
+           "captured" if compared else "skipped",
+           "" if compared else
+           ("the diff changes no scene" if not picked else
+            "no changed scene had a branch-point render to compare with "
+            "(new scenes have no before)"))
     scenes = manifest.get("scenes") or []
     # A scene entry with no shots on disk rendered nothing: `scenes` is a list
     # of ATTEMPTED renders, so a nonempty list is not proof a scene was drawn.
@@ -921,7 +1512,8 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
     _cover(manifest, "scenes",
            "captured" if drawn else ("skipped" if not scenes else "failed"),
            "" if drawn else
-           ("no scene renders in this capture" if not scenes else
+           ("the diff adds or changes no scene, and no scene uses a changed "
+            "script" if not scenes else
             f"{len(scenes)} scene render(s) produced no image"))
     man_glog, glog[:] = list(glog), []
     manifest["godot_errors"] = godot_errors(*man_glog)
@@ -939,9 +1531,12 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
         manifest["warnings"].append(
             "NO VISIBLE CHANGE: this diff touches "
             + ", ".join(gameplay[:5])
-            + f" but every camera changed <{config.EVIDENCE_MIN_CHANGE:.1%} of its "
-            "pixels and no scene render shows it either — either the change is "
-            "genuinely invisible, or the capture did not see it (see coverage)")
+            + f" but every view changed <{config.EVIDENCE_MIN_CHANGE:.1%} of its "
+            "pixels (" + ("the changed scenes rendered before and after"
+                          if any(sc.get("compare") for sc in scenes)
+                          else "the main scene's fixed cameras")
+            + ") — either the change is genuinely invisible, or the capture "
+            "did not see it (see coverage)")
     sheet = contact_sheet(capture_shots(manifest), out_dir)
     if sheet:
         manifest["contact_sheet"] = str(sheet)
@@ -957,35 +1552,68 @@ def _pct(x):
     return "—" if x is None else f"{x:.1%}"
 
 
-def capture_shots(manifest):
-    """[(label, path)] from the manifest: every render, in capture order.
+def _scene_label(sc):
+    return Path(str(sc.get("path") or "")).stem or "scene"
 
-    The shots ARE the after images (this worktree's renders), so each tile is
-    (camera name, shot). Scene renders — the other producer of shots — follow,
-    named by their scene. These labels are what the contact sheet prints under
-    each tile."""
-    out = [(Path(s).stem, s) for s in manifest.get("shots") or []]
+
+def _ranked_panels(sc):
+    """One changed scene's images, most informative first: its before|after|
+    diff panels by share changed (largest first), or — for a scene with no
+    before — its after shots."""
+    rows = [c for c in sc.get("compare") or [] if c.get("side_by_side")]
+    if rows:
+        rows.sort(key=lambda c: -(c.get("changed") or 0.0))
+        return [c["side_by_side"] for c in rows]
+    return list(sc.get("shots") or [])
+
+
+def capture_shots(manifest):
+    """[(label, path)] from the manifest: every render, changed scenes first.
+
+    The changed scenes are what the task is about, so their tiles lead the
+    contact sheet, labelled "<scene>/<view>"; the main scene's fixed cameras
+    follow, labelled by camera. These labels are what the contact sheet prints
+    under each tile."""
+    out = []
     for sc in manifest.get("scenes") or []:
-        name = Path(str(sc.get("path") or "")).stem
+        name = _scene_label(sc)
         for s in sc.get("shots") or []:
-            out.append((name or Path(s).stem, s))
+            out.append((f"{name}/{Path(s).stem}", s))
+    out += [(Path(s).stem, s) for s in manifest.get("shots") or []]
     return out
 
 
-def review_images(manifest, limit=8):
+def review_images(manifest, limit=10):
     """Images to attach for a reviewer, most informative first.
 
-    The contact sheet comes FIRST: one labeled grid of every camera is what a
-    reviewer should see before eight full-size panels."""
+    The changed scenes lead — the two most-changed before|after|diff panels of
+    each (or its after shots when the scene is new) — because they are the
+    change itself. Then the contact sheet (one labeled grid of every view),
+    the rest of the scene panels, the main scene's comparisons, uncompared
+    shots and playtest shots."""
+    scenes = [sc for sc in manifest.get("scenes") or [] if scene_shots([sc])]
+    ranked = [_ranked_panels(sc) for sc in scenes]
+    out = [p for r in ranked for p in r[:2]]
     sheet = manifest.get("contact_sheet")
-    out = [sheet] if sheet and Path(sheet).exists() else []
+    if sheet and Path(sheet).exists():
+        out.append(sheet)
+    out += [p for r in ranked for p in r[2:]]
     out += [c["side_by_side"] for c in manifest.get("compare") or []
             if c.get("side_by_side")]
     compared = {Path(c["side_by_side"]).stem for c in manifest.get("compare") or []
                 if c.get("side_by_side")}
     out += [s for s in manifest.get("shots") or [] if Path(s).stem not in compared]
     out += list(manifest.get("playtest_shots") or [])
-    return [p for p in out if Path(p).exists()][:limit]
+    seen, keep = set(), []
+    for p in out:
+        if p and p not in seen and Path(p).exists():
+            seen.add(p)
+            keep.append(p)
+    return keep[:limit]
+
+
+_COVERAGE_ORDER = ("scenes", "scene_compare", "fixed_cameras", "flythrough",
+                   "playtest", "playtest_shots", "baseline", "compare")
 
 
 def coverage_lines(manifest):
@@ -995,14 +1623,27 @@ def coverage_lines(manifest):
     "the capture did not happen", so a non-captured kind is never omitted."""
     cov = manifest.get("coverage") or {}
     out = []
-    for kind in ("fixed_cameras", "flythrough", "playtest", "playtest_shots",
-                 "baseline", "compare", "scenes"):
+    for kind in _COVERAGE_ORDER:
         c = cov.get(kind)
         if not c:
             continue
         out.append(f"- coverage {kind}: {c.get('status')}"
                    + (f" — {c['reason']}" if c.get("reason") else ""))
     return out
+
+
+def scene_summary(sc):
+    """One line for one changed scene: what it is and how much it changed."""
+    head = f"`{sc.get('path')}` ({sc.get('status')}: {sc.get('why')})"
+    if sc.get("error"):
+        return head + f" — DID NOT RENDER: {sc['error']}"
+    if not scene_shots([sc]):
+        return head + " — no image"
+    if sc.get("compare"):
+        per = ", ".join(f"{c['name']} {_pct(c.get('changed'))}"
+                        for c in sc["compare"] if not c.get("new"))
+        return head + f" — {_pct(sc.get('max_changed'))} of pixels changed at most ({per})"
+    return head + " — NEW: no before image; the after renders show it"
 
 
 def prompt_block(manifest):
@@ -1012,16 +1653,52 @@ def prompt_block(manifest):
     lines = ["VISUAL EVIDENCE (captured after the verify gate passed). Look at it: "
              "a visual regression or a change that does not show what the task "
              "asks for is a blocking issue, exactly like a failing test."]
+    scenes = manifest.get("scenes") or []
+    if manifest.get("non_visual"):
+        lines += ["This task is marked NON-VISUAL (`\"visual\": false`): an "
+                  "unchanged picture is expected. A visible regression is still "
+                  "a blocking issue."]
+    else:
+        lines += [
+            "BLOCKING RULE: if the change this task asks for is NOT VISIBLE in "
+            "this evidence — the new or changed thing is absent from the scene "
+            "renders, or a changed scene's before|after|diff shows no difference "
+            "where the task says there should be one — REJECT with the issue "
+            "\"the change is not visible in the evidence\" and say what you "
+            "expected to see where. The only exception is a task explicitly "
+            "marked non-visual."]
+    if scenes:
+        base = ((manifest.get("baseline") or {}).get("sha") or "")[:10]
+        lines += ["",
+                  "CHANGED SCENES — each rendered ALONE, framed on its own content, "
+                  "with the SAME cameras before (branch point "
+                  f"{base or 'unknown'}) and after. These are the images to judge "
+                  "the change by; the main scene's fixed cameras below only show "
+                  "the level around it."]
+        for sc in scenes:
+            lines.append("- " + scene_summary(sc).replace("`", ""))
+            for p in _ranked_panels(sc):
+                lines.append(f"    image: {p}")
+            if sc.get("video"):
+                lines.append(f"    orbit video: {sc['video'].get('mp4')} "
+                             f"(preview {sc['video'].get('gif')})")
+        if manifest.get("scenes_skipped"):
+            lines.append("- also changed but not rendered (cap): "
+                         + ", ".join(manifest["scenes_skipped"]))
+        lines.append("If you cannot open images, judge by the numbers: a changed "
+                     "scene at 0.0% did not change on screen.")
     if manifest.get("no_visible_change"):
         lines += [
             "",
             "*** NO VISIBLE CHANGE — READ THIS BEFORE APPROVING. ***",
             "This diff touches gameplay files ("
             + ", ".join(manifest.get("gameplay_diff") or [])[:300] + ") but the "
-            "evidence shows NO visual change: every camera differs from the branch "
+            "evidence shows NO visual change: every view differs from the branch "
             "point by less than "
-            f"{config.EVIDENCE_MIN_CHANGE:.1%} of its pixels, and no scene render "
-            "shows the change either.",
+            f"{config.EVIDENCE_MIN_CHANGE:.1%} of its pixels"
+            + (", including every changed scene rendered on its own."
+               if any(sc.get("compare") for sc in scenes)
+               else ", and no scene render shows the change either."),
             "That is either a genuinely invisible change or a capture that missed "
             "it — you cannot tell which from the images, and neither can the "
             "orchestrator. So you MUST do one of these two things: (a) verify the "
@@ -1031,6 +1708,8 @@ def prompt_block(manifest):
             "because a gameplay change nobody can see has not been demonstrated.",
             "Approving on an unchanged screenshot is not an option.",
             ""]
+    if scenes:
+        lines.append("MAIN SCENE (fixed anchor cameras):")
     for c in manifest.get("compare") or []:
         if c.get("new"):
             lines.append(f"- camera {c['name']}: new viewpoint (no baseline)")
@@ -1062,9 +1741,7 @@ def _coverage_table(manifest, short=False):
             if not short or c.get("status") != "captured"]
     if not rows:
         return []
-    order = {k: i for i, k in enumerate(
-        ("fixed_cameras", "flythrough", "playtest", "playtest_shots",
-         "baseline", "compare", "scenes"))}
+    order = {k: i for i, k in enumerate(_COVERAGE_ORDER)}
     rows.sort(key=lambda kv: order.get(kv[0], 99))
     out = ["| evidence | status | reason |", "|---|---|---|"]
     out += [f"| {k} | {c.get('status') or '?'} | "
@@ -1078,6 +1755,13 @@ def board_body(manifest):
     changed = [f"{c['name']} {_pct(c.get('changed'))}" for c in
                manifest.get("compare") or [] if c.get("changed")]
     body = f"evidence: {n} screenshot(s)" + (f", video: {vids}" if vids else "")
+    scenes = manifest.get("scenes") or []
+    if scenes:
+        body += "; changed scenes: " + ", ".join(
+            f"{_scene_label(sc)} "
+            + ("did not render" if sc.get("error") else
+               _pct(sc.get("max_changed")) if sc.get("compare") else "new")
+            for sc in scenes[:6])
     if changed:
         body += "; changed vs branch point: " + ", ".join(changed[:6])
     gaps = [f"{k}:{c.get('status')}"
@@ -1093,6 +1777,9 @@ def board_body(manifest):
     if manifest.get("warnings"):
         body += f"; {len(manifest['warnings'])} warning(s)"
     body += f" — {Path(manifest.get('shots', ['.'])[0]).parent.parent}"
+    if scenes:
+        body += "\n\n**Changed scenes**\n" + "\n".join(
+            "- " + scene_summary(sc) for sc in scenes)
     table = _coverage_table(manifest)
     if table:
         body += "\n\n**Evidence coverage**\n" + "\n".join(table)
@@ -1113,7 +1800,6 @@ def board_body(manifest):
         body += "\n\n**Warnings**\n" + "\n".join(f"- {w}" for w in manifest["warnings"])
     return body
 
-
 # --- publishing to the game repo --------------------------------------------
 
 def _github_slug(repo):
@@ -1132,7 +1818,8 @@ def publish(repo, project, task_id, attempt, manifest):
     slug, remote = _github_slug(repo)
     if not slug or not config.EVIDENCE_PUBLISH:
         return None
-    src = Path(manifest["shots"][0]).parent.parent if manifest.get("shots") else None
+    src = (evidence_root(manifest)
+           if manifest.get("shots") or manifest.get("out_dir") else None)
     if not src or not src.is_dir():
         return None
     rel = f"{_slug(task_id)}/x{int(attempt)}"
@@ -1177,50 +1864,139 @@ def publish(repo, project, task_id, attempt, manifest):
         raise EvidenceError(f"could not push evidence: {pushed.stderr.strip()[:300]}")
 
 
+def evidence_root(manifest):
+    """The capture's out_dir: every published path is relative to it."""
+    if manifest.get("out_dir"):
+        return Path(manifest["out_dir"])
+    return Path(manifest["shots"][0]).parent.parent
+
+
 def pr_markdown(manifest, web_base, *, task_id, attempt):
-    """The PR comment: screenshots, before/after comparisons and videos inline."""
+    """The PR comment: the changed scenes FIRST, then everything else.
+
+    Image URLs are `https://github.com/<repo>/blob/<evidence branch>/<path>?raw=true`.
+    That is the form that renders in a PRIVATE repo: GitHub leaves github.com
+    image URLs un-proxied (checked on the rendered body_html of a posted
+    comment — no camo rewrite), so the viewer's browser fetches them with its
+    own GitHub session and is redirected to a tokened raw URL. A
+    raw.githubusercontent.com link would 404 for the same viewer (no token),
+    and a camo-proxied external host cannot read a private repo at all. mp4
+    never plays inline in a comment, so every video is an inline GIF plus a
+    link to the mp4."""
+    root = evidence_root(manifest)
+
     def url(local, raw=True):
-        rel = Path(local).relative_to(Path(manifest["shots"][0]).parent.parent)
+        rel = Path(local).relative_to(root)
         return f"{web_base}/{rel.as_posix()}" + ("?raw=true" if raw else "")
+
+    def img(local, alt, width=None):
+        if width:
+            return f'<img src="{url(local)}" alt="{alt}" width="{width}">'
+        return f"![{alt}]({url(local)})"
+
     head = (manifest.get("head") or "")[:10]
+    base = ((manifest.get("baseline") or {}).get("sha") or "")[:10]
     lines = [f"### 🎥 Visual evidence — `{task_id}` attempt {attempt}"
              + (f" at `{head}`" if head else ""), ""]
+    scenes = manifest.get("scenes") or []
+    if scenes:
+        # The change itself, before anything else: one row per scene with the
+        # share of pixels changed, then each scene's most-changed panel.
+        lines += [f"#### Changed scenes — before \\| after \\| difference"
+                  + (f" vs branch point `{base}`" if base else ""), "",
+                  "Each scene is rendered on its own, framed on its content, with "
+                  "the same cameras before and after.", "",
+                  "| scene | why | changed |", "|---|---|---|"]
+        for sc in scenes:
+            if sc.get("error"):
+                state = "⚠️ did not render"
+            elif sc.get("compare"):
+                state = f"**{_pct(sc.get('max_changed'))}**"
+                if (sc.get("max_changed") or 0) < config.EVIDENCE_MIN_CHANGE:
+                    state += " 🚩"
+            elif scene_shots([sc]):
+                state = "new scene"
+            else:
+                state = "no image"
+            lines.append(f"| `{sc.get('path')}` | {sc.get('status')}: "
+                         f"{(sc.get('why') or '').replace('|', '/')} | {state} |")
+        lines.append("")
+        for sc in scenes:
+            if not scene_shots([sc]):
+                if sc.get("error"):
+                    lines += [f"**`{sc.get('path')}`** did not render: "
+                              f"`{sc['error'][:200]}`", ""]
+                continue
+            rows = sorted([c for c in sc.get("compare") or [] if c.get("side_by_side")],
+                          key=lambda c: -(c.get("changed") or 0.0))
+            if rows:
+                top = rows[0]
+                lines += [f"**`{sc.get('path')}`** — {_pct(sc.get('max_changed'))} "
+                          f"changed (view `{top['name']}`)", "",
+                          img(top["side_by_side"], f"{_scene_label(sc)} {top['name']}"),
+                          ""]
+                if len(rows) > 1:
+                    lines += [f"<details><summary>{len(rows) - 1} more view(s) of "
+                              f"{_scene_label(sc)}</summary>", ""]
+                    for c in rows[1:]:
+                        lines += [f"`{c['name']}` — {_pct(c.get('changed'))}", "",
+                                  img(c["side_by_side"], f"{_scene_label(sc)} {c['name']}"),
+                                  ""]
+                    lines += ["</details>", ""]
+            else:
+                lines += [f"**`{sc.get('path')}`** — new scene (nothing to compare "
+                          "with at the branch point)", "",
+                          " ".join(img(s, f"{_scene_label(sc)} {Path(s).stem}", 400)
+                                   for s in sc.get("shots") or []), ""]
+            v = sc.get("video")
+            if v and Path(v.get("gif") or "").exists():
+                lines += [f"Orbit of `{_scene_label(sc)}` "
+                          f"([full video, mp4]({url(v['mp4'])}))", "",
+                          img(v["gif"], f"{_scene_label(sc)} orbit"), ""]
+        if manifest.get("scenes_skipped"):
+            lines += ["Also changed, not rendered (ARC_EVIDENCE_MAX_SCENES): "
+                      + ", ".join(f"`{p}`" for p in manifest["scenes_skipped"]), ""]
+    if manifest.get("no_visible_change"):
+        lines += ["**🚩 No visible change** — this diff touches gameplay files ("
+                  + ", ".join(f"`{p}`" for p in (manifest.get("gameplay_diff") or [])[:5])
+                  + ") but no rendered view moved. Either the change is invisible or "
+                  "the capture missed it; the coverage table below says which kinds "
+                  "ran.", ""]
     sheet = manifest.get("contact_sheet")
     if sheet and Path(sheet).exists():
-        # First, before the videos and panels: one labeled grid of everything
-        # captured is what tells a reviewer at a glance what they are looking at.
-        lines += [f"**Every camera** ([full size]({url(sheet, raw=True)}))", "",
-                  f"![contact sheet]({url(sheet)})", ""]
+        # One labeled grid of everything captured: what tells a reviewer at a
+        # glance what they are looking at, before the videos and panels.
+        lines += [f"**Every view** ([full size]({url(sheet, raw=True)}))", "",
+                  img(sheet, "contact sheet"), ""]
     vids = manifest.get("videos") or {}
     for kind in ("playtest", "flythrough"):
         v = vids.get(kind)
         if v:
             lines += [f"**{kind.capitalize()}** ([full video]({url(v['mp4'], raw=True)}))",
-                      "", f"![{kind}]({url(v['gif'])})", ""]
+                      "", img(v["gif"], kind), ""]
     comp = [c for c in manifest.get("compare") or [] if c.get("side_by_side")]
     if comp:
-        base = (manifest.get("baseline") or {}).get("sha", "")[:10]
-        lines += [f"**Before \\| after \\| difference** (vs branch point `{base}`)", "",
-                  "| camera | changed | before · after · diff |", "|---|---|---|"]
-        for c in comp:
-            lines.append(f"| {c['name']} | {_pct(c.get('changed'))} | "
-                         f"![{c['name']}]({url(c['side_by_side'])}) |")
-        lines.append("")
-    else:
+        title = (f"**Main scene, fixed cameras — before \\| after \\| difference** "
+                 f"(vs branch point `{base}`)")
+        table = ["| camera | changed | before · after · diff |", "|---|---|---|"]
+        table += [f"| {c['name']} | {_pct(c.get('changed'))} | "
+                  f"{img(c['side_by_side'], c['name'])} |" for c in comp]
+        if scenes:
+            # Secondary when scenes changed: the level around the change.
+            lines += ["<details><summary>Main scene, fixed cameras "
+                      f"({', '.join(c['name'] + ' ' + _pct(c.get('changed')) for c in comp)})"
+                      "</summary>", "", title, ""] + table + ["", "</details>", ""]
+        else:
+            lines += [title, ""] + table + [""]
+    elif manifest.get("shots"):
         lines += ["**Screenshots**", ""]
-        lines += [f"![{Path(s).stem}]({url(s)})" for s in manifest.get("shots") or []]
+        lines += [img(s, Path(s).stem) for s in manifest.get("shots") or []]
         lines.append("")
     pts = manifest.get("playtest_shots") or []
     if pts:
         lines += ["**Playtest screenshots**", ""]
-        lines += [f"![{Path(p).stem}]({url(p)})" for p in pts[:6]]
+        lines += [img(p, Path(p).stem) for p in pts[:6]]
         lines.append("")
-    if manifest.get("no_visible_change"):
-        lines += ["**🚩 No visible change** — this diff touches gameplay files ("
-                  + ", ".join(f"`{p}`" for p in (manifest.get("gameplay_diff") or [])[:5])
-                  + ") but no camera moved and no scene render shows it. Either the "
-                  "change is invisible or the capture missed it; the coverage table "
-                  "below says which kinds ran.", ""]
     table = _coverage_table(manifest)
     if table:
         lines += ["**Evidence coverage**", ""] + table + [""]
@@ -1230,9 +2006,10 @@ def pr_markdown(manifest, web_base, *, task_id, attempt):
     if manifest.get("warnings"):
         lines += ["**Warnings**", ""] + [f"- ⚠️ {w}" for w in manifest["warnings"]] + [""]
     lines.append(f"<sub>Captured by arc-orchestrator (AGENTS.md Rule 7d) in "
-                 f"{manifest.get('seconds', '?')}s.</sub>")
+                 f"{manifest.get('seconds', '?')}s. Images load with your GitHub "
+                 "session (private repo); files are on the "
+                 f"`{config.EVIDENCE_BRANCH}` branch.</sub>")
     return "\n".join(lines)
-
 
 def emit(kind, **fields):
     events.emit(f"evidence.{kind}", **fields)

@@ -85,11 +85,29 @@ def latest():
         return None
 
 
+class Scheduler(threading.Thread):
+    """The running scheduler thread; `stop()` ends the loop and joins it."""
+
+    def __init__(self, loop, stopped):
+        super().__init__(target=loop, name="daily-audit", daemon=True)
+        self.stopped = stopped
+
+    def stop(self, timeout=5):
+        self.stopped.set()
+        self.join(timeout)
+        return not self.is_alive()
+
+
 def start(store=None, interval=INTERVAL_S, check_every=CHECK_EVERY_S):
     """Background thread: run when due, then every `interval`. Daemon, so it
-    never keeps the process alive on its own."""
+    never keeps the process alive on its own. Returns the Scheduler; the
+    dashboard never stops it, but anything else that starts one must — the
+    loop resolves config.ROOT on every tick, so a leaked thread writes its
+    reports into whatever root is current by then."""
+    stopped = threading.Event()
+
     def loop():
-        while True:
+        while not stopped.is_set():
             try:
                 if due(interval=interval):
                     run_once(store)
@@ -100,7 +118,7 @@ def start(store=None, interval=INTERVAL_S, check_every=CHECK_EVERY_S):
                     errors.capture(exc, node="audit.scheduler")
                 except Exception:
                     pass
-            time.sleep(check_every)
-    t = threading.Thread(target=loop, name="daily-audit", daemon=True)
+            stopped.wait(check_every)
+    t = Scheduler(loop, stopped)
     t.start()
     return t
