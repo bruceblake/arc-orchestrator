@@ -226,6 +226,20 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   </section>
 
   <section class="panel">
+    <h2>Seats · <span class="snote">24h busy, starved cap-waits, idle while other work waited</span></h2>
+    <div class="tblwrap">
+      <table>
+        <thead><tr>
+          <th>model</th><th class="r">busy h</th><th class="r">cap</th>
+          <th class="r">util</th><th class="r">cap waits</th>
+          <th class="r">idle while waiting h</th><th class="r">errors</th><th>plan</th>
+        </tr></thead>
+        <tbody id="seat-body"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel">
     <h2>Driver events <small style="color:var(--dim);font-weight:normal">errors · stalls · timeouts · pruned phantoms · cap breaches</small></h2>
     <div id="drv-events"></div>
     <div class="empty" id="drv-empty" style="display:none">No driver errors, stalls or cap breaches on record.</div>
@@ -630,6 +644,26 @@ function updateUI(u, fleet) {
   updateDriverEvents(u.recent_driver_events);
 }
 
+function renderSeats(data) {
+  const rows = (data && data.seats) || [];
+  const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+  const hrs = v => { const n = num(v); return n == null ? "—" : n.toFixed(2); };
+  const pct = v => { const n = num(v); return n == null ? "—" : Math.round(n) + "%"; };
+  $("#seat-body").innerHTML = rows.map(s => {
+    const plan = s.plan_spent
+      ? ("spent" + (s.resets_at ? " · " + new Date(s.resets_at * 1000).toLocaleString() : ""))
+      : "open";
+    return "<tr><td>" + esc(s.model) + "</td>"
+      + '<td class="r">' + hrs(s.busy_hours) + "</td>"
+      + '<td class="r">' + (num(s.cap) == null ? "—" : num(s.cap)) + "</td>"
+      + '<td class="r">' + pct(s.utilization) + "</td>"
+      + '<td class="r">' + (num(s.cap_waits) == null ? "—" : num(s.cap_waits)) + "</td>"
+      + '<td class="r">' + hrs(s.idle_while_waiting_hours) + "</td>"
+      + '<td class="r">' + pct(num(s.error_rate) == null ? null : num(s.error_rate) * 100) + "</td>"
+      + "<td>" + esc(plan) + "</td></tr>";
+  }).join("");
+}
+
 async function load() {
   try {
     // NOTE: /api/usage omits `series` unless ?series=1 — checked every caller in
@@ -643,6 +677,7 @@ async function load() {
     const fleet = await fetchFleet();
     await fetchDaily(fleet);
     updateUI(u, fleet);
+    renderSeats(await jget("/api/seats"));
     syncedAt = Date.now();
     $("#stale").style.display = "none";
     paintClock();

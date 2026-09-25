@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 import config
@@ -257,6 +258,328 @@ def audit_leases(store):
             ", ".join(dead[:10]),
             "they pin a model at cap until the TTL expires; "
             "main.py code reconcile --apply reaps them"))
+    return out
+
+
+_SEAT_TYPES = ("driver.start", "driver.done", "driver.error", "driver.cap_wait",
+               "driver.usage_limit", "driver.usage_wait", "driver.usage_swap",
+               "driver.queued", "driver.stale", "driver.cancelled",
+               "driver.cap_timeout", "driver.heartbeat", "driver.progress")
+_TERMINAL = ("driver.done", "driver.error", "driver.stale", "driver.cancelled",
+             "driver.cap_timeout")
+_LIVENESS = ("driver.heartbeat", "driver.progress")
+
+
+def _load_seat_events():
+    path = Path(config.EVENTS_LOG)
+    if not path.is_file():
+        return []
+    out = []
+    with path.open(encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if "driver." not in line:
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if ev.get("type") in _SEAT_TYPES:
+                out.append(ev)
+    return out
+
+
+def _epoch(value):
+    """harness_runs.created_at is an ISO string from store._now(); tests pass epochs."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not value:
+        return 0.0
+    text = str(value)
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return 0.0
+
+
+def _runs_in_window(store, cutoff):
+    if store is None:
+        return []
+    # created_at is TEXT in store._now()'s format. A float binds above every
+    # ISO string in SQLite's type order and returns the whole table.
+    cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat(timespec="seconds")
+    try:
+        with store.lock:
+            rows = store.conn.execute(
+                "SELECT model, seconds, created_at, task_id, attempt "
+                "FROM harness_runs WHERE created_at >= ?", (cutoff_iso,)).fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def _clip_iv(start, end, lo, hi):
+    a, b = max(start, lo), min(end, hi)
+    return (a, b) if b > a else None
+
+
+def _task_key(task):
+    """Fix-round ids are `<task>-x<attempt>`; a start on any attempt closes the wait."""
+    text = str(task or "")
+    head, sep, tail = text.rpartition("-x")
+    if sep and tail.isdigit() and head:
+        return head
+    return text
+
+
+def _pid_dead(pid):
+    """A present pid that is gone. A missing pid is not evidence of death."""
+    if pid is None or pid == "":
+        return False
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except (OSError, ValueError, TypeError):
+        return True
+    return False
+
+
+def _wait_intervals(events, now):
+    """A wait stays open until that task starts, ends, or its owner pid dies."""
+    opened, closed = {}, []
+    for ev in sorted(events, key=lambda e: float(e.get("ts") or 0)):
+        model, kind = ev.get("model"), ev.get("type")
+        if not model:
+            continue
+        ts = float(ev.get("ts") or 0)
+        key = (model, _task_key(ev.get("task")))
+        if kind in ("driver.queued", "driver.cap_wait", "driver.usage_wait"):
+            if _pid_dead(ev.get("pid")):
+                if key in opened:
+                    closed.append((model, opened.pop(key)[0], ts))
+                continue
+            opened.setdefault(key, [ts, ev.get("pid")])
+        elif kind in ("driver.start",) + _TERMINAL and key in opened:
+            closed.append((model, opened.pop(key)[0], ts))
+    for (model, _), (t0, pid) in opened.items():
+        if _pid_dead(pid):
+            continue
+        closed.append((model, t0, now))
+    return closed
+
+
+def _busy_intervals(model, runs, events, leases, cutoff, now):
+    iv = []
+    for run in runs:
+        if run.get("model") != model:
+            continue
+        end = _epoch(run.get("created_at"))
+        dur = float(run.get("seconds") or 0)
+        clipped = _clip_iv(end - dur, end, cutoff, now)
+        if clipped:
+            iv.append(clipped)
+    finished = {(run.get("task_id"), run.get("attempt"))
+                for run in runs if run.get("model") == model}
+    closed, live, starts = set(), {}, []
+    for ev in events:
+        if ev.get("model") != model:
+            continue
+        key = (ev.get("task"), ev.get("attempt"))
+        kind = ev.get("type")
+        ts = float(ev.get("ts") or 0)
+        if kind in _TERMINAL:
+            closed.add(key)
+        elif kind in _LIVENESS:
+            live[key] = max(live.get(key, 0.0), ts)
+        elif kind == "driver.start":
+            starts.append((key, ts, ev.get("pid")))
+    open_tasks = set()
+    for key, ts, pid in starts:
+        if key in closed or key in finished or _pid_dead(pid):
+            continue
+        # Credit only through the last heartbeat. A live pid is itself
+        # liveness; a flat lease-TTL horizon counted dead runs as a full day.
+        if pid not in (None, "") and not _pid_dead(pid):
+            end = now
+        else:
+            end = live.get(key, 0.0)
+            if end <= ts:
+                continue
+        open_tasks.add(key[0])
+        clipped = _clip_iv(ts, end, cutoff, now)
+        if clipped:
+            iv.append(clipped)
+    for lease in leases:
+        if (lease.get("model") != model or lease.get("task") in open_tasks
+                or _pid_dead(lease.get("pid"))):
+            continue
+        clipped = _clip_iv(float(lease.get("acquired_at") or now), now, cutoff, now)
+        if clipped:
+            iv.append(clipped)
+    return iv
+
+
+def _occupied_seconds(intervals, cap, lo, hi):
+    """Seat-seconds busy, concurrent seats kept but never above `cap`.
+
+    Summing raw lengths counts the same moment once per overlapping run, so a
+    pile of stale starts reports utilization far past 100%.
+    """
+    if cap <= 0 or not intervals:
+        return 0.0
+    points = {lo, hi}
+    for a, b in intervals:
+        if b > lo and a < hi:
+            points.add(min(hi, max(lo, a)))
+            points.add(min(hi, max(lo, b)))
+    pts = sorted(p for p in points if lo <= p <= hi)
+    total = 0.0
+    for a, b in zip(pts, pts[1:]):
+        if b <= a:
+            continue
+        held = sum(1 for x, y in intervals if x <= a and b <= y)
+        total += min(cap, held) * (b - a)
+    return total
+
+
+def _free_seat_hours(cap, busy, masks, lo, hi):
+    """Seat-hours this model was free while `masks` (other models waiting) overlap."""
+    if cap <= 0 or not masks:
+        return 0.0
+    points = {lo, hi}
+    for a, b in busy + masks:
+        if b > lo and a < hi:
+            points.add(min(hi, max(lo, a)))
+            points.add(min(hi, max(lo, b)))
+    pts = sorted(points)
+    total = 0.0
+    for a, b in zip(pts, pts[1:]):
+        if b <= a or not any(x <= a and b <= y for x, y in masks):
+            continue
+        held = sum(1 for x, y in busy if x <= a and b <= y)
+        total += max(0, cap - held) * (b - a)
+    return total / 3600.0
+
+
+def seat_utilization(since_hours=24, *, now=None, events=None, runs=None,
+                     leases=None, store=None):
+    """Per live-roster model: busy time, starvation, wasted idle, plan window.
+
+    Busy seat-hours come from harness_runs.seconds (plus a lease or an open
+    driver.start for work that has not finished). cap_waits, errors and the
+    plan window come from the event log. Idle-while-waiting is the seat-hours
+    this model was free while another model had a task queued or cap-waiting.
+    """
+    now = time.time() if now is None else now
+    since_hours = float(since_hours or 0) or 24.0
+    cutoff = now - since_hours * 3600.0
+    if events is None:
+        events = _load_seat_events()
+    if runs is None:
+        runs = _runs_in_window(store, cutoff)
+    if leases is None:
+        try:
+            leases = list(store.driver_lease_rows() or []) if store is not None else []
+        except Exception:
+            leases = []
+    events = [e for e in events if isinstance(e, dict)]
+    in_window = [e for e in events
+                 if cutoff <= float(e.get("ts") or 0) <= now]
+    waits = _wait_intervals(in_window, now)
+    try:
+        import drivers
+        plans = {w["model"]: w for w in drivers.active_plan_windows(events, now=now)
+                 if w.get("model")}
+    except Exception:
+        plans = {}
+    out = []
+    for model, _fam, _harness, _tier, roster_cap, _roles in config.live_roster(check_api=False):
+        try:
+            cap = int(config.driver_limit(model))
+        except Exception:
+            cap = int(roster_cap or 0)
+        busy_iv = _busy_intervals(model, runs, events, leases, cutoff, now)
+        busy_s = _occupied_seconds(busy_iv, cap, cutoff, now)
+        plan = plans.get(model)
+        if plan and plan.get("since"):
+            blocked = _clip_iv(float(plan["since"]), now, cutoff, now)
+            if blocked and cap:
+                busy_iv = busy_iv + [blocked] * cap
+        masks = []
+        for other, a, b in waits:
+            if other == model:
+                continue
+            clipped = _clip_iv(a, b, cutoff, now)
+            if clipped:
+                masks.append(clipped)
+        def _failed(ev):
+            if ev.get("model") != model:
+                return False
+            kind = ev.get("type")
+            if kind in ("driver.stale", "driver.cancelled"):
+                return True
+            if kind != "driver.error" or ev.get("capacity"):
+                return False
+            try:
+                import drivers
+                if drivers.is_usage_limit(str(ev.get("error") or "")):
+                    return False
+            except Exception:
+                pass
+            return True
+        errs = sum(1 for e in in_window if _failed(e))
+        dones = sum(1 for e in in_window
+                    if e.get("type") == "driver.done" and e.get("model") == model)
+        busy_hours = busy_s / 3600.0
+        denom = cap * since_hours
+        out.append({
+            "model": model,
+            "busy_hours": round(busy_hours, 3),
+            "cap": cap,
+            "utilization": round(100.0 * busy_hours / denom, 1) if denom else 0.0,
+            "cap_waits": sum(1 for e in in_window
+                             if e.get("type") == "driver.cap_wait" and e.get("model") == model),
+            "idle_while_waiting_hours": round(
+                _free_seat_hours(cap, busy_iv, masks, cutoff, now), 3),
+            "error_rate": round(errs / (errs + dones), 3) if errs + dones else 0.0,
+            "plan_spent": plan is not None,
+            "resets_at": (plan or {}).get("resets_at"),
+        })
+    return out
+
+
+def audit_seats(since_s=86400, store=None, **kw):
+    """Warn when a seat sat idle for more than half the window while another was starved."""
+    try:
+        seats = seat_utilization(since_s / 3600.0, store=store, **kw)
+    except Exception as exc:
+        return [_finding("warning", "seats", "could not compute seat utilization",
+                         str(exc)[:200], "check events.jsonl and harness_runs are readable")]
+    hours = since_s / 3600.0
+    starved = [s["model"] for s in seats if s["cap_waits"]]
+    out = []
+    for s in seats:
+        others = [m for m in starved if m != s["model"]]
+        if not others or s["idle_while_waiting_hours"] <= 0.5 * hours:
+            continue
+        if s["error_rate"] >= 0.5:
+            action = "fix its errors"
+        elif s["utilization"] >= 50:
+            action = "raise its cap"
+        else:
+            action = "route more tiers to it"
+        out.append(_finding(
+            "warning", "seats",
+            f"{s['model']} idle {s['idle_while_waiting_hours']:.1f}h "
+            f"while {', '.join(others)} starved",
+            f"cap {s['cap']}, utilization {s['utilization']:.0f}%, "
+            f"{s['cap_waits']} cap-waits, error rate {s['error_rate']:.0%}",
+            action))
     return out
 
 
@@ -790,6 +1113,7 @@ def run(store=None, since_s=86400, with_health=True, snapshot=False):
     if store is not None:
         findings += triage_tasks(store)
         findings += audit_leases(store)
+    findings += audit_seats(since_s, store)
     findings += audit_git(store=store)
     findings += audit_gates(store)
     findings += audit_pr_collisions(store)

@@ -4923,6 +4923,12 @@ class Handler(BaseHTTPRequestHandler):
                 q = parse_qs(u.query)
                 return self._json(_errors(q.get("range", ["24h"])[0],
                                           int(q.get("limit", ["40"])[0])))
+            if u.path == "/api/seats":
+                # Read-only. The window is fixed: nothing in the query or
+                # body selects a path, a command, or a git ref (Rule 6b).
+                import audit
+                return self._json({"seats": audit.seat_utilization(
+                    store=Handler.store)})
             if u.path == "/api/projects":
                 return self._json({"projects": _projects(Handler.store)})
             if u.path == "/api/repos":
