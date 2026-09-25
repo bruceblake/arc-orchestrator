@@ -4,6 +4,7 @@ Unit tests run everywhere. The one real-render test needs Godot, ffmpeg and a
 display, and is skipped (with the reason) where they are missing — CI has none.
 """
 import json
+import math
 import os
 import pathlib
 import shutil
@@ -406,8 +407,8 @@ class ContactSheet(unittest.TestCase):
                     "scenes": [{"path": "res://scenes/labs/suspicion_lab.tscn",
                                 "shots": [str(self.d / "lab.png")]}]}
         pairs = evidence.capture_shots(manifest)
-        self.assertIn("suspicion_lab", [lbl for lbl, _p in pairs],
-                      "a scene render has no name")
+        # Changed scenes lead the sheet, labelled <scene>/<view>.
+        self.assertEqual(pairs[0][0], "suspicion_lab/lab", "a scene render has no name")
         self.assertEqual(len(pairs), 2, "a scene render has no tile")
 
     @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not installed")
@@ -896,6 +897,401 @@ class RealCapture(unittest.TestCase):
             st = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
                                 capture_output=True, text=True).stdout
             self.assertEqual(st.strip(), "", "the capture left files in the worktree")
+
+
+# --- changed scenes (the PR #19 regression) ----------------------------------
+#
+# prison-escape-test PR #19 added scenes/labs/security_cameras.tscn. The
+# capture only ever rendered the MAIN scene from its fixed cameras, so every
+# comparison read 0.0%, the manifest said NO VISIBLE CHANGE, and the PR
+# comment showed four photos of an unchanged prison yard.
+
+_PR19_STATUS = {
+    "scenes/labs/security_cameras.tscn": "A",
+    "scripts/security/blind_spot_map.gd": "A",
+    "scripts/security/security_camera.gd": "A",
+    "scripts/security/security_camera.gd.uid": "A",
+    "tests/run_tests.tscn": "M",
+    "tests/test_security_cameras.gd": "A",
+}
+_PR19_TEXTS = {
+    "scenes/labs/security_cameras.tscn":
+        '[ext_resource type="Script" path="res://scripts/security/security_camera.gd" id="1"]\n',
+    "scenes/world.tscn": '[ext_resource type="PackedScene" path="res://scenes/graybox_prison.tscn" id="1"]\n',
+    "scenes/labs/vent_lab.tscn": "[node name=\"VentLab\" type=\"Node3D\"]\n",
+    "tests/run_tests.tscn":
+        '[ext_resource type="Script" path="res://scripts/security/security_camera.gd" id="1"]\n',
+}
+
+
+class ChangedScenes(unittest.TestCase):
+    def test_the_pr19_diff_selects_the_lab_scene_it_added(self):
+        picked, skipped = evidence.changed_scenes(_PR19_STATUS, _PR19_TEXTS, limit=6)
+        self.assertEqual([e["path"] for e in picked],
+                         ["scenes/labs/security_cameras.tscn"],
+                         "the scene the diff added must be rendered — and a test "
+                         "scene that uses the same script must not")
+        self.assertEqual(picked[0]["status"], "added")
+        self.assertEqual(picked[0]["res"], "res://scenes/labs/security_cameras.tscn")
+        self.assertEqual(skipped, [])
+
+    def test_a_scene_that_uses_a_changed_script_is_rendered_too(self):
+        status = {"scripts/player.gd": "M", "scenes/labs/a.tscn": "M",
+                  "scenes/labs/new.tscn": "A", "scenes/old.tscn": "D"}
+        texts = {"scenes/labs/a.tscn": "",
+                 "scenes/labs/new.tscn": "",
+                 "scenes/world.tscn": 'path="res://scripts/player.gd"',
+                 "scenes/menu.tscn": 'path="res://scripts/menu.gd"'}
+        picked, skipped = evidence.changed_scenes(status, texts, limit=6)
+        self.assertEqual([(e["path"], e["status"]) for e in picked],
+                         [("scenes/labs/new.tscn", "added"),
+                          ("scenes/labs/a.tscn", "changed"),
+                          ("scenes/world.tscn", "dependent")])
+        self.assertIn("scripts/player.gd", picked[2]["why"])
+        # The cap keeps the most direct first and REPORTS the rest.
+        picked, skipped = evidence.changed_scenes(status, texts, limit=1)
+        self.assertEqual([e["path"] for e in picked], ["scenes/labs/new.tscn"])
+        self.assertEqual([e["path"] for e in skipped],
+                         ["scenes/labs/a.tscn", "scenes/world.tscn"])
+
+    def test_name_status_is_parsed(self):
+        text = "A\tscenes/a.tscn\nM\tscripts/b.gd\nD\tscenes/gone.tscn\n\n"
+        self.assertEqual(evidence.parse_name_status(text),
+                         {"scenes/a.tscn": "A", "scripts/b.gd": "M",
+                          "scenes/gone.tscn": "D"})
+
+    def test_scene_texts_skip_tests_tools_and_the_import_cache(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        for rel in ("scenes/a.tscn", "tests/t.tscn", "tools/x.tscn",
+                    ".godot/imported/c.tscn", "addons/p/d.tscn"):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_text("[gd_scene]\n")
+        self.assertEqual(sorted(evidence.scene_texts(d)), ["scenes/a.tscn"])
+
+
+class AutoFraming(unittest.TestCase):
+    """Cameras placed around a scene's content, not at fixed world spots."""
+
+    BOXES = ({"position": [-0.4, -0.2, -0.4], "size": [20.8, 3.4, 20.8]},   # the lab
+             {"position": [100.0, 0.0, -50.0], "size": [2.0, 30.0, 2.0]},   # a tower
+             {"position": [0.0, 0.0, 0.0], "size": [0.1, 0.1, 0.1]})        # a prop
+
+    def test_every_corner_of_the_content_is_in_every_view(self):
+        for b in self.BOXES:
+            for cam in evidence.frame_cameras(b):
+                for corner in evidence._corners(b):
+                    self.assertTrue(evidence.in_frame(cam, corner),
+                                    f"{cam['name']} cuts off {corner} of {b}")
+
+    def test_the_fit_is_tight_not_a_speck(self):
+        """A camera 20% closer must lose a corner: the content fills the view."""
+        b = self.BOXES[0]
+        c = evidence._center(b)
+        for cam in evidence.frame_cameras(b):
+            closer = dict(cam, position=[ci + (p - ci) * 0.8
+                                         for p, ci in zip(cam["position"], c)])
+            self.assertFalse(all(evidence.in_frame(closer, k)
+                                 for k in evidence._corners(b)),
+                             f"{cam['name']} is framed loosely")
+
+    def test_cameras_look_at_the_content(self):
+        b = self.BOXES[1]
+        centre = evidence._center(b)
+        cams = evidence.frame_cameras(b)
+        self.assertEqual({c["name"] for c in cams}, {"overview", "top", "front", "side"})
+        for c in cams:
+            self.assertEqual(c["look_at"], [round(x, 4) for x in centre])
+            self.assertTrue(evidence.in_frame(c, centre))
+
+    def test_bounds_union_and_outliers(self):
+        room = [0, 0, 0, 20, 3, 20]
+        pillar = [9, 0, 9, 2, 3, 2]
+        ground = [-5000, -1, -5000, 10000, 1, 10000]
+        self.assertEqual(evidence.scene_bounds([room, pillar]),
+                         {"position": [0, 0, 0], "size": [20, 3, 20]})
+        # A 10 km ground plane does not shrink the room to a speck.
+        self.assertEqual(evidence.scene_bounds([room, pillar, pillar, ground]),
+                         {"position": [0, 0, 0], "size": [20, 3, 20]})
+        self.assertIsNone(evidence.scene_bounds([]))
+        self.assertIsNone(evidence.scene_bounds([[0, 0, 0, float("inf"), 1, 1]]))
+
+    def test_a_2d_scene_gets_one_screen_camera(self):
+        cams = evidence.frame_cameras(None)
+        self.assertEqual([c["name"] for c in cams], ["screen"])
+
+    def test_the_orbit_circles_at_one_radius_and_closes(self):
+        b = self.BOXES[0]
+        c = evidence._center(b)
+        orbit = evidence.orbit_cameras(b, n=8)
+        self.assertEqual(len(orbit), 9)
+        self.assertEqual(orbit[0]["position"], orbit[-1]["position"])
+        radii = {round(math.dist(o["position"], c), 2) for o in orbit}
+        self.assertEqual(len(radii), 1, f"the orbit bobs: {radii}")
+        for o in orbit:
+            for corner in evidence._corners(b):
+                self.assertTrue(evidence.in_frame(o, corner))
+
+
+class ScenesDecideTheFlag(unittest.TestCase):
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, True)
+        _png(self.d / "after.png", lambda x, y: (9, 9, 9))
+
+    def _scene(self, **kw):
+        return dict({"path": "scenes/labs/security_cameras.tscn", "status": "changed",
+                     "why": "modified by this diff",
+                     "shots": [str(self.d / "after.png")]}, **kw)
+
+    def test_the_pr19_case_is_not_no_visible_change(self):
+        """A new scene rendered on its own IS the visible change, even while
+        every fixed camera on the main scene reads 0.0%."""
+        yard = [{"name": n, "changed": 0.0} for n in
+                ("cell_corridor", "guard_station", "isometric_overview")]
+        gameplay = ["scenes/labs/security_cameras.tscn",
+                    "scripts/security/security_camera.gd"]
+        self.assertTrue(evidence.no_visible_change(yard, gameplay, []),
+                        "precondition: the fixed cameras alone flag it")
+        self.assertFalse(evidence.no_visible_change(
+            yard, gameplay, [self._scene(status="added", compare=[])]))
+
+    def test_a_changed_scene_that_moved_nothing_is_flagged(self):
+        flat = [{"name": "top", "changed": 0.0}, {"name": "side", "changed": 0.001}]
+        self.assertTrue(evidence.no_visible_change(
+            [{"name": "yard", "changed": 0.3}], ["scripts/a.gd"],
+            [self._scene(compare=flat)]),
+            "the changed scene is the evidence; a busy main scene cannot hide it")
+        moved = [{"name": "top", "changed": 0.016}]
+        self.assertFalse(evidence.no_visible_change(
+            [{"name": "yard", "changed": 0.0}], ["scripts/a.gd"],
+            [self._scene(compare=moved)]))
+
+
+def _scene_manifest(d):
+    """_manifest plus one changed scene (compared) and one new scene."""
+    m = _manifest(d)
+    sdir = d / "scenes" / "scenes-labs-lab"
+    for sub in ("after", "compare"):
+        (sdir / sub).mkdir(parents=True, exist_ok=True)
+    for n in ("top", "side"):
+        _png(sdir / "after" / f"{n}.png", lambda x, y: (1, 2, 3))
+        _png(sdir / "compare" / f"{n}.png", lambda x, y: (4, 5, 6))
+    (sdir / "orbit.gif").write_bytes(b"x")
+    (sdir / "orbit.mp4").write_bytes(b"x")
+    ndir = d / "scenes" / "scenes-labs-new"
+    (ndir / "after").mkdir(parents=True, exist_ok=True)
+    _png(ndir / "after" / "top.png", lambda x, y: (7, 8, 9))
+    m["out_dir"] = str(d)
+    m["scenes"] = [
+        {"path": "scenes/labs/lab.tscn", "status": "changed", "why": "modified by this diff",
+         "shots": [str(sdir / "after" / "top.png"), str(sdir / "after" / "side.png")],
+         "compare": [{"name": "top", "changed": 0.016,
+                      "side_by_side": str(sdir / "compare" / "top.png")},
+                     {"name": "side", "changed": 0.027,
+                      "side_by_side": str(sdir / "compare" / "side.png")}],
+         "max_changed": 0.027,
+         "video": {"mp4": str(sdir / "orbit.mp4"), "gif": str(sdir / "orbit.gif")}},
+        {"path": "scenes/labs/new.tscn", "status": "added", "why": "added by this diff",
+         "shots": [str(ndir / "after" / "top.png")], "compare": [], "max_changed": None}]
+    return m
+
+
+class ScenesArePresentedFirst(unittest.TestCase):
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.m = _scene_manifest(self.d)
+        sheet = self.d / "contact_sheet.png"
+        _png(sheet, lambda x, y: (5, 5, 5))
+        self.m["contact_sheet"] = str(sheet)
+        self.web = "https://github.com/o/r/blob/arc-evidence/t/x2"
+
+    def test_pr_comment_leads_with_the_changed_scenes_and_their_share(self):
+        md = evidence.pr_markdown(self.m, self.web, task_id="t", attempt=2)
+        top = md.index("Changed scenes")
+        for later in ("contact_sheet.png", "playtest.gif", "flythrough.gif",
+                      "compare/overview.png"):
+            self.assertLess(top, md.index(later), f"{later} comes before the scenes")
+        self.assertIn("| `scenes/labs/lab.tscn` | changed: modified by this diff | **2.7%** |", md)
+        self.assertIn("| `scenes/labs/new.tscn` | added: added by this diff | new scene |", md)
+        # The most-changed view is the one shown open, inline, raw.
+        side = f"{self.web}/scenes/scenes-labs-lab/compare/side.png?raw=true"
+        self.assertIn(f"![lab side]({side})", md)
+        self.assertLess(md.index(side), md.index("<details>"))
+        # New scenes show their after shots inline; videos are gif + mp4 link.
+        self.assertIn(f'<img src="{self.web}/scenes/scenes-labs-new/after/top.png?raw=true"', md)
+        self.assertIn(f"![lab orbit]({self.web}/scenes/scenes-labs-lab/orbit.gif?raw=true)", md)
+        self.assertIn(f"({self.web}/scenes/scenes-labs-lab/orbit.mp4?raw=true)", md)
+        # The main scene's fixed cameras are demoted, not dropped.
+        self.assertIn("<summary>Main scene, fixed cameras", md)
+
+    def test_an_unmoved_changed_scene_is_flagged_in_the_table(self):
+        self.m["scenes"][0]["max_changed"] = 0.0
+        md = evidence.pr_markdown(self.m, self.web, task_id="t", attempt=2)
+        self.assertIn("**0.0%** 🚩", md)
+
+    def test_reviewers_get_the_most_changed_scene_panel_first(self):
+        imgs = [Path(p) for p in evidence.review_images(self.m)]
+        self.assertEqual(imgs[0], self.d / "scenes/scenes-labs-lab/compare/side.png")
+        self.assertEqual(imgs[1], self.d / "scenes/scenes-labs-lab/compare/top.png")
+        self.assertEqual(imgs[2], self.d / "scenes/scenes-labs-new/after/top.png")
+        self.assertEqual(imgs[3].name, "contact_sheet.png")
+
+    def test_prompt_makes_an_invisible_change_blocking(self):
+        text = evidence.prompt_block(self.m)
+        self.assertIn("BLOCKING RULE", text)
+        self.assertIn("the change is not visible in the evidence", text)
+        self.assertLess(text.index("CHANGED SCENES"), text.index("camera overview"))
+        self.assertIn("scenes/labs/lab.tscn (changed: modified by this diff) — 2.7% "
+                      "of pixels changed at most", text)
+        self.assertIn("scenes/labs/new.tscn (added: added by this diff) — NEW", text)
+        self.assertIn("image: " + str(self.d / "scenes/scenes-labs-lab/compare/side.png"), text)
+        self.m["non_visual"] = True
+        text = evidence.prompt_block(self.m)
+        self.assertNotIn("BLOCKING RULE", text)
+        self.assertIn("NON-VISUAL", text)
+
+    def test_board_names_each_changed_scene(self):
+        body = evidence.board_body(self.m)
+        self.assertIn("changed scenes: lab 2.7%, new new", body.splitlines()[0])
+
+
+class CaptureScenesWiring(unittest.TestCase):
+    """capture_scenes() on a real git repo, Godot stubbed: a modified scene
+    is rendered after AND at the branch point with the same cameras, and the
+    difference is measured."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.wt = self.d / "game"
+        env = dict(os.environ, GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t",
+                   GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        self.git = lambda *a: subprocess.run(["git", "-C", str(self.wt), *a], env=env,
+                                             check=True, capture_output=True,
+                                             text=True).stdout.strip()
+        (self.wt / "scenes").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.wt)], check=True)
+        (self.wt / "project.godot").write_text("[application]\n")
+        (self.wt / "scenes" / "lab.tscn").write_text("pillar at 10\n")
+        (self.wt / "scenes" / "yard.tscn").write_text("unchanged\n")
+        self.git("add", "-A")
+        self.git("commit", "-qm", "base")
+        self.base = self.git("rev-parse", "HEAD")
+        (self.wt / "scenes" / "lab.tscn").write_text("pillar at 15\n")
+        (self.wt / "scenes" / "new.tscn").write_text("new\n")
+
+    def test_a_modified_scene_is_compared_and_a_new_one_is_shown(self):
+        calls = []
+
+        def fake_render(project, cameras, out_dir, scratch, *, timeout, log=None,
+                        scene=None):
+            calls.append((Path(project) == self.wt, scene, [c["name"] for c in cameras]))
+            text = (Path(project) / scene[len("res://"):]).read_text()
+            col = (200, 0, 0) if "15" in text else (0, 0, 200)
+            out_dir.mkdir(parents=True, exist_ok=True)
+            made = []
+            for c in cameras:
+                _png(out_dir / f"{c['name']}.png",
+                     lambda x, y: col if x < 20 else (50, 50, 50))
+                made.append(out_dir / f"{c['name']}.png")
+            return made
+
+        with unittest.mock.patch.object(
+                evidence, "_probe_scene",
+                return_value=({"position": [0, 0, 0], "size": [20, 3, 20]}, 0)), \
+                unittest.mock.patch.object(evidence, "_render_shots",
+                                           side_effect=fake_render), \
+                unittest.mock.patch.object(evidence, "_scene_video",
+                                           side_effect=evidence.EvidenceError("x")), \
+                unittest.mock.patch("studio.engine.godot.import_assets"):
+            picked, skipped, warns = evidence.capture_scenes(
+                self.wt, self.d / "out", str(self.d), repo=self.wt, sha=self.base,
+                timeout=5)
+        by = {e["path"]: e for e in picked}
+        self.assertEqual(sorted(by), ["scenes/lab.tscn", "scenes/new.tscn"],
+                         "the unchanged yard must not be rendered")
+        lab = by["scenes/lab.tscn"]
+        self.assertEqual(lab["status"], "changed")
+        self.assertEqual(len(lab["compare"]), 4)
+        self.assertGreater(lab["max_changed"], 0.2, "the moved pillar was not measured")
+        # Same cameras on both sides: before and after are the same viewpoints.
+        before = [c for c in calls if not c[0]]
+        self.assertEqual(before, [(False, "res://scenes/lab.tscn",
+                                   ["overview", "top", "front", "side"])])
+        self.assertEqual(by["scenes/new.tscn"]["compare"], [])
+        self.assertEqual(len(by["scenes/new.tscn"]["shots"]), 4)
+        self.assertEqual(skipped, [])
+        # The throwaway branch-point worktree is gone.
+        self.assertEqual(self.git("worktree", "list").count("\n"), 0)
+
+    def test_a_scene_that_will_not_load_is_a_warning_not_a_crash(self):
+        with unittest.mock.patch.object(
+                evidence, "_probe_scene",
+                side_effect=evidence.EvidenceError("could not load res://scenes/lab.tscn")):
+            picked, _skipped, warns = evidence.capture_scenes(
+                self.wt, self.d / "out", str(self.d), timeout=5)
+        self.assertTrue(all(e["error"] for e in picked))
+        self.assertTrue(any("did not render" in w for w in warns))
+
+
+class PlaytestRecording(unittest.TestCase):
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, True)
+        (self.d / "tools").mkdir()
+        (self.d / "tools" / "playtest.gd").write_text("extends SceneTree\n")
+
+    def test_the_wrapper_extends_the_games_playtest_with_light_and_a_camera(self):
+        w = evidence.PLAYTEST_WRAPPER
+        self.assertTrue(w.startswith('extends "res://tools/playtest.gd"'))
+        self.assertIn("super()", w)
+        self.assertIn("DirectionalLight3D.new()", w)
+        self.assertIn("EvidenceChaseCamera", w)
+        self.assertIn("_arc_cutaway", w)
+
+    def test_the_wrapper_is_recorded_first_and_the_bare_script_is_the_fallback(self):
+        scripts = []
+
+        def fake(project, args, *, timeout, log=None):
+            script = args[args.index("--script") + 1]
+            scripts.append(script)
+            avi = Path(args[args.index("--write-movie") + 1])
+            avi.write_bytes(b"avi")
+            return 1, "Parse Error: cannot extend" if script.endswith(
+                "playtest_evidence.gd") else ""
+
+        with unittest.mock.patch.object(evidence, "_godot", side_effect=fake), \
+                unittest.mock.patch.object(evidence, "_video",
+                                           return_value=("m.mp4", "m.gif")):
+            video, _note, reason = evidence._playtest(self.d, self.d, self.d, timeout=1)
+        self.assertEqual([Path(s).name for s in scripts],
+                         ["playtest_evidence.gd", "playtest.gd"])
+        self.assertEqual(video, ("m.mp4", "m.gif"))
+        self.assertEqual(reason, "")
+
+
+class ResumedReviewsSeeEvidence(unittest.TestCase):
+    def test_latest_manifest_is_the_highest_attempt(self):
+        d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, d, True)
+        old = config.EVIDENCE_DIR
+        config.EVIDENCE_DIR = d
+        self.addCleanup(setattr, config, "EVIDENCE_DIR", old)
+        for n in (2, 9, 10):
+            a = d / "proj" / "task" / f"x{n}"
+            a.mkdir(parents=True)
+            (a / "manifest.json").write_text(json.dumps({"n": n}))
+        self.assertEqual(evidence.latest_manifest("proj", "task"),
+                         {"n": 10, "attempt": 10})
+        self.assertIsNone(evidence.latest_manifest("proj", "other"))
+
+    def test_both_reviews_fall_back_to_the_capture_on_disk(self):
+        src = (ROOT / "code_tasks.py").read_text()
+        self.assertEqual(src.count("shown = review_evidence(ctx)"), 2)
+        self.assertIn("evidence.latest_manifest(project_slug, tid)", src)
+        self.assertIn('m["non_visual"] = t.get("visual") is False', src)
 
 
 if __name__ == "__main__":

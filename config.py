@@ -1761,6 +1761,13 @@ EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
 # Below this share of changed pixels a camera counts as "nothing to see", and
 # a gameplay diff whose every camera is under it is flagged no_visible_change.
 EVIDENCE_MIN_CHANGE = float(os.getenv("ARC_EVIDENCE_MIN_CHANGE", "0.005"))
+# Every scene the diff adds or changes (and every scene that instances a
+# changed script/scene) is rendered on its own, auto-framed on its content,
+# before and after. Bounded so a wholesale scene rework cannot make one gate
+# run for an hour: beyond the cap, scenes are listed but not rendered.
+EVIDENCE_MAX_SCENES = int(os.getenv("ARC_EVIDENCE_MAX_SCENES", "6"))
+# Length of each changed scene's orbit video (seconds of game time).
+EVIDENCE_SCENE_SECONDS = float(os.getenv("ARC_EVIDENCE_SCENE_SECONDS", "6"))
 
 # Project-wide agent board (board.py). Per-task threads live in the worktree
 # at .arc/board.jsonl and are excluded from publish; this directory is the

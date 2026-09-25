@@ -3515,6 +3515,12 @@ def _timeline_evidence(tid):
             if not isinstance(man, dict):
                 continue
             cands, shots, seen = [], [], set()
+            # The changed scenes' before|after|diff panels first: they are the
+            # change itself (Rule 7d); the main scene's cameras follow.
+            for sc in (man.get("scenes") or []):
+                if isinstance(sc, dict):
+                    cands += [c.get("side_by_side") for c in (sc.get("compare") or [])
+                              if isinstance(c, dict)]
             cands += list(man.get("shots") or [])
             cands += list(man.get("playtest_shots") or [])
             cands += [c.get("side_by_side") for c in (man.get("compare") or [])
@@ -3543,6 +3549,10 @@ def _timeline_evidence(tid):
                 "godot_errors": man.get("godot_errors") or [],
                 "no_visible_change": man.get("no_visible_change"),
                 "warnings": man.get("warnings") or [],
+                "scenes": [{k: sc.get(k) for k in
+                            ("path", "status", "why", "max_changed", "error")}
+                           for sc in (man.get("scenes") or [])
+                           if isinstance(sc, dict)],
             })
     return out
 

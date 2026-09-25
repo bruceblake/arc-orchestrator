@@ -2779,6 +2779,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 evidence.emit("error", task=tid, error=str(exc)[:300], fingerprint=fp)
                 return None, None
             m["attempt"] = attempt
+            # `"visual": false` marks a task whose change is not meant to be
+            # seen; everything else must SHOW its change (Rule 7d).
+            m["non_visual"] = t.get("visual") is False
             evidence.emit("captured", task=tid, attempt=attempt,
                           shots=len(m.get("shots") or []),
                           videos=sorted(m.get("videos") or {}),
@@ -2830,6 +2833,17 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         def gate_evidence(ctx):
             """The latest capture for this task in this graph run, or None."""
             return (ctx.get("results", {}).get(f"gate_{tid}") or {}).get("evidence")
+
+        def review_evidence(ctx):
+            """What a reviewer is shown: this run's capture, or — when the run
+            resumed past its gate (a restart re-attaching to an open PR) — the
+            newest capture on disk, so a resumed review is not blind. A gate
+            that DID run this time and captured nothing is not overridden by
+            an older attempt's images: those would show code that changed."""
+            gated = ctx.get("results", {}).get(f"gate_{tid}")
+            if gated is not None:
+                return gated.get("evidence")
+            return evidence.latest_manifest(project_slug, tid)
 
         async def gate(ctx):
             cmd = t["verify_cmd"]
@@ -2993,7 +3007,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         model=rev_model,
                         family=config.MODEL_FAMILY.get(rev_model),
                         implementer=impl_now, reason=rev_reason)
-            shown = gate_evidence(ctx)
+            shown = review_evidence(ctx)
             if shown:
                 driver.images = evidence.review_images(shown)
             try:
@@ -3441,7 +3455,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 drv = _driver(model, "pr_reviewer", pol)
                 wt = await worktree(ctx)
                 impact = await graft.blast(wt, base, task=tid)
-                shown = gate_evidence(ctx)
+                shown = review_evidence(ctx)
                 if shown:
                     drv.images = evidence.review_images(shown)
                 prompt = _pr_review_prompt(
