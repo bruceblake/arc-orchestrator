@@ -1804,6 +1804,13 @@ BOARD_DIR = Path(os.getenv("ARC_BOARD_DIR") or ROOT / "logs" / "boards")
 # on one message body. board.py's JSONL lines keep their 400-character cap.
 BOARD_BODY_MAX = int(os.getenv("ARC_BOARD_BODY_MAX", "4000"))
 
+# How often (seconds) the pipeline harvests a RUNNING agent's
+# .arc/board.jsonl, so a line it writes reaches other agents' next prompts
+# while it is still working instead of when its (often hour-long) run ends.
+# It is also where `main.py board post` queues a post when a harness sandbox
+# (Codex workspace-write) makes the board DB read-only. 0 = only after runs.
+BOARD_LIVE_INGEST_S = float(os.getenv("ARC_BOARD_LIVE_INGEST_S", "60"))
+
 # The spend ceiling, in USD, for one studio run. The local fleet never needed
 # one: ARC is campus-served and effectively free, so the only cost of a task
 # looping sixteen times was time. The studio roster is billed per token at up

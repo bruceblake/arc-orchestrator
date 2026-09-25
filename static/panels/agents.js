@@ -3,10 +3,14 @@
 const attemptOf = t => { const m = /-(\d+)\.jsonl$/.exec(t || ""); return m ? m[1] : null; };
 // The stable board ID (<task>/<role>): the same across fix rounds, usage swaps
 // and escalations, and the address to DM (dm:<id>) from the Messages tab.
+const idOf = a => a.agent || (a.task ? a.task + "/" + (a.role || "") : (a.role || ""));
 const agentId = a => {
-  const id = a.agent || (a.task ? a.task + "/" + (a.role || "") : "");
+  const id = idOf(a);
   return id ? `<span class="agent-id" title="agent ID — DM it as dm:${attr(id)}"><b>${esc(id)}</b></span>` : "";
 };
+// A transcript is titled by the agent that wrote it, then the model that ran.
+const openAgentTranscript = el =>
+  openTranscript(el.dataset.t, `${el.dataset.a || el.dataset.r} · ${el.dataset.m}`, el.dataset.task);
 async function pollAgents() {
   try {
     const d = (typeof jgetRev !== "function")
@@ -46,7 +50,7 @@ function renderRecent() {
                               : `<span class="bad">review fail${v.issues ? " · " + v.issues + " issue" + (v.issues === 1 ? "" : "s") : ""}</span>`)
                     : (a.ok ? '<span class="hint">ok</span>' : '<span class="bad">exit ' + esc(a.exit_code) + "</span>");
     return `<div class="donerow ${a.ok && (!v || v.pass) ? "" : "bad"} ${a.transcript ? "has-t" : ""}"
-                 data-t="${attr(a.transcript || "")}" data-m="${attr(a.pretty)}" data-r="${attr(a.role || "")}" data-task="${attr(a.task || "")}"${a.transcript ? ' role="button" tabindex="0" aria-label="open transcript"' : ""}>
+                 data-t="${attr(a.transcript || "")}" data-m="${attr(a.pretty)}" data-r="${attr(a.role || "")}" data-a="${attr(idOf(a))}" data-task="${attr(a.task || "")}"${a.transcript ? ' role="button" tabindex="0" aria-label="open transcript"' : ""}>
       ${agentId(a)}
       <span class="who">${esc(a.pretty)}${a.harness ? " · " + esc(a.harness) : ""}</span>
       <span class="hint">${esc(a.task || "")}</span>
@@ -57,7 +61,7 @@ function renderRecent() {
     </div>`;
   }).join("") : '<div class="empty">No finished agent runs recorded yet.</div>';
   document.querySelectorAll("#agents-done .donerow.has-t").forEach(el => el.onclick = () =>
-    openTranscript(el.dataset.t, `${el.dataset.m} ${el.dataset.r}`, el.dataset.task));
+    openAgentTranscript(el));
 }
 
 function renderAgents() {
@@ -73,7 +77,7 @@ function renderAgents() {
     const hb = a.last_event_s != null
       ? `<span data-since="${sinceStamp(a.last_event_s)}" data-suffix=" ago">…</span>`
       : "starting";
-    return `<div class="agentrow ${a.stuck ? "stuck" : ""} ${a.transcript ? "has-t" : ""}" data-t="${attr(a.transcript || "")}" data-m="${attr(a.pretty || short(a.model))}" data-r="${attr(a.role || "")}" data-task="${attr(a.task || "")}"${a.transcript ? ' role="button" tabindex="0" aria-label="open live transcript"' : ""}>
+    return `<div class="agentrow ${a.stuck ? "stuck" : ""} ${a.transcript ? "has-t" : ""}" data-t="${attr(a.transcript || "")}" data-m="${attr(a.pretty || short(a.model))}" data-r="${attr(a.role || "")}" data-a="${attr(idOf(a))}" data-task="${attr(a.task || "")}"${a.transcript ? ' role="button" tabindex="0" aria-label="open live transcript"' : ""}>
       ${agentId(a)}
       <span class="who">${esc(a.pretty || short(a.model))}${a.harness ? " · " + esc(a.harness) : ""}</span>
       ${a.session_id ? `<span class="hint" title="harness session">${esc(String(a.session_id).slice(0, 14))}</span>` : ""}
@@ -87,7 +91,7 @@ function renderAgents() {
   }).join("");
   if (paint($("#agents"), html)) {
     document.querySelectorAll("#agents .agentrow.has-t").forEach(el => el.onclick = () => {
-      if (el.dataset.t) openTranscript(el.dataset.t, `${el.dataset.m} ${el.dataset.r}`, el.dataset.task);
+      if (el.dataset.t) openAgentTranscript(el);
     });
   }
   rebuildFilterOptions();
