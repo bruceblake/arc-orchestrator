@@ -43,7 +43,8 @@ HEARTBEAT_INTERVAL = 15
 
 class DriverError(RuntimeError):
     def __init__(self, message, session_id=None, capacity=False,
-                 usage_limit=False, resets_at=None):
+                 usage_limit=False, resets_at=None, kind=None,
+                 config_error=False):
         super().__init__(message)
         self.session_id = session_id
         # Set when a subscription plan refused on its usage window; resets_at
@@ -62,6 +63,17 @@ class DriverError(RuntimeError):
         # landed in the error triage table as a crash (172 occurrences of one
         # fingerprint, all capacity).
         self.capacity = capacity
+        # Set when the exit was a DEPLOYMENT fault (no usable ARC key) rather
+        # than anything about the task. Classified at the exit site, where the
+        # whole transcript is still in hand; Driver.run reads it so a config
+        # exit is retried ZERO times and escalates to no one.
+        self.config_error = config_error
+        # A short classification for the event log ("config" for a broken
+        # deployment). Its own field rather than a message prefix: the event
+        # log and the triage table read fields, not prose.
+        self.kind = kind or ("config" if config_error
+                             else "capacity" if capacity
+                             else "usage_limit" if usage_limit else None)
 
 
 @dataclass
@@ -1089,6 +1101,12 @@ def reasonix_fleet_home():
     disk, so concurrent drivers do not thrash the file and reasonix's own
     session state under the same home is left alone. The .env is 0600: it
     holds the ARC key.
+
+    An EMPTY key is REFUSED (config.ConfigError) rather than written: reasonix
+    reads its credential only from this file, so `ARC_API_KEY=` here is a
+    harness that is guaranteed to fail and says so 437 times over (2026-09-23)
+    — once per retry ladder, per fix round, per escalation. A missing key must
+    fail once, loudly, at the point where it is known.
     """
     home = Path(config.REASONIX_FLEET_HOME)
     models = [m for m, h in config.MODEL_HARNESS.items() if h == "reasonix"]
@@ -1096,7 +1114,8 @@ def reasonix_fleet_home():
     if not models:
         models = ["DeepSeek-V4.1-Flash-thinking-max"]
     cfg = _reasonix_config_toml(models)
-    env = f"ARC_API_KEY={config.API_KEY}\n"
+    key = config.require_api_key(f"the reasonix harness ({config.REASONIX_FLEET_HOME})")
+    env = f"ARC_API_KEY={key}\n"
     try:
         home.mkdir(parents=True, exist_ok=True)
         cfg_path, env_path = home / "config.toml", home / ".env"
@@ -1451,6 +1470,26 @@ class Driver:
         low = (text or "").lower()
         return any(m in low for m in cls._VPN_MARKERS)
 
+    # A missing/unusable API key is a DEPLOYMENT fault, not a run of one: the
+    # process is fine, the account is fine, and no amount of retrying or
+    # escalating conjures a key out of the environment. reasonix prints
+    # `provider "arc-.../...": missing env ARC_API_KEY` and exits 1.
+    #
+    # Cost of not classifying it: on 2026-09-23 reasonix failed 437 times
+    # this way and every one was retried as an ordinary crash — MAX_RETRIES
+    # attempts, then a fix round, then a tier escalation — on a pool of 10
+    # unlimited sessions that could never have succeeded. "invalid or
+    # expired" is the same class of fault (the key is present and unusable):
+    # not capacity, not a crash, so it must not burn an attempt budget either.
+    _CONFIG_MARKERS = ("missing env arc_api_key", "arc_api_key is not set",
+                       "arc_api_key is invalid or expired",
+                       "missing env openrouter_api_key")
+
+    @classmethod
+    def is_config_error(cls, text):
+        low = (text or "").lower()
+        return any(m in low for m in cls._CONFIG_MARKERS)
+
     async def _swap_run(self, prompt, worktree, task_id, tried, avoid_families):
         """Re-run `prompt` on another harness, or None when there is no seat.
 
@@ -1523,6 +1562,19 @@ class Driver:
                             model=self.model, role=self.role, task=task_id,
                             attempt=attempt)
                 raise
+            except config.ConfigError as exc:
+                # Raised by extra_env (no key to write) before any harness was
+                # spawned. Same classification as the exit below, minus the
+                # attempt: nothing ran, so there is nothing to retry.
+                fp = errors.capture(exc, task=task_id, model=self.model,
+                                    node="driver", harness=self.harness,
+                                    attempt=attempt, kind="config")
+                events.emit("driver.error", harness=self.harness,
+                            model=self.model, role=self.role, task=task_id,
+                            attempt=attempt, error=str(exc)[:400],
+                            kind="config", capacity=False, will_resume=False,
+                            fingerprint=fp)
+                raise
             except DriverError as exc:
                 if exc.session_id and not sid:
                     sid = exc.session_id
@@ -1535,6 +1587,26 @@ class Driver:
                     events.emit("driver.resume", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt,
                                 session_id=sid)
+                # A missing or unusable ARC key is a DEPLOYMENT fault. Retrying
+                # it, sending the implementer a "fix" round, or escalating a
+                # tier cannot produce a key, so this branch sits ABOVE every
+                # ladder: one attempt, one driver.error with a distinct kind,
+                # and a raise. On 2026-09-23 reasonix failed 437 times with
+                # `missing env ARC_API_KEY`; each was retried as a crash and
+                # then billed as a fix round on a pool of 10 free sessions.
+                if (getattr(exc, "config_error", False)
+                        or self.is_config_error(str(exc))):
+                    fp = errors.capture(exc, task=task_id, model=self.model,
+                                        node="driver", harness=self.harness,
+                                        attempt=attempt, kind="config")
+                    events.emit("driver.error", harness=self.harness,
+                                model=self.model, role=self.role, task=task_id,
+                                attempt=attempt, error=str(exc)[:400],
+                                kind="config", capacity=False, will_resume=False,
+                                fingerprint=fp)
+                    raise config.ConfigError(
+                        f"{self.model} ({self.harness}) cannot run: {exc}"
+                    ) from exc
                 # A stall where the process was blocked with an unanswered
                 # request outstanding IS a capacity symptom, even though the
                 # error text carries no 400 — retrying it on the crash ladder
@@ -1890,6 +1962,11 @@ class Driver:
                               session_id=sid or session_id,
                               capacity=self.is_capacity_error(detail),
                               usage_limit=usage,
+                              # Judged on the FULL output like `usage` above:
+                              # the generator's provider line can sit outside
+                              # the 300-character tail kept on the message.
+                              config_error=self.is_config_error(
+                                  "\n".join((detail, err_text))),
                               resets_at=(usage_reset_at("\n".join((detail, err_text, raw)))
                                          if usage else None))
         return DriverResult(self.harness, self.model, self.role, proc.returncode,
@@ -2271,8 +2348,10 @@ class DeepseekDriver(Driver):
             os.environ, PWD=str(worktree),
             # dsh talks to the deepseek-official provider under these names
             # (see ~/.dsh/cordis.patch.yml); values mirror the ARC endpoint
-            # every other harness uses.
-            DEEPSEEK_API_KEY=config.API_KEY,
+            # every other harness uses. require_api_key, not config.API_KEY:
+            # an empty key here is the same guaranteed-failure write that
+            # reasonix's fleet home refuses.
+            DEEPSEEK_API_KEY=config.require_api_key("the dsh harness"),
             DEEPSEEK_BASE_URL=config.BASE_URL,
             DSH_TELEMETRY_MODE="DISABLED",
             # Headless runs cannot answer an approval prompt — this flips the

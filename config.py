@@ -1,17 +1,105 @@
 import os
 import re
 import shutil
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent
+
+
+class ConfigError(RuntimeError):
+    """A deployment is wrong, not a run of it.
+
+    Raised when the process cannot work at all — no API key to put in a
+    harness's environment — as opposed to a harness that crashed or a
+    provider that refused. Callers treat it as NON-retryable: there is
+    nothing to wait out and no model to escalate to, because every model
+    shares the same missing key. Retrying it as a crash is what burned fix
+    rounds and escalations on the 437 reasonix exits of 2026-09-23.
+    """
+
+
+def _main_checkout_env():
+    """The main checkout's .env, found through `git rev-parse
+    --git-common-dir` — the same trick check.sh uses to find the main .venv.
+
+    A task worktree is a checkout with NO .env: the file is gitignored, so
+    `git worktree add` never creates one, and a process started from one
+    (`~/repos/arc-orchestrator`, a worktree, a dashboard launched from a
+    branch) loaded an EMPTY key while the operator's sat in the main
+    checkout's .env one directory away. That empty key is what reasonix
+    reported as `missing env ARC_API_KEY` (437 times on 2026-09-23).
+
+    Returns the path only when it exists and is not the file we already
+    tried, so this never re-loads the same file under another name.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "--git-common-dir"],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            return None
+        raw = (proc.stdout or "").strip()
+        if not raw:
+            return None
+        # Relative to ROOT from a normal checkout (".git", "../.git"); an
+        # absolute path from a linked worktree (/main/.git). Either way its
+        # PARENT is the main checkout — the sibling of the .git it names.
+        common = Path(raw)
+        if not common.is_absolute():
+            common = ROOT / common
+        cand = common.resolve().parent / ".env"
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    if cand == (ROOT / ".env") or not cand.is_file():
+        return None
+    return cand
+
+
+# .env lookup order: next to config.py first (the operator's checkout wins),
+# then the MAIN checkout's when config.py runs from a worktree or a blessed
+# clone with no .env of its own. load_dotenv does not override variables
+# already set, so the first file defining ARC_API_KEY keeps it.
 load_dotenv(ROOT / ".env")
+_main_env = _main_checkout_env()
+if _main_env is not None:
+    load_dotenv(_main_env)
 
 API_KEY = os.getenv("ARC_API_KEY", "")
 BASE_URL = os.getenv("ARC_BASE_URL", "https://llm-api.arc.vt.edu/api/v1")
 DB_PATH = os.getenv("ARC_DB_PATH") or str(ROOT / "orchestrator.db")
+
+# Any key that is not a real one. The placeholder is the .env.example value:
+# a key still set to it is exactly as unusable as an empty one, and pool.py
+# has judged it so since the research workload existed.
+_PLACEHOLDER_KEYS = ("PASTE-YOUR-KEY",)
+
+
+def require_api_key(what="the harness"):
+    """The ARC key, or a ConfigError naming what to fix. Returns the key.
+
+    Read at CALL time (not import) so a process that reloaded its environment
+    or a test that sets config.API_KEY is honoured. Called by every writer of
+    a key into a harness's environment: an EMPTY key written silently is what
+    made reasonix fail 437 times on 2026-09-23 with `missing env ARC_API_KEY`,
+    each retried as a crash and paid for with fix rounds and escalations.
+    """
+    key = (API_KEY or "").strip()
+    if key and not any(p in key for p in _PLACEHOLDER_KEYS):
+        return key
+    state = "still the placeholder" if key else "empty"
+    raise ConfigError(
+        f"ARC_API_KEY is not set ({state}): {what} cannot run without it. Put "
+        f"your key from llm.arc.vt.edu (User profile > Settings > Account > "
+        f"API keys) in {ROOT / '.env'}. A task worktree has no .env of its "
+        f"own, so config also loads the MAIN checkout's, found through "
+        f"`git rev-parse --git-common-dir`. This is a configuration error, "
+        f"not a crash: it is not retried, it consumes no fix round, and it "
+        f"escalates to no one — no model of any tier can run on a key that "
+        f"is not there.")
 
 
 def dsh_bin():
