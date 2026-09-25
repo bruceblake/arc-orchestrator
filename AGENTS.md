@@ -517,10 +517,17 @@ PR** in the life of the repo.
   `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 12). A real textual conflict still stops,
   recording which files disagree.
 - **Resuming a task whose PR is open re-attaches to it.** `in_review` and
-  `conflict` tasks restart at `publish`, which finds the existing worktree and
-  the open PR and hands it straight to review. Do not "fix" this by starting
-  at `alloc`: alloc RESETS `task/<id>` to the base and discards the branch the
-  PR was opened from.
+  `conflict` tasks, and any other non-merged row with an OPEN pull request
+  for `task/<id>`, reuse the existing worktree. A clean worktree restarts at
+  `publish`; one with unfinished local edits restarts at `gate`, so the edits
+  pass `verify_cmd` and cross-family review before they can be committed.
+  A reboot leaves the row `running` (stale-reset then writes `failed`) while
+  the PR is still open, and that task must not start at `alloc`. A gh failure
+  is not an open PR: resume keeps today's path and does not crash. `alloc` refuses to
+  reset a branch whose tip is not an ancestor of base while that PR is open;
+  it reuses the branch and emits `task.branch_kept`. Do not "fix" a resume by
+  starting at `alloc` unconditionally: alloc RESETS `task/<id>` to the base
+  when no open PR is found and discards the branch the PR was opened from.
 - **A sibling's failure must not orphan an open PR.** The `publish ->
   pr_review -> pr_merge` edges are marked `on_drain=True`, so they keep firing
   after the graph starts draining. The rework edge deliberately is not:
