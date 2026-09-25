@@ -1,7 +1,12 @@
 "use strict";
 // ---- GitHub panel ----------------------------------------------------------
+let GH_LIMIT = 10;
 async function pollGithub() {
-  try { GH = await jget("/api/github"); } catch (e) { return; }
+  try {
+    const rev = await jgetRev("/api/github" + pageQuery(GH_LIMIT, 0), "github:" + GH_LIMIT);
+    if (rev.unchanged) return;
+    GH = rev.data;
+  } catch (e) { return; }
   renderGithub();
 }
 function renderGithub() {
@@ -9,7 +14,7 @@ function renderGithub() {
   const panel = $("#gh-panel");
   if (!d.ready) {
     $("#gh-meta").textContent = `(${d.reason || "unavailable"})`;
-    $("#gh-prs").innerHTML = '<div class="empty">Add a remote and run <code>gh auth login</code> to turn on the pull-request flow.</div>';
+    paint($("#gh-prs"), '<div class="empty">Add a remote and run <code>gh auth login</code> to turn on the pull-request flow.</div>');
     return;
   }
   const open = (d.prs || []).filter(p => p.state === "OPEN");
@@ -23,7 +28,7 @@ function renderGithub() {
     (d.stranded ? ` <span class="warn">· ${d.stranded} with no run</span>` : "");
   const repo = $("#gh-repo");
   if (repo && d.repo_url) repo.href = d.repo_url;
-  $("#gh-prs").innerHTML = (d.prs || []).slice(0, 10).map(p => {
+  let html = (d.prs || []).map(p => {
     const rounds = p.rounds || [];
     const last = rounds[rounds.length - 1];
     const verdict = !rounds.length
@@ -55,6 +60,17 @@ function renderGithub() {
       ${roundNote}${stranded}${verdict}${detail}
     </div>`;
   }).join("") || '<div class="empty">No pull requests yet.</div>';
+  if (d.page && d.page.next_offset != null) {
+    html += '<button class="act" id="gh-more" type="button">Show more</button>';
+  }
+  if (paint($("#gh-prs"), html)) {
+    const more = $("#gh-more");
+    if (more) more.onclick = () => {
+      GH_LIMIT += 10;
+      forgetEtag("github:" + (GH_LIMIT - 10));
+      pollGithub();
+    };
+  }
 }
 $("#gh-promote").onclick = async () => {
   if (!confirm(`Open a ${(GH || {}).base} → ${(GH || {}).prod} pull request?\n\nIt is NOT merged — you review and merge it on GitHub.`)) return;

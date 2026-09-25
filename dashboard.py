@@ -32,6 +32,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import config
+import dashboard_services
 import gitstore
 import orchchat
 from store import Store
@@ -5075,12 +5076,29 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.debug("%s " + fmt, self.address_string(), *args)
 
-    def _json(self, obj, code=200):
+    def _json(self, obj, code=200, conditional=False):
+        # conditional: poll endpoints may send If-None-Match. A match is
+        # 304 with an empty body. Clients that never send the header
+        # (tests, phone.html) still get the full JSON. FakeRequest has
+        # no headers attribute; treat that as "no validator".
+        tag = None
+        if conditional and code == 200:
+            tag = dashboard_services.etag_for(obj)
+            headers = getattr(self, "headers", None)
+            client = headers.get("If-None-Match") if headers is not None else None
+            if dashboard_services.not_modified(client, obj):
+                self.send_response(304)
+                self.send_header("ETag", tag)
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
         body = json.dumps(obj, default=str).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        if tag:
+            self.send_header("ETag", tag)
         self.end_headers()
         self.wfile.write(body)
 
@@ -5109,6 +5127,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._file(Path(config.ROOT) / "static" / "common.js", "application/javascript; charset=utf-8")
             if re.fullmatch(r"/panels/[a-z]+\.js", u.path):
                 return self._file(Path(config.ROOT) / "static" / u.path[1:], "application/javascript; charset=utf-8")
+            if re.fullmatch(r"/services/[a-z_]+\.js", u.path):
+                return self._file(Path(config.ROOT) / "static" / u.path[1:], "application/javascript; charset=utf-8")
             if u.path == "/api/usage":
                 q = parse_qs(u.query)
                 range_key = q.get("range", ["1h"])[0]
@@ -5130,7 +5150,7 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/fleet":
                 return self._json(_fleet(Handler.store))
             if u.path == "/api/queue":
-                return self._json(_queue(Handler.store))
+                return self._json(_queue(Handler.store), conditional=True)
             if u.path == "/api/audit":
                 import scheduler_audit
                 rep = scheduler_audit.latest()
@@ -5148,9 +5168,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"seats": audit.seat_utilization(
                     store=Handler.store)})
             if u.path == "/api/projects":
-                return self._json({"projects": _projects(Handler.store)})
+                q = parse_qs(u.query)
+                obj = {"projects": _projects(Handler.store)}
+                page = dashboard_services.page_requested(
+                    q, default_limit=50, max_limit=200)
+                if page:
+                    obj = dashboard_services.page_apply(obj, "projects", *page)
+                return self._json(obj, conditional=True)
             if u.path == "/api/work-status":
-                return self._json(_work_status(Handler.store))
+                return self._json(_work_status(Handler.store), conditional=True)
             if u.path == "/api/repos":
                 return self._json({"repos": _list_repos()})
             if u.path == "/api/chat/poll":
@@ -5220,9 +5246,24 @@ class Handler(BaseHTTPRequestHandler):
                 obj, code = _project_detail(Handler.store, q.get("file", [""])[0])
                 return self._json(obj, code)
             if u.path == "/api/agents":
-                return self._json(_agents(Handler.store))
+                q = parse_qs(u.query)
+                obj = _agents(Handler.store)
+                # Page the finished-run list only. Live `agents` stays
+                # complete: hiding a running harness behind a page would
+                # make the panel lie about who holds a slot.
+                page = dashboard_services.page_requested(
+                    q, default_limit=40, max_limit=100)
+                if page:
+                    obj = dashboard_services.page_apply(obj, "recent", *page)
+                return self._json(obj, conditional=True)
             if u.path == "/api/github":
-                return self._json(_github(Handler.store))
+                q = parse_qs(u.query)
+                obj = _github(Handler.store)
+                page = dashboard_services.page_requested(
+                    q, default_limit=20, max_limit=50)
+                if page:
+                    obj = dashboard_services.page_apply(obj, "prs", *page)
+                return self._json(obj, conditional=True)
             if u.path == "/api/health":
                 return self._json(_health(Handler.store))
             if u.path == "/api/metrics":
@@ -5357,6 +5398,13 @@ class Handler(BaseHTTPRequestHandler):
                 if limit <= 0:
                     limit = 50
                 limit = min(limit, ACTIVITY_MAX_LIMIT)
+                try:
+                    offset = int(q.get("offset", ["0"])[0])
+                except (TypeError, ValueError):
+                    offset = 0
+                if offset < 0:
+                    offset = 0
+                offset = min(offset, 1_000_000)
                 lines = _load_event_lines()
                 # id -> taskfile, for the click-through. Built from the
                 # code_tasks table rather than from the page's loaded list:
@@ -5377,7 +5425,9 @@ class Handler(BaseHTTPRequestHandler):
                 # events are the last lines and there is no need to parse the
                 # whole 100MB history to answer "the last 50".
                 for line in reversed(lines):
-                    if len(out) >= limit:
+                    # One past the window so next_offset is set only when
+                    # another matching event exists beyond this page.
+                    if len(out) > limit + offset:
                         break
                     try:
                         e = json.loads(line)
@@ -5414,9 +5464,18 @@ class Handler(BaseHTTPRequestHandler):
                                 "task": tid, "run_id": e.get("run_id"),
                                 "file": file_of,
                                 "context": ctx})
-                return self._json({"events": out, "limit": limit,
-                                   "total": len([1 for ln in lines
-                                                 if ln.strip()])})
+                more = len(out) > limit + offset
+                window = out[offset:offset + limit]
+                body = {"events": window, "limit": limit,
+                        "offset": offset,
+                        "total": len([1 for ln in lines if ln.strip()])}
+                if offset or "limit" in q:
+                    body["page"] = {
+                        "key": "events", "limit": limit, "offset": offset,
+                        "total": None if more else len(out),
+                        "next_offset": (offset + limit) if more else None,
+                    }
+                return self._json(body, conditional=True)
             if u.path == "/api/graph-shapes":
                 # The graph BETWEEN tasks: the pattern catalogue the planner
                 # chooses from, every taskfile classified by the shape its deps

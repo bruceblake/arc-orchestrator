@@ -3,7 +3,9 @@
 const attemptOf = t => { const m = /-(\d+)\.jsonl$/.exec(t || ""); return m ? m[1] : null; };
 async function pollAgents() {
   try {
-    const d = await jget("/api/agents");
+    const rev = await jgetRev("/api/agents", "agents");
+    if (rev.unchanged) { markFail("agents", false); return; }
+    const d = rev.data;
     AGENTS = (d.agents || []).filter(a => a.task);
     RECENT = d.recent || [];
     markFail("agents", false);
@@ -51,24 +53,29 @@ function renderAgents() {
   const rows = FILT.m ? AGENTS.filter(a => a.model === FILT.m || a.pretty === FILT.m) : AGENTS;
   $("#agents-meta").textContent = `(${rows.length} running${FILT.m ? " of " + AGENTS.length : ""} — click for live transcript)`;
   $("#agents-empty").style.display = rows.length ? "none" : "";
-  $("#agents").innerHTML = rows.map(a => {
+  const html = rows.map(a => {
     const att = attemptOf(a.transcript);
     const quiet = a.idle_s != null && a.stuck
-      ? `<span class="quiet">quiet ${tick(a.idle_s)}${a.state ? ` · ${esc(a.state)}` : ""}${(a.cpu_delta_s != null && a.cpu_delta_s < 0.5) ? " · no CPU" : ""}</span>`
-      : (a.idle_s != null ? `<span class="hint">quiet ${tick(a.idle_s)}</span>` : "");
+      ? `<span class="quiet">quiet <span data-since="${sinceStamp(a.idle_s)}" data-suffix="">…</span>${a.state ? ` · ${esc(a.state)}` : ""}${(a.cpu_delta_s != null && a.cpu_delta_s < 0.5) ? " · no CPU" : ""}</span>`
+      : (a.idle_s != null ? `<span class="hint">quiet <span data-since="${sinceStamp(a.idle_s)}" data-suffix="">…</span></span>` : "");
+    const hb = a.last_event_s != null
+      ? `<span data-since="${sinceStamp(a.last_event_s)}" data-suffix=" ago">…</span>`
+      : "starting";
     return `<div class="agentrow ${a.stuck ? "stuck" : ""} ${a.transcript ? "has-t" : ""}" data-t="${attr(a.transcript || "")}" data-m="${attr(a.pretty || short(a.model))}" data-r="${attr(a.role || "")}" data-task="${attr(a.task || "")}"${a.transcript ? ' role="button" tabindex="0" aria-label="open live transcript"' : ""}>
       <span class="who">${esc(a.pretty || short(a.model))} ${esc(a.role || "")}</span>
       <span>${esc(a.task)}</span>
       ${att ? `<span class="hint">attempt ${att}</span>` : ""}
       ${a.stalled ? '<span class="bad">STALLED</span>' : ""}
-      <span class="hint" data-el="${a.started || 0}">${a.started ? tick(Date.now() / 1000 - a.started) : ""}</span>
-      <span class="hint">hb ${a.last_event_s != null ? tick(a.last_event_s) + " ago" : "starting"}</span>
+      <span class="hint" data-since="${a.started || ""}">…</span>
+      <span class="hint">hb ${hb}</span>
       ${a.bytes ? `<span class="hint">${fmtK(a.bytes)}B out</span>` : ""}
       ${quiet}</div>`;
   }).join("");
-  document.querySelectorAll("#agents .agentrow.has-t").forEach(el => el.onclick = () => {
-    if (el.dataset.t) openTranscript(el.dataset.t, `${el.dataset.m} ${el.dataset.r}`, el.dataset.task);
-  });
+  if (paint($("#agents"), html)) {
+    document.querySelectorAll("#agents .agentrow.has-t").forEach(el => el.onclick = () => {
+      if (el.dataset.t) openTranscript(el.dataset.t, `${el.dataset.m} ${el.dataset.r}`, el.dataset.task);
+    });
+  }
   rebuildFilterOptions();
 }
 

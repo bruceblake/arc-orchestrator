@@ -104,6 +104,11 @@ running until it holds every slot it needs.
 
 ## Notes
 
+List paging, `ETag` / `If-None-Match` (304 when only the clock moved), and
+skeleton first-paint are described in
+[dashboard-services.md](dashboard-services.md). Omitting `limit` and
+`offset` keeps the full list.
+
 - Live transcripts tail `logs/harness/*.jsonl`; the drawer polls a run's
   transcript every ~3 s and the project list every ~5 s.
 - Token totals exclude dry-run events (model/family `dry-run` is skipped).

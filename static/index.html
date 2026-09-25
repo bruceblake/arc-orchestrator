@@ -80,6 +80,10 @@ tr.clickable { cursor: pointer; } tr.clickable:hover td { background: #1c2128; }
 .tag { display: inline-block; padding: 0 6px; border-radius: 8px; background: #21262d; color: var(--dim); margin: 1px 2px; font-size: 11px; white-space: nowrap; }
 .hint { color: var(--dim); font-size: 11px; }
 .empty { color: var(--dim); font-size: 12px; padding: 10px 0; }
+.sk { display:grid; gap:8px; padding:6px 0; }
+.sk-row { height:14px; border-radius:6px; background:linear-gradient(90deg,#21262d 25%,#30363d 37%,#21262d 63%); background-size:400% 100%; animation:sk 1.4s ease infinite; }
+@keyframes sk { from { background-position:100% 0; } to { background-position:0 0; } }
+@media (prefers-reduced-motion: reduce) { .sk-row { animation:none; background:#21262d; } }
 button.act { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit; font-size: 12px; }
 button.act:hover { border-color: var(--accent); color: var(--accent); }
 button.act.primary { border-color: var(--accent); color: var(--accent); }
@@ -579,7 +583,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
           <option value="attention">Needs attention</option>
         </select>
       </div>
-      <div id="work-map"><div class="work-empty">Loading task map…</div></div>
+      <div id="work-map"><div class="sk" aria-busy="true" aria-label="Loading"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></div></div>
     </div>
     <div class="panel" id="health-panel">
       <h2>Fleet <span class="hint" id="health-meta"></span>
@@ -605,7 +609,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <button class="act seg" id="ac-100" data-ac="100">100</button>
         <button class="act seg" id="ac-500" data-ac="500">500</button>
       </h2>
-      <div id="activity"></div>
+      <div id="activity"><div class="sk" aria-busy="true" aria-label="Loading"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></div></div>
       <div class="empty" id="activity-empty" style="display:none">No fleet activity in the log yet.</div>
     </div>
     <div class="panel tab-hidden" id="messages-panel">
@@ -635,7 +639,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <button class="act seg on" id="sl-tab-all" data-sl="all">everything</button>
         <button class="act seg" id="sl-tab-rev" data-sl="rev">reviewers only</button>
       </h2>
-      <div class="slots" id="slots"></div>
+      <div class="slots" id="slots"><div class="sk" aria-busy="true" aria-label="Loading"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></div></div>
       <div class="qrows" id="slot-rows"></div>
       <div class="empty" id="slots-empty" style="display:none">Nothing is running or queued — every model slot is free.</div>
     </div>
@@ -645,7 +649,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <button class="act seg on" id="ag-tab-live" data-ag="live">running</button>
         <button class="act seg" id="ag-tab-done" data-ag="done">finished</button>
       </h2>
-      <div id="agents"></div>
+      <div id="agents"><div class="sk" aria-busy="true" aria-label="Loading"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></div></div>
       <div id="agents-done" style="display:none"></div>
       <div class="empty" id="agents-empty" style="display:none">No agents running right now.</div>
     </div>
@@ -655,7 +659,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <a class="act seg" id="gh-repo" target="_blank" rel="noopener">open repo ↗</a>
         <button class="act seg" id="gh-promote" title="open a development → main PR for you to merge">promote…</button>
       </h2>
-      <div id="gh-prs"></div>
+      <div id="gh-prs"><div class="sk" aria-busy="true" aria-label="Loading"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></div></div>
     </div>
     <div class="panel" id="projects-panel">
       <h2>Projects <span class="hint" id="proj-meta"></span>
@@ -666,7 +670,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
         <button class="act" id="btn-captain" aria-label="Supervise the fleet with the captain">🧭 Captain</button>
         <button class="act primary" id="btn-new" aria-label="Create a new project">+ New project</button>
       </h2>
-      <div id="projects"></div>
+      <div id="projects"><div class="sk" aria-busy="true" aria-label="Loading"><div class="sk-row"></div><div class="sk-row"></div><div class="sk-row"></div></div></div>
       <div class="empty" id="projects-empty" style="display:none">No task files in ~/tasks yet — create one with “+ New project”.</div>
     </div>
     <div class="panel" id="topo-panel">
@@ -803,6 +807,9 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 </div>
 
 <script src="/common.js"></script>
+<script src="/services/skeleton.js"></script>
+<script src="/services/page.js"></script>
+<script src="/services/refresh.js"></script>
 <script src="/panels/state.js"></script>
 <!-- tabs.js BEFORE summary.js: summary.js reads TAB_PRIMARY, a const, and a
      const read before its declaration runs throws even under typeof. -->
@@ -827,22 +834,23 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 // ---- boot: staggered polls so nothing fires all at once ----
 loadHash(); syncFilterControls();
 pollProjects();
-setTimeout(() => { pollWorkStatus(); setInterval(pollWorkStatus, 5000); }, 600);
+every(pollWorkStatus, 5000, 600);
 initEvents();
-setTimeout(() => { pollFleet(); setInterval(pollFleet, 5000); }, 1600);
-setTimeout(() => { pollSlots(); setInterval(pollSlots, 3000); }, 400);
-setTimeout(() => { pollErrors(); setInterval(pollErrors, 15000); }, 2000);
-setTimeout(() => { pollActivity(); setInterval(pollActivity, 10000); }, 2200);
-setTimeout(() => { pollAgents(); setInterval(pollAgents, 4500); }, 800);
-setTimeout(() => { pollHealth(); setInterval(pollHealth, 6000); }, 2400);
-setTimeout(() => setInterval(pollEvents, 8000), 1200);
-setInterval(pollGithub, 20000);
-setTimeout(() => { pollTopos(); setInterval(pollTopos, 30000); }, 2000);
+every(pollFleet, 5000, 1600);
+every(pollSlots, 3000, 400);
+every(pollErrors, 15000, 2000);
+every(pollActivity, 10000, 2200);
+every(pollAgents, 4500, 800);
+every(pollHealth, 6000, 2400);
+every(pollEvents, 8000, 1200);
+every(pollGithub, 20000, 800);
+every(pollTopos, 30000, 2000);
 // Studio: poll fast only while its tab is showing; the snapshot runs gate
 // checks and reads render archives, which there is no point doing unseen.
 jget("/api/studio").then(d => { STUDIO = d; initTabs(((d || {}).projects || []).length > 0); renderStudio(); })
   .catch(() => initTabs(false));
 setInterval(() => { if (TAB === "studio") pollStudio(); }, 5000);
+startClock();
 </script>
 </body>
 </html>

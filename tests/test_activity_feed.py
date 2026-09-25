@@ -272,6 +272,14 @@ class ActivityFeed(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body["events"], [])
 
+    def test_offset_skips_newer_events(self):
+        self._write(*[self._ev("task.merged", 100.0 + i, task=f"t{i}")
+                      for i in range(6)])
+        _, body = self._get("/api/activity?limit=2&offset=2")
+        self.assertEqual([e["task"] for e in body["events"]], ["t3", "t2"])
+        self.assertEqual(body["page"]["next_offset"], 4)
+        self.assertEqual(body["offset"], 2)
+
 
 def _taskfile(tasks, repo="/tmp", title="t"):
     project = {"repo": repo, "title": title, "tasks": tasks}

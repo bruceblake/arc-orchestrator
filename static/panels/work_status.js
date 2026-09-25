@@ -47,15 +47,16 @@ function workTaskRow(t, file) {
   const activity = t.activity || "unknown";
   const reason = workTaskReason(t);
   const detail = [workActivity(t), workStage(t.stage), reason].join(" · ");
-  const age = t.idle_s != null && ["working", "stalled"].includes(activity)
-    ? ` · no output ${tick(t.idle_s)}` : "";
+  const idle = t.idle_s != null && ["working", "stalled"].includes(activity);
+  const age = idle
+    ? ` · no output <span data-since="${sinceStamp(t.idle_s)}">…</span>` : "";
   const agents = (t.agents || []).map(a => `${a.role || "agent"}: ${short(a.model || "?")}${a.activity ? " · " + a.activity : ""}`);
   const agentLine = agents.length ? agents.join("; ") : (t.role ? `${t.role}${t.model ? " · " + short(t.model) : ""}` : "");
-  return `<button class="work-task ${attr(activity)}" type="button" data-work-file="${attr(file)}" data-work-task="${attr(t.id)}" aria-label="${attr(`${t.id}: ${detail}${age}. Open project detail`)}">
+  return `<button class="work-task ${attr(activity)}" type="button" data-work-file="${attr(file)}" data-work-task="${attr(t.id)}" aria-label="${attr(`${t.id}: ${detail}${idle ? " · no output" : ""}. Open project detail`)}">
     <span><b>${esc(t.id)}</b><span class="title">${esc(t.title || "")}</span></span>
     <span>${esc(workActivity(t))}</span>
     <span>${esc(workStage(t.stage))}${agentLine ? `<span class="title">${esc(agentLine)}</span>` : ""}</span>
-    <span class="reason">${esc(reason)}${esc(age)}</span>
+    <span class="reason">${esc(reason)}${age}</span>
   </button>`;
 }
 function workProject(p, filter) {
@@ -95,9 +96,10 @@ function renderWorkStatus(data) {
   const html = [...projects].sort((a,b) => priority(a)-priority(b)).map(p => workProject(p, filter)).filter(Boolean);
   const map = $("#work-map");
   const next = html.join("") || `<div class="work-empty">${projects.length ? "No tasks match this filter." : "No projects are planned yet."}</div>`;
-  if (map.innerHTML !== next) {
+  if (map._paint !== next) {
     // Polling every five seconds must not throw away a keyboard user's focus
-    // or reset a wide DAG while someone is panning it.
+    // or reset a wide DAG while someone is panning it. The clock rewrites
+    // [data-since] text, so compare the template, not the live innerHTML.
     const active = typeof document !== "undefined" ? document.activeElement : null;
     const focused = active && map.contains && map.contains(active) ? {
       file: active.dataset.workFile || active.dataset.workProject || active.dataset.f || active.dataset.file,
@@ -105,6 +107,7 @@ function renderWorkStatus(data) {
     } : null;
     const scroll = map.querySelectorAll ? [...map.querySelectorAll("[data-work-section]")].map(section =>
       [section.dataset.workSection, (section.querySelector(".work-dag") || {}).scrollLeft || 0]) : [];
+    map._paint = next;
     map.innerHTML = next;
     if (map.querySelectorAll) {
       for (const section of map.querySelectorAll("[data-work-section]")) {
@@ -149,8 +152,13 @@ $("#work-map").onkeydown = ev => {
 };
 async function pollWorkStatus() {
   try {
-    const data = await jget("/api/work-status");
-    if (!data || data.error) throw new Error((data && data.error) || "empty work status");
+    const rev = await jgetRev("/api/work-status", "work");
+    if (rev.unchanged) { markFail("work-status", false); return; }
+    const data = rev.data;
+    if (!data || data.error) {
+      forgetEtag("work");
+      throw new Error((data && data.error) || "empty work status");
+    }
     WORK_STATUS = data;
     // This snapshot already contains the full /api/projects payload. Reuse it
     // for the Projects tab instead of making a second expensive scan each poll.

@@ -35,7 +35,7 @@ function slotRow(r, running) {
     <span class="who">${esc(r.task)}</span>
     <span class="role">${esc(r.role_label || "working")}</span>
     <span class="why">${esc(r.pretty)} · ${why}</span>
-    <span class="wait">${tick(r.seconds)}</span>
+    <span class="wait" data-since="${sinceStamp(r.seconds)}">…</span>
   </div>`;
 }
 
@@ -55,12 +55,12 @@ function renderSlots(q) {
     pretty: h.harness, cap: h.cap, running: h.running, waiting: h.waiting,
     free: h.free, reviewers_waiting: 0, isHarness: true,
   })).join("");
-  $("#slots").innerHTML = hs + (q.models || []).map(slotCard).join("");
+  paint($("#slots"), hs + (q.models || []).map(slotCard).join(""));
   const revOnly = SLOT_VIEW === "rev";
   const keep = r => !revOnly || r.role === "pr_reviewer";
   const rows = (q.waiting || []).filter(keep).map(r => slotRow(r, false))
     .concat((q.running || []).filter(keep).map(r => slotRow(r, true)));
-  $("#slot-rows").innerHTML = rows.join("");
+  paint($("#slot-rows"), rows.join(""));
   $("#slots-empty").style.display = rows.length ? "none" : "";
   $("#slots-empty").textContent = revOnly && (t.running || t.waiting)
     ? "No PR reviewers running or queued right now."
@@ -68,8 +68,12 @@ function renderSlots(q) {
 }
 
 async function pollSlots() {
-  try { renderSlots(await jget("/api/queue")); markFail("queue", false); }
-  catch (e) { markFail("queue", true); }
+  try {
+    const rev = await jgetRev("/api/queue", "queue");
+    if (rev.unchanged) { markFail("queue", false); return; }
+    renderSlots(rev.data);
+    markFail("queue", false);
+  } catch (e) { markFail("queue", true); }
 }
 
 for (const b of document.querySelectorAll("[data-sl]")) {
