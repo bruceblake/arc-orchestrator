@@ -135,6 +135,18 @@ class GoldenTolerance(unittest.TestCase):
         self.assertEqual(len(want), 16)       # 4 pages x desktop/phone x light/dark
 
 
+class RunScriptInAFreshCheckout(unittest.TestCase):
+    def test_log_dir_is_created_before_anything_is_written_under_it(self):
+        """A fresh clone has no logs/ (gitignored). run.sh redirected the
+        capture log into logs/visual/ before anything created it, so
+        check.sh failed on every fresh checkout: "logs/visual/check.log: No
+        such file or directory"."""
+        src = (ROOT / "tools" / "visual" / "run.sh").read_text()
+        body = src[src.index('out=logs/visual/check'):]
+        self.assertIn("mkdir -p logs/visual", body)
+        self.assertLess(body.index("mkdir -p logs/visual"), body.index('>"$out.log"'))
+
+
 class FixtureIsolation(unittest.TestCase):
     """The fixture server never reads the operator's live state."""
 

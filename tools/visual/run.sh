@@ -14,6 +14,9 @@ set -uo pipefail
 cd "$(dirname "$0")/../.." || exit 1
 PY="${PY:-./py}"
 out=logs/visual/check
+# logs/ is gitignored, so a fresh checkout has no logs/visual/ yet: the
+# capture log below is written before capture.py makes its own --out dir.
+mkdir -p logs/visual
 rm -rf "$out" logs/visual/check-diff
 "$PY" tools/visual/capture.py --out "$out" --strict >"$out.log" 2>&1
 rc=$?
