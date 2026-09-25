@@ -1464,6 +1464,12 @@ class Driver:
     # free slot ahead of queued batch work rather than lining up behind it. It
     # does not raise any cap — the provider's ceiling is the provider's ceiling.
     interactive = False
+    # Screenshots a reviewer should look at (evidence.py / ui_evidence.py). A
+    # harness that can put pixels in front of its model says so with
+    # `sees_images` and consumes `images` in argv; the base harness cannot, and
+    # a reviewer prompt must then say it is blind rather than pretend.
+    images = ()
+    sees_images = False
 
     def argv(self, prompt, session_id):
         raise NotImplementedError
@@ -2554,6 +2560,23 @@ class DeepseekDriver(Driver):
                             round(time.monotonic() - t0, 1), 0, 0, 0)
 
 
+def _view_image_prompt(prompt, images):
+    """`prompt` plus the instruction that makes reasonix actually LOOK.
+
+    reasonix has a `view_image` tool that feeds real pixels to DeepSeek
+    (measured 2026-09-18: shown a file named actually_blue.png that was red,
+    it answered "red" and noted the name lied). But asked about a PNG without
+    being told to use it, it decoded the bytes with a python one-liner and
+    never saw the image. So the tool is named, and the byte route forbidden."""
+    if not images:
+        return prompt
+    return (prompt + "\n\nSCREENSHOTS TO LOOK AT. These are real screenshots of the "
+            "changed UI. Call the view_image tool on EACH of them and judge what you "
+            "actually see. Do NOT read the PNG bytes with bash or python — that is "
+            "not seeing the image. Report anything broken, misaligned, unreadable, "
+            "or different from the spec:\n" + "\n".join(f"  {i}" for i in images))
+
+
 class ReasonixDriver(Driver):
     """Reasonix (github.com/esengine/DeepSeek-Reasonix), DeepSeek's cache-first
     coding agent — the DeepSeek harness by operator decision 2026-09-13,
@@ -2581,6 +2604,7 @@ class ReasonixDriver(Driver):
     """
 
     harness = "reasonix"
+    sees_images = True           # through view_image; see _view_image_prompt
 
     def __init__(self, model, role, bench=False, interactive=False):
         if not bench:
@@ -2612,7 +2636,7 @@ class ReasonixDriver(Driver):
              "--output-format", "stream-json"]
         if session_id:
             a.append("-c")
-        return a + [prompt]
+        return a + [_view_image_prompt(prompt, self.images)]
 
     def extra_env(self, worktree):
         return {"REASONIX_HOME": reasonix_fleet_home(),
@@ -2678,6 +2702,7 @@ class ClaudeCodeDriver(Driver):
     """
 
     harness = "claude"
+    sees_images = True           # consumes `images` in argv
 
     def __init__(self, model, role, bench=False, interactive=False):
         _check_roster(model, role, bench)
@@ -2725,6 +2750,7 @@ class CodexDriver(Driver):
     """
 
     harness = "codex"
+    sees_images = True           # consumes `images` in argv
 
     def __init__(self, model, role, bench=False, interactive=False):
         _check_roster(model, role, bench)
@@ -2778,6 +2804,7 @@ class CursorDriver(Driver):
     """
 
     harness = "cursor"
+    sees_images = True           # consumes `images` in argv
 
     def __init__(self, model, role, bench=False, interactive=False):
         _check_roster(model, role, bench)
@@ -2821,6 +2848,7 @@ class AntigravityDriver(Driver):
     """
 
     harness = "agy"
+    sees_images = True           # consumes `images` in argv
 
     def __init__(self, model, role, bench=False, interactive=False):
         _check_roster(model, role, bench)
@@ -2864,6 +2892,7 @@ class GeminiDriver(Driver):
     """
 
     harness = "gemini"
+    sees_images = True           # consumes `images` in argv
 
     def __init__(self, model, role, bench=False, interactive=False):
         _check_roster(model, role, bench)
@@ -2923,3 +2952,11 @@ def driver_for(model, role, bench=False, interactive=False):
     if harness == "reasonix":
         return ReasonixDriver(model, role, bench=bench, interactive=interactive)
     return OpencodeDriver(model, role, bench=bench, interactive=interactive)
+
+
+def sees_images(driver):
+    """Whether this driver puts attached images in front of its model.
+
+    opencode (GLM-5.3) does not: ARC rejects image input for GLM
+    (`400 unsupported multimodal content: image_url`, measured 2026-09-18)."""
+    return bool(getattr(driver, "sees_images", False))

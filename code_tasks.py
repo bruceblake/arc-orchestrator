@@ -33,6 +33,7 @@ import gh_issues
 import plan_amend
 import dossier as dossier_mod
 import project_contract
+import ui_evidence
 from drivers import (DeepseekDriver, DriverError, KimiDriver, OpencodeDriver,
                      ReasonixDriver,
                      driver_for, transcript_tokens)
@@ -1352,6 +1353,42 @@ def _scope_lock_prose(flag):
     )
 
 
+def _evidence_block(shown, driver):
+    """The reviewer's visual-evidence block for a gate capture, or "".
+
+    A dashboard capture (Rule 7e) says whether THIS reviewer can see the
+    attached images — a blind model is told so, never asked to judge pixels
+    it cannot see. A game capture (Rule 7d) keeps evidence.py's block."""
+    if not shown:
+        return ""
+    if shown.get("kind") == ui_evidence.KIND:
+        return ui_evidence.prompt_block(shown, drivers.sees_images(driver))
+    return evidence.prompt_block(shown)
+
+
+def _visual_review_prose(diff):
+    """The VISUAL clause for a diff that touches the dashboard UI, else "".
+
+    A passing DOM unit test can still ship a page that looks broken, so a UI
+    diff is judged by looking at it. Non-UI diffs get nothing: their prompt
+    stays byte-identical."""
+    ui = ui_evidence.diff_touches_ui(diff)
+    if not ui:
+        return ""
+    return ("VISUAL — this diff changes the dashboard UI ("
+            + ", ".join(ui[:6]) + "). A UI change needs visual evidence: the "
+            "VISUAL EVIDENCE block (before/after screenshots rendered by the "
+            "orchestrator) and, when the look changes on purpose, updated golden "
+            "screenshots under tests/visual/golden/ in this diff — the visual "
+            "regression check in ./check.sh fails until they match. A visible "
+            "regression (broken layout, clipped or overlapping text, lost "
+            "contrast in light or dark mode, a phone layout that overflows, a "
+            "new JavaScript error) is BLOCKING, exactly like a failing test. "
+            "If there is no VISUAL EVIDENCE block and no golden update for a "
+            "change that alters what a page shows, reject it for missing "
+            "visual evidence.\n")
+
+
 def _review_prompt(t, diff, impact="", roster=None, board="", contract="",
                    dossier=""):
     p = (
@@ -1367,6 +1404,7 @@ def _review_prompt(t, diff, impact="", roster=None, board="", contract="",
     if config.REQUIRE_TESTS:
         p += ("A code change MUST come with tests that would FAIL without it. "
               "Documentation-only changes are exempt.\n")
+    p += _visual_review_prose(diff)
     if board:
         p += "\n" + board + "\n" + BOARD_ETIQUETTE
     if roster:
@@ -1497,6 +1535,9 @@ def _pr_review_prompt(t, diff, n_reviewers, round_n, prior_issues, impact="",
               "without it. Reject if there are none, if they only assert the "
               "code runs, or if they miss the behaviour the spec describes. "
               "Documentation-only changes are exempt.\n")
+    visual = _visual_review_prose(diff)
+    if visual:
+        p += "3b. " + visual
     p += ("4. SCOPE — nothing unrelated to the spec. An issue this diff did "
           "not introduce is not yours to block on.\n\n"
           "Review independently: do not assume another reviewer checked "
@@ -2788,6 +2829,43 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                        project=project_slug)
             return m, None
 
+        async def capture_ui_evidence(wt, attempt, changed):
+            """(manifest, gate_error) for a diff that touches the dashboard UI
+            (Rule 7e; see ui_evidence.py): before/after screenshots of every
+            dashboard view, rendered from the merge base and the worktree.
+
+            Same failure contract as capture_evidence: no browser on this
+            machine never fails the task; a dashboard that will not start
+            from this worktree does, in `required` mode."""
+            out = evidence.run_dir(project_slug, tid, attempt)
+            try:
+                m = await asyncio.to_thread(ui_evidence.capture, wt, out, base=base,
+                                            project=project_slug, changed=changed)
+            except evidence.EvidenceUnavailable as exc:
+                evidence.emit("unavailable", task=tid, surface="ui", reason=str(exc)[:300])
+                return None, None
+            except evidence.EvidenceError as exc:
+                evidence.emit("failed", task=tid, surface="ui", attempt=attempt,
+                              error=str(exc)[:300])
+                if config.EVIDENCE_MODE == "required":
+                    return None, ("visual evidence: the dashboard did not render "
+                                  f"for its screenshots:\n{str(exc)[:1500]}")
+                return None, None
+            except Exception as exc:                           # noqa: BLE001
+                fp = errors.capture(exc, task=tid, node=f"gate_{tid}")
+                evidence.emit("error", task=tid, surface="ui", error=str(exc)[:300],
+                              fingerprint=fp)
+                return None, None
+            m["attempt"] = attempt
+            evidence.emit("captured", task=tid, surface="ui", attempt=attempt,
+                          shots=len(m.get("shots") or []),
+                          changed=m.get("changed_views") or [],
+                          warnings=len(m.get("warnings") or []), dir=str(out))
+            board.post(wt, task=tid, role="orchestrator", model="", harness="evidence",
+                       kind="evidence", body=ui_evidence.board_body(m),
+                       project=project_slug)
+            return m, None
+
         async def post_pr_evidence(ctx, number):
             """Push this attempt's capture to the game repo's evidence branch
             and comment it onto the PR. Never fails publish: a PR without its
@@ -2801,8 +2879,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                               tid, shown.get("attempt", 0), shown)
                 if not web:
                     return
-                body = evidence.pr_markdown(shown, web, task_id=tid,
-                                            attempt=shown.get("attempt", 0))
+                body = ui_evidence.presenter(shown).pr_markdown(
+                    shown, web, task_id=tid, attempt=shown.get("attempt", 0))
                 rc, out, err = await gitstore._gh(
                     ["pr", "comment", str(number), "--body", body], cwd=repo)
                 if rc != 0:
@@ -2943,15 +3021,20 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     store.set_code_task_verdict(taskfile, tid, verdict)
                     events.emit("task.verdict", task=tid, attempt=attempt, verdict=verdict)
             shown = None
+            changed = await _changed_files(wt, base)
+            eerr = None
             if passed and evidence.enabled_for(wt, t):
                 # Rule 7d: a game change is SEEN before anyone judges it. A
                 # project that will not render fails the gate like a test.
                 shown, eerr = await capture_evidence(wt, attempt)
-                if eerr:
-                    passed = False
-                    output = (eerr + "\n...\n" + output)[-2400:]
-                    events.emit("task.gate", task=tid, attempt=attempt, passed=False,
-                                log=log_path, cmd="visual evidence", tail=eerr[-400:])
+            elif passed and ui_evidence.enabled_for(wt, t, changed):
+                # Rule 7e: so is a change to the orchestrator's own dashboard.
+                shown, eerr = await capture_ui_evidence(wt, attempt, changed)
+            if eerr:
+                passed = False
+                output = (eerr + "\n...\n" + output)[-2400:]
+                events.emit("task.gate", task=tid, attempt=attempt, passed=False,
+                            log=log_path, cmd="visual evidence", tail=eerr[-400:])
             dossier_after(tid, None, attempt=attempt,
                           model=prev.get("model") or cur_model(ctx),
                           role="implementer", harness=prev.get("harness", ""),
@@ -2959,7 +3042,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                           summary=("gate passed" if passed else
                                    f"gate failed: {cmd[:120]}"),
                           failure_excerpt="" if passed else (tail or output)[-1200:],
-                          files=await _changed_files(wt, base),
+                          files=changed,
                           session_id=prev.get("session_id"))
             if not passed:
                 board_post(tid, "status", "gate failed: "
@@ -2995,11 +3078,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         implementer=impl_now, reason=rev_reason)
             shown = gate_evidence(ctx)
             if shown:
-                driver.images = evidence.review_images(shown)
+                driver.images = ui_evidence.presenter(shown).review_images(shown)
             try:
                 prompt = _review_prompt(t, diff, impact, roster,
                                         board_digest(tid, wt, "reviewer", driver.model)
-                                        + evidence.prompt_block(shown),
+                                        + _evidence_block(shown, driver),
                                         project_contract.role_block(wt, "reviewer"),
                                         dossier=dossier_block(tid, "reviewer"))
                 note_prompt(tid, "reviewer", prompt)
@@ -3443,12 +3526,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 impact = await graft.blast(wt, base, task=tid)
                 shown = gate_evidence(ctx)
                 if shown:
-                    drv.images = evidence.review_images(shown)
+                    drv.images = ui_evidence.presenter(shown).review_images(shown)
                 prompt = _pr_review_prompt(
                     t, it["diff"], it["n_reviewers"], it["round"],
                     it["prior_issues"], impact, roster,
                     board_digest(tid, wt, "pr-reviewer", model)
-                    + evidence.prompt_block(shown),
+                    + _evidence_block(shown, drv),
                     project_contract.role_block(wt, "reviewer"),
                     dossier=dossier_block(tid, "pr-reviewer"))
                 note_prompt(tid, "pr-reviewer", prompt)

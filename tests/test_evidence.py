@@ -845,8 +845,12 @@ class PipelineWiring(unittest.TestCase):
         for start, end in (("        async def review(ctx):", "        async def publish(ctx):"),
                            ("        async def pr_reviewer(ctx):", "        async def pr_review(ctx):")):
             body = self._body(start, end)
-            self.assertIn("evidence.review_images(shown)", body, start)
-            self.assertIn("evidence.prompt_block(shown)", body, start)
+            # Dispatched through ui_evidence.presenter: a game capture is still
+            # presented by evidence.py, a dashboard capture by ui_evidence.py.
+            self.assertIn("ui_evidence.presenter(shown).review_images(shown)", body, start)
+            self.assertIn("_evidence_block(shown, ", body, start)
+        self.assertIn("return evidence.prompt_block(shown)",
+                      self._body("def _evidence_block(", "def _visual_review_prose("))
 
     def test_the_pr_gets_the_evidence(self):
         self.assertIn("await post_pr_evidence(ctx, number)", self.src)
