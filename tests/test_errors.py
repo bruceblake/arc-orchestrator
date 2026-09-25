@@ -8,6 +8,7 @@ produced a message like "opencode exited 1:".
 import json
 import os
 import tempfile
+import time
 import unittest
 
 from helpers import capture_events  # noqa: F401  (sys.path)
@@ -1168,6 +1169,198 @@ class TheDailyAuditSchedulesItself(unittest.TestCase):
             audit.run = orig
         self.assertLessEqual(len(list(pathlib.Path(self.dir, "logs", "audit").glob("2*.json"))),
                              sa.KEEP_REPORTS)
+
+
+class TheBoardSectionOfTheAudit(unittest.TestCase):
+    """`main.py audit` reports whether agents COORDINATE, not just whether
+    anything crashed (Rule 4c). The metrics come from
+    `agentboard.board_health`; this pins the section's rendering: a finding
+    per problem, each with a concrete action, and INFO on a board that is
+    simply quiet."""
+
+    def setUp(self):
+        import shutil
+        self.dir = tempfile.mkdtemp(prefix="arc-audit-board-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        orig_db, orig_events = config.DB_PATH, config.EVENTS_LOG
+        config.DB_PATH = os.path.join(self.dir, "board.db")
+        config.EVENTS_LOG = os.path.join(self.dir, "events.jsonl")
+        self.addCleanup(setattr, config, "DB_PATH", orig_db)
+        self.addCleanup(setattr, config, "EVENTS_LOG", orig_events)
+
+    def test_a_healthy_board_is_info_not_a_warning(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="doors/implementer", kind="claim",
+                body="claiming", author_task="doors", refs={"paths": ["a.py"]})
+        ab.post("prison", author="doors/implementer", kind="result", body="done",
+                author_task="doors", refs={"files": ["a.py"]})
+        f = audit.board_health_findings("prison")
+        self.assertEqual([x["severity"] for x in f], ["info"], f)
+        self.assertIn("board post(s)", f[0]["what"])
+
+    def test_a_quiet_board_produces_no_warnings(self):
+        import audit
+        f = audit.board_health_findings("empty-project")
+        self.assertEqual([x["severity"] for x in f], ["info"])
+        self.assertIn("0 board post(s)", f[0]["what"])
+
+    def test_an_unanswered_question_is_a_warning_with_an_action(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="locks/implementer", kind="question",
+                body="is @doors ready?", author_task="locks",
+                ts=time.time() - 6 * 3600)
+        f = [x for x in audit.board_health_findings("prison")
+             if "unanswered" in x["what"]]
+        self.assertTrue(f, "an unanswered question must be reported")
+        self.assertEqual(f[0]["severity"], "warning", "older than 4h")
+        self.assertIn("reply_to", f[0]["action"])
+        self.assertIn("oldest 6.0h", f[0]["detail"])
+
+    def test_a_recent_unanswered_question_is_only_info(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="locks/implementer", kind="question",
+                body="quick one", author_task="locks", ts=time.time() - 600)
+        f = [x for x in audit.board_health_findings("prison")
+             if "unanswered" in x["what"]]
+        self.assertEqual(f[0]["severity"], "info")
+
+    def test_a_question_the_asker_answered_itself_is_still_unanswered(self):
+        """The audit must warn about it: the asker replying to its own
+        question is not someone replying, and the warning is the only thing
+        that gets the question in front of an agent that can answer it."""
+        import audit
+        import agentboard as ab
+        q = ab.post("prison", author="locks/implementer", kind="question",
+                    body="is @doors ready?", author_task="locks",
+                    ts=time.time() - 6 * 3600)
+        ab.post("prison", author="locks/implementer", kind="answer",
+                body="never mind", reply_to=q, ts=time.time() - 6 * 3600 + 60)
+        f = [x for x in audit.board_health_findings("prison")
+             if "unanswered" in x["what"]]
+        self.assertEqual(len(f), 1, "the question must still be reported")
+        self.assertEqual(f[0]["severity"], "warning", "older than 4h")
+        self.assertIn("1 unanswered question(s)", f[0]["what"])
+
+    def test_tasks_that_never_claimed_or_reported_are_warnings(self):
+        import audit
+        import agentboard as ab
+        for t in ("doors", "locks", "hatch"):
+            ab.post("prison", author=f"{t}/implementer", kind="status",
+                    body="working", author_task=t)
+        f = {x["what"]: x for x in audit.board_health_findings("prison")}
+        claim = [x for w, x in f.items() if "posted a claim" in w]
+        result = [x for w, x in f.items() if "posted a result" in w]
+        self.assertEqual(claim[0]["severity"], "warning")
+        self.assertIn("0%", claim[0]["what"])
+        self.assertTrue(claim[0]["action"])
+        self.assertEqual(result[0]["severity"], "warning")
+        self.assertIn("refs.files", result[0]["action"])
+
+    def test_overlapping_claims_are_a_warning_naming_both(self):
+        import audit
+        import agentboard as ab
+        ab.claim("prison", task="doors", author="doors/implementer",
+                 paths=["pkg/"])
+        ab.claim("prison", task="locks", author="locks/implementer",
+                 paths=["pkg/a.py"])
+        f = [x for x in audit.board_health_findings("prison")
+             if "overlapping files" in x["what"]]
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("doors/implementer", f[0]["what"])
+        self.assertIn("locks/implementer", f[0]["what"])
+        self.assertIn("pkg/", f[0]["detail"])
+
+    def test_the_conflict_warning_survives_the_author_order(self):
+        """The warning must not depend on which author sorts first: the old
+        pairing dropped the pair entirely when the earlier name claimed
+        second, so the audit went silent on a real collision."""
+        import audit
+        import agentboard as ab
+        ab.claim("prison", task="locks", author="locks/implementer",
+                 paths=["pkg/"])
+        ab.claim("prison", task="doors", author="doors/implementer",
+                 paths=["pkg/a.py"])
+        f = [x for x in audit.board_health_findings("prison")
+             if "overlapping files" in x["what"]]
+        self.assertEqual(len(f), 1, "exactly one pair, not two")
+        self.assertIn("doors/implementer", f[0]["what"])
+        self.assertIn("locks/implementer", f[0]["what"])
+
+    def test_a_released_conflict_stops_warning(self):
+        """After release the audit must go quiet: warning about a lease
+        nobody holds is exactly the false alarm that makes a report
+        unreadable."""
+        import audit
+        import agentboard as ab
+        ab.claim("prison", task="doors", author="doors/implementer",
+                 paths=["pkg/"])
+        ab.claim("prison", task="locks", author="locks/implementer",
+                 paths=["pkg/a.py"])
+        self.assertTrue([x for x in audit.board_health_findings("prison")
+                         if "overlapping files" in x["what"]])
+        ab.release("prison", "locks", "locks/implementer")
+        self.assertEqual([x for x in audit.board_health_findings("prison")
+                          if "overlapping files" in x["what"]], [])
+
+    def test_an_agent_that_read_a_mention_and_never_replied_is_reported(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="captain", channel="project",
+                body="@all stand up")
+        ab.mark_read("prison", "doors/implementer", "inbox", time.time() + 1)
+        f = [x for x in audit.board_health_findings("prison")
+             if "never replied" in x["what"]]
+        self.assertEqual(f[0]["severity"], "warning")
+        self.assertIn("doors/implementer", f[0]["what"])
+        self.assertIn("delivered to its prompt", f[0]["detail"])
+        self.assertTrue(f[0]["action"])
+
+    def test_the_section_renders_under_the_board_area(self):
+        import audit
+        import agentboard as ab
+        ab.post("prison", author="locks/implementer", kind="question",
+                body="is @doors ready?", author_task="locks",
+                ts=time.time() - 6 * 3600)
+        report = {"ts": time.time(), "since_s": 86400.0,
+                  "counts": {"critical": 0, "warning": 1, "info": 0},
+                  "findings": audit.board_health_findings("prison")}
+        text = audit.render(report)
+        self.assertIn("[WARNING]", text)
+        self.assertIn("board: prison:", text)
+        self.assertIn("-> answer with kind=answer", text)
+
+    def test_an_unreadable_board_is_info_not_a_crash(self):
+        import audit
+        import agentboard
+        orig = agentboard.board_health
+        agentboard.board_health = lambda *a, **k: (_ for _ in ()).throw(
+            OSError("boom"))
+        try:
+            f = audit.board_health_findings("prison")
+        finally:
+            agentboard.board_health = orig
+        self.assertEqual([x["severity"] for x in f], ["info"])
+        self.assertIn("unreadable", f[0]["what"])
+
+    def test_run_includes_the_board_section(self):
+        import audit
+        orig = audit.board_health_findings
+        seen = {}
+
+        def spy(*, project=None, since_hours=24):
+            seen["since_hours"] = since_hours
+            return [{"severity": "info", "area": "board", "what": "spy",
+                     "detail": "", "action": ""}]
+        audit.board_health_findings = spy
+        try:
+            report = audit.run(None, since_s=12 * 3600.0, with_health=False)
+        finally:
+            audit.board_health_findings = orig
+        self.assertEqual(seen["since_hours"], 12.0)
+        self.assertIn("spy", [f["what"] for f in report["findings"]])
 
 
 class SeatUtilization(unittest.TestCase):

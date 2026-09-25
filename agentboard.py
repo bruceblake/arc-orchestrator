@@ -76,6 +76,16 @@ CREATE TABLE IF NOT EXISTS board_reads(
   last_ts REAL NOT NULL,
   PRIMARY KEY (project, reader, channel)
 );
+-- The prompt each agent was last given, so an ingest can refuse a body that
+-- is a bare copy of it (see _copies_prompt). One row per task+role.
+CREATE TABLE IF NOT EXISTS board_prompts(
+  project TEXT NOT NULL,
+  task TEXT NOT NULL,
+  role TEXT NOT NULL,
+  ts REAL NOT NULL,
+  text TEXT,
+  PRIMARY KEY (project, task, role)
+);
 """
 
 _lock = threading.RLock()
@@ -374,6 +384,17 @@ def _reads(project, reader):
     return {r["channel"]: r["last_ts"] for r in rows}
 
 
+def _readers(project):
+    """Every reader the store has a mark for — agents that were given a
+    prompt. Keys starting "ingest:" are dropped: those track file offsets
+    for a worktree, not an agent's inbox."""
+    with _lock:
+        rows = _db(project).execute(
+            "SELECT DISTINCT reader FROM board_reads WHERE project=? AND"
+            " reader NOT LIKE 'ingest:%'", (project,)).fetchall()
+    return [r["reader"] for r in rows]
+
+
 def _norm_path(p):
     p = str(p or "").strip().replace("\\", "/")
     while p.startswith("./"):
@@ -509,6 +530,16 @@ def expertise(project):
 
 
 @_safe(list)
+def projects():
+    """Every project the board has messages for, most recently active first."""
+    with _lock:
+        rows = _conn().execute(
+            "SELECT project, COUNT(*) AS n, MAX(ts) AS last_ts "
+            "FROM board_messages GROUP BY project ORDER BY last_ts DESC").fetchall()
+    return [dict(r) for r in rows]
+
+
+@_safe(list)
 def channels(project, reader=None):
     """[{channel, last_ts, count[, unread_for]}], most recent first."""
     with _lock:
@@ -640,7 +671,154 @@ def _ingest_key(worktree):
     return "ingest:" + str(Path(worktree).resolve())
 
 
-def _check_line(obj, task):
+def record_prompt(project, *, task, role, text):
+    """Remember the prompt an agent is about to be given.
+
+    The ingest uses it to refuse a board line that is a bare copy of the
+    prompt: echoing the prompt back onto the board tells the next agent
+    nothing the prompt did not already say. Never raises.
+    """
+    try:
+        with _lock:
+            conn = _db(project)
+            conn.execute(
+                "INSERT INTO board_prompts(project, task, role, ts, text)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(project, task, role)"
+                " DO UPDATE SET ts=excluded.ts, text=excluded.text",
+                (str(project or ""), str(task or ""), str(role or ""),
+                 time.time(), str(text or "")[:60000]))
+            conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        errors.capture(exc, task=task, node="agentboard.record_prompt")
+
+
+def _norm_text(s):
+    return " ".join(str(s or "").split()).lower()
+
+
+# Shorter than this a body can legitimately match prompt wording ("done",
+# "tests pass"), so it is never treated as an echo.
+COPY_MIN_CHARS = 120
+
+
+def _copies_prompt(project, task, role, body):
+    """True when the body is a bare copy of the prompt this agent was given.
+
+    Compared normalised (case and whitespace collapsed), because an agent
+    quoting its prompt back reproduces line breaks slightly differently. Only
+    a long verbatim span counts: a body that merely mentions prompt wording
+    is fine.
+    """
+    text = _norm_text(body)
+    if len(text) < COPY_MIN_CHARS:
+        return False
+    with _lock:
+        row = _db(project).execute(
+            "SELECT text FROM board_prompts WHERE project=? AND task=? AND role=?",
+            (str(project or ""), str(task or ""), str(role or ""))).fetchone()
+    prompt = _norm_text(row["text"]) if row else ""
+    return bool(prompt) and text in prompt
+
+
+# Addresses that are always legal: they name no task, they are roles.
+MENTION_FREE = ("all", "captain", "operator", "planner")
+
+
+@_safe(lambda: set(MENTION_FREE))
+def known_targets(project):
+    """Who a mention may name here: this project's tasks, models and the
+    project-wide roles.
+
+    Tasks come from the board itself (every agent that has posted) and from
+    the `code_tasks` rows, so a sibling that has not spoken yet is still
+    addressable; the models are the live roster, so `@<model>` resolves; and
+    `MENTION_FREE` carries the bare roles that really reach an agent
+    (`captain`, `operator`, `planner`, `all`). A name outside this set reaches
+    nobody — a mention to a typo'd task id is a question that is never
+    answered. It FAILS OPEN: a store that cannot be read must not turn every
+    mention into a rejection.
+    """
+    names = set(MENTION_FREE) | set(config.MODEL_ROLES)
+    # NOT the role names (`implementer`, `reviewer`, `pr_reviewer`). Those are
+    # SUFFIXES of an address, never an address: `_targets` matches an agent's
+    # full `task/role`, its task, its model, or `all`, so a bare
+    # `@implementer` is delivered to nobody. The only bare roles that DO reach
+    # an agent are MENTION_FREE's, which is why they are listed there rather
+    # than derived from MODEL_ROLES.
+    with _lock:
+        conn = _db(project)
+        rows = conn.execute(
+            "SELECT DISTINCT author_task FROM board_messages WHERE project=?"
+            " AND author_task IS NOT NULL AND author_task!=''",
+            (str(project or ""),)).fetchall()
+        names |= {r["author_task"] for r in rows}
+        names |= _project_task_ids(conn, project)
+    return names
+
+
+def _project_task_ids(conn, project):
+    """THIS project's task ids, read from the `code_tasks` table.
+
+    Filtered by the rule the dashboard already uses (`_board_task_rows`): the
+    row's worktree sits under `<WORKTREE_ROOT>/<project>/`, or its taskfile
+    stem is the project. Both exclusions matter, because a name in this set is
+    a promise that a mention to it is DELIVERED:
+
+    - a task id from ANOTHER project reaches nobody here;
+    - the `reviewer` column is a FAMILY token (`deepseek`, `glm`), not a model
+      name, and `_targets` never matches it — `@deepseek` would validate and
+      be delivered to nobody, exactly like `@implementer`.
+
+    Model names are already covered by `config.MODEL_ROLES`, so none are added
+    here. A store predating the code workload simply contributes nothing.
+    """
+    ids = set()
+    try:
+        rows = conn.execute("SELECT DISTINCT id, taskfile, worktree"
+                            " FROM code_tasks").fetchall()
+    except sqlite3.Error:
+        return ids
+    root = Path(config.WORKTREE_ROOT)
+    for r in rows:
+        if not r["id"]:
+            continue
+        wt = r["worktree"] or ""
+        if wt:
+            try:
+                rel = Path(wt).resolve().relative_to(root.resolve())
+            except (ValueError, OSError):
+                rel = None
+            if rel is not None and rel.parts and rel.parts[0] == project:
+                ids.add(r["id"])
+                continue
+        if Path(r["taskfile"] or "").stem == project:
+            ids.add(r["id"])
+    return ids
+
+
+def unknown_mentions(mentions, known):
+    """Mentions naming nothing real: not a known task, model or role.
+
+    A bare name is legal when it is in ``known``. A ``<task>/<role>`` mention
+    is legal only when its HEAD is known — a role name must never bless an
+    unknown head, or `@not-a-task/implementer` (a typo) passes the check and
+    is delivered to nobody, which is exactly what this rejects.
+    """
+    bad = []
+    for m in mentions:
+        name = str(m).strip().lstrip("@")
+        if not name:
+            continue
+        # The HEAD decides. For a bare name head == name; for `<task>/<role>`
+        # only the first half can make it real — `implementer` is a role, not
+        # an address, and must not bless `@not-a-task/implementer`.
+        if name.partition("/")[0] in known:
+            continue
+        bad.append(name)
+    return bad
+
+
+def _check_line(obj, task, project="", role="", known=None):
     """(fields, None) for a valid agent line, or (None, reason)."""
     if not isinstance(obj, dict):
         return None, "not a JSON object"
@@ -656,6 +834,17 @@ def _check_line(obj, task):
     mentions = obj.get("mentions") or []
     if not isinstance(mentions, list) or not all(isinstance(x, str) for x in mentions):
         return None, "mentions must be a list of strings"
+    if project and known is not None:
+        bad = unknown_mentions(mentions + parse_mentions(body),
+                               set(known) | {task})
+        if bad:
+            return None, ("mention(s) name nothing in this project: "
+                          + ", ".join("@" + b for b in bad)
+                          + " — address a real task id, a model, or @all/"
+                          "@captain/@operator")
+        if _copies_prompt(project, task, role, body):
+            return None, ("body is a bare copy of your prompt — post what YOU "
+                          "found or did, not what you were asked")
     reply_to = obj.get("reply_to")
     if reply_to is not None and not isinstance(reply_to, str):
         return None, "reply_to must be a string"
@@ -684,6 +873,7 @@ def ingest_file(project, worktree, *, task, role, model):
         if end <= offset:
             return 0
         author = f"{task}/{role}"
+        known = known_targets(project)
         pos = offset
         for raw in data[offset:end].split(b"\n")[:-1]:
             at, pos = pos, pos + len(raw) + 1
@@ -696,7 +886,7 @@ def ingest_file(project, worktree, *, task, role, model):
             except ValueError:
                 obj, reason = None, "not valid JSON"
             else:
-                fields, reason = _check_line(obj, task)
+                fields, reason = _check_line(obj, task, project, role, known)
             mid = str(obj.get("id")) if isinstance(obj, dict) and obj.get("id") else digest
             if reason:
                 post(project, author=author, channel=f"task:{task}", kind="error",
@@ -705,9 +895,9 @@ def ingest_file(project, worktree, *, task, role, model):
                      refs={"ingest": REL, "offset": at}, msg_id="bad-" + digest)
                 continue
             with _lock:
-                known = _db(project).execute(
+                dupe = _db(project).execute(
                     "SELECT 1 FROM board_messages WHERE id=?", (mid,)).fetchone()
-            if known:
+            if dupe:
                 continue
             post(project, author=author, author_model=model, author_role=role,
                  author_task=task, msg_id=mid, **fields)
@@ -716,3 +906,168 @@ def ingest_file(project, worktree, *, task, role, model):
     except Exception as exc:  # noqa: BLE001
         errors.capture(exc, task=task, model=model, node="agentboard.ingest_file")
     return n
+
+
+# ---- health --------------------------------------------------------------
+#
+# Whether agents USE the board well is a measurable question, and the answer
+# is what audit.board_health reports. These are pure readers over the tables
+# above; `audit.py` turns them into findings with actions.
+
+def _median(values):
+    vals = sorted(float(v) for v in values)
+    if not vals:
+        return None
+    mid = len(vals) // 2
+    return vals[mid] if len(vals) % 2 else (vals[mid - 1] + vals[mid]) / 2.0
+
+
+def _questions_and_answers(msgs):
+    """(answered_ids, unanswered_messages, median_seconds) for a message list.
+
+    A question is CLOSED only by an answer from SOMEONE ELSE — replying to it
+    by id, or landing in its channel afterwards. The latency is the first such
+    answer minus the question's timestamp.
+
+    Deliberately NOT trusting the row's `state`: `_insert` sets
+    `state='answered'` for every `answer` carrying a `reply_to`, including an
+    answer the ASKER posted to its own question ("never mind, found it").
+    That is not an answer from anyone, so counting it closed the question,
+    dropped it out of `unanswered`, and left `median_answer_s` None — the
+    question looked handled while nobody had replied.
+    """
+    answered, latencies, unanswered = [], [], []
+    for m in msgs:
+        if m["kind"] != "question":
+            continue
+        later = [a for a in msgs
+                 if a["kind"] == "answer" and a["ts"] >= m["ts"]
+                 and a["author"] != m["author"]
+                 and (a["reply_to"] == m["id"] or a["channel"] == m["channel"])]
+        if later:
+            answered.append(m["id"])
+            latencies.append(max(0.0, min(a["ts"] for a in later) - m["ts"]))
+        else:
+            unanswered.append(m)
+    return answered, unanswered, _median(latencies)
+
+
+@_safe(dict)
+def board_health(project, since_hours=24):
+    """How well the project's agents are using the board.
+
+    Answers, per ``since_hours`` window: posts by agent and by kind; the share
+    of tasks that posted a claim and posted a result; the median time to
+    answer a question; the questions nobody answered; claim conflicts; and the
+    agents that never read their inbox (a mention was delivered to a prompt,
+    yet no answer or acknowledgement followed).
+    """
+    since = time.time() - max(0.0, float(since_hours)) * 3600.0
+    msgs = _select(project, "ts>?", (since,))
+    # Two different questions about the same table: what was CLAIMED in the
+    # window (the share) and what is still HELD (the conflicts). A released
+    # lease belongs in the first and never in the second.
+    claims_all = _select_claims(project, since)
+    live_claims = _select_claims(project, since, live_only=True)
+    answered, unanswered, median_s = _questions_and_answers(msgs)
+
+    by_agent = Counter(m["author"] for m in msgs if m["kind"] != "error")
+    by_kind = Counter(m["kind"] for m in msgs)
+    tasks = set()
+    claimed, resulted = set(), set()
+    for m in msgs:
+        t = m["author_task"] or split_agent(m["author"])[0]
+        if t:
+            tasks.add(t)
+            if m["kind"] == "claim":
+                claimed.add(t)
+            elif m["kind"] == "result":
+                resulted.add(t)
+    # The orchestrator's own claims (claim_files) count as the task claiming.
+    for c in claims_all:
+        if c["task"]:
+            tasks.add(c["task"])
+            claimed.add(c["task"])
+
+    # Claim conflicts: two LIVE claims whose paths overlap, the same relation
+    # claim() reports when the second one lands.
+    #
+    # Paired by IDENTITY, never by name order or timestamp: the old guard
+    # (`d["author"] <= c["author"] or d["ts"] < c["ts"]`) skipped every pair
+    # where the lexicographically earlier author happened to claim SECOND, so
+    # `locks` then `doors` on `pkg/` reported NOTHING — the collision the
+    # metric exists to find. Slicing past each claim emits every unordered
+    # pair exactly once, and an author never conflicts with itself (a task
+    # re-claiming after a fix round is not a conflict).
+    conflicts = []
+    for i, c in enumerate(live_claims):
+        for d in live_claims[i + 1:]:
+            if c["author"] == d["author"]:
+                continue
+            shared = sorted({p for p in c["paths"]
+                             for q in d["paths"] if paths_overlap(p, q)})
+            if not shared:
+                continue
+            # Report the older claim first, so the output is stable.
+            first, second = (c, d) if c["ts"] <= d["ts"] else (d, c)
+            conflicts.append({"a": first["author"], "b": second["author"],
+                              "paths": shared})
+
+    # A mention was DELIVERED (the pipeline marks the inbox read when it hands
+    # a digest to a prompt) and got no answer or acknowledgement back. Readers
+    # count as agents too: the whole point is an agent that was handed a
+    # mention and never said anything.
+    deaf = []
+    agents = {m["author"] for m in msgs if m["kind"] != "error"}
+    agents |= set(_readers(project))
+    for agent in sorted(a for a in agents if a and a != "operator" and "/" in a):
+        reads = _reads(project, agent)
+        delivered = [m for m in msgs
+                     if m["ts"] <= reads.get("inbox", 0)
+                     and _addressed(m, agent) and m["author"] != agent]
+        if not delivered:
+            continue
+        answered_at = max((m["ts"] for m in msgs if m["kind"] in ("answer", "note",
+                                                                 "result", "status",
+                                                                 "decision")
+                           and m["author"] == agent), default=0.0)
+        latest = max(m["ts"] for m in delivered)
+        if answered_at < latest:
+            deaf.append({"agent": agent, "pending": len(
+                [m for m in delivered if m["ts"] > answered_at]),
+                "since_s": round(max(0.0, time.time() - latest))})
+    total = len(tasks) or 0
+    return {
+        "project": project, "since_hours": float(since_hours),
+        "posts": len(msgs), "by_agent": dict(by_agent.most_common()),
+        "by_kind": dict(by_kind.most_common()),
+        "tasks": total, "claimed": len(claimed), "resulted": len(resulted),
+        "claim_share": (len(claimed) / total) if total else 0.0,
+        "result_share": (len(resulted) / total) if total else 0.0,
+        "answered": len(answered), "median_answer_s": median_s,
+        "unanswered": [{"id": m["id"], "author": m["author"],
+                        "channel": m["channel"], "body": (m["body"] or "")[:200],
+                        "age_s": round(max(0.0, time.time() - m["ts"]))}
+                       for m in unanswered],
+        "claim_conflicts": conflicts, "deaf": deaf,
+        "errors": by_kind.get("error", 0),
+    }
+
+
+def _select_claims(project, since, *, live_only=False):
+    """Claims taken in the window, oldest first.
+
+    ``live_only`` applies `claims()`'s own live filter — released_at IS NULL
+    AND expires_at>now. The CONFLICT computation needs it: a released or
+    expired lease is not a conflict any more, and reporting one names a lease
+    nobody holds. The claim/result SHARE does not: a task that claimed and
+    then released still posted a claim, which is what that metric counts.
+    """
+    sql = "SELECT * FROM board_claims WHERE project=? AND ts>?"
+    args = [str(project or ""), float(since)]
+    if live_only:
+        sql += " AND released_at IS NULL AND expires_at>?"
+        args.append(time.time())
+    with _lock:
+        rows = _db(project).execute(sql + " ORDER BY ts", args).fetchall()
+    return [_claim_row(r) for r in rows]
