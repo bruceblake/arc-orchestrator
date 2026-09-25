@@ -13,6 +13,7 @@ orphan the next run trips over:
 Worktrees whose branch still has commits main does not are NEVER removed: that
 is reviewed work the conflict-repair path in code_tasks.publish can still land.
 """
+import json
 import os
 from pathlib import Path
 
@@ -104,21 +105,43 @@ async def _worktree_state(repo, task_id, wt):
     return "ahead" if await gitstore.branch_ahead(repo, task_id) else "merged"
 
 
+def _taskfile_exists(path):
+    """Check if taskfile exists either directly or under TASKS_DIR."""
+    if not path:
+        return False
+    p = Path(path)
+    try:
+        if p.exists():
+            return True
+        if not p.is_absolute() and (Path(config.TASKS_DIR) / p).exists():
+            return True
+    except OSError:
+        return False
+    return False
+
+
 async def reconcile(store, *, repos=None, apply=True, force=False):
     """Return a report dict; mutates only when `apply`.
 
-    Refuses to touch anything while a `code run` process is alive unless
-    `force`, because its rows and worktrees are legitimately in use.
+    While a `code run` process is alive, destructive git operations (worktree
+    deletion and branch cleanup) are skipped, but safe bookkeeping is performed
+    for taskfiles that are not the live run's taskfile: dead-pid driver leases
+    are reaped, running rows whose taskfile does not exist on disk are reset to
+    interrupted, and in_review/conflict rows whose PR is already merged on GitHub
+    are settled without deleting worktrees. Pass `force=True` to run the full
+    sweep including worktree cleanup even when live runs are detected.
     """
     report = {"live_runs": live_run_pids(), "rows": [], "rows_kept": [],
               "merged_settled": [], "leases": 0, "worktrees": [], "kept": [],
               "skipped": False}
-    if report["live_runs"] and not force:
+    is_live = bool(report["live_runs"] and not force)
+    if is_live:
         report["skipped"] = True
-        return report
 
     if apply:
-        report["leases"] = store.reap_driver_leases(config.DRIVER_LEASE_TTL)
+        report["leases"] = store.reap_driver_leases(
+            float("inf") if is_live else config.DRIVER_LEASE_TTL
+        )
     else:
         now_dead = 0
         for r in store.driver_lease_rows():
@@ -135,16 +158,32 @@ async def reconcile(store, *, repos=None, apply=True, force=False):
     def _tf_key(path):
         return str(Path(path).resolve()) if path else ""
 
-    live_tf = {_tf_key(r["taskfile"]) for r in live_runs() if r.get("taskfile")}
+    live_tf = set()
+    for r in live_runs():
+        tf = r.get("taskfile")
+        if tf:
+            live_tf.add(_tf_key(tf))
+            live_tf.add(str(tf))
+
     running = store.running_code_tasks()
-    orphaned = [r for r in running if _tf_key(r["taskfile"]) not in live_tf]
-    report["rows"] = [{"id": r["id"], "taskfile": Path(r["taskfile"]).name,
+    orphaned = []
+    kept = []
+    for r in running:
+        tf = r.get("taskfile")
+        if _tf_key(tf) in live_tf or (tf and str(tf) in live_tf):
+            kept.append(r)
+        elif is_live and _taskfile_exists(tf):
+            kept.append(r)
+        else:
+            orphaned.append(r)
+
+    report["rows"] = [{"id": r["id"], "taskfile": Path(r["taskfile"]).name if r.get("taskfile") else "",
                        "model": r["model"], "worktree": r.get("worktree"),
-                       "_taskfile": r["taskfile"]}
+                       "_taskfile": r.get("taskfile")}
                       for r in orphaned]
     report["rows_kept"] = [
-        {"id": r["id"], "taskfile": Path(r["taskfile"]).name}
-        for r in running if r not in orphaned]
+        {"id": r["id"], "taskfile": Path(r["taskfile"]).name if r.get("taskfile") else ""}
+        for r in kept]
     if apply:
         # Group by the RAW taskfile string the row stores — a resolved
         # absolute path would not match the WHERE clause.
@@ -153,29 +192,43 @@ async def reconcile(store, *, repos=None, apply=True, force=False):
     for r in report["rows"]:
         r.pop("_taskfile", None)
 
-    # Settle in_review rows whose PR is already MERGED on GitHub: the run
+    # Settle in_review and conflict rows whose PR is already MERGED on GitHub: the run
     # that would have written 'merged' died first, and a resume alone would
     # need a live model just to do bookkeeping. Best-effort — no gh / no
     # remote means leave the row for the normal resume path.
     report["merged_settled"] = []
-    for row in store.code_tasks_with_status("in_review"):
-        if _tf_key(row["taskfile"]) in live_tf:
-            continue  # a live run owns this row's taskfile
-        wt = row.get("worktree")
-        repo = _find_repo(Path(wt).parent.name) if wt else None
-        if repo is None:
-            continue
-        number, url, pr_st = await gitstore.find_pr(repo, row["id"],
-                                                    state="all")
-        if pr_st != "MERGED":
-            continue
-        if apply:
-            store.upsert_code_task(row["taskfile"], row["id"], row["title"],
-                                   row["model"], row["reviewer"], "merged",
-                                   finished=True)
-            await gitstore.cleanup(repo, row["id"])
-        report["merged_settled"].append(
-            {"id": row["id"], "pr": number, "url": url})
+    for status in ("in_review", "conflict"):
+        for row in store.code_tasks_with_status(status):
+            tf = row.get("taskfile")
+            if _tf_key(tf) in live_tf or (tf and str(tf) in live_tf):
+                continue  # a live run owns this row's taskfile
+            wt = row.get("worktree")
+            repo = _find_repo(Path(wt).parent.name) if wt else None
+            if repo is None and tf and _taskfile_exists(tf):
+                try:
+                    data = json.loads(Path(tf).read_text(encoding="utf-8"))
+                    repo_path = (data.get("project") or {}).get("repo")
+                    if repo_path:
+                        repo = _find_repo(Path(repo_path).name)
+                except Exception:
+                    pass
+            if repo is None:
+                continue
+            number, url, pr_st = await gitstore.find_pr(repo, row["id"],
+                                                        state="all")
+            if (pr_st or "").upper() != "MERGED":
+                continue
+            if apply:
+                store.upsert_code_task(row["taskfile"], row["id"], row["title"],
+                                       row["model"], row["reviewer"], "merged",
+                                       finished=True)
+                if not is_live:
+                    await gitstore.cleanup(repo, row["id"])
+            report["merged_settled"].append(
+                {"id": row["id"], "pr": number, "url": url})
+
+    if is_live:
+        return report
 
     # Worktree sweep: every directory under <root>/<repo-name>/<task-id>.
     root = Path(config.WORKTREE_ROOT)
@@ -222,27 +275,29 @@ def format_report(rep):
         out.append(f"SKIPPED — {len(rep['live_runs'])} code-run process(es) still "
                    f"alive: {rep['live_runs']}")
         out.append("stop them first, or pass --force if you know they are wedged.")
-        return "\n".join(out)
     out.append(f"driver leases reaped : {rep['leases']}")
     out.append(f"stale 'running' rows : {len(rep['rows'])}")
     for r in rep["rows"]:
         out.append(f"    {r['id']:<28} {r['taskfile']:<38} {r['model']}")
     if rep.get("rows_kept"):
-        out.append(f"'running' left alone : {len(rep['rows_kept'])} — "
-                   "their taskfile still has a live run")
+        reason = ("their taskfile still has a live run or exists on disk"
+                  if rep["skipped"] else
+                  "their taskfile still has a live run")
+        out.append(f"'running' left alone : {len(rep['rows_kept'])} — {reason}")
         for r in rep["rows_kept"]:
             out.append(f"    {r['id']:<28} {r['taskfile']}")
     if rep.get("merged_settled"):
-        out.append(f"in_review settled    : {len(rep['merged_settled'])} — "
+        out.append(f"in_review/conflict settled : {len(rep['merged_settled'])} — "
                    "PR already merged on GitHub")
         for m in rep["merged_settled"]:
             out.append(f"    {m['id']:<28} PR #{m['pr']}")
-    out.append(f"worktrees removed    : {len(rep['worktrees'])}")
-    for w in rep["worktrees"]:
-        out.append(f"    {w['repo']}/{w['task']}  (branch {w['branch']})")
-    if rep["kept"]:
-        out.append(f"worktrees KEPT       : {len(rep['kept'])} — unmerged work, "
-                   f"resume the taskfile to land it")
-        for w in rep["kept"]:
-            out.append(f"    {w['repo']}/{w['task']}  ({w['reason']})")
+    if not rep["skipped"]:
+        out.append(f"worktrees removed    : {len(rep['worktrees'])}")
+        for w in rep["worktrees"]:
+            out.append(f"    {w['repo']}/{w['task']}  (branch {w['branch']})")
+        if rep["kept"]:
+            out.append(f"worktrees KEPT       : {len(rep['kept'])} — unmerged work, "
+                       f"resume the taskfile to land it")
+            for w in rep["kept"]:
+                out.append(f"    {w['repo']}/{w['task']}  ({w['reason']})")
     return "\n".join(out)
