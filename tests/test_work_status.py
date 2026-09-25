@@ -201,6 +201,24 @@ class WorkStatusTests(unittest.TestCase):
         self.assertEqual(chained[0]["activity"], "waiting")
         self.assertIn("upstream project", chained[0]["reason"])
 
+    def test_fresh_implement_node_without_driver_event_is_working(self):
+        # node_start clears driver_event. Before the fix, a missing timestamp
+        # became seconds-since-epoch and this node was stalled immediately.
+        tasks = self.status(
+            self.project(run_pid=self.pid),
+            self.event("node_start", node="implement_alpha", age=1))
+        self.assertEqual(tasks[0]["stage"], "implement")
+        self.assertEqual(tasks[0]["activity"], "working")
+        self.assertNotEqual(tasks[0]["reason"], "no recent agent heartbeat")
+
+    def test_old_driver_event_without_agent_is_still_stalled(self):
+        tasks = self.status(
+            self.project(run_pid=self.pid),
+            self.event("node_start", node="implement_alpha", age=500),
+            self.event("driver.start", task="alpha-x1", age=500))
+        self.assertEqual(tasks[0]["activity"], "stalled")
+        self.assertEqual(tasks[0]["reason"], "no recent agent heartbeat")
+
     def test_pending_task_is_not_called_capacity_queued_without_a_wait_event(self):
         tasks = self.status(self.project(status="pending", run_pid=self.pid))
         self.assertEqual(tasks[0]["activity"], "waiting")
