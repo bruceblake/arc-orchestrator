@@ -441,7 +441,7 @@ _SEAT_TYPES = ("driver.start", "driver.done", "driver.error", "driver.cap_wait",
                "driver.queued", "driver.stale", "driver.cancelled",
                "driver.cap_timeout", "driver.heartbeat", "driver.progress")
 _TERMINAL = ("driver.done", "driver.error", "driver.stale", "driver.cancelled",
-             "driver.cap_timeout")
+             "driver.cap_timeout", "driver.cap_swap")
 _LIVENESS = ("driver.heartbeat", "driver.progress")
 
 
@@ -728,6 +728,11 @@ def seat_utilization(since_hours=24, *, now=None, events=None, runs=None,
     return out
 
 
+def _tier_rank(model):
+    tier = config.MODEL_TIER.get(model)
+    return config.TIER_ORDER.index(tier) if tier in config.TIER_ORDER else -1
+
+
 def audit_seats(since_s=86400, store=None, **kw):
     """Warn when a seat sat idle for more than half the window while another was starved."""
     try:
@@ -742,12 +747,24 @@ def audit_seats(since_s=86400, store=None, **kw):
         others = [m for m in starved if m != s["model"]]
         if not others or s["idle_while_waiting_hours"] <= 0.5 * hours:
             continue
+        # Rule 1: an idle seat can only take work from a model at its own
+        # tier or BELOW. "Route more tiers to it" for a medium seat while the
+        # hard tier starved told the operator to break the routing rule.
+        rank = _tier_rank(s["model"])
+        takers = [m for m in others if _tier_rank(m) <= rank]
         if s["error_rate"] >= 0.5:
             action = "fix its errors"
         elif s["utilization"] >= 50:
             action = "raise its cap"
+        elif takers:
+            action = (f"route more of {', '.join(takers)}'s tier to it; the "
+                      f"capacity swap (ARC_CAP_SWAP_AFTER) moves queued attempts "
+                      f"there automatically")
         else:
-            action = "route more tiers to it"
+            action = (f"do NOT route {', '.join(others)}'s work here (Rule 1: "
+                      f"{s['model']} is a lower tier); plan more "
+                      f"{config.MODEL_TIER.get(s['model']) or 'lower'}-tier tasks, "
+                      f"or add capacity at the starved tier")
         out.append(_finding(
             "warning", "seats",
             f"{s['model']} idle {s['idle_while_waiting_hours']:.1f}h "

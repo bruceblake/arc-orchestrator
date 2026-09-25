@@ -650,6 +650,7 @@ Every route acts only on values the server listed: projects, builds, sessions, f
 | `ARC_AGY_BIN` | agy | pin the Antigravity CLI (`agy`) |
 | `ARC_AGY_MODEL` | `gemini-3.8-flash-high` | model slug passed to `agy --model` (Gemini 3.8 Flash) |
 | `ARC_USAGE_SWAP` | 1 | on a spent plan window, rerun an implementation or review on the next free harness (Cursor Grok 4.7, then Antigravity, then Claude, then Codex, then OpenCode Zen free models, then billed API models); a review never lands in the implementer's family; a planner is not swapped; `0` waits out the reset on the same model |
+| `ARC_CAP_SWAP_AFTER` | 600 | seconds an attempt may wait for a slot at a full concurrency cap before it moves to a seat with a FREE slot (`drivers.cap_substitute`): same tier or above (Rule 1), never into the avoided family (Rule 2), never the planner; `driver.cap_swap` event; `0` turns it off |
 | `ARC_ZEN_FREE` | 0 | admit every live OpenCode Zen free slug as its own roster family (`Zen-*`, `opencode/<slug>`); `0` drops them |
 | `ARC_ZEN_MODEL_CAP` | 2 | per-slug driver/account cap — each partner pool is independent, so run different slugs in parallel and wait for daily resets per model |
 | `ARC_DRIVER_LIMIT_<FAMILY>` | seat cap | per-seat driver cap: openai 4, cursor 3, google 3, anthropic 2 |

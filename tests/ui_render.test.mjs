@@ -56,7 +56,7 @@ const mod = new Function(externals + "\n" + js
   + "\nglobalThis.__setGH = v => { GH = v; };"
   + "\nglobalThis.__setSlots = v => { SLOTS = v; };"
   + "\nglobalThis.__setProjects = v => { PROJECTS = v; };"
-  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY, boardPaint, boardMarkRead, showTab,"
+  + "\nreturn {card, pipelineLane, progressLines, renderGithub, liveBadge, friendly, esc, renderSummary, gotoPanel, jpost, TOKEN_KEY, authClick, authRefresh, boardPaint, boardMarkRead, showTab,"
   + " tlGist, tlEntry, renderTimeline, openTaskTimeline, closeTimeline, tlWhen, pollTimeline,"
   + " openTranscript, __gen: () => timelineGen, __task: () => timelineTask};");
 const api = mod();
@@ -464,6 +464,64 @@ ok(clean(document.querySelector("#drv-events").innerHTML), "usage: driver-event 
   globalThis.prompt = () => { prompted++; return "x"; };
   const r3 = await api.jpost("/api/promote", {});
   ok(r3.code === 200 && prompted === 0, "jpost: no prompt when the server does not ask for a token");
+}
+
+// ---- stale token: re-asked once, never kept, never looped -------------------
+// After a restart the server's token can differ from the one this browser
+// saved (or the address changed, which is a different localStorage). A stored
+// token the server refuses must be reported as stale and re-asked ONCE.
+{
+  const store = new Map([[api.TOKEN_KEY, "old-token"]]);
+  globalThis.localStorage = { getItem: k => store.has(k) ? store.get(k) : null,
+                              setItem: (k, v) => store.set(k, v), removeItem: k => store.delete(k) };
+  const calls = [];
+  let answers = [401, 200];
+  globalThis.fetch = async (u, opts) => {
+    calls.push({u, headers: (opts || {}).headers || {}});
+    const status = answers.shift();
+    return { status, json: async () => ({status}) };
+  };
+  const asked = [];
+  globalThis.prompt = (msg) => { asked.push(msg); return "new-token"; };
+  const r = await api.jpost("/api/projects/run", {file: "p.json"});
+  ok(r.code === 200, "stale token: the retry with the new token succeeds");
+  ok(asked.length === 1 && /rejected/.test(asked[0]), "stale token: the prompt says the saved token was rejected");
+  ok(calls[0].headers["Authorization"] === "Bearer old-token", "stale token: the stored one was tried first");
+  ok(store.get(api.TOKEN_KEY) === "new-token", "stale token: replaced by the accepted one");
+
+  // the new answer is wrong too: one prompt, one retry, and it is not kept
+  answers = [401, 401]; calls.length = 0; asked.length = 0;
+  globalThis.prompt = () => "still-wrong";
+  const r2 = await api.jpost("/api/promote", {});
+  ok(r2.code === 401 && calls.length === 2, "stale token: no loop — one retry only");
+  ok(!store.has(api.TOKEN_KEY), "stale token: a token the server just refused is forgotten");
+
+  // dismissing the prompt drops the stale token so the lock reads 'locked'
+  store.set(api.TOKEN_KEY, "old"); answers = [401]; calls.length = 0;
+  globalThis.prompt = () => null;
+  await api.jpost("/api/promote", {});
+  ok(!store.has(api.TOKEN_KEY) && calls.length === 1, "stale token: dismissing forgets it, no retry");
+  const pill = document.querySelector("#auth-lock");
+  ok(/locked/.test(pill.textContent) && !/unlocked/.test(pill.textContent), "lock pill: shows locked after a refusal");
+
+  // the lock pill: /api/auth drives it; clicking sets or clears the token
+  globalThis.fetch = async (u, opts) => {
+    const h = (opts || {}).headers || {};
+    return { status: 200, json: async () => ({required: true, ok: h["Authorization"] === "Bearer good"}) };
+  };
+  globalThis.prompt = () => "good";
+  await api.authClick();
+  ok(store.get(api.TOKEN_KEY) === "good" && /unlocked/.test(pill.textContent), "lock pill: a click saves the token and shows unlocked");
+  globalThis.prompt = () => "";
+  await api.authClick();
+  ok(!store.has(api.TOKEN_KEY) && /actions: locked/.test(pill.textContent), "lock pill: an empty answer forgets the token");
+  globalThis.prompt = () => null;
+  store.set(api.TOKEN_KEY, "keep");
+  await api.authClick();
+  ok(store.get(api.TOKEN_KEY) === "keep", "lock pill: cancel changes nothing");
+  globalThis.fetch = async () => ({ status: 200, json: async () => ({required: false, ok: true}) });
+  await api.authRefresh();
+  ok(/no token/.test(pill.textContent), "lock pill: an open server says so");
 }
 
 // ---- Messages tab: mounts, escapes a mention, flags a claim overlap --------

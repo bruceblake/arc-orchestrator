@@ -750,7 +750,8 @@ class BoardHealth(BoardCase):
         self.assertEqual(h["by_kind"]["question"], 1)
 
     def test_the_claim_and_result_shares_count_tasks_not_posts(self):
-        self._post("doors/implementer", "claim", author_task="doors")
+        self._post("doors/implementer", "claim", author_task="doors",
+                   refs={"paths": ["pkg/a.py"]})
         self._post("doors/implementer", "result", author_task="doors")
         self._post("locks/implementer", "status", author_task="locks")
         self._post("hatch/implementer", "status", author_task="hatch")
@@ -760,6 +761,18 @@ class BoardHealth(BoardCase):
         self.assertEqual(h["resulted"], 1)
         self.assertAlmostEqual(h["claim_share"], 1 / 3)
         self.assertAlmostEqual(h["result_share"], 1 / 3)
+
+    def test_a_claim_on_no_paths_is_not_a_claim(self):
+        """The pre-attempt lease on an empty files_hint: every prison-escape
+        claim had paths=[] and the share still read 80%."""
+        agentboard.claim(P, task="doors", author="doors/implementer", paths=[])
+        self._post("locks/implementer", "claim", "claiming", author_task="locks")
+        h = agentboard.board_health(P)
+        self.assertEqual(h["tasks"], 2)
+        self.assertEqual(h["claimed"], 0)
+        agentboard.claim(P, task="doors", author="doors/implementer",
+                         paths=["scenes/door.tscn"])
+        self.assertEqual(agentboard.board_health(P)["claimed"], 1)
 
     def test_a_live_claim_without_a_post_still_counts_as_claimed(self):
         agentboard.claim(P, task="doors", author="doors/implementer",

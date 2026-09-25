@@ -153,8 +153,8 @@ PYEOF
     if [ -f tests/render_check.mjs ] && curl -sf -m 2 -o /dev/null "http://localhost:8787/api/health"; then
         d=$(mktemp -d)
         if curl -sf -m 5 "http://localhost:8787/api/health" > "$d/h.json" \
-           && curl -sf -m 5 "http://localhost:8787/api/projects" > "$d/p.json" \
-           && f=$(curl -sf -m 5 "http://localhost:8787/api/projects" | "$PY" -c "import json,sys;ps=json.load(sys.stdin)['projects'];print(ps[0]['file'] if ps else '')") \
+           && curl -sf -m 15 "http://localhost:8787/api/projects" > "$d/p.json" \
+           && f=$(curl -sf -m 15 "http://localhost:8787/api/projects" | "$PY" -c "import json,sys;ps=json.load(sys.stdin)['projects'];print(ps[0]['file'] if ps else '')") \
            && curl -sf -m 5 "http://localhost:8787/api/project?file=$f" > "$d/d.json"; then
             if ! node tests/render_check.mjs "$d/h.json" "$d/p.json" "$d/d.json" 2>&1 | tail -12; then
                 echo "FAIL: the dashboard JS throws on real data"; rc=1
@@ -201,6 +201,11 @@ PYEOF
     # findings filter and triage, and typed text surviving the 5 s poll.
     if ! node tests/studio_playtest_ui.test.mjs; then
         echo "FAIL: studio playtest view misbehaves"; rc=1
+    fi
+    # The Needs-you queue (desktop panel + phone view): evidence, play,
+    # approve / request changes.
+    if ! node tests/review_ui.test.mjs; then
+        echo "FAIL: human review queue UI misbehaves"; rc=1
     fi
     if ! node tests/projects_ui.test.mjs; then
         echo "FAIL: projects-list UI misbehaves"; rc=1

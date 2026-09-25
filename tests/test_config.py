@@ -706,6 +706,21 @@ class OpencodeServeBin(unittest.TestCase):
                     with mock.patch("config.Path.home", return_value=Path(tmp)):
                         self.assertEqual(config.opencode_serve_bin(), str(home_bin))
 
+    def test_official_installer_dir_when_not_on_path(self):
+        """opencode.ai/install puts the binary in ~/.opencode/bin — where it is
+        on the fleet machine. Checking only ~/.local/bin left every
+        watchdog-relaunched run failing "could not spawn 'opencode'"."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home_bin = Path(tmp) / ".opencode" / "bin" / "opencode"
+            home_bin.parent.mkdir(parents=True)
+            home_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.pop("ARC_OPENCODE_SERVE_BIN", None)
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch("shutil.which", return_value=None):
+                    with mock.patch("config.Path.home", return_value=Path(tmp)):
+                        self.assertEqual(config.opencode_serve_bin(), str(home_bin))
+
     def test_env_override_wins(self):
         with mock.patch.dict(os.environ, {"ARC_OPENCODE_SERVE_BIN": "/custom/opencode"}):
             self.assertEqual(config.opencode_serve_bin(), "/custom/opencode")

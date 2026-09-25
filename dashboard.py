@@ -29,7 +29,7 @@ from collections import OrderedDict
 from datetime import date as _date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import config
 import dashboard_services
@@ -40,6 +40,7 @@ from store import Store
 log = logging.getLogger("dashboard")
 
 _lines_cache = {"key": None, "lines": []}
+_lines_lock = threading.Lock()
 MAX_EVENTS_PER_RESPONSE = 3000
 
 # Live models first; the retired ones (Kimi-K3, gpt-oss-120b,
@@ -172,19 +173,108 @@ ACTIVITY_MAX_LIMIT = 500
 
 
 def _load_event_lines():
+    """Every line of the event log, cached and read INCREMENTALLY.
+
+    The log is ~50 MB and gains a line every few seconds (heartbeats, driver
+    progress), so a cache keyed on (size, mtime) alone missed on almost every
+    poll and re-read and re-split the whole file each time. With several
+    pollers (desktop, phone, captain) that is part of what took /api/projects
+    to ~10 s under load. Now an append reads only the new bytes; a rotation,
+    a truncation or a rewrite (different inode, a shorter file, or bytes just
+    before the old end that changed) falls back to one full read and bumps
+    ``_lines_cache["gen"]`` so incremental folds (`_EventFold`) start over.
+
+    Tests reset the cache with ``_lines_cache["key"] = None``; that forces a
+    full read too.
+    """
+    return _event_lines_state()[0]
+
+
+def _event_lines_state():
+    """(lines, n_complete, generation) for the event log.
+
+    ``lines[:n_complete]`` end in a newline and will never change within this
+    generation; a trailing half-written line (if any) is returned after them
+    but re-read next time, so a fold must stop at ``n_complete``."""
     path = Path(config.EVENTS_LOG)
     try:
         st = path.stat()
     except OSError:
-        return []
-    key = (st.st_size, st.st_mtime_ns)
-    if _lines_cache["key"] != key:
+        return [], 0, -1
+    key = (str(path), st.st_size, st.st_mtime_ns)
+    c = _lines_cache
+    snap = c.get("snap")
+    if c["key"] == key and snap is not None:
+        return snap
+    with _lines_lock:
+        snap = c.get("snap")
+        if c["key"] == key and snap is not None:
+            return snap
+        off = c.get("offset") or 0
+        tail = c.get("tail") or b""
+        appended = (c["key"] is not None and snap is not None
+                    and c["key"][0] == str(path) and c.get("ino") == st.st_ino
+                    and st.st_size >= off > 0)
         try:
-            _lines_cache["lines"] = path.read_text(encoding="utf-8", errors="replace").splitlines()
-            _lines_cache["key"] = key
+            with open(path, "rb") as fh:
+                if appended:
+                    fh.seek(off - len(tail))
+                    if fh.read(len(tail)) != tail:
+                        appended = False       # rewritten in place, not appended
+                if not appended:
+                    fh.seek(0)
+                data = fh.read()
         except OSError:
-            return []
-    return _lines_cache["lines"]
+            return [], 0, -1
+        start = off if appended else 0
+        # Only whole lines advance the offset. A half-written last line is
+        # still returned (a file without a final newline is complete as far
+        # as a reader can tell) but is re-read on the next call instead of
+        # being cached as if it were finished.
+        cut = data.rfind(b"\n") + 1
+        whole = data[:cut].decode("utf-8", errors="replace").splitlines()
+        partial = data[cut:].decode("utf-8", errors="replace").splitlines()
+        if appended:
+            done = snap[0][:snap[1]] + whole
+            gen = snap[2]
+        else:
+            done = whole
+            gen = c.get("gen", 0) + 1
+        lines = done + partial
+        snap = (lines, len(done), gen)
+        c.update(lines=lines, snap=snap, gen=gen, offset=start + cut,
+                 tail=((tail if appended else b"") + data[:cut])[-64:],
+                 ino=st.st_ino, key=key)
+        return snap
+
+
+class _EventFold:
+    """Fold the event log incrementally: each complete line is seen ONCE.
+
+    ``step(state, line)`` updates ``state`` (made by ``init()``) in place; it
+    sees raw lines, so it can skip uninteresting ones with a substring test
+    before paying for json.loads. ``get()`` returns the state after every
+    complete line so far (plus a trailing partial line applied to a COPY is
+    not attempted -- a half-written event is not an event yet). A rotation or
+    rewrite of the log starts the fold over.
+
+    Callers must not mutate the returned state; copy what they prune.
+    """
+
+    def __init__(self, init, step):
+        self._init, self._step = init, step
+        self._lock = threading.Lock()
+        self._gen, self._n, self._state = None, 0, None
+
+    def get(self):
+        lines, n, gen = _event_lines_state()
+        with self._lock:
+            if self._state is None or gen != self._gen or n < self._n:
+                self._state, self._n, self._gen = self._init(), 0, gen
+            for i in range(self._n, n):
+                self._step(self._state, lines[i])
+            self._n = n
+            return self._state
 
 
 def _ts(v):
@@ -553,67 +643,96 @@ def _opencode_token_backfill(store, done_tok_keys):
     return points
 
 
-def _collect_inflight(now, store=None):
-    """Unmatched start events across all three layers -> live agent rows."""
-    rows = []
-    starts = {}      # request_start req_id -> event (in-flight raw pool/stream requests)
-    driver_starts = {}  # (harness, model, role, task, attempt) -> event (in-flight task runs)
-    driver_progress = {}  # same key -> newest driver.progress heartbeat
-    driver_last = {}  # same key -> newest start/heartbeat/stalled/timeout event
-    for line in _load_event_lines():
-        try:
-            e = json.loads(line)
-        except Exception:
-            continue
-        etype = e.get("type")
-        if etype == "request_start":
-            rid = e.get("req_id")
-            if rid:
-                starts[rid] = e
-        elif etype in ("request", "request_end"):
-            starts.pop(e.get("req_id"), None)
-        elif etype == "driver.start":
-            key = (e.get("harness"), e.get("model"), e.get("role"),
-                   e.get("task"), e.get("attempt"))
-            driver_starts[key] = e
-            driver_last[key] = e
-        elif etype in ("driver.heartbeat", "driver.stalled", "driver.timeout"):
-            # Liveness/failure pings for an in-flight attempt — they settle
-            # nothing, but the newest one is what "last_event_s" reports.
-            driver_last[(e.get("harness"), e.get("model"), e.get("role"),
+def _inflight_init():
+    return {"starts": {},          # request_start req_id -> event (raw pool/stream requests)
+            "driver_starts": {},   # (harness, model, role, task, attempt) -> event (task runs)
+            "driver_progress": {},  # same key -> newest driver.progress heartbeat
+            "driver_last": {}}     # same key -> newest start/heartbeat/stalled/timeout event
+
+
+def _inflight_step(st, line):
+    """One event of the in-flight fold (see `_collect_inflight`)."""
+    if '"request' not in line and '"driver.' not in line:
+        return
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return
+    if not isinstance(e, dict):
+        return
+    starts, driver_starts = st["starts"], st["driver_starts"]
+    driver_progress, driver_last = st["driver_progress"], st["driver_last"]
+    etype = e.get("type")
+    if etype == "request_start":
+        rid = e.get("req_id")
+        if rid:
+            starts[rid] = e
+    elif etype in ("request", "request_end"):
+        starts.pop(e.get("req_id"), None)
+    elif etype == "driver.start":
+        key = (e.get("harness"), e.get("model"), e.get("role"),
+               e.get("task"), e.get("attempt"))
+        driver_starts[key] = e
+        driver_last[key] = e
+    elif etype in ("driver.heartbeat", "driver.stalled", "driver.timeout"):
+        # Liveness/failure pings for an in-flight attempt -- they settle
+        # nothing, but the newest one is what "last_event_s" reports.
+        driver_last[(e.get("harness"), e.get("model"), e.get("role"),
+                     e.get("task"), e.get("attempt"))] = e
+    elif etype == "driver.progress":
+        # Not a terminal event -- it settles nothing. It is proof the driver
+        # was alive at that moment, and carries the idle/CPU sample that
+        # says whether it is working or blocked.
+        driver_progress[(e.get("harness"), e.get("model"), e.get("role"),
                          e.get("task"), e.get("attempt"))] = e
-        elif etype == "driver.progress":
-            # Not a terminal event — it settles nothing. It is proof the driver
-            # was alive at that moment, and carries the idle/CPU sample that
-            # says whether it is working or blocked.
-            driver_progress[(e.get("harness"), e.get("model"), e.get("role"),
-                             e.get("task"), e.get("attempt"))] = e
-        elif etype in ("driver.done", "driver.error", "driver.stale",
-                       "driver.cancelled", "driver.cap_timeout"):
-            key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
-            if key in driver_starts:
-                del driver_starts[key]
-                driver_last.pop(key, None)
-            else:  # driver.error/stale may carry no role; settle by the other fields
-                for k in list(driver_starts):
-                    if k[:2] == key[:2] and k[3:] == key[3:]:
-                        del driver_starts[k]
-                        driver_last.pop(k, None)
-                        break
-        elif etype == "driver.usage_swap":
-            # A spent plan hands the attempt to another model. The substitute
-            # emits its own start/done; the original start gets no terminal
-            # event and its owning run is still alive, so without this it
-            # rendered as a live agent for a day (2026-09-24: 22 phantom
-            # GPT-6-Sol rows against one real codex lease).
+    elif etype in ("driver.done", "driver.error", "driver.stale",
+                   "driver.cancelled", "driver.cap_timeout"):
+        key = (e.get("harness"), e.get("model"), e.get("role"), e.get("task"), e.get("attempt"))
+        # A settled attempt's progress sample is history; dropping it keeps
+        # the fold's memory bounded by what is actually in flight.
+        driver_progress.pop(key, None)
+        if key in driver_starts:
+            del driver_starts[key]
+            driver_last.pop(key, None)
+        else:  # driver.error/stale may carry no role; settle by the other fields
             for k in list(driver_starts):
-                if (k[0], k[1], k[3]) == (e.get("harness"), e.get("model"), e.get("task")) \
-                        and (not e.get("role") or k[2] == e.get("role")):
+                if k[:2] == key[:2] and k[3:] == key[3:]:
                     del driver_starts[k]
                     driver_last.pop(k, None)
                     driver_progress.pop(k, None)
-        elif etype == "request.stale":
-            starts.pop(e.get("req_id"), None)
+                    break
+    elif etype == "driver.usage_swap":
+        # A spent plan hands the attempt to another model. The substitute
+        # emits its own start/done; the original start gets no terminal
+        # event and its owning run is still alive, so without this it
+        # rendered as a live agent for a day (2026-09-24: 22 phantom
+        # GPT-6-Sol rows against one real codex lease).
+        for k in list(driver_starts):
+            if (k[0], k[1], k[3]) == (e.get("harness"), e.get("model"), e.get("task")) \
+                    and (not e.get("role") or k[2] == e.get("role")):
+                del driver_starts[k]
+                driver_last.pop(k, None)
+                driver_progress.pop(k, None)
+    elif etype == "request.stale":
+        starts.pop(e.get("req_id"), None)
+
+
+# The in-flight fold is read by /api/agents, /api/projects, /api/summary and
+# more on every poll. Re-parsing all ~150k lines (70% heartbeats) each time
+# was the single largest cost of /api/projects; now each line is folded once.
+_INFLIGHT_FOLD = _EventFold(_inflight_init, _inflight_step)
+
+
+def _collect_inflight(now, store=None):
+    """Unmatched start events across all three layers -> live agent rows."""
+    rows = []
+    st = _INFLIGHT_FOLD.get()
+    with _INFLIGHT_FOLD._lock:
+        # Pruning below deletes from these; the fold's own state must survive.
+        starts = dict(st["starts"])
+        driver_starts = dict(st["driver_starts"])
+        driver_progress = dict(st["driver_progress"])
+        driver_last = dict(st["driver_last"])
     # Prune phantom in-flight rows: starts that can no longer be real because
     # their owner would have errored out long ago (killed runs never settle).
     # Emit one event per pruned key so the reconciliation survives restarts.
@@ -1543,7 +1662,7 @@ def _repo_problem(path, base="main"):
                 f"make one commit on {base}")
     try:
         r = subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", base],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=5, env=_child_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return f"could not inspect {path}: {exc}"
     if r.returncode != 0:
@@ -1600,65 +1719,53 @@ def _kimi_tokens_by_task():
     return out
 
 
-def _task_progress(ids):
-    """Per running task: what step it is on, and whether it is actually moving.
+def _progress_init():
+    return {"open_node": {}, "prog": {}, "prev_bytes": {}, "gate_fail": {}, "gate_log": {}}
 
-    "Is this progressing?" was unanswerable from the console. The events to
-    answer it already existed — node_start/node_end say which step, and
-    driver.progress carries bytes/idle_s every 60s — but nothing joined them,
-    so a task that had produced nothing for ten minutes looked exactly like
-    one mid-edit.
-    """
-    want = {i for i in (ids or []) if i}
-    if not want:
-        return {}
-    open_node, prog, prev_bytes = {}, {}, {}
-    for line in _load_event_lines():
-        if ('"node_' not in line and '"driver.progress"' not in line
-                and '"driver.start"' not in line):
-            continue
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
-        t = e.get("type")
-        if t in ("node_start", "node_end"):
-            node = e.get("node") or ""
-            step, _, tid = node.partition("_")
-            if tid in want:
-                if t == "node_start":
-                    open_node[tid] = step
-                elif open_node.get(tid) == step:
-                    open_node.pop(tid, None)
-        elif t in ("driver.progress", "driver.start"):
-            base, _x = _xkey(e.get("task"))
-            if base not in want:
-                continue
-            if t == "driver.start":
-                prog[base] = {"attempt": e.get("attempt"), "bytes": 0,
-                              "idle_s": 0, "elapsed_s": 0, "ts": _ts(e.get("ts"))}
-                prev_bytes[base] = 0
-                continue
-            before = prog.get(base, {}).get("bytes", 0)
-            prev_bytes[base] = before
-            prog[base] = {"attempt": e.get("attempt"), "bytes": e.get("bytes") or 0,
-                          "idle_s": e.get("idle_s"), "elapsed_s": e.get("elapsed_s"),
-                          "cpu_delta_s": e.get("cpu_delta_s"), "ts": _ts(e.get("ts"))}
-    # Why the last gate rejected the task. Without this a fix loop is
-    # indistinguishable from progress: the console says "writing code" while
-    # the same gate rejects the same work over and over.
-    gate_fail = {}
-    gate_log = {}
-    for line in _load_event_lines():
-        if '"task.gate"' not in line:
-            continue
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
+
+def _progress_step(st, line):
+    """One event of the per-task progress fold (see `_task_progress`)."""
+    gate = '"task.gate"' in line
+    if (not gate and '"node_' not in line and '"driver.progress"' not in line
+            and '"driver.start"' not in line):
+        return
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return
+    if not isinstance(e, dict):
+        return
+    t = e.get("type")
+    open_node, prog, prev_bytes = st["open_node"], st["prog"], st["prev_bytes"]
+    if t in ("node_start", "node_end"):
+        node = e.get("node") or ""
+        step, _, tid = node.partition("_")
+        if tid:
+            if t == "node_start":
+                open_node[tid] = step
+            elif open_node.get(tid) == step:
+                open_node.pop(tid, None)
+    elif t in ("driver.progress", "driver.start"):
+        base, _x = _xkey(e.get("task"))
+        if not base:
+            return
+        if t == "driver.start":
+            prog[base] = {"attempt": e.get("attempt"), "bytes": 0,
+                          "idle_s": 0, "elapsed_s": 0, "ts": _ts(e.get("ts"))}
+            prev_bytes[base] = 0
+            return
+        before = prog.get(base, {}).get("bytes", 0)
+        prev_bytes[base] = before
+        prog[base] = {"attempt": e.get("attempt"), "bytes": e.get("bytes") or 0,
+                      "idle_s": e.get("idle_s"), "elapsed_s": e.get("elapsed_s"),
+                      "cpu_delta_s": e.get("cpu_delta_s"), "ts": _ts(e.get("ts"))}
+    elif t == "task.gate":
+        # Why the last gate rejected the task. Without this a fix loop is
+        # indistinguishable from progress: the console says "writing code"
+        # while the same gate rejects the same work over and over.
         tid = e.get("module") or e.get("task")
-        if tid in want:
-            gate_fail[tid] = bool(e.get("passed"))
+        if tid:
+            st["gate_fail"][tid] = bool(e.get("passed"))
             # The event carries the gate's OWN log path
             # (`code_tasks.gate` emits `log=<path>`, absolute). Deriving the
             # name here instead is what let the writer move to
@@ -1667,7 +1774,32 @@ def _task_progress(ids):
             # to logs/gates, which is the form /api/gate-log serves.
             rel = _gate_log_rel(e.get("log"))
             if rel:
-                gate_log[tid] = rel
+                st["gate_log"][tid] = rel
+
+
+_PROGRESS_FOLD = _EventFold(_progress_init, _progress_step)
+
+
+def _task_progress(ids):
+    """Per running task: what step it is on, and whether it is actually moving.
+
+    "Is this progressing?" was unanswerable from the console. The events to
+    answer it already existed — node_start/node_end say which step, and
+    driver.progress carries bytes/idle_s every 60s — but nothing joined them,
+    so a task that had produced nothing for ten minutes looked exactly like
+    one mid-edit. The join is an incremental fold over the event log
+    (`_PROGRESS_FOLD`): each line is parsed once, not once per poll.
+    """
+    want = {i for i in (ids or []) if i}
+    if not want:
+        return {}
+    st = _PROGRESS_FOLD.get()
+    with _PROGRESS_FOLD._lock:
+        open_node = {k: v for k, v in st["open_node"].items() if k in want}
+        prog = {k: dict(st["prog"][k]) for k in want if k in st["prog"]}
+        prev_bytes = {k: st["prev_bytes"][k] for k in want if k in st["prev_bytes"]}
+        gate_fail = {k: st["gate_fail"][k] for k in want if k in st["gate_fail"]}
+        gate_log = {k: st["gate_log"][k] for k in want if k in st["gate_log"]}
 
     out = {}
     now = time.time()
@@ -1888,6 +2020,46 @@ def _chain_dag_nodes(chain, heads):
                       "merged": d["merged"], "n_tasks": d["n_tasks"], "live": status == "running"})
         edges.extend({"src": nid, "dst": h, "kind": "chain"} for h in heads)
     return nodes, edges
+
+
+# A page poll that the reader abandoned mid-response: the browser tab closed,
+# the phone slept (TimeoutError after the kernel gave up on the peer), or the
+# client reset the connection. None of them is a server defect; logging each
+# as "handler error" with a traceback buried real errors in the log.
+_CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, TimeoutError)
+
+# /api/projects: single-flight + a short TTL. The desktop page, the phone page
+# and the captain each poll it; every call walks the task files, the
+# harness_runs table and the event log (~0.7 s of CPU warm). Under the GIL N
+# concurrent pollers cost N x that each, which is how one request reached
+# ~10 s and check.sh's 5 s live sample timed out. Now one computation serves
+# every caller that arrives while it runs, and its result is reused for
+# PROJECTS_TTL_S seconds -- well under every page's poll interval.
+PROJECTS_TTL_S = float(os.getenv("ARC_DASHBOARD_PROJECTS_TTL", "2.0"))
+_projects_cache = {"at": 0.0, "store": None, "value": None}
+_projects_lock = threading.Lock()
+
+
+def _projects_cached(store, ttl=None):
+    ttl = PROJECTS_TTL_S if ttl is None else ttl
+    c = _projects_cache
+    now = time.monotonic()
+    if c["value"] is not None and c["store"] is store and now - c["at"] < ttl:
+        return c["value"]
+    with _projects_lock:
+        # Whoever waited on the lock gets the result the holder just made.
+        now = time.monotonic()
+        if c["value"] is not None and c["store"] is store and now - c["at"] < ttl:
+            return c["value"]
+        value = _projects(store)
+        c.update(at=time.monotonic(), store=store, value=value)
+        return value
+
+
+def _projects_invalidate():
+    """A POST that changed a project (run, stop, archive, retry) drops the
+    cached list so the page's next poll shows the change."""
+    _projects_cache["value"] = None
 
 
 def _projects(store):
@@ -2147,7 +2319,7 @@ def _git_block(repo, gh=None):
     def git(*args):
         try:
             r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                               text=True, timeout=5)
+                               text=True, timeout=5, env=_child_env())
             return r.stdout if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -2436,10 +2608,18 @@ def _playtest_launch(body):
     if project is None:
         return {"error": "unknown studio project"}, 404
     build = (body or {}).get("build")
-    if not isinstance(build, str) or build not in [b["id"] for b in playtest.builds(project)]:
+    rows = {b["id"]: b for b in playtest.builds(project)}
+    if not isinstance(build, str) or build not in rows:
         return {"error": "unknown build for this project"}, 404
+    # Optional: which scene to open. Byte-identical to one of THIS build's
+    # scenes (read from its git tree), or absent for the game's main scene.
+    scene = (body or {}).get("scene") or None
+    if scene is not None and (not isinstance(scene, str)
+                              or scene not in (rows[build].get("scenes") or [])):
+        return {"error": "unknown scene for this build"}, 404
     try:
-        return {"ok": True, "session": playtest.launch(project, build, wait=False)}, 200
+        return {"ok": True, "session": playtest.launch(project, build, wait=False,
+                                                        scene=scene)}, 200
     except playtest.Unavailable as exc:
         return {"error": str(exc)}, 409
     except KeyError:
@@ -2795,7 +2975,7 @@ def _github(store, repo=None):
         try:
             r = subprocess.run(["gh", "-R", "", *args] if False else ["gh", *args],
                                cwd=str(repo), capture_output=True, text=True,
-                               timeout=timeout)
+                               timeout=timeout, env=_child_env())
             return r.stdout if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -2803,7 +2983,7 @@ def _github(store, repo=None):
     def git(*args):
         try:
             r = subprocess.run(["git", "-C", str(repo), *args],
-                               capture_output=True, text=True, timeout=5)
+                               capture_output=True, text=True, timeout=5, env=_child_env())
             return r.stdout if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -2930,7 +3110,7 @@ def _task_deliverable(repo, task_id, want_patch=False):
     def git(*args, limit=200000):
         try:
             r = subprocess.run(["git", "-C", str(repo), *args],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, env=_child_env())
             return r.stdout[:limit] if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -3126,6 +3306,22 @@ def _prune_registry():
             del _launch_registry[key]
 
 
+def _child_env(**extra):
+    """The environment for every process the dashboard starts, except its own
+    re-exec (_reexec_env). _ensure_token exports ARC_DASHBOARD_TOKEN into
+    os.environ, and a run's harnesses inherit whatever its process has — one
+    `env` call from a model would put the token in a transcript this dashboard
+    serves unauthenticated."""
+    return config.child_env(None, **extra)
+
+
+def _reexec_env():
+    env = dict(os.environ)
+    if config.DASHBOARD_TOKEN:
+        env["ARC_DASHBOARD_TOKEN"] = config.DASHBOARD_TOKEN
+    return env
+
+
 def _spawn_logged(argv, log_name, env_extra=None):
     log_dir = Path(config.ROOT) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -3133,7 +3329,7 @@ def _spawn_logged(argv, log_name, env_extra=None):
     # Unbuffered: with stdout redirected to a file Python block-buffers it,
     # so a live run's log stayed EMPTY until the process exited and "view
     # log" on a running project showed nothing at all.
-    env = dict(os.environ, PYTHONUNBUFFERED="1", **(env_extra or {}))
+    env = _child_env(PYTHONUNBUFFERED="1", **(env_extra or {}))
     proc = subprocess.Popen(argv, cwd=str(config.ROOT), stdout=lf, stderr=subprocess.STDOUT,
                             start_new_session=True, close_fds=True, env=env)
     return proc, log_name
@@ -3471,7 +3667,7 @@ def _evidence_url(root, p):
         rel = Path(p).resolve().relative_to(root)
     except (ValueError, OSError):
         return None
-    return "/api/evidence-file?path=" + str(rel)
+    return "/api/evidence-file?path=" + quote(rel.as_posix())
 
 
 def _timeline_evidence(tid):
@@ -3515,6 +3711,12 @@ def _timeline_evidence(tid):
             if not isinstance(man, dict):
                 continue
             cands, shots, seen = [], [], set()
+            # The changed scenes' before|after|diff panels first: they are the
+            # change itself (Rule 7d); the main scene's cameras follow.
+            for sc in (man.get("scenes") or []):
+                if isinstance(sc, dict):
+                    cands += [c.get("side_by_side") for c in (sc.get("compare") or [])
+                              if isinstance(c, dict)]
             cands += list(man.get("shots") or [])
             cands += list(man.get("playtest_shots") or [])
             cands += [c.get("side_by_side") for c in (man.get("compare") or [])
@@ -3543,6 +3745,10 @@ def _timeline_evidence(tid):
                 "godot_errors": man.get("godot_errors") or [],
                 "no_visible_change": man.get("no_visible_change"),
                 "warnings": man.get("warnings") or [],
+                "scenes": [{k: sc.get(k) for k in
+                            ("path", "status", "why", "max_changed", "error")}
+                           for sc in (man.get("scenes") or [])
+                           if isinstance(sc, dict)],
             })
     return out
 
@@ -3793,7 +3999,7 @@ def _git_quick(path, *args):
     half-built repo must never slow down the whole scan."""
     try:
         r = subprocess.run(["git", "-C", str(path), *args],
-                           capture_output=True, text=True, timeout=2)
+                           capture_output=True, text=True, timeout=2, env=_child_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -3891,7 +4097,7 @@ def _create_repo(body):
                       "-c", "user.email=arc-orchestrator@localhost",
                       "commit", "-q", "-m", "init"]):
             r = subprocess.run(argv, cwd=path, capture_output=True, text=True,
-                               timeout=30)
+                               timeout=30, env=_child_env())
             if r.returncode != 0:
                 raise RuntimeError(f"{' '.join(argv[:2])} failed: {r.stderr.strip()}")
     except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
@@ -4342,7 +4548,7 @@ _SERVED_AT = time.time()
 def _git_out(*args):
     try:
         r = subprocess.run(["git", "-C", str(config.ROOT), *args],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=5, env=_child_env())
         return r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -4398,7 +4604,10 @@ def _graceful_reexec():
         args = [sys.executable, script] + sys.argv[1:]
     else:
         args = [sys.executable] + sys.argv
-    os.execv(sys.executable, args)
+    # The environment is passed explicitly: it carries ARC_DASHBOARD_TOKEN
+    # (even when it came from the env file) and the unit's
+    # ARC_DB_PATH/ARC_EVENTS_LOG, all of which the new image needs.
+    os.execve(sys.executable, args, _reexec_env())
 
 
 _reexec_fn = _graceful_reexec
@@ -5191,7 +5400,7 @@ class Handler(BaseHTTPRequestHandler):
                     store=Handler.store)})
             if u.path == "/api/projects":
                 q = parse_qs(u.query)
-                obj = {"projects": _projects(Handler.store)}
+                obj = {"projects": _projects_cached(Handler.store)}
                 page = dashboard_services.page_requested(
                     q, default_limit=50, max_limit=200)
                 if page:
@@ -5292,6 +5501,10 @@ class Handler(BaseHTTPRequestHandler):
                        if page else dict(raw))
                 obj["open_count"] = open_count
                 return self._json(obj, conditional=True)
+            if u.path == "/api/auth":
+                # The lock pill (common.js): does this server want a token,
+                # and does the one this browser sends match? Never echoes it.
+                return self._json(self._auth_state())
             if u.path == "/api/health":
                 return self._json(_health(Handler.store))
             if u.path == "/api/metrics":
@@ -5504,6 +5717,11 @@ class Handler(BaseHTTPRequestHandler):
                         "next_offset": (offset + limit) if more else None,
                     }
                 return self._json(body, conditional=True)
+            if u.path.startswith("/api/reviews"):
+                import review_routes         # human checkpoints: review_routes.py
+                if u.path in review_routes.GET_ROUTES:
+                    obj, code = review_routes.GET_ROUTES[u.path](parse_qs(u.query))
+                    return self._json(obj, code)
             if u.path == "/api/graph-shapes":
                 # The graph BETWEEN tasks: the pattern catalogue the planner
                 # chooses from, every taskfile classified by the shape its deps
@@ -5566,14 +5784,25 @@ class Handler(BaseHTTPRequestHandler):
                 if got is not None:
                     return self._json(got[0], got[1])
             return self._json({"error": "not found"}, 404)
-        except BrokenPipeError:
-            pass
+        except _CLIENT_GONE:
+            pass  # the browser left (tab closed, phone slept); nothing to answer
         except Exception as exc:
             log.exception("handler error")
             try:
                 self._json({"error": str(exc)}, 500)
             except Exception:
                 pass
+
+    def _token_ok(self):
+        token = config.DASHBOARD_TOKEN
+        auth = (self.headers.get("Authorization") or "").strip()
+        given = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
+        return bool(given) and hmac.compare_digest(given.encode(), token.encode())
+
+    def _auth_state(self):
+        if not config.DASHBOARD_TOKEN:
+            return {"required": False, "ok": True}
+        return {"required": True, "ok": self._token_ok()}
 
     def _refuse_post(self):
         """Why this POST must not be acted on, as (status, error) — or None.
@@ -5606,11 +5835,8 @@ class Handler(BaseHTTPRequestHandler):
             host = (self.headers.get("Host") or "").strip().lower()
             if not host or urlparse(origin).netloc.lower() != host:
                 return 403, "cross-origin request refused"
-        token = config.DASHBOARD_TOKEN
-        if token:
-            auth = (self.headers.get("Authorization") or "").strip()
-            given = auth[7:].strip() if auth[:7].lower() == "bearer " else ""
-            if not given or not hmac.compare_digest(given.encode(), token.encode()):
+        if config.DASHBOARD_TOKEN:
+            if not self._token_ok():
                 return 401, "this dashboard requires a token for actions (ARC_DASHBOARD_TOKEN)"
         return None
 
@@ -5630,11 +5856,16 @@ class Handler(BaseHTTPRequestHandler):
                 body = json.loads(self.rfile.read(length).decode("utf-8", errors="replace"))
             except ValueError as exc:
                 return self._json({"error": f"invalid JSON: {exc}"}, 400)
+            _projects_invalidate()
             if u.path == "/api/studio/approve":
                 obj, code = _studio_approve(body)
                 return self._json(obj, code)
             if u.path in _PLAYTEST_POSTS:
                 obj, code = _PLAYTEST_POSTS[u.path](body)
+                return self._json(obj, code)
+            import review_routes             # human checkpoints: review_routes.py
+            if u.path in review_routes.POST_ROUTES:
+                obj, code = review_routes.POST_ROUTES[u.path](body)
                 return self._json(obj, code)
             if u.path == "/api/projects/create":
                 obj, code = _create_project(body)
@@ -5696,8 +5927,8 @@ class Handler(BaseHTTPRequestHandler):
                 obj, code = _board_read(body)
                 return self._json(obj, code)
             return self._json({"error": "not found"}, 404)
-        except BrokenPipeError:
-            pass
+        except _CLIENT_GONE:
+            pass  # the browser left (tab closed, phone slept); nothing to answer
         except Exception as exc:
             log.exception("handler error")
             try:
@@ -5740,20 +5971,202 @@ def _lan_addresses():
     return addrs
 
 
+
+# Exit codes `main.py serve` uses so systemd (and start.sh) can tell failures
+# apart. 98 = EADDRINUSE; 78 = EX_CONFIG (sysexits.h).
+EXIT_PORT_IN_USE = 98
+EXIT_TOKEN_UNREADABLE = 78
+
+
+def _read_env_token(path):
+    """ARC_DASHBOARD_TOKEN from a systemd-style EnvironmentFile.
+
+    Returns (state, token): state is "absent" (no file), "ok", "empty" (file
+    has no non-empty ARC_DASHBOARD_TOKEN) or "unreadable". Only that one key
+    is read; the value is never logged."""
+    p = Path(path).expanduser()
+    if not p.exists():
+        return "absent", ""
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError:
+        return "unreadable", ""
+    token = ""
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if not line.startswith("ARC_DASHBOARD_TOKEN="):
+            continue
+        val = line.split("=", 1)[1].strip()
+        if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+            val = val[1:-1]
+        token = val
+    return ("ok", token) if token else ("empty", "")
+
+
+def _ensure_token():
+    """Make sure a copy of the dashboard serves with the unit's token.
+
+    Returns None when fine, else the reason to refuse to start. The token is
+    exported into os.environ so a graceful re-exec (/api/restart) inherits the
+    same value; children the dashboard spawns never do (_child_env)."""
+    if config.DASHBOARD_TOKEN:
+        os.environ["ARC_DASHBOARD_TOKEN"] = config.DASHBOARD_TOKEN
+        return None
+    path = config.DASHBOARD_ENV_FILE
+    state, token = _read_env_token(path)
+    if state == "ok":
+        config.DASHBOARD_TOKEN = token
+        os.environ["ARC_DASHBOARD_TOKEN"] = token
+        log.info("dashboard token loaded from %s", path)
+        return None
+    if state == "absent":
+        return None               # no token configured anywhere: open by choice
+    if config.DASHBOARD_ALLOW_OPEN:
+        log.warning("%s exists but gave no token (%s); serving with actions "
+                    "UNLOCKED because ARC_DASHBOARD_ALLOW_OPEN is set", path, state)
+        return None
+    return (f"{path} exists but its ARC_DASHBOARD_TOKEN is {state}; refusing to "
+            f"serve with actions unlocked. Fix the file, or set "
+            f"ARC_DASHBOARD_ALLOW_OPEN=1 to serve without a token on purpose.")
+
+
+def _is_wsl_nat(ip):
+    """WSL2's NAT address (172.16/12 inside WSL): a new one every boot."""
+    try:
+        if "microsoft" not in Path("/proc/version").read_text().lower():
+            return False
+        a, b = (int(x) for x in ip.split(".")[:2])
+    except (OSError, ValueError):
+        return False
+    return a == 172 and 16 <= b <= 31
+
+
+def _port_holder(port):
+    """(pid, argv, cwd) of the local process listening on `port`, or None.
+
+    Reads /proc/net/tcp{,6} for the LISTEN socket's inode and finds the fd
+    that owns it. Best effort: only processes of this user are visible."""
+    inodes = set()
+    for name in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            rows = Path(name).read_text().splitlines()[1:]
+        except OSError:
+            continue
+        for row in rows:
+            f = row.split()
+            if len(f) > 9 and f[3] == "0A" and int(f[1].rsplit(":", 1)[1], 16) == port:
+                inodes.add(f[9])
+    if not inodes:
+        return None
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            for fd in (d / "fd").iterdir():
+                try:
+                    link = os.readlink(fd)
+                except OSError:
+                    continue
+                if link.startswith("socket:[") and link[8:-1] in inodes:
+                    argv = (d / "cmdline").read_bytes().split(b"\0")
+                    argv = [a.decode(errors="replace") for a in argv if a]
+                    try:
+                        cwd = os.readlink(d / "cwd")
+                    except OSError:
+                        cwd = "?"
+                    return int(d.name), argv, cwd
+        except OSError:
+            continue
+    return None
+
+
+def _in_unit(pid, unit="arc-dashboard.service"):
+    try:
+        return unit in Path(f"/proc/{pid}/cgroup").read_text()
+    except OSError:
+        return False
+
+
+def _is_stray_dashboard(holder):
+    """A `main.py serve` of this user that is NOT the systemd unit's process."""
+    if not holder:
+        return False
+    pid, argv, _cwd = holder
+    joined = " ".join(argv)
+    if "main.py" not in joined or " serve" not in f" {joined}":
+        return False
+    try:
+        if os.stat(f"/proc/{pid}").st_uid != os.getuid():
+            return False
+    except OSError:
+        return False
+    return pid != os.getpid() and not _in_unit(pid)
+
+
+def _bind(bind, port):
+    """Bind the server, waiting out a brief overlap, taking over a stray copy.
+
+    * A restart can race its predecessor's socket for a moment, so a busy port
+      is retried for ARC_DASHBOARD_BIND_WAIT seconds (default 10).
+    * Under systemd with ARC_DASHBOARD_TAKEOVER=1 (the unit sets it), a
+      dashboard started OUTSIDE the unit -- start.sh's nohup copy, a shell --
+      is terminated: the unit is the one owner, and the stray serves without
+      the unit's environment (token, db paths). Anything else holding the
+      port is reported and the process exits EXIT_PORT_IN_USE."""
+    wait_s = config.DASHBOARD_BIND_WAIT
+    takeover = config.DASHBOARD_TAKEOVER and bool(os.getenv("INVOCATION_ID"))
+    deadline = time.monotonic() + wait_s
+    took_over = False
+    while True:
+        try:
+            return ThreadingHTTPServer((bind, port), Handler)
+        except OSError as exc:
+            if exc.errno != errno.EADDRINUSE:
+                raise
+        holder = _port_holder(port)
+        if takeover and not took_over and _is_stray_dashboard(holder):
+            pid, argv, cwd = holder
+            print(f"port {port} is held by a dashboard started outside systemd "
+                  f"(pid {pid}, cwd {cwd}); stopping it so the unit owns the port.",
+                  flush=True)
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+            took_over = True
+            deadline = max(deadline, time.monotonic() + 15)
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.5)
+    if holder:
+        pid, argv, cwd = holder
+        who = (f"pid {pid} ({' '.join(argv)[:160]}, cwd {cwd}"
+               f"{', the arc-dashboard.service unit' if _in_unit(pid) else ', NOT the systemd unit'})")
+    else:
+        who = "a process this user cannot see"
+    print(f"port {port} is already in use by {who}.", flush=True)
+    if bool(os.getenv("INVOCATION_ID")):
+        print("stop that process (or run ./stop.sh), and this unit will take the "
+              "port on its next restart.", flush=True)
+    else:
+        print(f"the dashboard is probably already running: open http://localhost:{port}, "
+              f"or ./restart.sh to restart it.", flush=True)
+    raise SystemExit(EXIT_PORT_IN_USE)
+
+
 def serve(port=None, db_path=None):
     global _httpd
     port = port or config.DASHBOARD_PORT
     db_path = db_path or config.DB_PATH
+    refused = _ensure_token()
+    if refused:
+        print(refused, flush=True)
+        raise SystemExit(EXIT_TOKEN_UNREADABLE)
     Handler.store = Store(db_path)
     bind = config.DASHBOARD_BIND
-    try:
-        httpd = ThreadingHTTPServer((bind, port), Handler)
-    except OSError as exc:
-        if exc.errno == errno.EADDRINUSE:
-            print(f"port {port} is already in use -- the dashboard is probably already running.")
-            print(f"just open http://localhost:{port} in a browser (or run ./stop.sh, then start it again).")
-            raise SystemExit(1)
-        raise
+    httpd = _bind(bind, port)
     _httpd = httpd
     log.info("dashboard on http://%s:%d (db=%s, events=%s)", bind, port, db_path, config.EVENTS_LOG)
     # The daily audit runs from here. WSL has no working cron and sleeps when
@@ -5784,7 +6197,10 @@ def serve(port=None, db_path=None):
     for ip in ([bind] if bind not in ("0.0.0.0", "", "::") else _lan_addresses()):
         if ip.startswith("127."):
             continue
-        print(f"  from your laptop/phone: http://{ip}:{port}  (small screens: http://{ip}:{port}/phone.html)", flush=True)
+        note = ("  [WSL-internal: changes every reboot, and a browser saves the "
+                "token per address -- prefer localhost or the LAN/tailscale one]"
+                if _is_wsl_nat(ip) else "")
+        print(f"  from your laptop/phone: http://{ip}:{port}  (small screens: http://{ip}:{port}/phone.html){note}", flush=True)
     if not config.DASHBOARD_TOKEN:
         print("  note: no ARC_DASHBOARD_TOKEN is set — anyone who can reach this address can "
               "start and stop fleet runs. See README: Who can reach the dashboard.", flush=True)

@@ -176,10 +176,18 @@ def opencode_serve_bin():
     found = shutil.which("opencode")
     if found:
         return found
-    local = Path.home() / ".local" / "bin" / "opencode"
-    if local.is_file():
-        return str(local)
+    # ~/.opencode/bin is where the official installer (opencode.ai/install)
+    # puts it -- the location on the fleet machine, and on no service PATH:
+    # the 2026-09-25 audit counted nine "could not spawn 'opencode'"
+    # StartupErrors from watchdog-relaunched runs with ~/.local/bin checked.
+    for rel in OPENCODE_INSTALL_DIRS:
+        local = Path.home() / rel / "opencode"
+        if local.is_file():
+            return str(local)
     return "opencode"
+
+
+OPENCODE_INSTALL_DIRS = (".opencode/bin", ".local/bin", ".local/opt/node/bin")
 
 
 # Codex sandbox policy for fleet runs. `workspace-write` lets the agent edit
@@ -195,6 +203,8 @@ if CODEX_SANDBOX not in ("read-only", "workspace-write", "danger-full-access"):
 
 def harness_bin(harness):
     """The executable a harness runs as, for doctor checks and argv[0]."""
+    if harness == "opencode":
+        return opencode_serve_bin()
     if harness == "dsh":
         return dsh_bin()
     if harness == "reasonix":
@@ -530,6 +540,35 @@ DASHBOARD_PORT = int(os.getenv("ARC_DASHBOARD_PORT", "8787"))
 # glanced at from a phone without a login step.
 DASHBOARD_BIND = os.getenv("ARC_DASHBOARD_BIND", "0.0.0.0")
 DASHBOARD_TOKEN = os.getenv("ARC_DASHBOARD_TOKEN", "")
+# Where the systemd unit keeps the token (EnvironmentFile=). `main.py serve`
+# reads it itself when ARC_DASHBOARD_TOKEN is not in its environment, so a
+# copy started by hand, by start.sh/restart.sh or by a re-exec serves with the
+# SAME token as the unit -- and one that cannot read it refuses to start
+# rather than silently serving with actions unlocked (2026-09-24/25: a copy
+# started outside systemd held the port token-less while the unit crash-looped
+# 2700+ times on "port already in use").
+DASHBOARD_ENV_FILE = os.getenv(
+    "ARC_DASHBOARD_ENV_FILE", str(Path.home() / ".config" / "arc-dashboard.env"))
+# 1 = serve with actions unlocked even though DASHBOARD_ENV_FILE exists but
+# yields no token (the default is to refuse to start).
+DASHBOARD_ALLOW_OPEN = os.getenv("ARC_DASHBOARD_ALLOW_OPEN", "").lower() in ("1", "true", "yes")
+# Secrets no child process needs. A harness that runs `env` writes its
+# environment into logs/harness/*.jsonl, which the dashboard serves to anyone,
+# so the dashboard's children, harnesses and gates are all spawned without it.
+CHILD_ENV_DROP = ("ARC_DASHBOARD_TOKEN",)
+
+
+def child_env(base=None, **extra):
+    """A copy of `base` (default os.environ) plus `extra`, minus CHILD_ENV_DROP."""
+    env = dict(os.environ if base is None else base, **extra)
+    for key in CHILD_ENV_DROP:
+        env.pop(key, None)
+    return env
+# Seconds a busy port is retried before `serve` names the holder and exits 98.
+DASHBOARD_BIND_WAIT = float(os.getenv("ARC_DASHBOARD_BIND_WAIT", "10"))
+# Set by the systemd unit: terminate a `main.py serve` started OUTSIDE the unit
+# that holds the port, instead of crash-looping on "address in use".
+DASHBOARD_TAKEOVER = os.getenv("ARC_DASHBOARD_TAKEOVER", "").lower() in ("1", "true", "yes")
 REVIEW_PASS_SCORE = float(os.getenv("ARC_REVIEW_PASS_SCORE", "6.5"))
 
 
@@ -686,6 +725,12 @@ USAGE_LIMIT_MARGIN = float(os.getenv("ARC_USAGE_LIMIT_MARGIN", "60"))
 # models. ARC_USAGE_SWAP=0 restores the old behaviour: wait out the window on
 # the same model.
 USAGE_SWAP = os.getenv("ARC_USAGE_SWAP", "1").lower() not in ("0", "false", "no", "")
+# Capacity swap (drivers.cap_substitute): an attempt still queued for a slot
+# after this many seconds moves to a seat with a FREE slot at the same tier or
+# above, never into the family it must stay out of (Rules 1 and 2 -- the same
+# rules as the usage swap). 0 turns it off. Measured 2026-09-25: GLM-5.3
+# logged 5254 cap-waits in 24 h while two hard-tier seats sat idle.
+CAP_SWAP_AFTER = float(os.getenv("ARC_CAP_SWAP_AFTER", "600"))
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot
 # stack. Rows this old are reaped (owner assumed dead; pid liveness is checked
@@ -1761,6 +1806,13 @@ EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
 # Below this share of changed pixels a camera counts as "nothing to see", and
 # a gameplay diff whose every camera is under it is flagged no_visible_change.
 EVIDENCE_MIN_CHANGE = float(os.getenv("ARC_EVIDENCE_MIN_CHANGE", "0.005"))
+# Every scene the diff adds or changes (and every scene that instances a
+# changed script/scene) is rendered on its own, auto-framed on its content,
+# before and after. Bounded so a wholesale scene rework cannot make one gate
+# run for an hour: beyond the cap, scenes are listed but not rendered.
+EVIDENCE_MAX_SCENES = int(os.getenv("ARC_EVIDENCE_MAX_SCENES", "6"))
+# Length of each changed scene's orbit video (seconds of game time).
+EVIDENCE_SCENE_SECONDS = float(os.getenv("ARC_EVIDENCE_SCENE_SECONDS", "6"))
 
 # Project-wide agent board (board.py). Per-task threads live in the worktree
 # at .arc/board.jsonl and are excluded from publish; this directory is the
@@ -1770,6 +1822,13 @@ BOARD_DIR = Path(os.getenv("ARC_BOARD_DIR") or ROOT / "logs" / "boards")
 # The agent coordination board (agentboard.py, docs/agent-board.md): the cap
 # on one message body. board.py's JSONL lines keep their 400-character cap.
 BOARD_BODY_MAX = int(os.getenv("ARC_BOARD_BODY_MAX", "4000"))
+
+# How often (seconds) the pipeline harvests a RUNNING agent's
+# .arc/board.jsonl, so a line it writes reaches other agents' next prompts
+# while it is still working instead of when its (often hour-long) run ends.
+# It is also where `main.py board post` queues a post when a harness sandbox
+# (Codex workspace-write) makes the board DB read-only. 0 = only after runs.
+BOARD_LIVE_INGEST_S = float(os.getenv("ARC_BOARD_LIVE_INGEST_S", "60"))
 
 # The spend ceiling, in USD, for one studio run. The local fleet never needed
 # one: ARC is campus-served and effectively free, so the only cost of a task
@@ -1842,7 +1901,25 @@ BLENDER_BIN = os.getenv("ARC_BLENDER_BIN", "")
 # RENDER here at all — `godot --headless` has no renderer and cannot produce
 # the screenshots the judge scores. Point this at an Xvfb display instead for
 # a deterministic software-rendered run.
-STUDIO_DISPLAY = os.getenv("ARC_STUDIO_DISPLAY", "") or os.getenv("DISPLAY", "")
+#
+# Last resort: the local X server's :0 socket. The dashboard runs under
+# systemd (deploy/arc-dashboard.service), and systemd starts it with NO
+# DISPLAY, so the playtest "Play" button said "display none" and launched
+# nothing even though WSLg's :0 was right there. ARC_STUDIO_DISPLAY=none
+# turns the fallback off (a machine with a socket but no screen to show).
+X0_SOCKET = "/tmp/.X11-unix/X0"
+
+
+def _studio_display():
+    v = os.getenv("ARC_STUDIO_DISPLAY", "")
+    if v:
+        return "" if v.lower() == "none" else v
+    if os.getenv("DISPLAY", ""):
+        return os.getenv("DISPLAY", "")
+    return ":0" if os.path.exists(X0_SOCKET) else ""
+
+
+STUDIO_DISPLAY = _studio_display()
 
 # OpenRouter is where every external model is served. The key is NOT an ARC_*
 # var because it is the provider's own credential, shared with the operator's

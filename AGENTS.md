@@ -551,8 +551,25 @@ PR** in the life of the repo.
 - Reviewers are told that a code change **must** ship tests that would fail
   without it (`config.REQUIRE_TESTS`), and to check for regressions in what
   calls the changed code. Documentation-only changes are exempt.
+- **Human checkpoints (manual review).** A task whose taskfile sets
+  `human_review` (per task, else `project.human_review`, else the fleet-wide
+  `ARC_PR_MANUAL_REVIEW`; the loader rejects a non-boolean) does not merge
+  on the fleet's approval alone: `pr_review` calls
+  `code_tasks._await_manual_review`, which records a hold in the
+  `manual_reviews` table (`manual_review.py`) and waits, spending no model
+  time, for a human. The human decides in the dashboard's **Needs you**
+  queue (desktop tab and the phone page's Review view, `review_routes.py`:
+  `GET /api/reviews`, `POST /api/reviews/decide` behind `_refuse_post`),
+  which shows the task's evidence (Rule 7d), the fleet verdicts and a
+  **Play this build** button; or with the `manual-approved` /
+  `manual-rejected` labels on GitHub. A rejection's comment becomes the
+  implementer's feedback exactly like a reviewer's issue. A decision made
+  while the run is down is kept and applied on resume; `ARC_PR_MANUAL_TIMEOUT`
+  ends as a rejection, never a merge. Events: `task.pr_awaiting_manual`,
+  `task.pr_manual` (`via` = dashboard | github label), `review.human_decision`.
 - Only `pr_merge` merges, via `gh pr merge --squash --delete-branch`, and only
-  after a unanimous `pr_review`. It then fast-forwards the local integration
+  after a unanimous `pr_review` (and, when the task wants one, a human
+  approval). It then fast-forwards the local integration
   branch to what GitHub merged and cleans up the worktree.
 
 **Every task is a GitHub issue** (`gh_issues.py`). At run start the
@@ -848,16 +865,48 @@ the gate node runs `evidence.capture` right after `verify_cmd` passes:
   `gitstore.diff_full` rule; siblings' merges are not this task's change),
   with the share of pixels changed. Near-solid frames are flagged as blank
   renders.
+- **Every scene the diff changes, rendered on its own**
+  (`evidence.capture_scenes`): each `.tscn` the diff adds or modifies, plus
+  each scene that references (`ext_resource path=`) a changed
+  `.gd`/`.tscn`/`.tres` — tests/ and tools/ excluded, capped at
+  `ARC_EVIDENCE_MAX_SCENES` (default 6, the rest listed). Each is loaded
+  alone, its visible geometry's world AABB probed, and cameras auto-framed
+  around it (`frame_cameras`: overview/top/front/side, every corner in
+  frame), rendered after AND at the merge base with the SAME cameras, diffed,
+  plus an orbit video (`ARC_EVIDENCE_SCENE_SECONDS`, default 6). The fixed cameras only ever see the main scene: PR #19
+  of prison-escape-test added a lab scene and every comparison read 0.0%.
+  A scene that will not load alone is a warning, not a gate failure.
+- **The playtest is recorded watchable**: `tools/playtest.gd` runs through a
+  wrapper that extends it and adds inspection light, an overhead chase camera
+  on the player and a cutaway of geometry above its head (visibility only —
+  the playtest itself is unchanged); the bare script is the fallback.
 
 That evidence goes to every place a decision is made:
 
 - the **pre-merge reviewer** and **every PR reviewer** get the images attached
-  (drivers' `images`) and an evidence block in the prompt that makes a visible
-  regression a blocking issue, exactly like a failing test;
-- the **pull request** gets a comment with the comparisons, screenshots and
-  videos inline — pushed to the game repo's orphan `arc-evidence` branch
-  (`ARC_EVIDENCE_BRANCH`) so a private repo renders them for its viewers;
+  (drivers' `images` — the changed scenes' most-changed before|after|diff
+  panels FIRST, then the contact sheet) and an evidence block in the prompt
+  that makes a visible regression AND a change that is not visible in the
+  evidence blocking issues, unless the task is marked `"visual": false`. A
+  review resumed past its gate reads the newest capture on disk
+  (`evidence.latest_manifest`). Only harnesses that attach images (claude,
+  codex, cursor, agy, gemini) actually see them; opencode and reasonix get
+  the paths and the per-scene % changed as text;
+- the **pull request** gets a comment that LEADS with the changed scenes (a
+  table with % changed per scene, then each scene's most-changed panel, its
+  orbit GIF + mp4 link), then the contact sheet, playtest/flythrough GIFs
+  (mp4 linked — mp4 never plays inline) and the main scene's cameras. Files
+  are pushed to the game repo's orphan `arc-evidence` branch
+  (`ARC_EVIDENCE_BRANCH`) and linked as `github.com/<repo>/blob/<branch>/<path>?raw=true`:
+  GitHub does not camo-proxy those, so a viewer's own session loads them in a
+  private repo (anonymous requests 404; `raw.githubusercontent.com` without
+  a token does too);
 - the **agent board** gets a `kind: "evidence"` post (`board.py`);
+- the **human** gets it in the dashboard's **Needs you** queue next to
+  Approve / Request changes (Rule 5, manual review), with a **Play this
+  build** button: `studio/playtest.py` snapshots `task/<id>` (or `main`, or
+  a remote-only `origin/task/*` branch) and opens it on the PC's display,
+  with a scene picker allowlisted to that build's own `.tscn` files;
 - the files stay under `logs/evidence/<project>/<task>/x<attempt>/`.
 
 Rules the code holds to:
@@ -872,7 +921,14 @@ Rules the code holds to:
 - **A machine that cannot capture never fails a task** — no display, Godot or
   ffmpeg is `evidence.unavailable`, an infrastructure gap, not the
   implementer's bug. Rendering needs a display: WSLg provides `:0`; elsewhere
-  run Xvfb and set `ARC_STUDIO_DISPLAY`.
+  run Xvfb and set `ARC_STUDIO_DISPLAY`. With no `DISPLAY` at all (the
+  dashboard runs under systemd) `config.STUDIO_DISPLAY` falls back to `:0`
+  when `/tmp/.X11-unix/X0` exists; `ARC_STUDIO_DISPLAY=none` turns that off.
+- **An unlit scene is said out loud.** The capture harness adds a neutral
+  inspection light to a scene that has none — so the evidence looked fine
+  while a player saw a black screen. It now records `scene_unlit` and a
+  warning in the manifest, so reviewers and the human are told the game
+  itself is unlit; the human playtest overlay lights it the same way (#139).
 - A publish or comment failure never fails publish (`evidence.publish_failed`
   with a fingerprint): the reviewers already had the images.
 - Events: `evidence.captured`, `evidence.failed`, `evidence.unavailable`,
@@ -1158,6 +1214,8 @@ Top-level Python modules (one role each):
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
 | `agentboard.py` | The agent coordination board (Rule 4c): typed messages on channels with @mentions, leased path claims with overlap detection, per-reader digests (`digest_for`), expertise derived from results, and harvest of agents' `.arc/board.jsonl` lines (`ingest_file`); CLI `main.py board post|read|claims`. Prose: [docs/agent-board.md](docs/agent-board.md) |
 | `board.py` | Shared agent board: `.arc/board.jsonl` in the task worktree plus `logs/boards/<project>.jsonl`. A session id resumes only on the harness that posted it |
+| `manual_review.py` | Human checkpoints (Rule 5): the `manual_reviews` table of PRs waiting for a human decision, `wanted` (taskfile `human_review` over `ARC_PR_MANUAL_REVIEW`), `request` / `decide` / `settle` |
+| `review_routes.py` | Dashboard routes for the Needs-you queue: `GET /api/reviews` (holds + evidence URLs + play target), `POST /api/reviews/decide` |
 | `plan_amend.py` | The living-plan channel (Rule 4b): prompt schema, `.arc/plan_proposals.jsonl` harvest (read + delete before `git add -A`), loader-validated amendment of the taskfile with per-entry rollback, `plan_proposals` recording |
 | `project_contract.py` | The target repo's agent contract (Rule 10): discovers `AGENTS.md`, `CLAUDE.md`, and `.cursor/rules` inside the product repo, and supplies the planner, implementer, reviewer, captain, and chat prompts. This file stays fleet-only |
 | `pool.py` | `AsyncOpenAI` request pool for the research workload: per-family semaphores, retry/backoff, token accounting |
@@ -1172,7 +1230,7 @@ Everything else at the top level:
 | `static/index.html` | Dashboard web UI (desktop) |
 | `static/usage.html` | Dashboard usage/tokens view |
 | `static/phone.html` | Small-screen dashboard page (add `/phone.html` to the URL) |
-| `start.sh` / `stop.sh` | Start/stop the dashboard (`nohup .venv/bin/python main.py serve` → `logs/server.log`; `pkill -f "main\.py serve"` — never touches an orchestrator process) |
+| `start.sh` / `stop.sh` / `restart.sh` | Start/stop/restart the dashboard. With the `arc-dashboard.service` user unit installed they drive the unit (`systemctl --user …`, `deploy/dashboard-unit.sh`) and stop any `main.py serve` started outside it — the unit carries the token; otherwise `nohup .venv/bin/python main.py serve` → `logs/server.log`. Never touch an orchestrator process ([docs/runbook.md](docs/runbook.md) § 1) |
 | `docs/` | Detail reference docs — see [Links](#links); includes `graph-patterns.md`, the prose behind `graph_shapes.PATTERNS` (the planner is handed the catalogue from code, not the doc) |
 | `deploy/` | systemd units: `arc-orchestrator.service`, `arc-dashboard.service` |
 | `tools/visual/` | Dashboard screenshot tooling (Rule 7e): `fixture.py`, `serve.py`, `capture.py`, `compare.py`, `run.sh` (golden regression, run by `check.sh`); goldens in `tests/visual/golden/` |

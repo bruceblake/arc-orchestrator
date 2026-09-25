@@ -141,7 +141,7 @@ a { color: var(--accent); text-decoration: none; }
 }
 .fsel:hover { border-color: var(--accent); }
 button.act {
-  background: #21262d; color: var(--text); border: 1px solid var(--border);
+  background: var(--panel); color: var(--text); border: 1px solid var(--border);
   border-radius: 6px; padding: 3px 10px; cursor: pointer; font: inherit;
   font-size: 12px; min-width: 44px; min-height: 44px;
 }
@@ -176,6 +176,12 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 @keyframes micpulse { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.15); } }
 .mic-live { animation: micpulse 1s ease-in-out infinite; background: var(--accent); color: #0d1117; }
 
+/* Needs you (review view) */
+.rvimg { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 6px; }
+.rvwarn { color: var(--warn); font-size: 11px; }
+.rvtext { width: 100%; box-sizing: border-box; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px; font: inherit; }
+button.act.rvok { border-color: var(--ok); color: var(--ok); font-weight: 700; } button.act.rvno { border-color: var(--err); color: var(--err); }
+
 /* Keyboard users must be able to see focus. */
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
@@ -189,12 +195,18 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 <main>
 
 <section id="view-now" class="view on" aria-label="Now">
-  <h1>Now <span id="pulse" class="pulse">…</span> <span id="stale" class="stale">stale data</span></h1>
+  <h1>Now <span id="pulse" class="pulse">…</span> <span id="stale" class="stale">stale data</span> <button type="button" class="pill" id="auth-lock" aria-label="dashboard token: lock state" onclick="authClick()">actions: …</button></h1>
   <p class="sub" id="nowsub">loading…</p>
   <div class="figs" id="figs"></div>
   <div class="alert" id="alert" role="status"></div>
   <h2 class="sec">Agents</h2>
   <div class="stack" id="agents"></div>
+</section>
+
+<section id="view-review" class="view" aria-label="Needs you">
+  <h1>Needs you</h1>
+  <p class="sub" id="reviewsub">pull requests waiting for your decision</p>
+  <div class="stack" id="reviews"></div>
 </section>
 
 <section id="view-projects" class="view" aria-label="Projects">
@@ -239,6 +251,7 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 
 <nav class="bnav" aria-label="Primary">
   <button type="button" id="nav-now" class="tap on"><span class="ic" aria-hidden="true">◉</span>Now<span class="nbadge" id="badge-now"></span></button>
+  <button type="button" id="nav-review" class="tap"><span class="ic" aria-hidden="true">✋</span>Review<span class="nbadge" id="badge-review"></span></button>
   <button type="button" id="nav-projects" class="tap"><span class="ic" aria-hidden="true">▦</span>Projects<span class="nbadge" id="badge-projects"></span></button>
   <button type="button" id="nav-prs" class="tap"><span class="ic" aria-hidden="true">⇄</span>PRs<span class="nbadge" id="badge-prs"></span></button>
   <button type="button" id="nav-fleet" class="tap"><span class="ic" aria-hidden="true">☰</span>Fleet<span class="nbadge" id="badge-fleet"></span></button>
@@ -270,10 +283,10 @@ var S = {
   queue: null,
   summary: null,
   stale: false,
-  open: { now: "", projects: "", prs: "", fleet: "" }
+  open: { now: "", review: "", projects: "", prs: "", fleet: "" }
 };
 
-var VIEWIDS = ["now", "projects", "prs", "fleet", "plan"];
+var VIEWIDS = ["now", "review", "projects", "prs", "fleet", "plan"];
 
 function $(s) {
   return document.getElementById(s.startsWith("#") ? s.slice(1) : s);
@@ -723,8 +736,86 @@ function renderMeta() {
   badge("#badge-fleet", waiting);
 }
 
+// ---- Needs you: approve / request changes on a held PR (review_routes.py) ----
+var rvDraft = {};
+function rvKeyOf(r) { return r.task + "|" + r.pr + "|" + r.round; }
+function rvImg(u, alt) {
+  return u ? '<a href="' + attr(u) + '" target="_blank" rel="noopener"><img class="rvimg" loading="lazy" src="' + attr(u) + '" alt="' + attr(alt) + '"></a>' : "";
+}
+function reviewCard(r) {
+  var k = rvKeyOf(r), open = S.open.review === k, ev = r.evidence || {};
+  var verdicts = (r.reviewers || []).map(function (v) {
+    return '<div class="kv"><span class="k">' + esc(v.model || "?") + '</span><span class="v">' +
+      (v.crashed ? "crashed" : v.approve ? "approved" : "changes: " + esc((v.issues || []).join("; "))) + '</span></div>';
+  }).join("");
+  var imgs = (ev.compare || []).map(function (c) { return rvImg(c.url, "before | after: " + c.name); }).join("");
+  var vids = Object.keys(ev.videos || {}).map(function (n) { return rvImg(ev.videos[n].gif, n + " video"); }).join("");
+  if (!imgs && ev.contact_sheet) imgs = rvImg(ev.contact_sheet, "screenshots");
+  var warn = (ev.warnings || []).map(function (w) { return '<div class="rvwarn">' + esc(w) + '</div>'; }).join("");
+  var play = r.play && r.play.available
+    ? '<button type="button" class="act tap" data-rv-play="' + attr(k) + '">▶ Play on the PC</button>' : "";
+  var link = /^https:\/\/github\.com\//.test(r.url || "") ? '<a href="' + attr(r.url) + '" target="_blank" rel="noopener">PR #' + esc(r.pr) + '</a>' : "PR #" + esc(r.pr);
+  return '<div class="card' + (open ? " open" : "") + '">' +
+    '<button type="button" class="card-head tap" data-key="' + attr(k) + '"><span class="cmain">' +
+    '<span class="c-title">' + esc(r.title || r.task) + '</span>' +
+    '<span class="c-sub">' + esc(r.task) + " · round " + esc(r.round) + (r.live ? "" : " · run not live") + '</span></span><span class="chev">›</span></button>' +
+    '<div class="card-body">' + link + verdicts +
+    '<textarea class="rvtext" data-rv-comment="' + attr(k) + '" rows="3" aria-label="comment for the implementer" placeholder="What must change?">' + esc(rvDraft[k] || "") + '</textarea>' +
+    '<div class="kv"><button type="button" class="act tap rvok" data-rv-decide="approve" data-rv-key="' + attr(k) + '">✓ Approve</button>' +
+    '<button type="button" class="act tap rvno" data-rv-decide="reject" data-rv-key="' + attr(k) + '">✗ Request changes</button></div>' +
+    play + warn + imgs + vids +
+    '</div></div>';
+}
+function renderReview() {
+  var list = (S.reviews && S.reviews.waiting) || [];
+  badge("#badge-review", list.length);
+  var box = $("#reviews");
+  if (!box) return;
+  var a = document.activeElement;
+  if (a && a.getAttribute && a.getAttribute("data-rv-comment")) return;
+  box.innerHTML = list.length ? list.map(reviewCard).join("") : '<div class="empty">nothing is waiting for you</div>';
+  wire("#reviews", "review");
+  var tas = document.querySelectorAll("#reviews [data-rv-comment]");
+  for (var i = 0; i < tas.length; i++) {
+    tas[i].oninput = function () { rvDraft[this.getAttribute("data-rv-comment")] = this.value; };
+  }
+  var bs = document.querySelectorAll("#reviews [data-rv-decide]");
+  for (var j2 = 0; j2 < bs.length; j2++) {
+    bs[j2].onclick = function () { rvDecide(this.getAttribute("data-rv-key"), this.getAttribute("data-rv-decide")); };
+  }
+  var ps = document.querySelectorAll("#reviews [data-rv-play]");
+  for (var p2 = 0; p2 < ps.length; p2++) {
+    ps[p2].onclick = function () { rvPlay(this.getAttribute("data-rv-play")); };
+  }
+}
+function rvFind(k) {
+  var list = (S.reviews && S.reviews.waiting) || [];
+  for (var i = 0; i < list.length; i++) if (rvKeyOf(list[i]) === k) return list[i];
+  return null;
+}
+function rvDecide(k, decision) {
+  var r = rvFind(k);
+  if (!r) return;
+  var comment = String(rvDraft[k] || "").trim();
+  if (decision === "reject" && !comment) { alert("Say what must change: the comment is what the implementer gets."); return; }
+  if (decision === "approve" && !confirm("Approve " + r.task + " and let the fleet merge it?")) return;
+  jpost("/api/reviews/decide", {task: r.task, pr: r.pr, round: r.round, decision: decision, comment: comment}).then(function (res) {
+    if (res.code !== 200) { alert("decision failed: " + ((res.body && res.body.error) || res.code)); return; }
+    delete rvDraft[k];
+    poll();
+  }).catch(function () { alert("decision failed"); });
+}
+function rvPlay(k) {
+  var r = rvFind(k);
+  if (!r || !r.play) return;
+  jpost("/api/studio/playtest/launch", {project: r.play.project, build: r.play.build}).then(function (res) {
+    alert(res.code === 200 ? "Starting " + r.play.build + " on the PC's display." : "launch failed: " + ((res.body && res.body.error) || res.code));
+  }).catch(function () { alert("launch failed"); });
+}
+
 function renderAll() {
   renderNow();
+  renderReview();
   renderProjects();
   renderPRs();
   renderFleet();
@@ -768,26 +859,8 @@ async function j(url) {
   return res.json();
 }
 
-function authHeaders() {
-  var t = null;
-  try { t = localStorage.getItem("arc.dashboard.token"); } catch (e) {}
-  return t ? {"Authorization": "Bearer " + t} : {};
-}
-
-async function jpost(u, body) {
-  var send = function () {
-    return fetch(u, {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, authHeaders()), body: JSON.stringify(body)});
-  };
-  var r = await send();
-  if (r.status === 401 && typeof prompt === "function") {
-    var t = prompt("Dashboard token (ARC_DASHBOARD_TOKEN):");
-    if (t && String(t).trim()) {
-      try { localStorage.setItem("arc.dashboard.token", String(t).trim()); } catch (e) {}
-      r = await send();
-    }
-  }
-  return {code: r.status, body: await r.json()};
-}
+// authHeaders / jpost / the token lock live in common.js, shared with the
+// desktop page: one prompt, one stale-token rule, one #auth-lock pill.
 
 async function poll() {
   var res = await Promise.all([
@@ -795,9 +868,11 @@ async function poll() {
     j("/api/agents").catch(function () { return null; }),
     j("/api/projects").catch(function () { return null; }),
     j("/api/github").catch(function () { return null; }),
-    j("/api/queue").catch(function () { return null; })
+    j("/api/queue").catch(function () { return null; }),
+    j("/api/reviews").catch(function () { return null; })
   ]);
   var bad = false;
+  if (res[5]) S.reviews = res[5];
   if (res[0]) S.summary = res[0];
   if (res[1]) { S.agents = res[1]; } else { bad = true; }
   if (res[2]) { S.projects = res[2].projects || []; } else { bad = true; }
@@ -833,6 +908,7 @@ document.addEventListener("visibilitychange", function () {
 
 function init() {
   $("#nav-now").onclick = function () { showView("now"); };
+  $("#nav-review").onclick = function () { showView("review"); };
   $("#nav-projects").onclick = function () { showView("projects"); };
   $("#nav-prs").onclick = function () { showView("prs"); };
   $("#nav-fleet").onclick = function () { showView("fleet"); };

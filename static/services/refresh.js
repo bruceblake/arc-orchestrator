@@ -75,6 +75,7 @@ function bootPolls() {
   run(typeof pollEvents === "function" ? pollEvents : null, 8000, 1200);
   run(typeof pollGithub === "function" ? pollGithub : null, 20000, 800);
   run(typeof pollTopos === "function" ? pollTopos : null, 30000, 2000);
+  run(typeof pollReviews === "function" ? pollReviews : null, 8000, 600);
   if (typeof startClock === "function") startClock();
 }
 
