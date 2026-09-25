@@ -1662,7 +1662,7 @@ def _repo_problem(path, base="main"):
                 f"make one commit on {base}")
     try:
         r = subprocess.run(["git", "-C", str(path), "rev-parse", "--verify", base],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=5, env=_child_env())
     except (OSError, subprocess.SubprocessError) as exc:
         return f"could not inspect {path}: {exc}"
     if r.returncode != 0:
@@ -2319,7 +2319,7 @@ def _git_block(repo, gh=None):
     def git(*args):
         try:
             r = subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                               text=True, timeout=5)
+                               text=True, timeout=5, env=_child_env())
             return r.stdout if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -2967,7 +2967,7 @@ def _github(store, repo=None):
         try:
             r = subprocess.run(["gh", "-R", "", *args] if False else ["gh", *args],
                                cwd=str(repo), capture_output=True, text=True,
-                               timeout=timeout)
+                               timeout=timeout, env=_child_env())
             return r.stdout if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -2975,7 +2975,7 @@ def _github(store, repo=None):
     def git(*args):
         try:
             r = subprocess.run(["git", "-C", str(repo), *args],
-                               capture_output=True, text=True, timeout=5)
+                               capture_output=True, text=True, timeout=5, env=_child_env())
             return r.stdout if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -3102,7 +3102,7 @@ def _task_deliverable(repo, task_id, want_patch=False):
     def git(*args, limit=200000):
         try:
             r = subprocess.run(["git", "-C", str(repo), *args],
-                               capture_output=True, text=True, timeout=10)
+                               capture_output=True, text=True, timeout=10, env=_child_env())
             return r.stdout[:limit] if r.returncode == 0 else ""
         except Exception:
             return ""
@@ -3298,6 +3298,22 @@ def _prune_registry():
             del _launch_registry[key]
 
 
+def _child_env(**extra):
+    """The environment for every process the dashboard starts, except its own
+    re-exec (_reexec_env). _ensure_token exports ARC_DASHBOARD_TOKEN into
+    os.environ, and a run's harnesses inherit whatever its process has — one
+    `env` call from a model would put the token in a transcript this dashboard
+    serves unauthenticated."""
+    return config.child_env(None, **extra)
+
+
+def _reexec_env():
+    env = dict(os.environ)
+    if config.DASHBOARD_TOKEN:
+        env["ARC_DASHBOARD_TOKEN"] = config.DASHBOARD_TOKEN
+    return env
+
+
 def _spawn_logged(argv, log_name, env_extra=None):
     log_dir = Path(config.ROOT) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -3305,7 +3321,7 @@ def _spawn_logged(argv, log_name, env_extra=None):
     # Unbuffered: with stdout redirected to a file Python block-buffers it,
     # so a live run's log stayed EMPTY until the process exited and "view
     # log" on a running project showed nothing at all.
-    env = dict(os.environ, PYTHONUNBUFFERED="1", **(env_extra or {}))
+    env = _child_env(PYTHONUNBUFFERED="1", **(env_extra or {}))
     proc = subprocess.Popen(argv, cwd=str(config.ROOT), stdout=lf, stderr=subprocess.STDOUT,
                             start_new_session=True, close_fds=True, env=env)
     return proc, log_name
@@ -3965,7 +3981,7 @@ def _git_quick(path, *args):
     half-built repo must never slow down the whole scan."""
     try:
         r = subprocess.run(["git", "-C", str(path), *args],
-                           capture_output=True, text=True, timeout=2)
+                           capture_output=True, text=True, timeout=2, env=_child_env())
     except (OSError, subprocess.TimeoutExpired):
         return None
     return r.stdout if r.returncode == 0 else None
@@ -4063,7 +4079,7 @@ def _create_repo(body):
                       "-c", "user.email=arc-orchestrator@localhost",
                       "commit", "-q", "-m", "init"]):
             r = subprocess.run(argv, cwd=path, capture_output=True, text=True,
-                               timeout=30)
+                               timeout=30, env=_child_env())
             if r.returncode != 0:
                 raise RuntimeError(f"{' '.join(argv[:2])} failed: {r.stderr.strip()}")
     except (OSError, subprocess.TimeoutExpired, RuntimeError) as exc:
@@ -4514,7 +4530,7 @@ _SERVED_AT = time.time()
 def _git_out(*args):
     try:
         r = subprocess.run(["git", "-C", str(config.ROOT), *args],
-                           capture_output=True, text=True, timeout=5)
+                           capture_output=True, text=True, timeout=5, env=_child_env())
         return r.stdout if r.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -4571,9 +4587,9 @@ def _graceful_reexec():
     else:
         args = [sys.executable] + sys.argv
     # The environment is passed explicitly: it carries ARC_DASHBOARD_TOKEN
-    # (exported by _ensure_token even when it came from the env file) and the
-    # unit's ARC_DB_PATH/ARC_EVENTS_LOG, all of which the new image needs.
-    os.execve(sys.executable, args, dict(os.environ))
+    # (even when it came from the env file) and the unit's
+    # ARC_DB_PATH/ARC_EVENTS_LOG, all of which the new image needs.
+    os.execve(sys.executable, args, _reexec_env())
 
 
 _reexec_fn = _graceful_reexec
@@ -5966,8 +5982,8 @@ def _ensure_token():
     """Make sure a copy of the dashboard serves with the unit's token.
 
     Returns None when fine, else the reason to refuse to start. The token is
-    exported into os.environ so a graceful re-exec (/api/restart) and every
-    child the dashboard spawns inherit the same value."""
+    exported into os.environ so a graceful re-exec (/api/restart) inherits the
+    same value; children the dashboard spawns never do (_child_env)."""
     if config.DASHBOARD_TOKEN:
         os.environ["ARC_DASHBOARD_TOKEN"] = config.DASHBOARD_TOKEN
         return None

@@ -552,6 +552,18 @@ DASHBOARD_ENV_FILE = os.getenv(
 # 1 = serve with actions unlocked even though DASHBOARD_ENV_FILE exists but
 # yields no token (the default is to refuse to start).
 DASHBOARD_ALLOW_OPEN = os.getenv("ARC_DASHBOARD_ALLOW_OPEN", "").lower() in ("1", "true", "yes")
+# Secrets no child process needs. A harness that runs `env` writes its
+# environment into logs/harness/*.jsonl, which the dashboard serves to anyone,
+# so the dashboard's children, harnesses and gates are all spawned without it.
+CHILD_ENV_DROP = ("ARC_DASHBOARD_TOKEN",)
+
+
+def child_env(base=None, **extra):
+    """A copy of `base` (default os.environ) plus `extra`, minus CHILD_ENV_DROP."""
+    env = dict(os.environ if base is None else base, **extra)
+    for key in CHILD_ENV_DROP:
+        env.pop(key, None)
+    return env
 # Seconds a busy port is retried before `serve` names the holder and exits 98.
 DASHBOARD_BIND_WAIT = float(os.getenv("ARC_DASHBOARD_BIND_WAIT", "10"))
 # Set by the systemd unit: terminate a `main.py serve` started OUTSIDE the unit

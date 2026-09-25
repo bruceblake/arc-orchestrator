@@ -1296,10 +1296,11 @@ async def spawn(argv, *, cwd, env=None, stdout=asyncio.subprocess.PIPE,
     _terminate); stdin from /dev/null, because nothing here ever answers a
     prompt — every harness takes its instructions on argv — and a child that
     inherits a terminal's stdin and then reads it stops the whole run on a
-    tty read nobody will see.
+    tty read nobody will see. The environment never carries
+    config.CHILD_ENV_DROP: a harness's `env` output lands in its transcript.
     """
     return await asyncio.create_subprocess_exec(
-        *argv, cwd=str(cwd), env=env, stdin=asyncio.subprocess.DEVNULL,
+        *argv, cwd=str(cwd), env=config.child_env(env), stdin=asyncio.subprocess.DEVNULL,
         stdout=stdout, stderr=stderr, start_new_session=True)
 
 

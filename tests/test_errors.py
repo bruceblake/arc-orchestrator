@@ -1256,13 +1256,55 @@ class TheDailyAuditSchedulesItself(unittest.TestCase):
         def boom(*a, **k):
             calls.append(1); raise RuntimeError("audit exploded")
         audit.run = boom
+        t = None
         try:
             t = sa.start(None, interval=0, check_every=0.05)
+            self.addCleanup(t.stop)
             _time.sleep(0.3)
+            alive = t.is_alive()
         finally:
+            # Stop before the real audit.run is back: a leaked thread ran it
+            # and wrote reports under a LATER test's config.ROOT, whose
+            # tempdir cleanup then failed on logs/audit.
+            if t is not None:
+                t.stop()
             audit.run = orig
         self.assertGreater(len(calls), 1, "the thread must keep ticking after a failure")
-        self.assertTrue(t.is_alive())
+        self.assertTrue(alive)
+
+    def test_stop_ends_the_thread_and_it_runs_no_more_audits(self):
+        import scheduler_audit as sa, audit, time as _time
+        orig = audit.run
+        calls = []
+        def boom(*a, **k):
+            calls.append(1); raise RuntimeError("audit exploded")
+        audit.run = boom
+        try:
+            t = sa.start(None, interval=0, check_every=0.05)
+            self.addCleanup(t.stop)
+            _time.sleep(0.15)
+            self.assertTrue(t.stop(timeout=2), "stop() must join the thread")
+            self.assertFalse(t.is_alive())
+            n = len(calls)
+            _time.sleep(0.2)
+        finally:
+            audit.run = orig
+        self.assertGreater(n, 0)
+        self.assertEqual(len(calls), n, "a stopped scheduler must not run the audit again")
+
+    def test_stop_does_not_wait_out_the_check_interval(self):
+        import scheduler_audit as sa, audit, time as _time
+        orig = audit.run
+        audit.run = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no"))
+        try:
+            t = sa.start(None, interval=0, check_every=300)
+            self.addCleanup(t.stop)
+            _time.sleep(0.05)
+            t0 = _time.monotonic()
+            self.assertTrue(t.stop(timeout=2))
+            self.assertLess(_time.monotonic() - t0, 2)
+        finally:
+            audit.run = orig
 
     def test_old_reports_are_pruned(self):
         import scheduler_audit as sa, audit, pathlib
