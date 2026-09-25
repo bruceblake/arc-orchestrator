@@ -29,7 +29,7 @@ from collections import OrderedDict
 from datetime import date as _date, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 import config
 import dashboard_services
@@ -3651,7 +3651,7 @@ def _evidence_url(root, p):
         rel = Path(p).resolve().relative_to(root)
     except (ValueError, OSError):
         return None
-    return "/api/evidence-file?path=" + str(rel)
+    return "/api/evidence-file?path=" + quote(rel.as_posix())
 
 
 def _timeline_evidence(tid):

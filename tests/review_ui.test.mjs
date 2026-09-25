@@ -67,6 +67,21 @@ const item = (over = {}) => ({
     base: {build: "main", sha: "abc"}},
   ...over,
 });
+// Evidence names come from the game repo (studio_cameras.json, playtest shot
+// filenames): a double quote must not close the attribute it lands in.
+const Q = 'x" onerror="alert(1)';
+const quoted = () => item({
+  task: 'doors" autofocus onfocus="alert(2)',
+  url: 'https://github.com/o/game/pull/12" onmouseover="alert(3)',
+  evidence: {attempt: "x1", contact_sheet: "/api/evidence-file?path=" + Q,
+    shots: [{name: Q, url: "/api/evidence-file?path=" + Q}],
+    videos: {[Q]: {gif: "/api/evidence-file?path=" + Q, mp4: "/api/evidence-file?path=" + Q}},
+    compare: [{name: 'cam" onload="alert(4)', changed: 0.1, url: "/api/evidence-file?path=" + Q}],
+    warnings: []},
+});
+// Text nodes may hold a raw quote; only a tag's own attribute names matter.
+const breakout = h => [...h.matchAll(/<[a-z][^>]*>/gi)].some(([tag]) =>
+  [...tag.replace(/="[^"]*"/g, "").matchAll(/\s([^\s=>\/]+)/g)].some(([, a]) => /^(on|autofocus)/i.test(a)));
 
 // ---- desktop ---------------------------------------------------------------
 const src = fs.readFileSync(new URL("../static/index.html", import.meta.url), "utf8");
@@ -117,6 +132,11 @@ globalThis.__setRev({waiting: [item({play: {available: false, reason: "not a stu
 api.renderReviews();
 ok(get("#reviews").innerHTML.includes("disabled") && get("#reviews").innerHTML.includes("not a studio game project"), "unplayable build says why");
 
+globalThis.__setRev({waiting: [quoted()], recent: []});
+api.renderReviews();
+const dq = get("#reviews").innerHTML;
+ok(dq.includes("&quot;") && !breakout(dq), "desktop: a double quote in evidence urls/names cannot break out of an attribute");
+
 // ---- phone -----------------------------------------------------------------
 els.clear(); posts.length = 0;
 const psrc = fs.readFileSync("static/phone.html", "utf8");
@@ -124,7 +144,7 @@ ok(psrc.includes('id="nav-review"') && psrc.includes('id="view-review"'), "phone
 const pext = [...psrc.matchAll(/<script[^>]+src="([^"]+)"/g)].map(m => "static" + m[1])
   .filter(p => fs.existsSync(p)).map(p => fs.readFileSync(p, "utf8")).join("\n");
 const pjs = psrc.slice(psrc.indexOf("<script>") + 8, psrc.lastIndexOf("</script>"));
-const phone = new Function(pext + "\n" + pjs + "\nreturn {S, reviewCard, renderReview, rvDecide, rvDraft};")();
+const phone = new Function(pext + "\n" + pjs + "\nreturn {S, reviewCard, renderReview, rvDecide, rvDraft, rvKeyOf};")();
 phone.S.reviews = {waiting: [item()]};
 phone.S.open.review = "doors|12|2";
 phone.renderReview();
@@ -135,6 +155,14 @@ ok(get("#badge-review").textContent === "1", "phone nav badge");
 phone.rvDecide("doors|12|2", "approve");
 await new Promise(r => setImmediate(r));
 ok(posts.length === 1 && posts[0].body.decision === "approve", "phone approve posts");
+
+const pq = quoted();
+phone.S.reviews = {waiting: [pq]};
+phone.S.open.review = phone.rvKeyOf(pq);
+phone.renderReview();
+const phq = get("#reviews").innerHTML;
+ok(phq.includes("&quot;") && phq.includes("rvimg") && !breakout(phq),
+   "phone: a double quote in evidence urls/names cannot break out of an attribute");
 
 console.log(`review ui checks: ${n - failures.length} passed, ${failures.length} failed`);
 if (failures.length) process.exit(1);

@@ -740,7 +740,7 @@ function renderMeta() {
 var rvDraft = {};
 function rvKeyOf(r) { return r.task + "|" + r.pr + "|" + r.round; }
 function rvImg(u, alt) {
-  return u ? '<a href="' + esc(u) + '" target="_blank" rel="noopener"><img class="rvimg" loading="lazy" src="' + esc(u) + '" alt="' + esc(alt) + '"></a>' : "";
+  return u ? '<a href="' + attr(u) + '" target="_blank" rel="noopener"><img class="rvimg" loading="lazy" src="' + attr(u) + '" alt="' + attr(alt) + '"></a>' : "";
 }
 function reviewCard(r) {
   var k = rvKeyOf(r), open = S.open.review === k, ev = r.evidence || {};
@@ -753,16 +753,16 @@ function reviewCard(r) {
   if (!imgs && ev.contact_sheet) imgs = rvImg(ev.contact_sheet, "screenshots");
   var warn = (ev.warnings || []).map(function (w) { return '<div class="rvwarn">' + esc(w) + '</div>'; }).join("");
   var play = r.play && r.play.available
-    ? '<button type="button" class="act tap" data-rv-play="' + esc(k) + '">▶ Play on the PC</button>' : "";
-  var link = /^https:\/\/github\.com\//.test(r.url || "") ? '<a href="' + esc(r.url) + '" target="_blank" rel="noopener">PR #' + esc(r.pr) + '</a>' : "PR #" + esc(r.pr);
+    ? '<button type="button" class="act tap" data-rv-play="' + attr(k) + '">▶ Play on the PC</button>' : "";
+  var link = /^https:\/\/github\.com\//.test(r.url || "") ? '<a href="' + attr(r.url) + '" target="_blank" rel="noopener">PR #' + esc(r.pr) + '</a>' : "PR #" + esc(r.pr);
   return '<div class="card' + (open ? " open" : "") + '">' +
-    '<button type="button" class="card-head tap" data-key="' + esc(k) + '"><span class="cmain">' +
+    '<button type="button" class="card-head tap" data-key="' + attr(k) + '"><span class="cmain">' +
     '<span class="c-title">' + esc(r.title || r.task) + '</span>' +
     '<span class="c-sub">' + esc(r.task) + " · round " + esc(r.round) + (r.live ? "" : " · run not live") + '</span></span><span class="chev">›</span></button>' +
     '<div class="card-body">' + link + verdicts +
-    '<textarea class="rvtext" data-rv-comment="' + esc(k) + '" rows="3" aria-label="comment for the implementer" placeholder="What must change?">' + esc(rvDraft[k] || "") + '</textarea>' +
-    '<div class="kv"><button type="button" class="act tap rvok" data-rv-decide="approve" data-rv-key="' + esc(k) + '">✓ Approve</button>' +
-    '<button type="button" class="act tap rvno" data-rv-decide="reject" data-rv-key="' + esc(k) + '">✗ Request changes</button></div>' +
+    '<textarea class="rvtext" data-rv-comment="' + attr(k) + '" rows="3" aria-label="comment for the implementer" placeholder="What must change?">' + esc(rvDraft[k] || "") + '</textarea>' +
+    '<div class="kv"><button type="button" class="act tap rvok" data-rv-decide="approve" data-rv-key="' + attr(k) + '">✓ Approve</button>' +
+    '<button type="button" class="act tap rvno" data-rv-decide="reject" data-rv-key="' + attr(k) + '">✗ Request changes</button></div>' +
     play + warn + imgs + vids +
     '</div></div>';
 }

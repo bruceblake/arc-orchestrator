@@ -158,7 +158,7 @@ class TestRoutes(_DB):
         self.assertEqual(self._post({"task": "t", "pr": 7, "round": 1,
                                      "decision": "reject", "comment": " "})[0], 400)
         self.assertEqual(self._post({"task": "t", "pr": "7", "round": 1,
-                                     "decision": "approve"})[0], 404)
+                                     "decision": "approve"})[0], 400)
         self.assertEqual(self._post({"task": "../x", "pr": 7, "round": 1,
                                      "decision": "approve"})[0], 404)
         code, body = self._post({"task": "t", "pr": 7, "round": 1,
@@ -167,6 +167,14 @@ class TestRoutes(_DB):
         self.assertEqual(manual_review.get("t", 7, 1)["comment"], "fix it")
         self.assertEqual(self._post({"task": "t", "pr": 7, "round": 1,
                                      "decision": "approve"})[0], 404)
+
+    def test_decide_rejects_json_booleans_for_pr_and_round(self):
+        """True == 1 in Python, so a boolean would match a round-1 hold."""
+        for pr, rnd in ((True, 1), (7, True), (7, 1.0), (7, None)):
+            code, _ = self._post({"task": "t", "pr": pr, "round": rnd,
+                                  "decision": "approve"})
+            self.assertEqual(code, 400, (pr, rnd))
+        self.assertEqual(manual_review.get("t", 7, 1)["status"], "waiting")
 
     def test_decide_goes_through_refuse_post(self):
         code, _ = self._post({"task": "t", "pr": 7, "round": 1, "decision": "approve"},
@@ -195,6 +203,19 @@ class TestRoutes(_DB):
         self.assertTrue(ev["videos"]["flythrough"]["gif"].startswith("/api/evidence-file?path="))
         self.assertEqual([c["name"] for c in ev["compare"]], ["cam"])   # outside root dropped
         self.assertIsNotNone(ev["contact_sheet"])
+
+    def test_evidence_url_quotes_the_path(self):
+        """A shot name with '#', a space or '"' must survive the query string
+        and never close the HTML attribute it is rendered into."""
+        from urllib.parse import parse_qs, urlparse
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d).resolve()
+            f = root / "game" / "t" / "x1" / 'cam #2 "x".png'
+            url = dashboard._evidence_url(root, f)
+        for ch in ('#', ' ', '"'):
+            self.assertNotIn(ch, url)
+        self.assertEqual(parse_qs(urlparse(url).query)["path"],
+                         ['game/t/x1/cam #2 "x".png'])
 
 
 class TestScenesAndDisplay(PlaytestCase):

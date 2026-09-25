@@ -121,6 +121,8 @@ def decide(body):
     body = body if isinstance(body, dict) else {}
     task, pr, rnd = body.get("task"), body.get("pr"), body.get("round")
     decision, comment = body.get("decision"), body.get("comment", "")
+    if type(pr) is not int or type(rnd) is not int:
+        return {"error": "pr and round must be integers"}, 400
     if decision not in manual_review.DECISIONS:
         return {"error": "decision must be approve or reject"}, 400
     if not isinstance(comment, str) or len(comment) > manual_review.MAX_COMMENT:
