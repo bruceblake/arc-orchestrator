@@ -87,6 +87,121 @@ def _proc_cwd(pid):
         return None
 
 
+class LiveTaskfileMatcher:
+    """Matches taskfile paths against currently live code-run processes,
+    resolving relative argv against each process's cwd from /proc/<pid>/cwd."""
+
+    def __init__(self, runs=None):
+        if runs is None:
+            runs = live_runs()
+        self.runs = runs
+        self.live_resolved = set()
+        self.unresolved_tokens = set()
+        self.unresolved_basenames = set()
+        self.live_raw_tokens = set()
+        self.live_taskfiles = set()
+
+        for r in runs:
+            tf_arg = r.get("taskfile")
+            if not tf_arg:
+                continue
+            self.live_raw_tokens.add(tf_arg)
+            pid = r.get("pid")
+            cwd = r.get("cwd") or _proc_cwd(pid)
+            if cwd:
+                try:
+                    resolved = str((Path(cwd) / tf_arg).resolve())
+                    self.live_resolved.add(resolved)
+                    self.live_taskfiles.add(resolved)
+                except OSError:
+                    self.live_taskfiles.add(tf_arg)
+            else:
+                # Cannot read /proc/<pid>/cwd: do not guess, do not reset or settle that pid's taskfile.
+                self.unresolved_tokens.add(tf_arg)
+                self.unresolved_basenames.add(Path(tf_arg).name)
+                self.live_taskfiles.add(tf_arg)
+                try:
+                    if Path(tf_arg).is_absolute():
+                        self.live_resolved.add(str(Path(tf_arg).resolve()))
+                except OSError:
+                    pass
+
+    def is_live(self, tf):
+        """Return True if tf matches an active code-run process."""
+        if not tf:
+            return False
+        tf_str = str(tf)
+        try:
+            if str(Path(tf).resolve()) in self.live_resolved:
+                return True
+        except OSError:
+            pass
+        if tf_str in self.live_raw_tokens or tf_str in self.unresolved_tokens:
+            return True
+        try:
+            if Path(tf).name in self.unresolved_basenames:
+                return True
+        except OSError:
+            pass
+        return False
+
+    def matching_pids(self, tf):
+        """Return list of pids for live runs matching taskfile tf."""
+        if not tf:
+            return []
+        tf_str = str(tf)
+        try:
+            target_resolved = str(Path(tf).resolve())
+            target_name = Path(tf).name
+        except OSError:
+            target_resolved = tf_str
+            target_name = tf_str
+
+        pids = []
+        for r in self.runs:
+            tf_arg = r.get("taskfile")
+            if not tf_arg:
+                continue
+            pid = r.get("pid")
+            cwd = r.get("cwd") or _proc_cwd(pid)
+            matched = False
+            if cwd:
+                try:
+                    run_resolved = str((Path(cwd) / tf_arg).resolve())
+                    if run_resolved == target_resolved or tf_arg == tf_str:
+                        matched = True
+                except OSError:
+                    if tf_arg == tf_str:
+                        matched = True
+            else:
+                tf_arg_p = Path(tf_arg)
+                if (tf_arg == tf_str or
+                        tf_arg_p.name == target_name or
+                        (tf_arg_p.is_absolute() and
+                         str(tf_arg_p.resolve()) == target_resolved)):
+                    matched = True
+            if matched and pid is not None and pid not in pids:
+                pids.append(pid)
+        return pids
+
+    def __contains__(self, tf):
+        return self.is_live(tf)
+
+    def __call__(self, tf):
+        return self.is_live(tf)
+
+    def __len__(self):
+        return len(self.live_taskfiles)
+
+
+def live_taskfile_matcher(runs=None):
+    return LiveTaskfileMatcher(runs)
+
+
+def is_live_taskfile(taskfile, runs=None):
+    return LiveTaskfileMatcher(runs).is_live(taskfile)
+
+
 def live_run_pids():
     return [r["pid"] for r in live_runs()]
 
@@ -167,38 +282,8 @@ async def reconcile(store, *, repos=None, apply=True, force=False):
                 now_dead += 1
         report["leases"] = now_dead
 
-    live_resolved = set()
-    unresolved_tokens = set()
-    unresolved_basenames = set()
-    live_raw_tokens = set()
-
-    for r in live_runs():
-        tf_arg = r.get("taskfile")
-        if not tf_arg:
-            continue
-        live_raw_tokens.add(tf_arg)
-        pid = r.get("pid")
-        cwd = r.get("cwd") or _proc_cwd(pid)
-        if cwd:
-            live_resolved.add(str((Path(cwd) / tf_arg).resolve()))
-        else:
-            # Cannot read /proc/<pid>/cwd: do not guess, do not reset or settle that pid's taskfile.
-            unresolved_tokens.add(tf_arg)
-            unresolved_basenames.add(Path(tf_arg).name)
-            if Path(tf_arg).is_absolute():
-                live_resolved.add(str(Path(tf_arg).resolve()))
-
-    def _is_live(row_tf):
-        if not row_tf:
-            return False
-        # A row is live when its stored taskfile resolves equal to that path
-        if str(Path(row_tf).resolve()) in live_resolved:
-            return True
-        if row_tf in live_raw_tokens or row_tf in unresolved_tokens:
-            return True
-        if Path(row_tf).name in unresolved_basenames:
-            return True
-        return False
+    matcher = LiveTaskfileMatcher(live_runs())
+    _is_live = matcher.is_live
 
     running = store.running_code_tasks()
     orphaned = []

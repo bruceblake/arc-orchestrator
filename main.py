@@ -127,20 +127,18 @@ def cmd_code(args):
             # concurrent `code run` was actively executing — because the help
             # text promised a guard the code never had.
             import reconcile as _rec
-            live_tf = {str(Path(r["taskfile"]).resolve())
-                       for r in _rec.live_runs() if r.get("taskfile")}
+            matcher = _rec.LiveTaskfileMatcher()
             rows = store.running_code_tasks()
             n = 0
             seen = set()
             for r in rows:
                 raw = r.get("taskfile") or ""
-                key = str(Path(raw).resolve()) if raw else ""
-                if key in live_tf or raw in seen:
+                if not raw or matcher.is_live(raw) or raw in seen:
                     continue
                 seen.add(raw)
                 n += store.reset_stale_code_tasks(taskfile=raw)
             print(f"reset {n} stale 'running' task(s) -> failed "
-                  f"({len(live_tf)} live taskfile(s) left alone)")
+                  f"({len(matcher)} live taskfile(s) left alone)")
         out = store.code_status()
         out["chains"] = pending_chains(store)
         print(json.dumps(out, indent=2, default=str))
@@ -233,9 +231,7 @@ def cmd_code(args):
         # the account within its caps, but they cannot make this coherent.
         # (Different task files in parallel are fine and expected.)
         import reconcile as _rec
-        others = [r["pid"] for r in _rec.live_runs()
-                  if r.get("taskfile")
-                  and str(Path(r["taskfile"]).resolve()) == tf]
+        others = _rec.LiveTaskfileMatcher().matching_pids(tf)
         if others and not args.force:
             sys.exit(
                 f"{Path(tf).name} is already being run by pid "

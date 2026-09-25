@@ -1,11 +1,13 @@
 """Orphan reaping against a real temporary git repo."""
 import asyncio
+import json
 import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import capture_events  # noqa: F401  (sys.path)
 
@@ -529,8 +531,98 @@ class LiveRunGuard(unittest.TestCase):
             reconcile.live_run_pids = orig
 
 
-if __name__ == "__main__":
-    unittest.main()
+class LiveTaskfileMatcherTests(unittest.TestCase):
+    def test_relative_argv_resolves_against_process_cwd(self):
+        runs = [
+            {"pid": 111, "taskfile": "wave.json", "cwd": "/tmp/proj1"},
+            {"pid": 222, "taskfile": "/tmp/proj2/abs.json", "cwd": "/tmp/other"},
+        ]
+        matcher = reconcile.LiveTaskfileMatcher(runs)
+        self.assertTrue(matcher.is_live("/tmp/proj1/wave.json"))
+        self.assertTrue(matcher.is_live("wave.json"))
+        self.assertFalse(matcher.is_live("/tmp/other/wave.json"))
+        self.assertTrue(matcher.is_live("/tmp/proj2/abs.json"))
+        self.assertEqual(matcher.matching_pids("/tmp/proj1/wave.json"), [111])
+        self.assertEqual(matcher.matching_pids("wave.json"), [111])
+        self.assertEqual(matcher.matching_pids("/tmp/other/wave.json"), [])
+        self.assertEqual(matcher.matching_pids("/tmp/proj2/abs.json"), [222])
+        self.assertEqual(len(matcher), 2)
+
+    def test_unreadable_cwd_does_not_guess_and_protects_by_basename(self):
+        runs = [
+            {"pid": 333, "taskfile": "blind.json", "cwd": None},
+        ]
+        matcher = reconcile.LiveTaskfileMatcher(runs)
+        self.assertTrue(matcher.is_live("/some/dir/blind.json"))
+        self.assertTrue(matcher.is_live("blind.json"))
+        self.assertEqual(matcher.matching_pids("/some/dir/blind.json"), [333])
+        self.assertFalse(matcher.is_live("/some/dir/other.json"))
+        self.assertEqual(matcher.matching_pids("/some/dir/other.json"), [])
+
+
+class ResetStaleAndDuplicateRunCliTests(unittest.TestCase):
+    def test_reset_stale_protects_live_run_with_relative_argv_and_process_cwd(self):
+        import argparse
+        import io
+        from contextlib import redirect_stdout
+        import main
+
+        with tempfile.TemporaryDirectory() as d:
+            db_path = str(Path(d) / "orchestrator.db")
+            store = Store(db_path)
+            live_cwd = str(Path(d) / "subrun")
+            os.makedirs(live_cwd, exist_ok=True)
+            live_tf = str(Path(live_cwd) / "foo.json")
+            dead_tf = str(Path(d) / "dead.json")
+
+            store.upsert_code_task(
+                live_tf, "t-live", "T", "gpt-oss-120b",
+                config.cross_family_reviewer("gpt-oss-120b"), "running")
+            store.upsert_code_task(
+                dead_tf, "t-dead", "T", "gpt-oss-120b",
+                config.cross_family_reviewer("gpt-oss-120b"), "running")
+
+            mock_runs = [{"pid": 5555, "taskfile": "foo.json", "cwd": live_cwd}]
+            args = argparse.Namespace(code_cmd="status", reset_stale=True, db=db_path)
+            with mock.patch("reconcile.live_runs", return_value=mock_runs), \
+                    redirect_stdout(io.StringIO()) as out:
+                main.cmd_code(args)
+
+            by_id = {r["id"]: r for r in store.code_tasks_all()}
+            self.assertEqual(by_id["t-live"]["status"], "running")
+            self.assertEqual(by_id["t-dead"]["status"], "failed")
+            self.assertIn("1 live taskfile(s) left alone", out.getvalue())
+
+    def test_duplicate_run_guard_detects_relative_launch_against_live_process_cwd(self):
+        import argparse
+        import main
+
+        with tempfile.TemporaryDirectory() as d:
+            live_cwd = str(Path(d) / "active_dir")
+            os.makedirs(live_cwd, exist_ok=True)
+            tf_path = Path(live_cwd) / "run.json"
+            tf_path.write_text(json.dumps({
+                "project": {
+                    "repo": d,
+                    "title": "proj",
+                    "tasks": []
+                }
+            }))
+
+            mock_runs = [{"pid": 6666, "taskfile": "run.json", "cwd": live_cwd}]
+            args = argparse.Namespace(
+                code_cmd="run",
+                taskfile=str(tf_path),
+                repo=d,
+                dry_run=False,
+                force=False,
+                no_wait=False,
+                db=str(Path(d) / "t.db"),
+            )
+            with mock.patch("reconcile.live_runs", return_value=mock_runs):
+                with self.assertRaises(SystemExit) as cm:
+                    main.cmd_code(args)
+                self.assertIn("run.json is already being run by pid 6666", str(cm.exception))
 
 
 class AWrapperIsNotACompetingRun(unittest.TestCase):
@@ -562,3 +654,7 @@ class AWrapperIsNotACompetingRun(unittest.TestCase):
         pids = {r["pid"] for r in reconcile.live_runs()}
         self.assertNotIn(os.getpid(), pids)
         self.assertNotIn(os.getppid(), pids)
+
+
+if __name__ == "__main__":
+    unittest.main()
