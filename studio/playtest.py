@@ -240,6 +240,10 @@ def ensure_snapshot(project, build_id, *, do_import=True):
     repo = _repo(project)
     snap = _snapshot_dir(project, b["sha"])
     if (snap / READY_MARKER).exists():
+        # The game snapshot stays pinned to its sha. The overlay is ours, and
+        # a ready snapshot must pick up a newer overlay or a lighting fix
+        # never reaches a build the operator already played.
+        inject_overlay(snap)
         return snap
     snap.parent.mkdir(parents=True, exist_ok=True)
     if snap.exists():

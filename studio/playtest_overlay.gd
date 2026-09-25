@@ -39,6 +39,10 @@ func _ready() -> void:
 	while FileAccess.file_exists(_dir.path_join("shot-%d.png" % _shot_n)):
 		_shot_n += 1
 	_build_ui()
+	# The graybox ships with no lights on purpose. The render harness adds a
+	# sun for screenshots; without the same light a human playtest is a black
+	# window with only this overlay's label on it.
+	call_deferred("_ensure_inspection_light")
 	var timer := Timer.new()
 	timer.wait_time = TELEMETRY_SECONDS
 	timer.autostart = true
@@ -92,7 +96,39 @@ func _build_ui() -> void:
 	buttons.add_child(cancel)
 
 
+func _ensure_inspection_light() -> void:
+	var root := get_tree().current_scene
+	if root == null:
+		return
+	if root.find_children("*", "Light3D", true, false).is_empty():
+		var sun := DirectionalLight3D.new()
+		sun.name = "PlaytestInspectionSun"
+		sun.rotation_degrees = Vector3(-50.0, 35.0, 0.0)
+		sun.light_energy = 1.2
+		sun.shadow_enabled = true
+		root.add_child(sun)
+	if root.find_children("*", "WorldEnvironment", true, false).is_empty():
+		var env := Environment.new()
+		var sky := Sky.new()
+		sky.sky_material = ProceduralSkyMaterial.new()
+		env.background_mode = Environment.BG_SKY
+		env.sky = sky
+		env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+		env.ambient_light_energy = 0.6
+		var we := WorldEnvironment.new()
+		we.name = "PlaytestInspectionEnvironment"
+		we.environment = env
+		root.add_child(we)
+
+
 func _input(event: InputEvent) -> void:
+	if _panel != null and not _panel.visible and event is InputEventMouseButton \
+			and event.pressed and event.button_index == MOUSE_BUTTON_LEFT \
+			and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		# The player never captures the mouse itself, so look never starts.
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+		get_viewport().set_input_as_handled()
+		return
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	if _panel.visible:
