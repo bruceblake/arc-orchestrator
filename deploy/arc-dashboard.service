@@ -1,17 +1,44 @@
 [Unit]
-Description=ARC LLM orchestrator dashboard
+Description=ARC Godot Studio dashboard
 After=network-online.target
 Wants=network-online.target
+# No start-rate limit: the backoff below (5 s growing to 5 min) is what keeps
+# a port conflict from hot-looping, and the unit must come back by itself
+# once whatever held the port is gone.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
-WorkingDirectory=/home/proxyie/arc-orchestrator
-ExecStart=/home/proxyie/arc-orchestrator/.venv/bin/python main.py serve
-Restart=always
-RestartSec=15
+# The blessed clone: pr_merge fast-forwards it, so a restart picks up merged
+# code. State (db, events, studio, boards) stays in the main checkout.
+WorkingDirectory=/home/proxyie/repos/arc-orchestrator
+ExecStart=/home/proxyie/repos/arc-orchestrator/.venv/bin/python main.py serve
 Environment=PYTHONUNBUFFERED=1
 Environment=ARC_FLEET=studio
-Environment=ARC_STUDIO_AUTOPILOT=1
+Environment=ARC_DASHBOARD_BIND=0.0.0.0
+Environment=ARC_DB_PATH=/home/proxyie/arc-orchestrator/orchestrator.db
+Environment=ARC_EVENTS_LOG=/home/proxyie/arc-orchestrator/logs/events.jsonl
+Environment=ARC_STUDIO_DIR=/home/proxyie/arc-orchestrator/logs/studio
+Environment=ARC_BOARD_DIR=/home/proxyie/arc-orchestrator/logs/boards
+# Runs launched from the dashboard spawn harnesses: opencode lives in
+# ~/.opencode/bin, codex/claude/cursor-agent/agy/gh/godot in ~/.local/bin.
+Environment=PATH=/home/proxyie/.opencode/bin:/home/proxyie/.local/bin:/home/proxyie/.local/opt/node/bin:/usr/local/bin:/usr/bin:/bin
+# A dashboard started OUTSIDE this unit (start.sh's old nohup path, a shell)
+# serves without the token below; the unit terminates it and takes the port
+# instead of failing on "port already in use" (dashboard._bind).
+Environment=ARC_DASHBOARD_TAKEOVER=1
+EnvironmentFile=/home/proxyie/arc-orchestrator/.env
+# ARC_DASHBOARD_TOKEN. `main.py serve` also reads this file itself when the
+# variable is missing (config.DASHBOARD_ENV_FILE), so every launch path
+# serves with the same token.
+EnvironmentFile=/home/proxyie/.config/arc-dashboard.env
+Restart=always
+RestartSec=5
+# Exponential restart backoff (systemd >= 254): 5 s, then growing to 5 min.
+# The old flat RestartSec=15 restarted 2700+ times in one day against a port
+# held by a stray copy.
+RestartSteps=8
+RestartMaxDelaySec=300
 
 [Install]
 WantedBy=default.target

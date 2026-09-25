@@ -2027,6 +2027,34 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             errors.capture(exc, task=tid, model=model, node=f"board_{tid}",
                            role=role)
 
+    async def harvesting(tid, wt, role, model, run):
+        """Await ``run`` (a harness run) while harvesting its
+        .arc/board.jsonl every config.BOARD_LIVE_INGEST_S seconds.
+
+        Without this a line an agent wrote — including a post the board CLI
+        had to queue there because a sandbox made the DB read-only — reached
+        nobody until the run ended, which is an hour or more on a hard task.
+        ingest_file is offset-based and idempotent, so the harvest after the
+        run still lands only what is new."""
+        interval = config.BOARD_LIVE_INGEST_S
+        if wt is None or not interval or interval <= 0:
+            return await run
+
+        async def loop():
+            while True:
+                await asyncio.sleep(interval)
+                board_ingest(tid, wt, role, model)
+
+        poll = asyncio.create_task(loop())
+        try:
+            return await run
+        finally:
+            poll.cancel()
+            try:
+                await poll
+            except asyncio.CancelledError:
+                pass
+
     def board_post(tid, kind, body, **kw):
         kw.setdefault("author_task", tid)
         try:
@@ -2665,10 +2693,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                   dossier=dossier_block(tid, "implementer"))
             note_prompt(tid, "implementer", prompt)
             try:
-                res = await driver.run(
+                res = await harvesting(tid, wt, "implementer", model, driver.run(
                     prompt, wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
-                    avoid_families={reviewer_for(t, model)})
+                    avoid_families={reviewer_for(t, model)}))
                 ran["model"] = getattr(res, "model", None) or model
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -3017,11 +3045,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                         project_contract.role_block(wt, "reviewer"),
                                         dossier=dossier_block(tid, "reviewer"))
                 note_prompt(tid, "reviewer", prompt)
-                res = await driver.run(
+                res = await harvesting(tid, wt, "reviewer", driver.model, driver.run(
                     prompt,
                     wt, task_id=f"{tid}-x{attempt}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
-                        ctx, tid, cur_model(ctx), store)]})
+                        ctx, tid, cur_model(ctx), store)]}))
             except asyncio.CancelledError:
                 # A cancelled graph: land what the reviewer wrote, and end the
                 # implementer's lease — nobody will edit these files now.
@@ -3466,11 +3494,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     project_contract.role_block(wt, "reviewer"),
                     dossier=dossier_block(tid, "pr-reviewer"))
                 note_prompt(tid, "pr-reviewer", prompt)
-                res = await drv.run(
+                res = await harvesting(tid, wt, "pr-reviewer", model, drv.run(
                     prompt,
                     wt, task_id=f"{tid}-pr{it['round']}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
-                        ctx, tid, cur_model(ctx), store)]})
+                        ctx, tid, cur_model(ctx), store)]}))
             except asyncio.CancelledError:
                 board_ingest(tid, wt, "pr-reviewer", model)
                 release_files(tid)

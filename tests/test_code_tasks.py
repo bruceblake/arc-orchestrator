@@ -3633,6 +3633,45 @@ class AgentBoardWiring(unittest.TestCase):
         self.assertEqual(len(pings), 1)
         self.assertTrue({"other", "bw1"} <= set(pings[0]["mentions"]))
 
+    def test_a_board_line_is_harvested_while_the_agent_is_still_running(self):
+        """A line in .arc/board.jsonl — including a post the board CLI queued
+        there because a sandbox made the DB read-only — used to reach nobody
+        until the run ended (an hour or more on a hard task)."""
+        ab, project, seen = self.ab, self.project, {}
+
+        class Res:
+            exit_code, transcript_path, seconds = 0, "", 1.0
+            session_id, model, harness, text = "s1", None, None, "ok"
+
+        class Drv:
+            harness, model, images = "codex", "GLM-5.3", None
+
+            async def run(self, prompt, cwd, **kw):
+                arc = Path(cwd, ".arc")
+                arc.mkdir(exist_ok=True)
+                (arc / "board.jsonl").write_text(json.dumps(
+                    {"channel": "dm:other/implementer", "kind": "question",
+                     "body": "is pkg/a.py yours?"}) + "\n")
+                for _ in range(100):           # the agent keeps working
+                    await asyncio.sleep(0.02)
+                    if any("is pkg/a.py yours?" in m["body"] for m in
+                           ab.thread(project, channel="dm:other/implementer")):
+                        seen["mid_run"] = True
+                        break
+                return Res()
+
+        self.addCleanup(setattr, config, "BOARD_LIVE_INGEST_S",
+                        config.BOARD_LIVE_INGEST_S)
+        config.BOARD_LIVE_INGEST_S = 0.05
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: Drv()), \
+                capture_events():
+            self._implement(self._graph())
+        self.assertTrue(seen.get("mid_run"),
+                        "the line must land on the board while the run is live")
+        msgs = self._msgs(channel="dm:other/implementer")
+        self.assertEqual(len(msgs), 1, "the after-run harvest must not duplicate it")
+        self.assertEqual(msgs[0]["author"], "bw1/implementer")
+
     def test_the_digest_replaces_the_old_block(self):
         with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
                 mock.patch.object(code_tasks.board, "prompt_block",

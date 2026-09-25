@@ -14,38 +14,62 @@ against `main.py`, `dashboard.py`, `config.py`, `code_tasks.py`, `gitstore.py`,
 
 ## 1. Starting and stopping the dashboard
 
-The dashboard is a separate process from the orchestrator. To (re)start it on
-port 8787:
+The dashboard is a separate process from the orchestrator. On the fleet
+machine it is the systemd user unit `arc-dashboard.service`
+(`deploy/arc-dashboard.service`), and **the unit is the only thing that
+should ever own port 8787**: it carries the token
+(`EnvironmentFile=~/.config/arc-dashboard.env`), the shared db/log paths and
+the restart policy. To (re)start it:
 
 ```bash
-cd /home/proxyie/arc-orchestrator && ./stop.sh && ./start.sh
+cd /home/proxyie/arc-orchestrator && ./restart.sh     # or ./stop.sh && ./start.sh
 ```
 
-- `start.sh` reads `ARC_DASHBOARD_PORT` from `.env` and defaults to `8787`; it
-  uses `nohup .venv/bin/python main.py serve --port "$PORT" >> logs/server.log`
-  and prints the exact LAN/Tailscale URLs to open.
-- `stop.sh` is `pkill -f "main\.py serve"` (it will NOT kill a `main.py run`
-  orchestrator process — only the `serve` one).
-- Always use the project venv when invoking Python directly, e.g.
-  `cd /home/proxyie/arc-orchestrator && .venv/bin/python main.py serve`.
-  The **system `python3` lacks the dependencies** (`openai`, `python-dotenv`)
-  used by this repo, so do not use it for anything here.
+- `start.sh` / `stop.sh` / `restart.sh` drive the unit whenever it is
+  installed (`systemctl --user start|stop|restart arc-dashboard.service`,
+  helpers in `deploy/dashboard-unit.sh`), and first stop any `main.py serve`
+  started outside it. Only without the unit (or with
+  `ARC_DASHBOARD_NO_UNIT=1`, or on a port other than 8787) do they fall back
+  to `nohup .venv/bin/python main.py serve >> logs/server.log`.
+  `ARC_DASHBOARD_UNIT` names a unit other than `arc-dashboard.service`.
+- **Why.** On 2026-09-24 a nohup copy (the old `restart.sh` fallback, reached
+  after a 401 because it looked for the token only in `.env`) held 8787 with
+  actions unlocked all day while the unit crash-looped 2700+ times on "port
+  already in use". After the next reboot the unit won, the token was back,
+  and the operator was asked for it "on restart".
+- `main.py serve` reads `ARC_DASHBOARD_TOKEN` from `ARC_DASHBOARD_ENV_FILE`
+  (default `~/.config/arc-dashboard.env`) itself when the variable is not in
+  its environment, so any launch path serves with the unit's token. If that
+  file exists but yields no token it **refuses to start** (exit 78) rather
+  than serve unlocked; `ARC_DASHBOARD_ALLOW_OPEN=1` overrides on purpose.
+- A busy port is retried for `ARC_DASHBOARD_BIND_WAIT` seconds (default 10),
+  then `serve` names the holder (pid, command, cwd, unit or not) and exits
+  **98**. Under the unit, `ARC_DASHBOARD_TAKEOVER=1` makes it terminate a
+  `main.py serve` of this user started outside the unit and take the port.
+  The unit restarts with exponential backoff (5 s up to 5 min), never the old
+  flat 15 s loop.
+- The in-page Restart button (`POST /api/restart`) re-execs the same process
+  with the same environment (`os.execve`), so the token survives it.
+- Always use the project venv when invoking Python directly. The **system
+  `python3` lacks the dependencies** (`openai`, `python-dotenv`).
 - **NEVER touch ports `4096`** (the opencode web server) **or `7681`**
   (ttyd). Those are for other agents; the dashboard owns port 8787.
 
-Manual equivalent of `start.sh`:
-
-```bash
-cd /home/proxyie/arc-orchestrator
-nohup .venv/bin/python main.py serve --port 8787 >> logs/server.log 2>&1 &
-```
+**The token in the browser.** The header's `actions:` pill (`#auth-lock`,
+both pages) says `locked`, `unlocked` or `no token`; click it to enter the
+token or submit an empty answer to forget it. A saved token the server
+refuses is reported as stale and asked for once. The browser keeps the token
+per ADDRESS: `localhost`, the LAN IP, the Tailscale IP and WSL's internal
+172.x address (new on every reboot) are separate stores — open the same
+address each time, or use a link ending in `#token=<value>`, which stores it
+and strips it from the URL (a fragment never reaches the server).
 
 The pages read `orchestrator.db`, `logs/events.jsonl` and the harness
 transcripts under `logs/harness/` — but the dashboard is **not read-only**:
 its buttons write task files, start and stop fleet runs, archive projects
-and open promotion PRs. It has no login. Set `ARC_DASHBOARD_TOKEN` (and, to
-limit who can reach the port at all, `ARC_DASHBOARD_BIND`) in `.env` — see
-the README section *Who can reach the dashboard*.
+and open promotion PRs. Set `ARC_DASHBOARD_TOKEN` (and, to limit who can
+reach the port at all, `ARC_DASHBOARD_BIND`) — see the README section *Who
+can reach the dashboard*.
 
 ### 1.1 Pre-flight checks (`main.py doctor`)
 

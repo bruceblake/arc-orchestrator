@@ -232,6 +232,49 @@ class CliFromAnyWorktree(Case):
         d = agentboard.digest_for(P, task="doors", role="implementer", model="m")
         self.assertIn("is door.open() async?", d)
 
+    @unittest.skipIf(os.geteuid() == 0, "root ignores directory permissions")
+    def test_a_sandbox_that_cannot_write_the_db_queues_the_post(self):
+        """Codex's workspace-write sandbox mounts everything outside the
+        worktree read-only. The CLI used to print an id and exit 0 with
+        nothing stored (measured with `codex sandbox`, 2026-09-25)."""
+        game_wt = self.root / "worktrees" / P / "locks"
+        game_wt.mkdir(parents=True)
+        (game_wt / ".git").write_text("gitdir: /elsewhere\n")   # a worktree
+        (game_wt / "scenes").mkdir()
+        ro = self.root / "ro"
+        ro.mkdir()
+        config.DB_PATH = str(ro / "board.db")
+        cmd = self._prompt_command("locks/implementer", "dm:doors/implementer",
+                                   "is door.open() async?")
+        ro.chmod(0o555)
+        try:
+            env = {k: v for k, v in os.environ.items() if k != "ARC_DB_PATH"}
+            env["ARC_EVENTS_LOG"] = str(self.root / "events.jsonl")
+            r = subprocess.run(cmd, shell=True, cwd=game_wt / "scenes", env=env,
+                               capture_output=True, text=True, timeout=120)
+        finally:
+            ro.chmod(0o755)
+        self.assertEqual(r.returncode, 0, r.stderr[-800:])
+        self.assertIn("queued", r.stderr)
+        self.assertFalse((ro / "board.db").exists())
+        spooled = (game_wt / ".arc" / "board.jsonl").read_text().splitlines()
+        self.assertEqual(len(spooled), 1, "queued at the worktree root, not the cwd")
+        self.assertEqual(json.loads(spooled[0])["id"], r.stdout.split()[0])
+        # The orchestrator's harvest lands it under the sender's own ID, and
+        # the recipient's next digest carries it.
+        self.assertEqual(agentboard.ingest_file(
+            P, game_wt, task="locks", role="implementer", model="m"), 1)
+        m = self.msgs(channel="dm:doors/implementer")
+        self.assertEqual([(x["author"], x["id"]) for x in m],
+                         [("locks/implementer", r.stdout.split()[0])])
+        d = agentboard.digest_for(P, task="doors", role="implementer", model="m")
+        self.assertIn("is door.open() async?", d)
+
+    def test_a_post_that_did_not_store_is_not_reported_as_stored(self):
+        self.assertFalse(agentboard.stored(P, "nope"))
+        mid = agentboard.post(P, author="doors/implementer", body="hi")
+        self.assertTrue(agentboard.stored(P, mid))
+
 
 class ClaimLines(Case):
     def test_a_claim_line_takes_a_real_lease(self):
