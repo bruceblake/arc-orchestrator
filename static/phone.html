@@ -38,6 +38,7 @@ h1 { font-size: 22px; margin: 0; letter-spacing: -0.02em; display: flex; align-i
 h1 .stale { display: none; color: var(--warn); font-size: 13px; font-weight: 600; }
 .pulse { display: inline-block; font-size: 13px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
 .pulse.live { color: var(--ok); border-color: var(--ok); }
+.pulse.wait { color: var(--warn); border-color: var(--warn); }
 .pulse.bad { color: var(--err); border-color: var(--err); }
 .sub { color: var(--dim); font-size: 13px; margin: 4px 0 12px; }
 .sec {
@@ -568,11 +569,12 @@ function harnessCard(h) {
   var key = "h:" + h.harness;
   var open = S.open.fleet === key;
   var fill = h.cap ? Math.min(100, Math.round((h.running / h.cap) * 100)) : 0;
+  var tone = fill >= 100 ? " hot" : (fill >= 75 ? " warn" : "");
   var head = '<button type="button" class="card-head tap" data-key="' + attr(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="c-title">' + esc(h.harness) + " harness</span>" +
     '<span class="c-sub">' + h.running + " running · " + h.waiting + " waiting · cap " + h.cap + "</span></span>" +
     '<span class="chev" aria-hidden="true">›</span></button>' +
-    '<div class="meter" aria-hidden="true"><i style="width:' + fill + '%"></i></div>';
+    '<div class="meter' + tone + '" aria-hidden="true"><i style="width:' + fill + '%"></i></div>';
   var body = "";
   if (open) {
     body = '<div class="card-body">' + kv("free slots", h.free) + "</div>";
@@ -619,8 +621,9 @@ function renderNow() {
   if (pulse) {
     var nAgents = ((S.agents && S.agents.agents) || []).length;
     var working = (t.running || 0) > 0 || nAgents > 0;
-    pulse.textContent = lines.length ? "Needs a look" : (working ? "Working" : "Idle");
-    pulse.className = "pulse" + (lines.length ? " bad" : (working ? " live" : ""));
+    var queued = (t.waiting || 0) > 0;
+    pulse.textContent = lines.length ? "Needs a look" : (working ? "Working" : (queued ? "Queued" : "Idle"));
+    pulse.className = "pulse" + (lines.length ? " bad" : (working ? " live" : (queued ? " wait" : "")));
   }
   // Not filtered by task: an inflight row with "task": null (kimi-code
   // sessions, dashboard.py:417) is a running agent, and dropping it made the

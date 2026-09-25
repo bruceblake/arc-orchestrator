@@ -89,7 +89,7 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 .tblwrap { overflow-x: auto; }
 .fold summary { cursor: pointer; color: var(--dim); font-size: 13px; }
 .fold[open] summary { margin-bottom: 8px; }
-.seat { display: grid; grid-template-columns: minmax(120px, 1.4fr) 72px 1fr auto; gap: 8px 12px; align-items: center;
+.seat { display: grid; grid-template-columns: minmax(140px, 1.6fr) auto minmax(88px, 1fr) auto; gap: 8px 12px; align-items: center;
   padding: 8px 0; border-bottom: 1px solid var(--border); }
 .seat .sn { font-weight: 600; }
 .seat .sm { color: var(--dim); font-size: 12px; }
@@ -404,7 +404,8 @@ function familyRowHtml(f) {
   const pct = f.limit ? Math.min(100, (Number(eff) || 0) / f.limit * 100) : 0;
   return '<tr class="' + (f.over_cap ? "over" : f.at_cap ? "atcap" : "") + '">'
     + '<td><span class="dot" style="background:' + c + '"></span><span class="f-name">' + esc(f.family) + '</span></td>'
-    + '<td><span class="fmeter" title="inflight versus cap"><i style="width:' + pct.toFixed(0) + '%;background:' + c + '"></i></span></td>'
+    + '<td><span class="fmeter" title="inflight versus cap"><i style="width:' + pct.toFixed(0) + '%'
+    + (f.over_cap || f.at_cap ? "" : ";background:" + c) + '"></i></span></td>'
     + '<td class="r f-cap">' + (f.limit != null ? esc(f.limit) : "—") + '</td>'
     + '<td class="r f-req">' + fmt(f.requests) + '</td>'
     + '<td class="r f-tok">' + fmt(f.tokens) + '</td>'
@@ -673,9 +674,10 @@ function renderSeats(data) {
     const u = num(s.utilization);
     const hot = u != null && u >= 90 ? " hot" : (u != null && u >= 70 ? " warn" : "");
     return '<div class="seat' + (s.plan_spent ? " spent" : "") + '"><div><div class="sn">' + esc(short(s.model)) + "</div>"
-      + '<div class="sm">' + esc(plan) + " · waits " + (num(s.cap_waits) == null ? "—" : num(s.cap_waits))
+      + '<div class="sm">cap ' + (num(s.cap) == null ? "—" : num(s.cap)) + " · " + esc(plan)
+      + " · waits " + (num(s.cap_waits) == null ? "—" : num(s.cap_waits))
       + " · idle " + hrs(s.idle_while_waiting_hours) + "h · err " + pct(num(s.error_rate) == null ? null : num(s.error_rate) * 100) + "</div></div>"
-      + "<div>" + hrs(s.busy_hours) + "h / " + (num(s.cap) == null ? "—" : num(s.cap)) + "</div>"
+      + "<div>" + hrs(s.busy_hours) + "h busy</div>"
       + '<div class="umeter' + hot + '" title="utilization"><i style="width:' + (u == null ? 0 : Math.min(100, u)) + '%"></i></div>'
       + "<div>" + pct(s.utilization) + "</div></div>";
   }).join("") : '<div class="empty">No seat history yet.</div>';
