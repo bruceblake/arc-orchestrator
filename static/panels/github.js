@@ -17,13 +17,14 @@ function renderGithub() {
     paint($("#gh-prs"), '<div class="empty">Add a remote and run <code>gh auth login</code> to turn on the pull-request flow.</div>');
     return;
   }
-  const open = (d.prs || []).filter(p => p.state === "OPEN");
+  const shown = (d.prs || []).filter(p => p.state === "OPEN");
+  const openCount = d.open_count != null ? d.open_count : shown.length;
   // Hide the promote button when there is nothing to promote into: offering
   // it implies a gate that a one-branch configuration does not have.
   const promo = $("#gh-promote");
   if (promo) promo.style.display = (d.base && d.base === d.prod) ? "none" : "";
   $("#gh-meta").innerHTML =
-    `(${open.length} open · ${esc(d.base)} → ${esc(d.prod)}` +
+    `(${openCount} open · ${esc(d.base)} → ${esc(d.prod)}` +
     `${d.unpromoted ? ` · ${d.unpromoted} commit${d.unpromoted === 1 ? "" : "s"} unpromoted` : " · in sync"})` +
     (d.stranded ? ` <span class="warn">· ${d.stranded} with no run</span>` : "");
   const repo = $("#gh-repo");

@@ -462,8 +462,9 @@ function renderActivity(d) {
 async function pollActivity() {
   try {
     const rev = await jgetRev("/api/activity?limit=" + ACTIVITY_LIMIT, "activity:" + ACTIVITY_LIMIT);
-    if (rev.unchanged) { markFail("activity", false); return; }
-    renderActivity(rev.data);
+    // A 304 still carries the cached body for this limit. Switching
+    // 100 → 50 must paint the 50-row page, not leave the 100-row DOM up.
+    if (rev.data) renderActivity(rev.data);
     markFail("activity", false);
   } catch (e) { markFail("activity", true); }
 }

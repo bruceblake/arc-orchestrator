@@ -18,7 +18,7 @@ The split that does help is a stable boundary:
 
 ## What is paged
 
-- `GET /api/github?limit=&offset=` slices `prs`. The panel starts at 10 and asks for 10 more.
+- `GET /api/github?limit=&offset=` slices `prs`. The panel starts at 10 and asks for 10 more. `open_count` is the full list, so the header does not shrink with the page.
 - `GET /api/activity?limit=&offset=` skips `offset` matching events, newest first.
 - `GET /api/projects?limit=&offset=` slices `projects`. The console does not send this: phase filters need the full list.
 - `GET /api/agents?limit=&offset=` slices `recent` only. Live `agents` stays complete so a running harness cannot fall off the page.

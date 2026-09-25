@@ -7,21 +7,25 @@
 // element so a ticker's textContent edits do not look like new data.
 
 const POLL_ETAG = {};
+const POLL_BODY = {};
 
 async function jgetRev(url, slot) {
   const headers = {};
   if (POLL_ETAG[slot]) headers["If-None-Match"] = POLL_ETAG[slot];
   const r = await fetch(url, {cache: "no-store", headers});
-  if (r.status === 304) return {unchanged: true, data: null};
+  if (r.status === 304) return {unchanged: true, data: POLL_BODY[slot] || null};
   if (!r.ok) throw new Error("HTTP " + r.status);
   const tag = r.headers.get("ETag");
+  const data = await r.json();
   if (tag) POLL_ETAG[slot] = tag;
   else delete POLL_ETAG[slot];
-  return {unchanged: false, data: await r.json()};
+  POLL_BODY[slot] = data;
+  return {unchanged: false, data};
 }
 
 function forgetEtag(slot) {
   delete POLL_ETAG[slot];
+  delete POLL_BODY[slot];
 }
 
 function every(fn, ms, delay) {

@@ -5258,11 +5258,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(obj, conditional=True)
             if u.path == "/api/github":
                 q = parse_qs(u.query)
-                obj = _github(Handler.store)
+                raw = _github(Handler.store)
+                # Count before the slice. The panel used to count every open
+                # PR and only render the first ten; paging must not shrink
+                # that header. Copy so the 60s cache is not mutated.
+                open_count = sum(1 for p in (raw.get("prs") or [])
+                                 if p.get("state") == "OPEN")
                 page = dashboard_services.page_requested(
                     q, default_limit=20, max_limit=50)
-                if page:
-                    obj = dashboard_services.page_apply(obj, "prs", *page)
+                obj = (dashboard_services.page_apply(raw, "prs", *page)
+                       if page else dict(raw))
+                obj["open_count"] = open_count
                 return self._json(obj, conditional=True)
             if u.path == "/api/health":
                 return self._json(_health(Handler.store))
