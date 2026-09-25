@@ -128,6 +128,14 @@ class TestSnapshot(PlaytestCase):
         self.assertTrue(next(b for b in playtest.builds("game")
                              if b["id"] == "task/foo")["snapshot"])
 
+    def test_a_reused_snapshot_refreshes_the_overlay(self):
+        snap = playtest.ensure_snapshot("game", "main", do_import=False)
+        stale = snap / "arc_playtest" / "overlay.gd"
+        stale.write_text("extends Node\n# stale\n")
+        playtest.ensure_snapshot("game", "main", do_import=False)
+        self.assertEqual(stale.read_text(), playtest.OVERLAY_SRC.read_text())
+        self.assertIn("PlaytestInspectionSun", stale.read_text())
+
     def test_snapshot_is_reused_and_a_half_made_one_is_rebuilt(self):
         snap = playtest.ensure_snapshot("game", "main", do_import=False)
         (snap / "keep.txt").write_text("x")
