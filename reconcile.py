@@ -65,10 +65,26 @@ def live_runs():
                 continue
             if argv[i + 1:i + 3] == ["code", "run"]:
                 rest = [a for a in argv[i + 3:] if not a.startswith("-")]
+                cwd = None
+                try:
+                    cwd = os.readlink(entry / "cwd")
+                except OSError:
+                    pass
                 runs.append({"pid": int(entry.name),
-                             "taskfile": rest[0] if rest else None})
+                             "taskfile": rest[0] if rest else None,
+                             "cwd": cwd})
             break
     return runs
+
+
+def _proc_cwd(pid):
+    """Process working directory, or None if it cannot be read."""
+    if not pid:
+        return None
+    try:
+        return os.readlink(f"/proc/{pid}/cwd")
+    except OSError:
+        return None
 
 
 def live_run_pids():
@@ -151,26 +167,45 @@ async def reconcile(store, *, repos=None, apply=True, force=False):
                 now_dead += 1
         report["leases"] = now_dead
 
-    # Only reset rows whose taskfile has no live run. `--force` exists to
-    # clean up around a WEDGED process; it must never flip 'running' rows
-    # that a healthy concurrent run still owns (two taskfiles in parallel is
-    # normal, and a blanket reset used to mark them all failed).
-    def _tf_key(path):
-        return str(Path(path).resolve()) if path else ""
+    live_resolved = set()
+    unresolved_tokens = set()
+    unresolved_basenames = set()
+    live_raw_tokens = set()
 
-    live_tf = set()
     for r in live_runs():
-        tf = r.get("taskfile")
-        if tf:
-            live_tf.add(_tf_key(tf))
-            live_tf.add(str(tf))
+        tf_arg = r.get("taskfile")
+        if not tf_arg:
+            continue
+        live_raw_tokens.add(tf_arg)
+        pid = r.get("pid")
+        cwd = r.get("cwd") or _proc_cwd(pid)
+        if cwd:
+            live_resolved.add(str((Path(cwd) / tf_arg).resolve()))
+        else:
+            # Cannot read /proc/<pid>/cwd: do not guess, do not reset or settle that pid's taskfile.
+            unresolved_tokens.add(tf_arg)
+            unresolved_basenames.add(Path(tf_arg).name)
+            if Path(tf_arg).is_absolute():
+                live_resolved.add(str(Path(tf_arg).resolve()))
+
+    def _is_live(row_tf):
+        if not row_tf:
+            return False
+        # A row is live when its stored taskfile resolves equal to that path
+        if str(Path(row_tf).resolve()) in live_resolved:
+            return True
+        if row_tf in live_raw_tokens or row_tf in unresolved_tokens:
+            return True
+        if Path(row_tf).name in unresolved_basenames:
+            return True
+        return False
 
     running = store.running_code_tasks()
     orphaned = []
     kept = []
     for r in running:
         tf = r.get("taskfile")
-        if _tf_key(tf) in live_tf or (tf and str(tf) in live_tf):
+        if _is_live(tf):
             kept.append(r)
         elif is_live and _taskfile_exists(tf):
             kept.append(r)
@@ -200,7 +235,7 @@ async def reconcile(store, *, repos=None, apply=True, force=False):
     for status in ("in_review", "conflict"):
         for row in store.code_tasks_with_status(status):
             tf = row.get("taskfile")
-            if _tf_key(tf) in live_tf or (tf and str(tf) in live_tf):
+            if _is_live(tf):
                 continue  # a live run owns this row's taskfile
             wt = row.get("worktree")
             repo = _find_repo(Path(wt).parent.name) if wt else None
@@ -272,9 +307,15 @@ def _find_repo(name):
 def format_report(rep):
     out = []
     if rep["skipped"]:
-        out.append(f"SKIPPED — {len(rep['live_runs'])} code-run process(es) still "
-                   f"alive: {rep['live_runs']}")
-        out.append("stop them first, or pass --force if you know they are wedged.")
+        actions_taken = bool(rep["leases"] or rep["rows"] or rep.get("merged_settled"))
+        if actions_taken:
+            out.append(f"SKIPPED (destructive sweep) — {len(rep['live_runs'])} code-run process(es) still "
+                       f"alive: {rep['live_runs']}")
+            out.append("safe bookkeeping completed (worktrees kept); pass --force to sweep worktrees.")
+        else:
+            out.append(f"SKIPPED — {len(rep['live_runs'])} code-run process(es) still "
+                       f"alive: {rep['live_runs']}")
+            out.append("stop them first, or pass --force if you know they are wedged.")
     out.append(f"driver leases reaped : {rep['leases']}")
     out.append(f"stale 'running' rows : {len(rep['rows'])}")
     for r in rep["rows"]:

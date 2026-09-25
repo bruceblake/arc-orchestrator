@@ -69,6 +69,28 @@ class AuditCli(unittest.TestCase):
         self.assertEqual([c.kwargs["with_health"] for c in run.call_args_list],
                          [False, True])
 
+    def test_fix_calls_reconcile_even_when_runs_are_alive(self):
+        import reconcile
+        mock_rep = {
+            "live_runs": [12345],
+            "rows": [],
+            "rows_kept": [],
+            "merged_settled": [],
+            "leases": 0,
+            "worktrees": [],
+            "kept": [],
+            "skipped": True,
+        }
+        with mock.patch("audit.run", return_value=_report()), \
+                mock.patch("reconcile.live_runs", return_value=[{"pid": 12345}]), \
+                mock.patch("reconcile.reconcile", mock.AsyncMock(return_value=mock_rep)) as mock_rec, \
+                redirect_stdout(io.StringIO()) as out:
+            rc = main.cmd_audit(_args(fix=True))
+        self.assertEqual(rc, 0)
+        self.assertTrue(mock_rec.called)
+        self.assertIn("SKIPPED", out.getvalue())
+        self.assertNotIn("--fix skipped: runs are in flight", out.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

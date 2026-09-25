@@ -743,11 +743,6 @@ def cmd_audit(args):
         import reconcile
         if st is None:
             print("--fix needs the database; skipping cleanup")
-        elif reconcile.live_runs():
-            # Reaping worktrees and leases out from under a LIVE run is how a
-            # cleanup becomes an outage. The audit still reports; it just does
-            # not touch anything while the fleet is working.
-            print("--fix skipped: runs are in flight")
         else:
             print(reconcile.format_report(
                 asyncio.run(reconcile.reconcile(st, apply=True))))

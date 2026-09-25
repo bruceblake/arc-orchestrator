@@ -1,6 +1,7 @@
 """Orphan reaping against a real temporary git repo."""
 import asyncio
 import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -373,6 +374,122 @@ class SafeReconcileWhileLive(RepoFixture):
         self.assertEqual(remaining[0]["pid"], alive_pid)
         self.assertEqual(remaining[0]["task"], "alive-task")
 
+    def test_live_run_with_deleted_tmp_taskfile_stays_running(self):
+        """A live run whose taskfile was deleted while the process is still
+        alive must not be reset. Process cwd is used to resolve relative argv
+        tokens. A non-live row with a missing taskfile is reset."""
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+
+        live_tf_path = str((Path(temp_dir) / "foo.json").resolve())
+        dead_tf_path = str((Path(temp_dir) / "other_dead.json").resolve())
+
+        # Neither file exists on disk
+        if Path(live_tf_path).exists():
+            Path(live_tf_path).unlink()
+        if Path(dead_tf_path).exists():
+            Path(dead_tf_path).unlink()
+
+        self.store.upsert_code_task(
+            live_tf_path, "t-live-deleted", "T", "gpt-oss-120b",
+            config.cross_family_reviewer("gpt-oss-120b"), "running")
+        self.store.upsert_code_task(
+            dead_tf_path, "t-dead-missing", "T", "gpt-oss-120b",
+            config.cross_family_reviewer("gpt-oss-120b"), "running")
+
+        orig_live = reconcile.live_runs
+        reconcile.live_runs = lambda: [
+            {"pid": 12345, "taskfile": "foo.json", "cwd": temp_dir}
+        ]
+        try:
+            rep = asyncio.run(reconcile.reconcile(self.store, force=False))
+        finally:
+            reconcile.live_runs = orig_live
+
+        self.assertEqual([r["id"] for r in rep["rows"]], ["t-dead-missing"])
+        self.assertEqual([r["id"] for r in rep["rows_kept"]], ["t-live-deleted"])
+        by_id = {r["id"]: r for r in self.store.code_tasks_all()}
+        self.assertEqual(by_id["t-dead-missing"]["status"], "failed")
+        self.assertEqual(by_id["t-dead-missing"]["error"], reconcile.INTERRUPTED_REASON)
+        self.assertEqual(by_id["t-live-deleted"]["status"], "running")
+
+    def test_unread_proc_cwd_does_not_reset_or_settle_taskfile(self):
+        """When /proc/<pid>/cwd cannot be read, reconcile must not guess:
+        rows matching that pid's taskfile token must not be reset or settled."""
+        temp_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+
+        missing_tf = str((Path(temp_dir) / "proc_live.json").resolve())
+        if Path(missing_tf).exists():
+            Path(missing_tf).unlink()
+
+        self.store.upsert_code_task(
+            missing_tf, "t-unread-cwd", "T", "gpt-oss-120b",
+            config.cross_family_reviewer("gpt-oss-120b"), "running")
+        self.store.upsert_code_task(
+            missing_tf, "t-unread-cf", "T", "gpt-oss-120b",
+            config.cross_family_reviewer("gpt-oss-120b"), "conflict",
+            branch="task/t-unread-cf",
+            worktree=str(self.wt_root / "proj" / "t-unread-cf"))
+
+        orig_live = reconcile.live_runs
+        # No cwd provided and _proc_cwd will return None for non-existent pid 99998
+        reconcile.live_runs = lambda: [
+            {"pid": 99998, "taskfile": "proc_live.json"}
+        ]
+        import gitstore as _gs
+        orig_pr = _gs.find_pr
+
+        async def fake_find_pr(repo, tid, state="open"):
+            return 999, "https://example/pr/999", "MERGED"
+
+        _gs.find_pr = fake_find_pr
+        try:
+            rep = asyncio.run(reconcile.reconcile(self.store, force=False))
+        finally:
+            reconcile.live_runs = orig_live
+            _gs.find_pr = orig_pr
+
+        self.assertEqual(rep["rows"], [])
+        self.assertIn("t-unread-cwd", [r["id"] for r in rep["rows_kept"]])
+        self.assertEqual(rep["merged_settled"], [])
+        by_id = {r["id"]: r for r in self.store.code_tasks_all()}
+        self.assertEqual(by_id["t-unread-cwd"]["status"], "running")
+        self.assertEqual(by_id["t-unread-cf"]["status"], "conflict")
+
+    def test_format_report_does_not_claim_nothing_happened_when_actions_taken(self):
+        """format_report must acknowledge safe bookkeeping when leases/rows
+        were settled while runs were alive, rather than claiming skipped."""
+        rep = {
+            "live_runs": [12345],
+            "rows": [{"id": "t1", "taskfile": "f.json", "model": "m"}],
+            "rows_kept": [],
+            "merged_settled": [{"id": "t2", "pr": 42}],
+            "leases": 1,
+            "worktrees": [],
+            "kept": [],
+            "skipped": True,
+        }
+        text = reconcile.format_report(rep)
+        self.assertIn("SKIPPED", text)
+        self.assertIn("safe bookkeeping completed", text)
+        self.assertNotIn("stop them first", text)
+
+        # But when truly nothing happened:
+        empty_rep = {
+            "live_runs": [12345],
+            "rows": [],
+            "rows_kept": [],
+            "merged_settled": [],
+            "leases": 0,
+            "worktrees": [],
+            "kept": [],
+            "skipped": True,
+        }
+        empty_text = reconcile.format_report(empty_rep)
+        self.assertIn("SKIPPED", empty_text)
+        self.assertIn("stop them first", empty_text)
+
 
 class LiveRunGuard(unittest.TestCase):
     def test_live_run_detection_ignores_unrelated_command_lines(self):
@@ -395,9 +512,19 @@ class LiveRunGuard(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as d:
                 store = Store(str(Path(d) / "t.db"))
-                rep = asyncio.run(reconcile.reconcile(store))
-            self.assertTrue(rep["skipped"])
-            self.assertIn("SKIPPED", reconcile.format_report(rep))
+                wt_root = Path(d) / "worktrees"
+                wt = wt_root / "proj" / "t1"
+                wt.mkdir(parents=True)
+                orig_root = config.WORKTREE_ROOT
+                config.WORKTREE_ROOT = str(wt_root)
+                try:
+                    rep = asyncio.run(reconcile.reconcile(store))
+                finally:
+                    config.WORKTREE_ROOT = orig_root
+                self.assertTrue(rep["skipped"])
+                self.assertEqual(rep["worktrees"], [])
+                self.assertTrue(wt.exists(), "worktree was deleted while run was alive")
+                self.assertIn("SKIPPED", reconcile.format_report(rep))
         finally:
             reconcile.live_run_pids = orig
 
