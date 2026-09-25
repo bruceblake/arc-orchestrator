@@ -124,7 +124,8 @@ def cli_status(timeout=45):
     if codex.exists():
         try:
             r = subprocess.run([str(codex), "login", "status"],
-                               capture_output=True, text=True, timeout=timeout)
+                               capture_output=True, text=True, timeout=timeout,
+                               env=config.child_env())
             output = ((r.stdout or "") + (r.stderr or "")).lower()
             ok = r.returncode == 0 and "logged in" in output and "not logged in" not in output
         except (OSError, subprocess.SubprocessError):

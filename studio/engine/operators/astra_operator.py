@@ -100,7 +100,7 @@ def doctor():
 def _blender_version():
     try:
         out = subprocess.run([blender_bin(), "--version"], capture_output=True,
-                             text=True, timeout=60)
+                             text=True, timeout=60, env=config.child_env())
         return (out.stdout or "").strip().splitlines()[0] if out.stdout else ""
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -127,7 +127,7 @@ def execute_blender_script(script, *, cwd=None, timeout=BLENDER_TIMEOUT,
     started = time.time()
     try:
         p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
-                           cwd=cwd or None)
+                           cwd=cwd or None, env=config.child_env())
         rc, out, err = p.returncode, p.stdout or "", p.stderr or ""
     except subprocess.TimeoutExpired:
         rc, out, err = 124, "", f"blender timed out after {timeout}s"
@@ -165,7 +165,7 @@ def verify_mesh_metrics(model_path, *, max_triangle_count=0, project=""):
             model_path, str(int(max_triangle_count or 0))]
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=BLENDER_TIMEOUT)
+                           timeout=BLENDER_TIMEOUT, env=config.child_env())
     except subprocess.TimeoutExpired:
         raise OperatorError(f"mesh probe timed out on {model_path}")
     except OSError as exc:
@@ -225,7 +225,7 @@ def render_preview(blend_file, out_path=None, *, camera="", resolution="1280x720
             str(out), camera or "-", resolution, engine]
     try:
         p = subprocess.run(argv, capture_output=True, text=True,
-                           timeout=BLENDER_TIMEOUT)
+                           timeout=BLENDER_TIMEOUT, env=config.child_env())
     except subprocess.TimeoutExpired:
         raise OperatorError(f"render timed out after {BLENDER_TIMEOUT}s")
     except OSError as exc:
@@ -262,7 +262,7 @@ def capture_screen(out_path=None):
             "otherwise start Xvfb and set ARC_STUDIO_DISPLAY.")
     out_path = Path(out_path or (Path(tempfile.gettempdir())
                                  / f"astra-screen-{int(time.time() * 1000)}.png"))
-    env = dict(os.environ, DISPLAY=disp)
+    env = config.child_env(DISPLAY=disp)
     if _tool("ffmpeg"):
         argv = ["ffmpeg", "-y", "-loglevel", "error", "-f", "x11grab",
                 "-i", disp, "-frames:v", "1", str(out_path)]
@@ -297,7 +297,7 @@ def _xdotool(args):
     try:
         p = subprocess.run(["xdotool"] + list(args), capture_output=True,
                            text=True, timeout=INPUT_TIMEOUT,
-                           env=dict(os.environ, DISPLAY=disp))
+                           env=config.child_env(DISPLAY=disp))
     except (OSError, subprocess.SubprocessError) as exc:
         raise OperatorError(f"xdotool failed: {exc}")
     if p.returncode != 0:

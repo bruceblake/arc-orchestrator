@@ -37,7 +37,7 @@ def _finding(sev, area, what, detail="", action=""):
 def _sh(*args, cwd=None, timeout=30):
     try:
         r = subprocess.run(args, cwd=str(cwd or config.ROOT), capture_output=True,
-                           text=True, timeout=timeout)
+                           text=True, timeout=timeout, env=config.child_env())
         return r.returncode, r.stdout, r.stderr
     except (OSError, subprocess.SubprocessError) as exc:
         return 1, "", str(exc)
@@ -817,7 +817,8 @@ def audit_gates(store=None, tasks_dir=None, repo=None):
             flag = "-qi" if "grep -qi" in cmd else "-q"
             passing = [f"{pat} in {path}" for pat, path in checked
                        if subprocess.run(["grep", flag, pat, str(root / path)],
-                                         capture_output=True).returncode == 0]
+                                         capture_output=True,
+                                         env=config.child_env()).returncode == 0]
             if len(passing) == len(checked):
                 out.append(_finding(
                     "warning", "gates",

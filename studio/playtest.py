@@ -137,7 +137,7 @@ def _locked(project):
 # --- builds ---------------------------------------------------------------------
 def _git(repo, *args, timeout=30):
     return subprocess.run(["git", "-C", str(repo), *args], capture_output=True,
-                          text=True, timeout=timeout)
+                          text=True, timeout=timeout, env=config.child_env())
 
 
 def _repo(project):
@@ -255,7 +255,8 @@ def ensure_snapshot(project, build_id, *, do_import=True):
                  # The snapshot must never be able to push back to the blessed clone.
                  ["git", "-C", str(tmp), "remote", "remove", "origin"])
         for argv in steps:
-            p = subprocess.run(argv, capture_output=True, text=True, timeout=300)
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=300,
+                               env=config.child_env())
             if p.returncode != 0:
                 raise Unavailable(f"could not snapshot {build_id}: "
                                   f"{(p.stderr or p.stdout).strip()[:500]}")
@@ -448,7 +449,7 @@ def _start_session(project, sid, build_id, b, exe, display, *, raise_errors):
         snap = ensure_snapshot(project, build_id)
         argv = [exe, "--path", str(snap), "--log-file", str(sess / "godot.log"), "--",
                 f"--arc-playtest-dir={sess}", f"--arc-build={b['sha']}"]
-        env = dict(os.environ, DISPLAY=display, XDG_DATA_HOME=str(sess / "userdata"))
+        env = config.child_env(DISPLAY=display, XDG_DATA_HOME=str(sess / "userdata"))
         try:
             with open(sess / "stdout.log", "wb") as log:
                 proc = subprocess.Popen(argv, cwd=str(snap), env=env, stdout=log,

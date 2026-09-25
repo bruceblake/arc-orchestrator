@@ -383,14 +383,15 @@ def changelog(repo, limit=40):
         ref = "main"
         if subprocess.run(["git", "-C", str(repo), "merge-base", "--is-ancestor",
                            "main", "origin/main"], capture_output=True,
-                          timeout=10).returncode == 0:
+                          timeout=10, env=config.child_env()).returncode == 0:
             ref = "origin/main"
         out = subprocess.run(
             ["git", "-C", str(repo), "log", ref, f"-n{limit}",
              "--date=iso-strict", "--format=%H%x1f%ad%x1f%s%x1f%b%x1e"],
-            capture_output=True, text=True, timeout=20).stdout
+            capture_output=True, text=True, timeout=20, env=config.child_env()).stdout
         remote = subprocess.run(["git", "-C", str(repo), "remote", "get-url", "origin"],
-                                capture_output=True, text=True, timeout=10).stdout.strip()
+                                capture_output=True, text=True, timeout=10,
+                                env=config.child_env()).stdout.strip()
     except (OSError, ValueError):
         return []
     web = ""

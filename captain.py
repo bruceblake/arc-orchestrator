@@ -620,7 +620,7 @@ def _spawn_detached(argv, log_name):
     log_dir = Path(config.ROOT) / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     lf = open(log_dir / log_name, "ab", buffering=0)
-    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    env = config.child_env(PYTHONUNBUFFERED="1")
     proc = subprocess.Popen(argv, cwd=str(config.ROOT), stdout=lf,
                             stderr=subprocess.STDOUT, start_new_session=True,
                             close_fds=True, env=env)

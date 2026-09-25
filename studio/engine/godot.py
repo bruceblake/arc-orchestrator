@@ -59,7 +59,7 @@ def version():
         return None
     try:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True,
-                             timeout=30)
+                             timeout=30, env=config.child_env())
     except (OSError, subprocess.SubprocessError):
         return None
     return (out.stdout or out.stderr).strip().splitlines()[0] if (
@@ -82,7 +82,7 @@ def _run(args, *, project, timeout, display=None, env=None):
             "godot is not installed or not on PATH. Install it "
             "(`sudo pacman -S godot`) or set ARC_GODOT_BIN.")
     argv = [exe, "--path", str(project)] + list(args)
-    e = dict(os.environ)
+    e = config.child_env()
     if env:
         e.update(env)
     if display:

@@ -340,7 +340,7 @@ def _gh_json(args, cwd):
     and it is read-only."""
     try:
         cp = subprocess.run(["gh", "api", *args], cwd=cwd, capture_output=True,
-                            text=True, timeout=config.GH_TIMEOUT)
+                            text=True, timeout=config.GH_TIMEOUT, env=config.child_env())
     except (OSError, subprocess.SubprocessError):
         return None
     if cp.returncode != 0:
