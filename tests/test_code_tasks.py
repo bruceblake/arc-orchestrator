@@ -7,6 +7,7 @@ import os
 import subprocess
 import json
 import pathlib
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -745,15 +746,22 @@ class GateFeedbackNamesTheFailures(unittest.TestCase):
         # not-ok) must not get a "failing checks" header — the names block is
         # feedback, and pass-path output is only observability.
         src = pathlib.Path(code_tasks.__file__).read_text()
-        self.assertIn("if names and not passed:", src)
+        self.assertIn("names if not passed else None", src)
 
     def test_gate_feedback_lists_names_before_the_tail(self):
-        # Wiring, pinned by source slice like the other ownership tests.
+        # Wiring, pinned by source slice like the other ownership tests. The
+        # names block now lives in gate_feedback() (with the failing sections
+        # and the log path), so the slice covers that function plus its call.
         src = pathlib.Path(code_tasks.__file__).read_text()
         body = src[src.index("async def gate(ctx):"):]
         body = body[:body.index("async def review(ctx):")]
         self.assertIn("_gate_failures(full)", body)
-        self.assertIn('"failing checks:\\n"', body)
+        self.assertIn("gate_feedback(full, log_path", body)
+        fn = src[src.index("def gate_feedback("):]
+        fn = fn[:fn.index("\ndef save_review_log(")]
+        self.assertIn('"failing checks:\\n"', fn)
+        # Sections before the tail: the order is the point of the function.
+        self.assertLess(fn.index("failing sections:"), fn.index("gate output (tail):"))
 
     def test_the_full_fail_list_survives_the_log_tail_cut(self):
         """Measured 2026-09-15: a gate kept 1 of 15 failing test names.
@@ -796,6 +804,271 @@ class GateFeedbackNamesTheFailures(unittest.TestCase):
         gate_ev = ev.of("task.gate")[-1]
         self.assertIn(code_tasks._GATE_FULL_LIST_HEADER, gate_ev["tail"])
         self.assertIn("FAIL: test_beta_fails", gate_ev["tail"])
+
+
+class TheGateLogIsKeptWholeAndCapped(unittest.TestCase):
+    """Rule 4: the gate's FULL output lands on disk, bounded by a byte cap.
+
+    The file used to hold `full` and nothing capped it; the feedback handed to
+    the implementer was `full[-2000:]`, which on a long test run is the
+    unittest summary and the shell's echo — the failure itself is above the
+    cut. These tests pin the three things a fix round depends on: the file
+    exists, it cannot grow without bound, and what the implementer reads is
+    the failing SECTIONS rather than only the tail.
+    """
+
+    def _run_gate(self, output_text, verify_cmd=None):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="arc-gate-log-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "gate-output.txt").write_text(output_text)
+        cmd = verify_cmd or f"cat {tmp / 'gate-output.txt'}; exit 1"
+        task = dict(BASIC, verify_cmd=cmd)
+        ts = code_tasks.load_taskfile(taskfile([task]))
+        with capture_events():
+            g = code_tasks.build_code_graph(FakeStore(), ts, taskfile="tf.json")
+        ctx = {"results": {"alloc_t1": {"worktree": str(tmp)},
+                           "implement_t1": {"harness": "x"}}, "runs": {}}
+        with mock.patch.object(config, "ROOT", str(tmp)):
+            with capture_events() as ev:
+                res = asyncio.run(g.nodes["gate_t1"].fn(ctx))
+        return tmp, res, ev
+
+    def test_the_log_is_written_and_capped_at_the_configured_size(self):
+        """A runaway gate cannot fill the disk, and says what it dropped."""
+        # A distinctive head, then ~400 KB of filler, then a distinctive
+        # tail. Head and tail are BOTH retained on purpose, so the marker for
+        # what was dropped belongs at the cut, not near the start.
+        head = "FIRST LINE OF THE RUN\n"
+        tail = "FAILED (failures=1)\n"
+        body = head + "pad\n" * 100_000 + tail
+        self.assertGreater(len(body), 50_000)
+        with mock.patch.object(config, "GATE_LOG_MAX_BYTES", 20_000):
+            _, res, _ = self._run_gate(body)
+        log = pathlib.Path(res["log_path"])
+        self.assertTrue(log.is_file(), "the gate log must be written")
+        raw = log.read_bytes()
+        # The cap is on the FILE, marker included — 20 KB, not 20 KB + marker.
+        self.assertLessEqual(len(raw), 20_000)
+        text = raw.decode("utf-8", errors="replace")
+        self.assertIn("bytes omitted", text)
+        # Head AND tail survive: the first error is at the top, the summary at
+        # the end, and a human opens this file to find either.
+        self.assertIn(head.strip(), text)
+        self.assertIn(tail.strip(), text)
+        # What the cap bought: a fraction of the gate's own output.
+        self.assertLess(len(raw), len(body.encode("utf-8")) // 10)
+
+    def test_cap_log_keeps_head_and_tail_and_drops_only_the_middle(self):
+        """The dropped span is the middle, named by its byte count."""
+        text = "HEAD" + "M" * 5000 + "TAIL"
+        out = code_tasks.cap_log(text, 400)
+        self.assertLessEqual(len(out.encode("utf-8")), 400)
+        self.assertTrue(out.startswith("HEAD"), out[:20])
+        self.assertTrue(out.endswith("TAIL"), out[-20:])
+        self.assertIn("bytes omitted", out)
+        # The 5000-char run of M is broken in the middle: head and tail each
+        # keep a stub, and NO unbroken run survives the drop. Counting "MMMM"
+        # outright would fail — both stubs are M runs — so the run LENGTH is
+        # what has to be bounded.
+        self.assertLess(out.count("M"), 5000)
+        self.assertLess(max(len(r) for r in re.findall(r"M+", out)), 250)
+
+    def test_the_uncapped_log_is_byte_identical_to_the_gate_output(self):
+        """Under the cap nothing is altered: no marker, no reordering."""
+        body = "alpha\nbeta\nFAILED (failures=1)\n"
+        _, res, _ = self._run_gate(body)
+        self.assertEqual(pathlib.Path(res["log_path"]).read_text(), body)
+
+    def test_the_implementer_gets_the_failing_block_not_just_the_tail(self):
+        """The traceback under FAIL: is what a fix round needs, and it sat
+        above the 2000-char cut."""
+        block = ("FAIL: test_alpha (tests.test_x.X)\n"
+                 + "-" * 70 + "\n"
+                 "Traceback (most recent call last):\n"
+                 '  File "/w/tests/test_x.py", line 12, in test_alpha\n'
+                 "    self.assertEqual(1, 2)\n"
+                 "AssertionError: 1 != 2\n\n")
+        _, res, _ = self._run_gate(block + "pad line\n" * 1000
+                                   + "FAILED (failures=1)\n")
+        out = res["output"]
+        self.assertFalse(res["passed"])
+        # The assertion — the WHY — is in the feedback, ahead of the tail.
+        self.assertIn("AssertionError: 1 != 2", out)
+        self.assertIn("FAIL: test_alpha", out)
+        self.assertLess(out.index("AssertionError: 1 != 2"),
+                        out.index("gate output (tail)"))
+        # The blind tail reaches none of it: that is the bug this fixed.
+        self.assertNotIn("AssertionError",
+                         (block + "pad line\n" * 1000 + "FAILED (failures=1)\n")[-2000:])
+        # Bounded like the window it replaced.
+        self.assertLessEqual(len(out.encode("utf-8")), 6000)
+        # And the implementer is told where the rest is.
+        self.assertIn(res["log_path"], out)
+
+    def _full_head(self):
+        """A gate log whose failing sections and names both hit their caps.
+
+        Three 1500-byte sections are the worst case for the head, and a 40-name
+        list is the worst case for the names block — together they exceed the
+        whole budget, which is exactly what the rejected version mishandled.
+        """
+        def sec(i):
+            return ((f"FAIL: test_s{i} (t.T)\n")
+                    + "".join("  " + "y" * 198 + "\n" for _ in range(8)))
+        out = ("\n".join(sec(i) for i in (1, 2, 3))
+               + "\npad line\n" * 500 + "FAILED (failures=3)\n")
+        names = [f"test_a_very_long_failing_check_name_{i:03d}" for i in range(40)]
+        return out, names
+
+    def test_the_log_path_survives_a_head_that_fills_the_budget(self):
+        """The rejected version evicted the path FIRST — it was appended after
+        the tail and the block was sliced from the front, so three capped
+        sections produced 6000 bytes with no path at all. The path is the one
+        line a reader cannot reconstruct, so it is reserved before the rest."""
+        out, names = self._full_head()
+        path = "/logs/gates/proj/t1/x1.log"
+        self.assertEqual(len(code_tasks._failing_sections(out)), 3)
+        fb = code_tasks.gate_feedback(out, path, names=names)
+        self.assertIn(path, fb)
+
+    def test_feedback_never_exceeds_its_budget(self):
+        """Reserving the path must not push the block over the bound: the
+        rejected version returned 6221 bytes with NEITHER path nor tail.
+        Measured in bytes, like the log cap, since the budget is a prompt
+        budget and the output is multi-byte."""
+        out, names = self._full_head()
+        path = "/logs/gates/proj/t1/x1.log"
+        for label, fb in [
+            ("sections+names", code_tasks.gate_feedback(out, path, names=names)),
+            ("sections only", code_tasks.gate_feedback(out, path)),
+            ("names only", code_tasks.gate_feedback("plain\n" * 3000, path,
+                                                    names=names)),
+            ("everything huge", code_tasks.gate_feedback(out + "z" * 100_000,
+                                                         path, names=names)),
+        ]:
+            with self.subTest(label):
+                self.assertLessEqual(len(fb.encode("utf-8")), 6000)
+                self.assertIn(path, fb)
+                self.assertIn("gate output (tail)", fb)
+
+    def test_a_clipped_head_keeps_whole_names(self):
+        """A cut mid-line would leave half a test name, which reads as a real
+        one — the one thing the names block exists to prevent."""
+        out, names = self._full_head()
+        fb = code_tasks.gate_feedback(out, "/logs/x.log", names=names)
+        for line in fb.splitlines():
+            if line.startswith("  test_a_very_long"):
+                self.assertIn(line.strip(), names)
+
+    def test_a_godot_fail_line_is_extracted(self):
+        """Godot's own gate output: SCRIPT ERROR plus its stack, and FAIL:."""
+        godot = ("Godot Engine v4.4\n"
+                 "SCRIPT ERROR: Invalid call. Nonexistent function 'foo'.\n"
+                 "          at: push_error (core/variant/variant_utility.cpp:1090)\n"
+                 "FAIL: [SceneTree] res://test_scene.gd:12 - expected 3 got 4\n"
+                 + "pad line\n" * 1000 + "exit 1\n")
+        _, res, _ = self._run_gate(godot)
+        out = res["output"]
+        self.assertFalse(res["passed"])
+        self.assertIn("SCRIPT ERROR", out)
+        self.assertIn("test_scene.gd:12", out)
+        # The stack frame belongs to the error it explains.
+        self.assertIn("push_error", out)
+
+    def test_a_passing_gate_is_still_just_the_tail(self):
+        """On a pass the output is observability, not feedback: no failing
+        sections header over green output (a caught exception printed by an
+        expected-error test would make it a lie)."""
+        _, res, _ = self._run_gate("a caught AssertionError: fine\ndone\n",
+                                   verify_cmd="true")
+        self.assertTrue(res["passed"])
+        self.assertNotIn("failing sections:", res["output"])
+
+    def test_cap_log_is_utf8_safe_and_counts_bytes(self):
+        """The cap is a DISK budget: a multi-byte char is 3 bytes, and a cut
+        must never land mid-codepoint."""
+        text = "中" * 1000
+        out = code_tasks.cap_log(text, 300)
+        self.assertLessEqual(len(out.encode("utf-8")), 300)
+        out.encode("utf-8")            # a mid-codepoint cut would raise here
+        self.assertIn("bytes omitted", out)
+
+    def test_the_gate_event_names_the_log(self):
+        """Rule 7: an operator reads the event to find the log."""
+        _, res, ev = self._run_gate("FAILED (failures=1)\n")
+        gate_ev = [e for e in ev.of("task.gate") if e.get("passed") is False][-1]
+        self.assertEqual(gate_ev["log"], res["log_path"])
+        self.assertTrue(gate_ev["log"])
+
+    def test_the_log_sits_under_the_project_and_task(self):
+        """The layout Rule 4 specifies: logs/gates/<project>/<task>/x<n>.log.
+
+        Asserted by SHAPE, not by the sandbox's temp path: the gate log and
+        the raw reviewer output share this directory so one task's whole
+        evidence trail is one folder.
+        """
+        p = pathlib.Path(code_tasks.gate_log_path("my-proj", "my-task", 3))
+        self.assertEqual(p.parts[-5:],
+                         ("logs", "gates", "my-proj", "my-task", "x3.log"))
+
+    def test_a_slash_in_an_id_cannot_escape_the_log_directory(self):
+        """Task ids come from a taskfile: `..` must not climb out."""
+        p = pathlib.Path(code_tasks.gate_log_path("../../etc", "..", 1))
+        self.assertNotIn("..", p.parts)
+        self.assertEqual(p.parts[-2], "x")
+
+
+class TheRawReviewerOutputIsKept(unittest.TestCase):
+    """A reviewer that never emitted a verdict used to leave no evidence.
+
+    The review is retried (correctly — a crash is not a rejection), but the
+    retry had nothing to go on: whatever the reviewer wrote INSTEAD of the
+    verdict JSON was discarded with the session.
+    """
+
+    def _write(self):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="arc-review-log-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.object(config, "ROOT", str(tmp)):
+            path = code_tasks.save_review_log(
+                "arc-orchestrator", "t1", 3, "GLM-5.3",
+                "I have a question before I can judge this diff: ...")
+        return tmp, path
+
+    def test_the_raw_output_is_written_under_the_project_and_task(self):
+        tmp, path = self._write()
+        self.assertIsNotNone(path)
+        rel = pathlib.Path(path).relative_to(tmp)
+        self.assertEqual(rel.as_posix(),
+                         "logs/gates/arc-orchestrator/t1/review-x3.txt")
+        body = pathlib.Path(path).read_text()
+        self.assertIn("GLM-5.3", body)
+        self.assertIn("I have a question", body)
+
+    def test_an_id_cannot_escape_the_log_directory(self):
+        """The id reaches a path: it is slugged, never joined raw."""
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="arc-review-log-"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with mock.patch.object(config, "ROOT", str(tmp)):
+            path = code_tasks.save_review_log("../../etc", "..", 1, "m", "x")
+        self.assertTrue(pathlib.Path(path).resolve().is_relative_to(tmp.resolve()))
+
+    def test_a_write_failure_never_raises(self):
+        """Instrumentation must not turn a handled crash into an unhandled
+        one — the review is retried either way."""
+        with mock.patch.object(config, "ROOT", "/proc/nonexistent/nowhere"):
+            self.assertIsNone(
+                code_tasks.save_review_log("p", "t", 1, "m", "text"))
+
+    def test_the_reviewer_paths_save_their_raw_output(self):
+        """Wiring, pinned by source slice: BOTH no-verdict paths (pre-merge
+        and PR) keep the file, and neither returns without naming it."""
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        self.assertGreaterEqual(src.count("save_review_log("), 4)  # def + 3 uses
+        self.assertIn('fingerprint="reviewer.no_verdict"', src)
+        body = src[src.index("async def review(ctx):"):]
+        body = body[:body.index("async def publish(ctx):")]
+        self.assertIn("save_review_log", body)
 
 
 class AFixRoundContinuesTheHarnessSession(unittest.TestCase):

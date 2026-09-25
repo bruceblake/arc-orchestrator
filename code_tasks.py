@@ -821,9 +821,10 @@ _GATE_FAILURE = re.compile(
 def _gate_failures(output, limit=12):
     """The gate-output lines that NAME what failed, first occurrence order.
 
-    The fix loop hands the implementer the last 2000 characters of gate
-    output — on a check.sh run that is the unittest summary and the shell's
-    own echo, which say THAT something failed, not WHAT. empty-diff-publish
+    The fix loop's feedback window is small, and on a check.sh run that
+    window used to be the unittest summary and the shell's own echo, which
+    say THAT something failed, not WHAT (code_tasks.gate_feedback now
+    extracts the failing sections ahead of that tail). empty-diff-publish
     failed its worktree gate on exactly one of 1046 tests, the failing line
     ("FAIL: test_every_edge_condition_reads_as_english ...") sat a hundred
     lines above the cut, and the implementer was told only "unit tests
@@ -858,12 +859,13 @@ _GATE_FULL_LIST_HEADER = "--- failing checks (full list) ---"
 def _gate_fail_lines(output, limit=40):
     """EVERY `FAIL:`/`ERROR:` line in the output, not just the ones near the cut.
 
-    Rule 4 keeps only the last 2000 characters of gate output, and a check.sh
+    Rule 4's feedback window is small, and a check.sh
     run puts the unittest summary and the shell's echo under that cut: on
     2026-09-15 a gate kept 1 of 15 failing test names, and three worktrees
     spent a fix round hunting for the other fourteen. _gate_failures() covers
     more formats but stops at 12 names; this is the narrower, longer list that
-    goes beside the tail in the log file (`logs/gates/<tid>-x<attempt>.log`)
+    goes beside the tail in the log file
+    (`logs/gates/<project>/<task>/x<attempt>.log`, code_tasks.gate_log_path)
     and in the `task.gate` event, so the names survive outside the cut.
     """
     hits, seen = [], set()
@@ -883,6 +885,259 @@ def _gate_full_list_block(lines):
     if not lines:
         return ""
     return _GATE_FULL_LIST_HEADER + "\n" + "\n".join(lines)
+
+
+_TRUNCATION_MARKER = "\n\n... [%d bytes omitted] ...\n\n"
+
+
+def cap_log(text, max_bytes=None):
+    """Head + tail of `text`, with the dropped middle named in BYTES.
+
+    Rule 4 keeps the gate's full output on disk, and an unbounded file is how
+    a runaway test run fills the disk. Bytes, not characters: the cap is a
+    disk budget, and a harness transcript is full of multi-byte text (a
+    len(str)-based cap would let a 5 MB file be several times that).
+
+    Head AND tail, deliberately: for a test run the failure is usually in the
+    middle (the traceback) but the SUMMARY is at the end, and for a build the
+    first error is at the top. Cutting either end loses something a human
+    opens the log to find. Decoding is errors="replace" so a cut cannot land
+    mid-codepoint and make the file unreadable.
+    """
+    limit = config.GATE_LOG_MAX_BYTES if max_bytes is None else int(max_bytes)
+    raw = text.encode("utf-8", errors="replace")
+    if limit <= 0 or len(raw) <= limit:
+        return text
+    marker = _TRUNCATION_MARKER % (len(raw) - limit)
+    mlen = len(marker.encode("utf-8"))
+    # The marker is part of the budget: `limit` is the cap on the FILE, which
+    # has already been overrun by omitting anything at all.
+    room = max(limit - mlen, 0)
+    head, tail = room // 2, room - room // 2
+    # Move both cuts off any UTF-8 continuation byte. `errors="replace"` turns
+    # a split codepoint into a 3-byte U+FFFD — the file then comes out OVER
+    # the cap it was capped to (measured: 305 bytes for a 300-byte cap), which
+    # defeats the one guarantee this function makes. `raw` is valid UTF-8 by
+    # construction (it was encoded with the same handler), so aligning the two
+    # cuts is enough.
+    head_end, tail_start = head, len(raw) - tail
+    while head_end and raw[head_end] & 0xC0 == 0x80:
+        head_end -= 1
+    while tail_start < len(raw) and raw[tail_start] & 0xC0 == 0x80:
+        tail_start += 1
+    return (raw[:head_end].decode("utf-8", errors="replace") + marker
+            + raw[tail_start:].decode("utf-8", errors="replace"))
+
+
+# The failing BLOCKS, not just their first lines. `_gate_failures` gives the
+# implementer the NAMES of what failed; that is enough to know where to look
+# and not enough to know what broke. The lines under a `FAIL:` header are the
+# test's own traceback, and under untittest that is the entire answer.
+_SECTION_START = re.compile(
+    r"^(FAIL|ERROR): "                      # unittest and Godot both use this
+    r"|^_{2,}\s*\S.*_{2,}$"                 # pytest FAILURES-section separator
+    r"|^SCRIPT ERROR"                       # Godot: a script blew up
+    r"|^Traceback \(most recent call last\)")
+# Where a block ends: the run's SUMMARY, not its fences. `----` fences open
+# unittest's failure sections (right under the `FAIL:` header) as well as
+# closing them, so treating a fence as an end kept only the header line and
+# threw the traceback away — the exact loss this function exists to prevent.
+_SECTION_END = re.compile(r"^Ran \d+ tests?\b|^OK$|^FAILED\b")
+# What may START the next block. `Traceback` is deliberately NOT here: inside
+# a unittest `FAIL:` block it is the block's OWN traceback, so breaking on it
+# truncated every block to its header line.
+_SECTION_BREAK = re.compile(
+    r"^(FAIL|ERROR): |^_{2,}\s*\S.*_{2,}$|^SCRIPT ERROR")
+# What CONTINUES a block on an unindented line. `Traceback (most recent call
+# last)` is here and NOT in _SECTION_BREAK: inside a unittest `FAIL:` block it
+# is that block's own traceback, and treating it as the next block's start
+# split every failure in two (header+fence, then a headerless traceback) and
+# burned one of the three section slots on the fragment.
+_SECTION_CONT = re.compile(
+    r"^Traceback \(most recent call last\)"
+    r"|^\w*(Error|Exception|Warning)\b"
+    r"|^E\s+\w*(Error|Exception)\b"
+    r"|^\s*at: "                            # Godot stack frame
+    r"|^(res://|godot|Godot)"               # Godot echo / version banner
+    r"|^-{10,}$|^=+$")                      # unittest section fences
+
+
+def _failing_sections(output, limit=3, block_bytes=1500):
+    """The FAILING sections of a gate log, each headed by its own failure line.
+
+    The tail (and even the names list) tells the implementer WHAT failed; the
+    traceback under the name tells it WHY. On a check.sh run the tracebacks
+    sit exactly where the 2000-char cut throws them away — the summary and the
+    shell's echo are what survive — so the fix round starts by re-running the
+    test to see the error the gate already had in hand.
+
+    Covers unittest (`FAIL:`/`ERROR:` then its own traceback), pytest
+    (`____ test_x ____` separators) and Godot (`FAIL:`/`SCRIPT ERROR`, whose
+    stack and echo lines the block keeps), all bounded by the run's summary.
+
+    Bounded on both axes (few sections, bounded bytes each): this goes into a
+    PROMPT, so an extractor that can emit the whole log is no better than the
+    tail it replaced.
+    """
+    lines = output.splitlines()
+    out, i = [], 0
+    while i < len(lines) and len(out) < limit:
+        if not _SECTION_START.match(lines[i].strip()):
+            i += 1
+            continue
+        start = i
+        i += 1
+        # Inside a unittest traceback every line is indented or blank, and the
+        # block ends at the first unindented line that is neither the next
+        # failure's header nor a Godot stack/echo line. Capped so one runaway
+        # traceback cannot consume the whole prompt budget.
+        while i < len(lines) and i - start < 80:
+            probe = lines[i].strip()
+            if _SECTION_END.match(probe):
+                break
+            if probe and not lines[i][:1].isspace():
+                if _SECTION_BREAK.match(probe):
+                    break
+                # An unindented line belongs to this block only when it is one
+                # of the block's own continuation shapes.
+                if not _SECTION_CONT.match(probe):
+                    break
+            i += 1
+        block = "\n".join(lines[start:i]).strip()
+        out.append(block.encode("utf-8")[:block_bytes].decode("utf-8", "replace"))
+    return out
+
+
+_FEEDBACK_SEP = "\n\n"
+_FEEDBACK_SEP_B = len(_FEEDBACK_SEP.encode("utf-8"))
+# The tail's guaranteed share. The tail is what makes the block elastic, but
+# "elastic" must not mean "evicted": a feedback block that explains the
+# failures and then shows NO output is worse than a slightly shorter one.
+_TAIL_FLOOR = 600
+
+
+def _clip_bytes(text, limit, from_end=False):
+    """`text` cut to at most `limit` BYTES, never mid-codepoint.
+
+    Byte-exact, like `cap_log` and for the same reason: the budget is a prompt
+    budget, and a cut that lands inside a multi-byte character decodes to a
+    3-byte U+FFFD and puts the result over the limit it was cut to.
+    """
+    raw = text.encode("utf-8")
+    if limit <= 0:
+        return ""
+    if len(raw) <= limit:
+        return text
+    if from_end:
+        start = len(raw) - limit
+        while start < len(raw) and raw[start] & 0xC0 == 0x80:
+            start += 1
+        return raw[start:].decode("utf-8", "replace")
+    end = limit
+    while end and raw[end] & 0xC0 == 0x80:
+        end -= 1
+    return raw[:end].decode("utf-8", "replace")
+
+
+def gate_feedback(output, log_path=None, names=None, budget=6000):
+    """What the implementer is handed after a failed gate: the failing SECTIONS,
+    then the tail, and the path to the full log.
+
+    Replaces the blind `output[-2000:]` that Rule 4 used to specify. Every
+    part is bounded, so the whole thing fits a prompt the way the 2000-char
+    window did.
+
+    The allocation order is the whole point, and it is: **path, sections,
+    tail** — the reverse of how this was first written. The path was appended
+    LAST and the assembled block was sliced from the FRONT, so it was the
+    first thing evicted: with three sections at their cap the block came out
+    at 6000 bytes with no path, and a long name list at 6221 with neither
+    path nor tail — over its own budget as well as missing the one line a
+    reader cannot reconstruct. So the path is reserved first, the head is
+    clipped to what is left after the tail's floor, and only the tail absorbs
+    the remainder.
+    """
+    budget = int(budget)
+    path_part = f"full log: {log_path}" if log_path else ""
+
+    sections = _failing_sections(output)
+    head = []
+    if sections:
+        head.append("failing sections:\n" + "\n\n".join(sections))
+    if names:
+        head.append("failing checks:\n" + "\n".join(f"  {n}" for n in names))
+    raw_head = _FEEDBACK_SEP.join(head)
+
+    tail = output[-2000:].strip()
+    tail_header = "gate output (tail):\n"
+
+    # Set aside the path and the tail's floor, then clip the HEAD to what is
+    # left. An unbounded head is what pushed the block over budget; the
+    # sections lead the head, so a clip takes the names first.
+    reserve = len(path_part.encode("utf-8")) + _FEEDBACK_SEP_B if path_part else 0
+    floor = len(tail_header.encode("utf-8")) + _TAIL_FLOOR if tail else 0
+    head_text = _clip_bytes(raw_head, max(budget - reserve - floor - _FEEDBACK_SEP_B, 0))
+    if head_text != raw_head and "\n" in head_text:
+        # A clipped head must not end mid-line: half a test name reads as a
+        # real one, and the name list is the only line-shaped part here.
+        head_text = head_text.rsplit("\n", 1)[0]
+
+    parts = (1 if head_text else 0) + (1 if tail else 0) + (1 if path_part else 0)
+    fixed = (len(head_text.encode("utf-8")) + len(path_part.encode("utf-8"))
+             + _FEEDBACK_SEP_B * max(parts - 1, 0))
+    room = max(budget - fixed, 0)
+    # The tail keeps its END — the run's summary is the newest line, and the
+    # header is dropped only when it cannot fit at all.
+    body = _clip_bytes(tail, max(room - len(tail_header.encode("utf-8")), 0),
+                       from_end=True)
+    tail_text = (tail_header + body) if body else ""
+    return _FEEDBACK_SEP.join(
+        p for p in (head_text, tail_text, path_part) if p)
+
+
+def _slug(s):
+    """A task/project id as one safe path segment (no separators, no '..')."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(s or "x")).strip("-.") or "x"
+
+
+def gate_log_path(project, tid, attempt):
+    """Where a gate's full output goes: logs/gates/<project>/<task>/x<n>.log.
+
+    Returns the path as a string. The directory is NOT created here — the
+    caller writes the file immediately and treats an OSError as "no log"
+    rather than failing the gate over a diagnostic.
+
+    Mirrors `save_review_log`'s layout on purpose: one directory per task
+    holds the gate log and the raw reviewer output of every attempt, so an
+    operator asking "what did round 3 actually see?" opens one folder.
+    """
+    return str(Path(config.ROOT) / "logs" / "gates"
+               / _slug(project) / _slug(tid) / f"x{int(attempt)}.log")
+
+
+def save_review_log(project, tid, attempt, model, text, kind="review"):
+    """The raw reviewer output, kept when no verdict could be parsed.
+
+    A reviewer that ends its session without the verdict JSON is recorded as
+    `crashed` and the review is simply retried — so the ONE artefact that says
+    why (it asked a question? it wrote prose? its JSON was truncated?) was
+    previously thrown away, and the retry started with no more information
+    than the first attempt had. Written under
+    logs/gates/<project>/<task>/ beside the gate logs: same evidence trail,
+    and never inside the worktree (publish's `git add -A` would ship it).
+
+    Returns the path, or None if it could not be written — a diagnostic write
+    must never be the thing that fails a review.
+    """
+    try:
+        d = Path(config.ROOT) / "logs" / "gates" / _slug(project) / _slug(tid)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{_slug(kind)}-x{int(attempt)}.txt"
+        path.write_text(cap_log(
+            f"model: {model}\nrole: reviewer\nattempt: {attempt}\n\n{text}"))
+        return str(path)
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _resume_session(results, tid, model, harness=None):
@@ -2042,18 +2297,6 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             full = out.decode(errors="replace")
             passed = proc.returncode == 0
             names = _gate_failures(full)
-            output = full[-2000:]
-            if names and not passed:
-                # Names first, tail second: the implementer reads this top
-                # down, and WHICH check failed matters more than the last
-                # screenful of output above the unittest summary (which is
-                # where the names used to be lost — see _gate_failures).
-                # Failure-only: on a pass the output is observability, not
-                # feedback, and a names-looking line in green output (a
-                # caught exception printed by an expected-error test) would
-                # be a lie.
-                block = "failing checks:\n" + "\n".join(f"  {n}" for n in names)
-                output = (block + "\n...\n" + full[-1400:])[:2400]
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0)
             # The FULL `FAIL:`/`ERROR:` list, not just the window the 2000-char
             # cut keeps: on 2026-09-15 a gate kept 1 of 15 failing test names
@@ -2065,13 +2308,26 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             fail_block = "" if passed else _gate_full_list_block(_gate_fail_lines(full))
             log_path = None
             try:
-                log_dir = Path(config.ROOT) / "logs" / "gates"
-                log_dir.mkdir(parents=True, exist_ok=True)
-                log_path = str(log_dir / f"{tid}-x{attempt}.log")
+                log_path = gate_log_path(project_slug, tid, attempt)
+                Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+                # Rule 4: the FULL output, not the 2000-char window the fix
+                # loop hands the implementer — a failing line a hundred lines
+                # above that cut is the usual reason a fix round starts by
+                # re-running the test. Capped, head and tail, so a runaway
+                # run cannot fill the disk.
                 Path(log_path).write_text(
-                    full + ("\n\n" + fail_block if fail_block else ""))
+                    cap_log(full + ("\n\n" + fail_block if fail_block else "")))
             except OSError:
                 log_path = None
+            # What the implementer is handed. Sections first (the traceback of
+            # each failure — the part the blind tail threw away), then the
+            # names, then the tail, then where the full log is. Failure-only
+            # for the sections and names: on a pass a FAIL:-shaped line is a
+            # caught exception printed by an expected-error test, and a
+            # "failing checks" header over it would be a lie.
+            output = (gate_feedback(full, log_path,
+                                    names if not passed else None)
+                      if not passed else full[-2000:])
             # Attribution and a reason, not just a boolean: a bare
             # {"passed": false} in the log cannot be tied to a task or acted
             # on, and this is the per-node progress signal the dashboard reads.
@@ -2080,7 +2336,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             elif names:
                 tail = ("failing: " + "; ".join(names))[-400:]
             else:
-                tail = output.strip()[-400:]
+                # The raw output's own tail, not `output`'s: `output` is the
+                # feedback block now, so slicing it would put the log path in
+                # a field meant to be the last lines the gate printed.
+                tail = full.strip()[-400:]
             if fail_block:
                 # The log-tail field carries the names too: the tail alone is
                 # a 400-char window of the output that just hid them, so the
@@ -2219,14 +2478,22 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # with a question). Same rule as a crash: the diff was never
                 # judged, so retry the REVIEW — don't bounce the implementer to
                 # fix issues that were never delivered.
+                # The raw output is the ONLY evidence of what the reviewer did
+                # instead of voting (asked a question, wrote prose, emitted
+                # truncated JSON), and this path used to discard it — the
+                # retry then repeated the same failure blind.
+                rlog = save_review_log(project_slug, tid, attempt, ran_model,
+                                       res.text)
                 events.emit("driver.error", task=tid, role="reviewer",
                             fingerprint="reviewer.no_verdict",
-                            model=ran_model,
+                            model=ran_model, log=rlog,
                             error="review ended without a parseable verdict")
                 return {"pass": False, "crashed": True,
                         "reviewer_model": ran_model,
                         "reviewer_family": config.MODEL_FAMILY.get(ran_model),
-                        "issues": ["reviewer session ended without a verdict"]}
+                        "review_log": rlog,
+                        "issues": ["reviewer session ended without a verdict"
+                                   + (f" (raw output: {rlog})" if rlog else "")]}
             issues = verdict.get("issues") or []
             board.post(wt, task=tid, role="reviewer", model=ran_model,
                        harness=ran_harness, kind="note",
@@ -2253,6 +2520,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         # rejection with no readable issue list — surfaced so
                         # a thin rejection is visible rather than mysterious.
                         salvaged=verdict.get("salvaged", False),
+                        # The raw output of a salvaged verdict: its issue list
+                        # is unreadable by definition, so without this file the
+                        # recorded rejection points at nothing a human (or the
+                        # next round) can inspect.
+                        log=(save_review_log(project_slug, tid, attempt,
+                                             ran_model, res.text, kind="review")
+                             if verdict.get("salvaged") else None),
                         # Pre-existing findings a reviewer filed while reading
                         # the full diff: recorded so they are not lost, and
                         # deliberately NOT in `issues` — they must never block
@@ -2607,9 +2881,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # Session ended without a verdict — a reviewer that never
                 # reviewed. Crashed, not a rejection: the join retries the
                 # round from PR_MAX_INCONCLUSIVE, not the implementer's rounds.
+                # Its raw output is kept for the same reason as the pre-merge
+                # one: an inconclusive round retried blind just repeats itself.
+                rlog = save_review_log(project_slug, tid, it["round"],
+                                       ran_model, res.text, kind="pr-review")
+                events.emit("driver.error", task=tid, role="pr-reviewer",
+                            fingerprint="reviewer.no_verdict", model=ran_model,
+                            log=rlog,
+                            error="PR reviewer session ended without a verdict")
                 return {"model": model, "approve": False, "crashed": True,
+                        "review_log": rlog,
                         "issues": [f"reviewer {model} session ended without "
-                                   "a verdict"]}
+                                   "a verdict"
+                                   + (f" (raw output: {rlog})" if rlog else "")]}
             verdict["model"] = model
             return verdict
 
@@ -2820,8 +3104,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             detail = ""
             if not gate_res.get("passed", True):
                 # gate() returns {"passed", "output", "log_path", "verdict"} —
-                # `output` is the tail it kept (last 2000 chars), and on a
-                # check.sh run that is the unittest summary naming the tests.
+                # `output` is the feedback block (failing sections, names,
+                # tail, log path), bounded by gate_feedback.
                 detail = (gate_res.get("output") or "")[-800:]
             elif rev_res and not rev_res.get("pass", True):
                 detail = "; ".join(str(i) for i in
