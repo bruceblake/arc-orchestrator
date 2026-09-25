@@ -513,8 +513,10 @@ class HttpParamsUsage(EndpointCase):
                          "today starts on the server's own date")
         self.assertEqual(time.localtime(cut)[3:6], (0, 0, 0),
                          "today starts at the server's local midnight")
-        self.assertNotAlmostEqual(body["now"] - cut, 86400, delta=60,
-                                  msg="today must not be a rolling 24h window")
+        # No "now - cut != 86400" assertion: in the last minute of a local day
+        # a correct midnight cutoff IS ~86400s back, and the two checks above
+        # (same local date, h/m/s zero) already pin it to a calendar midnight
+        # rather than a rolling 24h window.
 
 
 class HttpParamsPlanProposals(EndpointCase):
