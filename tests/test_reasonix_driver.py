@@ -122,6 +122,21 @@ class FleetHome(unittest.TestCase):
         self.assertEqual(env.read_text(), "ARC_API_KEY=sk-test-123\n")
         self.assertEqual(stat.S_IMODE(env.stat().st_mode), 0o600)
 
+    def test_an_empty_key_is_refused_not_written(self):
+        """reasonix reads its key ONLY from <home>/.env, so writing
+        `ARC_API_KEY=` produces a harness guaranteed to fail — 437 times over
+        on 2026-09-23, each retried as a crash. Fail once, where it is known."""
+        config.API_KEY = ""
+        with self.assertRaises(config.ConfigError) as ctx:
+            drivers.reasonix_fleet_home()
+        self.assertIn("ARC_API_KEY is not set (empty)", str(ctx.exception))
+        self.assertFalse((Path(config.REASONIX_FLEET_HOME) / ".env").exists(),
+                         "no .env may be written for a key that is not there")
+        config.API_KEY = "PASTE-YOUR-KEY"
+        with self.assertRaises(config.ConfigError) as ph:
+            drivers.reasonix_fleet_home()
+        self.assertIn("placeholder", str(ph.exception))
+
     def test_one_provider_per_model_with_its_real_context_window(self):
         # context_window is PER-PROVIDER and windows differ 4x across the
         # roster, so models may not share one entry: at a shared window
