@@ -51,11 +51,14 @@ def post(worktree, *, task, role, model, harness, kind="note", body="",
          session_id=None, project=None):
     """Append one post. Returns its id. Never raises."""
     kind = kind if kind in KINDS else "note"
+    board_project = project or agentboard.infer_project(worktree)[0]
     rec = {
         "id": uuid.uuid4().hex[:12],
         "ts": round(time.time(), 3),
-        "task": str(task or ""),
-        "role": str(role or ""),
+        # The stable agent ID, never a driver's `<task>-x3` run name: that
+        # posted into `task:<task>-x3`, a channel no digest reads.
+        "task": agentboard.canonical_task(task, project=board_project),
+        "role": agentboard.canonical_role(role),
         "model": str(model or ""),
         "harness": str(harness or ""),
         "kind": kind,

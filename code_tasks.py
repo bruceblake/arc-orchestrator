@@ -535,8 +535,8 @@ def _make_chain_wait(store, taskfile, after_keys):
 
 BOARD_ETIQUETTE = (
     "COORDINATE ON THE BOARD — one JSON line per post in .arc/board.jsonl\n"
-    "- claim shared files before editing (live claims: `./py main.py board "
-    "claims`): {\"kind\":\"claim\",\"body\":\"claiming audit.py\","
+    "- claim shared files before editing (others' live claims on your files "
+    "are listed above): {\"kind\":\"claim\",\"body\":\"claiming audit.py\","
     "\"refs\":{\"paths\":[\"audit.py\"]}}; a CLAIM CONFLICTS block above means "
     "ASK first.\n"
     "- ask instead of guessing an interface: {\"kind\":\"question\",\"channel\":"
@@ -2040,12 +2040,14 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         budget = config.total_timeout_for("implementer")
         return float(budget) if budget and budget > 0 else 4 * 3600.0
 
-    def claim_files(tid):
-        """(Re)take the implementer's lease on files_hint. Returns the prompt
-        text naming overlapping claims ("" when none) and pings each other
-        task, mentioning both, so the two coordinate instead of colliding."""
+    def claim_files(tid, touched=()):
+        """(Re)take the implementer's lease on files_hint plus `touched`.
+        Returns the prompt text naming overlapping claims ("" when none) and
+        pings each other task, mentioning both, so the two coordinate instead
+        of colliding."""
         author = f"{tid}/implementer"
-        paths = tasks[tid].get("files_hint") or []
+        paths = list(tasks[tid].get("files_hint") or [])
+        paths += [p for p in touched if p not in paths]
         try:
             agentboard.release(project_slug, tid, author)
             cid = agentboard.claim(project_slug, task=tid, author=author,
@@ -2718,6 +2720,18 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
             harvest_proposals(tid, wt, "implementer", ran_model)
             board_ingest(tid, wt, "implementer", ran_model)
+            # Most taskfiles carry no files_hint, so the pre-run lease above
+            # claimed NO paths (measured: every prison-escape claim had
+            # paths=[]) and a sibling was never warned off anything. Lease
+            # what this attempt actually changed, so the next digest of every
+            # sibling that touches those files shows the claim.
+            try:
+                touched = await _changed_files(wt, base)
+            except Exception:                                  # noqa: BLE001
+                touched = []
+            if [p for p in touched
+                    if p not in (tasks[tid].get("files_hint") or [])]:
+                claim_files(tid, touched)
             # The outcome of this attempt is the gate's to record; here only
             # the agent's handoff is harvested — and a plan-window swap is
             # written down, so the next model knows why it changed.

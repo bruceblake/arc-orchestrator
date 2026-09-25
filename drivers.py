@@ -388,7 +388,18 @@ def _tier_rank(model):
     return config.TIER_ORDER.index(tier) if tier in config.TIER_ORDER else -1
 
 
-_ATTEMPT_SUFFIX = re.compile(r"-(?:x|pr)\d+$")
+
+def _agent_id(task_id, role, worktree=None):
+    """The stable board ID (`<task>/<role>`) of the agent this run belongs to.
+    Stamped on driver.start so the dashboard can show one identity across
+    fix rounds, usage swaps and escalations. The worktree scopes the id:
+    another project's row must not keep an attempt suffix. Never raises."""
+    try:
+        import agentboard
+        project = agentboard.infer_project(worktree)[0] if worktree else None
+        return agentboard.agent_id(task_id, role, project=project) if task_id else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def post_handoff(worktree, task_id, role, model, harness, body, **refs):
@@ -398,11 +409,11 @@ def post_handoff(worktree, task_id, role, model, harness, body, **refs):
     carry the attempt suffix (``<tid>-x3``, ``<tid>-pr2``). Never raises."""
     try:
         import agentboard
-        tid = _ATTEMPT_SUFFIX.sub("", str(task_id or ""))
         project = agentboard.infer_project(worktree)[0]
+        tid = agentboard.canonical_task(task_id, project=project)
         if not project or not tid:
             return None
-        who = f"{tid}/{str(role or '').replace('_', '-')}"
+        who = agentboard.agent_id(tid, role, project=project)
         return agentboard.post(
             project, author=f"{tid}/orchestrator", channel=f"task:{tid}",
             kind="handoff", body=body, mentions=[who], author_model=model,
@@ -1794,6 +1805,8 @@ class Driver:
                         events.emit("driver.start", harness=self.harness,
                                     model=self.model, role=self.role,
                                     task=task_id, attempt=attempt,
+                                    agent=_agent_id(task_id, self.role, worktree),
+                                    session_id=sid or None,
                                     pid=os.getpid())
                         return await self._once(prompt, worktree, sid,
                                                 task_id, attempt)

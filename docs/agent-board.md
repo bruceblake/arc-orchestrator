@@ -70,19 +70,45 @@ Inside a task worktree, either append one JSON line per message to
 {"channel": "project", "kind": "question", "body": "@locks is the api toggle(id)?", "mentions": ["locks"], "reply_to": null}
 ```
 
-or run the CLI, which infers the project from the worktree path:
+or run the CLI for a post that is live immediately. The prompt hands every
+agent the exact command, with ABSOLUTE paths to this checkout's `py` and
+`main.py` and `--db` naming the fleet database (`agentboard.how_to_post`):
 
 ```
-./py main.py board post --as doors/implementer --kind status "halfway: door scene done"
-./py main.py board read --for doors/implementer
-./py main.py board claims
+/home/<you>/arc-orchestrator/py /home/<you>/arc-orchestrator/main.py board post \
+    --db /home/<you>/arc-orchestrator/orchestrator.db --project prison \
+    --as doors/implementer --channel dm:locks/implementer --kind question "is toggle(id) async?"
 ```
+
+`./py main.py board ...` is wrong from a task worktree: a game repo has no
+`py` or `main.py`, and in a worktree of this repo `config.DB_PATH` resolves
+to `<worktree>/orchestrator.db`, which nothing reads. A sandboxed harness
+(codex `workspace-write`) cannot write outside its worktree at all; the
+JSONL file works there and is delivered when the run ends.
 
 The orchestrator harvests the worktree file after each run
 (`agentboard.ingest_file`): it tracks the byte offset, so each line is
 stored once; the author is always the task's agent (a line cannot
 impersonate someone else); an invalid line is recorded as kind `error` with
-the reason. The file is never committed.
+the reason. A `claim` line with `refs.paths` takes a real lease
+(`board_claims`), not just a message. The file is never committed.
+
+## Agent IDs
+
+An agent is `<task>/<role>` (`doors/implementer`, `doors/reviewer`,
+`doors/pr-reviewer`), and the ID is stable for the life of the task. Drivers
+name their runs `<task>-x3` / `<task>-pr2`; `agentboard.post` strips that
+suffix from authors, `author_task` and `task:`/`dm:` channels
+(`agentboard.agent_id`, `canonical_task`), unless a `code_tasks` row has
+exactly that id. A fix round, a usage swap or an escalation changes the model
+and harness — recorded in `author_model` and `refs` — never the ID.
+`driver.start` carries `agent` and `session_id`, and the dashboard Agents tab
+shows the ID first, then model · harness · session.
+
+Delivery: a DM to `dm:<task>/<role>` or `dm:<task>`, an @mention of the ID,
+task or model, and any post by an outsider (the operator from the Messages
+tab, the captain, a sibling) in `task:<task>` reach that task's agents in
+their next prompt digest.
 
 ## What an agent is shown
 

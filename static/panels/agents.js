@@ -1,6 +1,12 @@
 "use strict";
 // ---- agents panel ----
 const attemptOf = t => { const m = /-(\d+)\.jsonl$/.exec(t || ""); return m ? m[1] : null; };
+// The stable board ID (<task>/<role>): the same across fix rounds, usage swaps
+// and escalations, and the address to DM (dm:<id>) from the Messages tab.
+const agentId = a => {
+  const id = a.agent || (a.task ? a.task + "/" + (a.role || "") : "");
+  return id ? `<span class="agent-id" title="agent ID — DM it as dm:${attr(id)}"><b>${esc(id)}</b></span>` : "";
+};
 async function pollAgents() {
   try {
     const rev = await jgetRev("/api/agents", "agents");
@@ -36,8 +42,9 @@ function renderRecent() {
                     : (a.ok ? '<span class="hint">ok</span>' : '<span class="bad">exit ' + esc(a.exit_code) + "</span>");
     return `<div class="donerow ${a.ok && (!v || v.pass) ? "" : "bad"} ${a.transcript ? "has-t" : ""}"
                  data-t="${attr(a.transcript || "")}" data-m="${attr(a.pretty)}" data-r="${attr(a.role || "")}" data-task="${attr(a.task || "")}"${a.transcript ? ' role="button" tabindex="0" aria-label="open transcript"' : ""}>
-      <span class="who">${esc(a.pretty)} ${esc(a.role || "")}</span>
-      <span>${esc(a.task || "")}</span>
+      ${agentId(a)}
+      <span class="who">${esc(a.pretty)}${a.harness ? " · " + esc(a.harness) : ""}</span>
+      <span class="hint">${esc(a.task || "")}</span>
       <span class="hint">att ${esc(a.attempt)}</span>
       <span class="hint">${a.seconds ? tick(a.seconds) : ""}</span>
       <span style="flex:1"></span>${badge}
@@ -62,8 +69,10 @@ function renderAgents() {
       ? `<span data-since="${sinceStamp(a.last_event_s)}" data-suffix=" ago">…</span>`
       : "starting";
     return `<div class="agentrow ${a.stuck ? "stuck" : ""} ${a.transcript ? "has-t" : ""}" data-t="${attr(a.transcript || "")}" data-m="${attr(a.pretty || short(a.model))}" data-r="${attr(a.role || "")}" data-task="${attr(a.task || "")}"${a.transcript ? ' role="button" tabindex="0" aria-label="open live transcript"' : ""}>
-      <span class="who">${esc(a.pretty || short(a.model))} ${esc(a.role || "")}</span>
-      <span>${esc(a.task)}</span>
+      ${agentId(a)}
+      <span class="who">${esc(a.pretty || short(a.model))}${a.harness ? " · " + esc(a.harness) : ""}</span>
+      ${a.session_id ? `<span class="hint" title="harness session">${esc(String(a.session_id).slice(0, 14))}</span>` : ""}
+      <span class="hint">${esc(a.task)}</span>
       ${att ? `<span class="hint">attempt ${att}</span>` : ""}
       ${a.stalled ? '<span class="bad">STALLED</span>' : ""}
       <span class="hint" data-since="${a.started || ""}">…</span>
