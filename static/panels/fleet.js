@@ -440,7 +440,7 @@ function activityRow(e) {
     (target ? ` role="button" tabindex="0" data-task="${attr(e.task)}"` +
       ` data-file="${attr(target)}"` +
       ` aria-label="open task ${attr(e.task)} in its project"` : "") + `>
-    <span class="when">${esc(AGO(e.ts))} ago</span>
+    <span class="when" data-since="${e.ts}" data-suffix=" ago">${e.ts ? tick(Math.max(0, Date.now() / 1000 - e.ts)) + " ago" : ""}</span>
     <span class="abadge" style="color:${color}" title="${attr(e.type)}">${esc(kind.w)}</span>
     ${e.task ? `<span class="atask">${esc(e.task)}</span>` : ""}
     <span class="awhat">${esc(activityWhat(e))}</span>
@@ -452,7 +452,10 @@ function renderActivity(d) {
   const evs = (d && d.events) || [];
   // The empty state is #activity-empty's sentence, not an inline copy of it:
   // rendering both printed the same line twice.
-  $("#activity").innerHTML = evs.length ? evs.map(activityRow).join("") : "";
+  const html = evs.length ? evs.map(activityRow).join("") : "";
+  const box = $("#activity");
+  if (typeof paint === "function") paint(box, html);
+  else box.innerHTML = html;
   $("#activity-empty").style.display = evs.length ? "none" : "";
   $("#activity-meta").innerHTML = evs.length
     ? `last ${evs.length}${d && d.total ? ` of ${fmtK(d.total)} log line${d.total === 1 ? "" : "s"}` : ""}`
@@ -461,7 +464,14 @@ function renderActivity(d) {
 
 async function pollActivity() {
   try {
-    renderActivity(await jget("/api/activity?limit=" + ACTIVITY_LIMIT));
+    // The UI harness calls jget. The page uses jgetRev so a 304 can
+    // still repaint the limit that was actually requested.
+    if (typeof jgetRev !== "function") {
+      renderActivity(await jget("/api/activity?limit=" + ACTIVITY_LIMIT));
+    } else {
+      const rev = await jgetRev("/api/activity?limit=" + ACTIVITY_LIMIT, "activity:" + ACTIVITY_LIMIT);
+      if (rev.data) renderActivity(rev.data);
+    }
     markFail("activity", false);
   } catch (e) { markFail("activity", true); }
 }
