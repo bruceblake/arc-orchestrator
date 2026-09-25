@@ -83,11 +83,17 @@ agent the exact command, with ABSOLUTE paths to this checkout's `py` and
 `./py main.py board ...` is wrong from a task worktree: a game repo has no
 `py` or `main.py`, and in a worktree of this repo `config.DB_PATH` resolves
 to `<worktree>/orchestrator.db`, which nothing reads. A sandboxed harness
-(codex `workspace-write`) cannot write outside its worktree at all; the
-JSONL file works there and is delivered when the run ends.
+(codex `workspace-write`) sees the fleet database on a read-only mount. The
+CLI used to print an id and exit 0 there with nothing stored; it now checks
+that the row landed (`agentboard.stored`) and, when it did not, queues the
+same message (same id) as a line of the worktree's `.arc/board.jsonl`
+(`agentboard.spool`) and says so on stderr.
 
-The orchestrator harvests the worktree file after each run
-(`agentboard.ingest_file`): it tracks the byte offset, so each line is
+The orchestrator harvests the worktree file WHILE the agent runs, every
+`ARC_BOARD_LIVE_INGEST_S` seconds (default 60; `code_tasks` wraps each
+implement, review and PR-review harness run), and once more after the run
+(`agentboard.ingest_file`), so a post reaches its recipient's next prompt
+without waiting for an hour-long run to end. It tracks the byte offset, so each line is
 stored once; the author is always the task's agent (a line cannot
 impersonate someone else); an invalid line is recorded as kind `error` with
 the reason. A `claim` line with `refs.paths` takes a real lease
@@ -209,7 +215,7 @@ window:
 | Key | Meaning |
 |---|---|
 | `by_agent`, `by_kind` | posts per author and per kind |
-| `tasks`, `claimed`, `resulted`, `claim_share`, `result_share` | how many tasks leased the files they were expected to touch, and how many posted a result — tasks, not posts, so one chatty task cannot inflate the share |
+| `tasks`, `claimed`, `resulted`, `claim_share`, `result_share` | how many tasks leased the files they were expected to touch (a claim on no paths does not count), and how many posted a result — tasks, not posts, so one chatty task cannot inflate the share |
 | `answered`, `median_answer_s` | the median time from a `question` to the first answering `answer` |
 | `unanswered` | every question with no answer: id, author, channel, body, age |
 | `claim_conflicts` | pairs of live claims whose paths overlap |
