@@ -316,7 +316,11 @@ function failedCount() {
 function redLines() {
   var out = [];
   if (S.stale) out.push("data stale - refresh failing");
-  var ag = ((S.agents && S.agents.agents) || []).filter(function (a) { return a.task; });
+  // Every inflight agent is considered, task or no task: /api/agents reports
+  // kimi-code sessions with "task": null (dashboard.py:417), and a stalled one
+  // of those is exactly as stalled as any other. The task is only ever a label
+  // here, so a missing one reads "?" rather than removing the agent.
+  var ag = (S.agents && S.agents.agents) || [];
   for (var i = 0; i < ag.length; i++) {
     if (ag[i].stalled) out.push(short(ag[i].model) + " stalled on " + (ag[i].task || "?"));
   }
@@ -578,7 +582,11 @@ function renderNow() {
     al.innerHTML = lines.map(esc).join("<br>");
     al.style.display = lines.length ? "block" : "none";
   }
-  var ag = ((S.agents && S.agents.agents) || []).filter(function (a) { return a.task; });
+  // Not filtered by task: an inflight row with "task": null (kimi-code
+  // sessions, dashboard.py:417) is a running agent, and dropping it made the
+  // view claim "no agents running" while one was. agentCard() already renders a
+  // missing task as an empty label, so nothing else is needed here.
+  var ag = (S.agents && S.agents.agents) || [];
   var box = $("#agents");
   if (box) {
     keepTxScroll(function () {

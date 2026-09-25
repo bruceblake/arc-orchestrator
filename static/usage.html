@@ -574,15 +574,31 @@ function updateDaily(daily) {
 }
 
 const EV_BAD = {"driver.error":1, "driver.timeout":1, "driver.stalled":1, "inflight.over_cap":1, "task.failed":1};
-function eventInRange(e) {
-  if (e.ts == null || RANGE === "all") return true;
+// The window belongs to the SERVER. /api/usage reports `cutoff` — the epoch
+// second its totals were actually summed from — and `now`, both read off the
+// orchestrator's clock; for "today" that cutoff is the orchestrator's LOCAL
+// midnight, the same instant the daily rows are keyed by. Re-deriving it here
+// from the viewer's clock made a browser in another time zone list driver
+// events outside the range the totals cover and hide ones inside it. The
+// server value wins whenever the payload is for the range on screen; the local
+// span below is only a fallback for a payload that carries no cutoff.
+function localCutoff() {
   if (RANGE === "today") {
-    const start = new Date();
-    start.setHours(0, 0, 0, 0);
-    return e.ts * 1000 >= start.getTime();
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime() / 1000;
   }
   const sec = RANGE_SEC[RANGE];
-  return sec ? (Date.now() / 1000 - e.ts) <= sec : true;
+  return sec ? Date.now() / 1000 - sec : null;
+}
+
+function eventInRange(e) {
+  if (e.ts == null || RANGE === "all") return true;
+  // A payload for another range is stale (the picker moved, load() has not
+  // answered yet), so it must not decide this window's boundary.
+  const u = USAGE && USAGE.range === RANGE ? USAGE : null;
+  const cut = u && u.cutoff != null ? u.cutoff : localCutoff();
+  return cut == null ? true : e.ts >= cut;
 }
 
 function updateDriverEvents(events) {

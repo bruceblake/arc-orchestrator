@@ -487,6 +487,35 @@ class HttpParamsUsage(EndpointCase):
         self.assertIsInstance(body["totals"], dict)
         self.assertIn("inflight", body)
 
+    def test_cutoff_is_the_server_window_start(self):
+        """`cutoff` is the instant the totals were summed from, on the
+        SERVER's clock — the usage page filters its driver-event feed by it
+        because a browser in another time zone cannot re-derive the
+        orchestrator's midnight."""
+        now = time.time()
+        for r in ("1h", "3h", "6h", "24h", "7d"):
+            with self.subTest(range=r):
+                body = self.get(f"/api/usage?range={r}").json()
+                self.assertIsInstance(body["cutoff"], (int, float))
+                # Within the window's own width of the server's `now`, allowing
+                # the request itself a few seconds.
+                width = dashboard._RANGE_SECONDS[r]
+                self.assertAlmostEqual(body["now"] - body["cutoff"], width, delta=30)
+        body = self.get("/api/usage?range=all").json()
+        self.assertIsNone(body["cutoff"], "no cutoff bounds the all-history window")
+
+    def test_today_cutoff_is_the_servers_local_midnight(self):
+        """'today' is a CALENDAR day on the orchestrator, not a rolling 24h and
+        not the viewer's midnight."""
+        body = self.get("/api/usage?range=today").json()
+        cut = body["cutoff"]
+        self.assertEqual(time.localtime(cut)[:3], time.localtime(body["now"])[:3],
+                         "today starts on the server's own date")
+        self.assertEqual(time.localtime(cut)[3:6], (0, 0, 0),
+                         "today starts at the server's local midnight")
+        self.assertNotAlmostEqual(body["now"] - cut, 86400, delta=60,
+                                  msg="today must not be a rolling 24h window")
+
 
 class HttpParamsPlanProposals(EndpointCase):
     """/api/plan-proposals is the read-only window into the plan_proposals
