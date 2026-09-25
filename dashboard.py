@@ -1097,9 +1097,16 @@ def _usage(store=None, range_key=None, include_series=False, window=None, with_p
     families = [by_family[f] for f in config.FAMILY_ORDER]
     families += [v for k, v in sorted(by_family.items()) if k not in config.FAMILY_ORDER]
 
+    # `cutoff` is the SERVER's own window start, and the page filters its
+    # driver-event feed by it. The client cannot re-derive "today": it has only
+    # its own clock, and a viewer in another time zone has a different midnight
+    # from the one this window (and the daily rows) are keyed by — re-deriving
+    # it showed events outside the totals' range and hid events inside it.
+    # `now` is already the server's clock for the same reason.
     res = {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
            "models": models, "families": families, "inflight": inflight,
            "recent_driver_events": recent_driver,
+           "cutoff": cutoff,
            "totals": totals}
     if include_series:
         res["series"] = series

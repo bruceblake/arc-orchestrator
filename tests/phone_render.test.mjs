@@ -170,8 +170,9 @@ ok(el("figs").innerHTML.split('class="fig"').length - 1 === 4, "figs row renders
 ok(el("figs").innerHTML.includes('fl">merged today</span>'), "ready github labels the figure 'merged today'");
 ok(el("agents").innerHTML.includes("GLM 5.3 · implementer"), "agent card shows model and role");
 ok(el("agents").innerHTML.includes("t2 · STALLED"), "stalled agent is flagged");
-ok(el("nowsub").textContent.includes("2 harness runs today"), "harness-run count in the sub line");
-ok(el("nowsub").textContent.includes("paused while hidden"), "sub line keeps the battery hint after render");
+ok(el("nowsub").textContent.includes("2 dashboard runs"), "sub line counts dashboard-launched runs");
+ok(el("nowsub").textContent.includes("waiting for a refresh"), "sub line waits until a poll succeeds");
+ok(!el("nowsub").textContent.includes("paused"), "a visible tab does not say it is paused");
 ok(el("alert").innerHTML.includes("DeepSeek V4.1 Flash max stalled on t2"),
    "stall surfaces in the alert line");
 ok(el("alert").style.display === "block", "alert is visible while red lines exist");
@@ -245,8 +246,31 @@ api.S.agents = { now: GH_NOW, agents: [stalledEvil], runs: [] };
 run(() => api.renderNow(), "renderNow() with a hostile stalled agent");
 ok(clean(el("alert").innerHTML), "alert line escapes hostile model names");
 
-// ---- 5. empty payloads --------------------------------------------------------
-Object.assign(api.S, { summary: {}, agents: {}, projects: [], gh: {}, queue: {}, stale: false });
+// ---- 5. an agent with no task is still a running agent ------------------------
+// /api/agents reports kimi-code sessions with "task": null (dashboard.py:417).
+// Filtering those out made the Now view say "no agents running" while one was
+// in flight, so the row must survive and the placeholder must NOT appear.
+const noTask = { req_id: "kimi-code/xyz", family: "kimi", model: "Kimi-K3",
+                 role: null, task: null, harness: "kimi-code", elapsed_s: 42,
+                 last_event_s: 5, stalled: false, transcript: null };
+api.S.agents = { now: GH_NOW, agents: [noTask], runs: [] };
+api.S.stale = false;
+run(() => api.renderNow(), "renderNow() with a task-less (kimi-code) agent");
+ok(!el("agents").innerHTML.includes("no agents running"),
+   "a task-less agent is not reported as 'no agents running'");
+ok(el("agents").innerHTML.includes("Kimi K3"), "the task-less agent card is rendered");
+ok(el("agents").innerHTML.includes(noTask.req_id), "task-less card carries its req_id key");
+
+// A stalled task-less agent must also reach the alert line (as "?"), or the one
+// class of agent that has no task would be the one that can stall silently.
+const noTaskStalled = Object.assign({}, noTask, { stalled: true });
+api.S.agents = { now: GH_NOW, agents: [noTaskStalled], runs: [] };
+run(() => api.renderNow(), "renderNow() with a stalled task-less agent");
+ok(el("alert").style.display === "block" && el("alert").innerHTML.includes("stalled"),
+   "a stalled task-less agent still raises the alert line");
+
+// ---- 5b. empty payloads ------------------------------------------------------
+Object.assign(api.S, { summary: {}, agents: { agents: [] }, projects: [], gh: {}, queue: {}, stale: false });
 run(() => api.renderAll(), "renderAll() on empty payloads");
 ok(el("projects").innerHTML.includes("no projects yet"), "empty projects placeholder");
 ok(el("prssub").textContent === "github status unavailable", "github-down sub line");

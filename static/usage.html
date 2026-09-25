@@ -104,7 +104,8 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 #hourly-chart .hbar-slot { fill: #21262d; }
 #hourly-chart .hbar-lab { fill: var(--dim); font-size: 9px; font-family: ui-monospace, monospace; }
 #hourly-chart .hbar-ax { stroke: var(--border); }
-#hourly-chart .hseg { cursor: pointer; }
+#hourly-chart .hseg, #hourly-chart .hbar { cursor: pointer; }
+#hourly-body tr.hot td { background: #21262d; }
 #hourly-chart .hseg:hover { opacity: .75; }
 #hourly-chart .hmiss { fill: var(--err); }
 
@@ -156,7 +157,6 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   <span class="stat">refresh <b id="count">5s</b></span>
   <span class="stat">updated <b id="clock">—</b></span>
   <span class="badge" id="stale" style="display:none">stale (retrying)</span>
-  <span class="badge" id="overcap" style="display:none;background:var(--err);color:#fff"></span>
 </header>
 <main>
   <section class="panel">
@@ -164,8 +164,9 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
     <div class="totrow">
       <span class="big"><b id="total-srate">—</b> <small>success</small></span>
       <span class="tot-kv" id="total-srate-sub" title="ok / (ok + errors + failed attempts)">—</span>
-      <span class="big"><b id="total-tok">—</b> <small>tokens</small><span class="dir" id="dir-tok"></span></span>
-      <span class="tot-kv">requests <b id="total-req">—</b><span class="dir" id="dir-req"></span></span>
+      <span class="big"><b id="total-tok">—</b> <small>tokens</small></span>
+      <span class="tot-kv">requests <b id="total-req">—</b></span>
+      <span class="tot-kv" title="priced from token counts; an upper bound where a call did not split prompt and completion">cost <b id="total-cost">—</b></span>
       <span class="tot-kv" title="quota spent on nothing · ≈ = failed × avg per ok">waste <b id="total-waste">—</b></span>
     </div>
     <div class="splitbar"><i class="p" id="split-prompt" style="width:0%"></i><i class="c" id="split-comp" style="width:0%"></i></div>
@@ -182,7 +183,7 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   </section>
 
   <section class="panel">
-    <h2>Families <small style="color:var(--dim);font-weight:normal">live cap per model family (retired families show history only)</small></h2>
+    <h2>Families <small style="color:var(--dim);font-weight:normal">requests and tokens follow the range above; inflight is live</small></h2>
     <div class="tblwrap">
       <table>
         <thead><tr><th>family</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
@@ -214,7 +215,7 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   <section class="panel">
     <h2>Daily</h2>
     <details id="daily-box">
-      <summary>show daily breakdown (requests · tokens · task runs)</summary>
+      <summary>calendar days, all history — not the range above</summary>
       <div class="tblwrap">
         <table>
           <thead><tr><th>day</th><th class="r">requests</th><th class="r">tokens</th><th class="r">task runs</th></tr></thead>
@@ -235,41 +236,26 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 <script>
 "use strict";
 const $ = s => document.querySelector(s);
-const RANGES = ["1h", "24h", "7d", "all"];
+const RANGES = ["1h", "3h", "6h", "today", "24h", "7d", "all"];
+const RANGE_SEC = {"1h": 3600, "3h": 10800, "6h": 21600, "24h": 86400, "7d": 604800};
 const AUTO = 5000;
 // "kimi-code" is HISTORICAL (the retired kimi CLI harness, 2026-09-12): its
 // wire logs still price so old usage rows do not read $0.00.
 const SRC = {"arc-pool":"pool","kimi-code":"kimi-code (historical)"};
 let RANGE = "1h", USAGE = null, FLEET = {caps:{}, totals:null}, nextAt = Date.now() + AUTO;
+let syncedAt = 0;
 
 const ms = n => n == null ? "—" : n >= 1000 ? (n/1000).toFixed(1)+"s" : Math.round(n)+"ms";
 const ago = ts => { if (!ts) return "—"; const s = Math.max(0, (Date.now()/1000) - ts);
   if (s < 60) return Math.round(s)+"s ago"; if (s < 3600) return Math.round(s/60)+"m ago";
   if (s < 86400) return (s/3600).toFixed(1)+"h ago"; return (s/86400).toFixed(1)+"d ago"; };
 const srcLabel = s => SRC[s] || (s && s.startsWith("driver:") ? "driver:" + s.split(":")[1] : (s || ""));
+const attr = s => esc(s).replace(/"/g, "&quot;");
 
 const rateOf = t => { const a = (t.ok || 0) + (t.errors || 0) + (t.failed_attempts || 0);
   return a ? (t.ok || 0) / a : null; };
 const wasteFig = t => ({ failed: t.failed_attempts || 0,
   est: (t.ok || 0) > 0 ? Math.round(((t.tokens || 0) / (t.ok || 1)) * (t.failed_attempts || 0)) : 0 });
-const dirWindow = range => range === "24h" ? {n: 1, label: "yesterday"}
-  : range === "7d" ? {n: 7, label: "previous 7 days"} : null;
-const daySums = (daily, n) => {
-  const d = daily || [];
-  const sum = arr => ({ req: arr.reduce((s, x) => s + (x.requests || 0), 0),
-                        tok: arr.reduce((s, x) => s + (x.tokens || 0), 0) });
-  return [sum(d.slice(-n)), sum(d.slice(-2 * n, -n))];
-};
-const dirPct = (cur, prev) => prev > 0 ? ((cur - prev) / prev) * 100 : null;
-const dirHtml = pct => { if (pct == null) return null; const up = pct >= 0;
-  return { txt: (up ? "▲ +" : "▼ -") + Math.abs(pct).toFixed(0) + "%", cls: up ? "up" : "down" }; };
-function fillDir(id, pct, titleTxt) {
-  const el = $("#" + id), d = dirHtml(pct);
-  el.textContent = d ? d.txt : "";
-  el.className = "dir" + (d ? " " + d.cls : "");
-  el.title = d ? titleTxt : "";
-}
-
 async function jget(url) {
   const r = await fetch(url, {cache:"no-store"});
   if (!r.ok) return null;
@@ -306,6 +292,8 @@ async function fetchDaily(fleet) {
 }
 
 function fillToolbar(fleet) {
+  const stat = $("#alltime-stat");
+  if (stat) stat.style.display = RANGE === "all" ? "none" : "";
   $("#alltime").textContent = fleet.totals && fleet.totals.tokens != null ? fmt(fleet.totals.tokens) : "—";
   $("#alltime-stat").title = "all-history tokens" + (fleet.totals && fleet.totals.prompt_tokens != null
     ? " · " + fmt(fleet.totals.prompt_tokens) + " prompt / " + fmt(fleet.totals.completion_tokens) + " completion" : "");
@@ -324,15 +312,8 @@ function fillTotal(u) {
   const wf = wasteFig(t), wl = $("#total-waste");
   wl.textContent = wf.failed || wf.est ? wf.failed + " failed · ≈" + fmt(wf.est) + " tok" : "none";
   wl.className = wf.failed || wf.est ? "err" : "ok";
-  const w = dirWindow(u.range || RANGE);
-  let tokPct = null, reqPct = null;
-  if (w && DAILY && DAILY.length) {
-    const sums = daySums(DAILY, w.n);
-    tokPct = dirPct(sums[0].tok, sums[1].tok);
-    reqPct = dirPct(sums[0].req, sums[1].req);
-  }
-  fillDir("dir-tok", tokPct, w ? "vs " + w.label + (w.n === 1 ? " (today is partial)" : "") : "");
-  fillDir("dir-req", reqPct, w ? "vs " + w.label + (w.n === 1 ? " (today is partial)" : "") : "");
+  const cost = $("#total-cost");
+  if (cost) cost.textContent = t.cost == null ? "—" : "$" + Number(t.cost).toFixed(2);
   const p = t.prompt_tokens || 0, c = t.completion_tokens || 0, tot = p + c;
   const pp = tot ? (p/tot)*100 : 0;
   $("#split-prompt").style.width = pp + "%";
@@ -405,24 +386,12 @@ function familyRowHtml(f) {
 }
 
 function updateFamilies(families) {
-  families = families || [];
+  families = (families || []).filter(f =>
+    (f.requests || 0) || (f.tokens || 0) || (f.errors || 0) || (f.failed_attempts || 0)
+    || (f.inflight || 0) || f.over_cap || f.at_cap);
   $("#fam-body").innerHTML = families.length
     ? families.map(familyRowHtml).join("")
-    : '<tr class="f-empty"><td colspan="5" class="empty">none</td></tr>';
-  let worst = null;
-  for (const f of families) {
-    if (f.over_cap) worst = f;
-    else if (f.at_cap && !worst) worst = f;
-  }
-  const badge = $("#overcap");
-  if (worst) {
-    badge.style.display = "";
-    badge.textContent = worst.over_cap
-      ? "OVER LIMIT: " + worst.family + " " + (worst.inflight_shared ?? worst.inflight) + "/" + worst.limit
-      : "at limit: " + worst.family + " " + (worst.inflight_shared ?? worst.inflight) + "/" + worst.limit;
-    badge.style.background = worst.over_cap ? "var(--err)" : "#d29922";
-    badge.style.color = worst.over_cap ? "#fff" : "#000";
-  } else { badge.style.display = "none"; }
+    : '<tr class="f-empty"><td colspan="5" class="empty">No family activity in this range.</td></tr>';
 }
 
 // ---- hourly view ----------------------------------------------------------
@@ -462,7 +431,12 @@ function hoursOf(payload) {
 function renderHourly(payload) {
   const hours = hoursOf(payload);
   const el = $("#hourly-chart");
-  if (!payload) { el.innerHTML = ""; $("#hourly-empty").style.display = "none"; return; }
+  if (!payload) {
+    el.innerHTML = "";
+    $("#hourly-empty").style.display = "";
+    $("#hourly-body").innerHTML = "";
+    return;
+  }
   // The picker follows the payload, not the other way round: the server
   // resolves a missing ?date= to its own "today", and a client clock a few
   // minutes ahead would otherwise label those bars with the wrong day.
@@ -526,10 +500,13 @@ function updateHourlyTable(hours) {
   const rows = [];
   for (const h of hours) {
     const models = Object.entries(h.by_model || {})
+      .filter(([, v]) => (v.requests || 0) || (v.tokens || 0))
       .sort((a, b) => (b[1].tokens || 0) - (a[1].tokens || 0));
     if (!models.length && !(h.totals || {}).failed_attempts) continue;
     if (!models.length) {
-      rows.push('<tr><td>' + hourlyAxis(h.hour) + '</td><td>' + esc("(no requests)") + '</td>'
+      const failed = (h.totals || {}).failed_attempts || 0;
+      rows.push('<tr id="hour-' + h.hour + '"><td>' + hourlyAxis(h.hour) + '</td><td>'
+        + esc(failed + " failed, no requests") + '</td>'
         + '<td class="r">0</td><td class="r">0</td></tr>');
       continue;
     }
@@ -537,8 +514,8 @@ function updateHourlyTable(hours) {
       // The row shows the friendly name (short(), same as the model cards) and
       // carries the raw id in the title, so the table still names the exact
       // model whose numbers these are.
-      rows.push('<tr><td>' + (i ? "" : hourlyAxis(h.hour)) + '</td>'
-        + '<td title="' + esc(model) + '">' + esc(short(model)) + '</td>'
+      rows.push('<tr' + (i ? "" : ' id="hour-' + h.hour + '"') + '><td>' + (i ? "" : hourlyAxis(h.hour)) + '</td>'
+        + '<td title="' + attr(model) + '">' + esc(short(model)) + '</td>'
         + '<td class="r">' + fmt(v.requests) + '</td><td class="r">' + fmt(v.tokens) + '</td></tr>');
     });
   }
@@ -583,6 +560,7 @@ async function loadHourly() {
     const body = await r.json();
     renderHourly(body);
   } catch (e) {
+    renderHourly(null);
     $("#hourly-sum").textContent = "hourly data unavailable";
   }
 }
@@ -596,9 +574,36 @@ function updateDaily(daily) {
 }
 
 const EV_BAD = {"driver.error":1, "driver.timeout":1, "driver.stalled":1, "inflight.over_cap":1, "task.failed":1};
+// The window belongs to the SERVER. /api/usage reports `cutoff` — the epoch
+// second its totals were actually summed from — and `now`, both read off the
+// orchestrator's clock; for "today" that cutoff is the orchestrator's LOCAL
+// midnight, the same instant the daily rows are keyed by. Re-deriving it here
+// from the viewer's clock made a browser in another time zone list driver
+// events outside the range the totals cover and hide ones inside it. The
+// server value wins whenever the payload is for the range on screen; the local
+// span below is only a fallback for a payload that carries no cutoff.
+function localCutoff() {
+  if (RANGE === "today") {
+    const d = new Date();
+    d.setHours(0, 0, 0, 0);
+    return d.getTime() / 1000;
+  }
+  const sec = RANGE_SEC[RANGE];
+  return sec ? Date.now() / 1000 - sec : null;
+}
+
+function eventInRange(e) {
+  if (e.ts == null || RANGE === "all") return true;
+  // A payload for another range is stale (the picker moved, load() has not
+  // answered yet), so it must not decide this window's boundary.
+  const u = USAGE && USAGE.range === RANGE ? USAGE : null;
+  const cut = u && u.cutoff != null ? u.cutoff : localCutoff();
+  return cut == null ? true : e.ts >= cut;
+}
+
 function updateDriverEvents(events) {
   const box = $("#drv-events");
-  events = events || [];
+  events = (events || []).filter(eventInRange);
   $("#drv-empty").style.display = events.length ? "none" : "";
   box.innerHTML = events.slice().reverse().map(e => {
     const bad = EV_BAD[e.type];
@@ -610,7 +615,7 @@ function updateDriverEvents(events) {
       .filter(Boolean).join(" · ");
     const when = e.ts ? ago(e.ts) : "";
     return '<div class="evrow"><span class="et ' + (bad ? "bad" : "warn") + '">' + label + '</span>'
-      + '<span class="em" title="' + esc(meta) + '">' + esc(detail) + '</span>'
+      + '<span class="em" title="' + attr(meta) + '">' + esc(detail) + '</span>'
       + '<span class="ew">' + esc(when) + '</span></div>';
   }).join("");
 }
@@ -638,22 +643,32 @@ async function load() {
     const fleet = await fetchFleet();
     await fetchDaily(fleet);
     updateUI(u, fleet);
+    syncedAt = Date.now();
     $("#stale").style.display = "none";
-    $("#clock").textContent = new Date().toLocaleTimeString();
+    paintClock();
   } catch (e) {
     $("#stale").style.display = "";
+    $("#clock").textContent = "failed";
   }
+}
+
+function paintClock() {
+  const el = $("#clock");
+  const stale = $("#stale");
+  if (!el || (stale && stale.style.display !== "none")) return;
+  if (!syncedAt) { el.textContent = "—"; return; }
+  const s = Math.max(0, Math.round((Date.now() - syncedAt) / 1000));
+  el.textContent = s < 60 ? s + "s ago" : Math.round(s / 60) + "m ago";
 }
 
 function applyRange(r) {
   if (!RANGES.includes(r)) r = "1h";
-  RANGE = r;
-  location.hash = r;
+  const hash = "#" + r;
   document.querySelectorAll("#ranges .seg").forEach(b => b.classList.toggle("on", b.dataset.r === r));
+  if (r === RANGE && location.hash === hash) return;
+  RANGE = r;
+  if (location.hash !== hash) location.hash = r;
   load();
-  // RANGE does not describe the hourly panel (it is a day, not a window), so
-  // switching the range must not drop the day the operator picked.
-  loadHourly();
 }
 
 document.querySelectorAll("#ranges .seg").forEach(b => b.onclick = () => applyRange(b.dataset.r));
@@ -666,6 +681,16 @@ $("#hour-prev").onclick = () => stepHourDate(-1);
 $("#hour-next").onclick = () => stepHourDate(1);
 $("#hour-today").onclick = () => { setHourDate(pickDefaultDate()); loadHourly(); };
 $("#hour-date").onchange = e => { setHourDate(e.target.value); loadHourly(); };
+const hourChart = $("#hourly-chart");
+if (hourChart) hourChart.onclick = ev => {
+  const g = ev.target.closest && ev.target.closest("[data-hour]");
+  if (!g) return;
+  const row = document.getElementById("hour-" + g.getAttribute("data-hour"));
+  document.querySelectorAll("#hourly-body tr.hot").forEach(tr => tr.classList.remove("hot"));
+  if (!row) return;
+  row.classList.add("hot");
+  if (row.scrollIntoView) row.scrollIntoView({block: "nearest"});
+};
 
 function refresh() {
   load().finally(() => { nextAt = Date.now() + AUTO; });
@@ -685,6 +710,7 @@ let tickTimer = null;
 function tickCountdown() {
   const left = Math.max(0, Math.ceil((nextAt - Date.now()) / 1000));
   $("#count").textContent = left + "s";
+  paintClock();
   if (Date.now() >= nextAt) refresh();
 }
 function startTicking() {
