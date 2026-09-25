@@ -50,6 +50,14 @@ import events
 
 MODES = ("required", "best-effort", "off")
 
+# How many distinct Godot error lines a manifest keeps. Enough to name every
+# real failure, few enough that a per-frame repeat cannot bury the rest.
+_MAX_GODOT_ERRORS = 30
+
+# The reason string for "this game has no scripted playtest" — one constant,
+# because coverage reasons and tests both key on it.
+_NO_PLAYTEST = "tools/playtest.gd not found"
+
 
 class EvidenceUnavailable(RuntimeError):
     """The machine cannot capture (no display, Godot or ffmpeg). Not the task's fault."""
@@ -203,10 +211,40 @@ def _require_tools():
             "elsewhere start Xvfb and set ARC_STUDIO_DISPLAY")
 
 
-def _godot(project, args, *, timeout):
-    """(rc, output) of one Godot run WITH a display (rendering needs one)."""
+def _godot(project, args, *, timeout, log=None):
+    """(rc, output) of one Godot run WITH a display (rendering needs one).
+
+    `log`, when given, collects the raw output of EVERY render call: Godot
+    prints script and scene errors while still exiting 0, so a run that
+    "succeeded" can still have said what it could not load. capture() turns
+    that into manifest['godot_errors']."""
     from studio.engine import godot
-    return godot._run(args, project=project, timeout=timeout, display=_display())
+    rc, out = godot._run(args, project=project, timeout=timeout, display=_display())
+    if log is not None:
+        log.append(out)
+    return rc, out
+
+
+# Godot's own error lines. Narrower than studio.engine.godot.output_errors on
+# purpose: that list judges whether a run did what it printed a 0 for, this one
+# is the four kinds a manifest records (the task's contract).
+_GODOT_ERROR_RE = re.compile(r"SCRIPT ERROR|ERROR:|push_error|Parse Error", re.I)
+
+
+def godot_errors(*texts, limit=_MAX_GODOT_ERRORS):
+    """Deduped Godot error lines from every render call's output, capped.
+
+    Short, stable lines: the manifest and the PR comment show them verbatim,
+    so an error repeated once a frame occupies one slot of the cap."""
+    out = []
+    for text in texts:
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if line and line not in out and _GODOT_ERROR_RE.search(line):
+                out.append(line)
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 def _ffmpeg(args, timeout=300):
@@ -261,7 +299,7 @@ def _cameras(project):
     return [c.to_dict() for c in camera_system.load_anchors(project)]
 
 
-def _render_shots(project, cameras, out_dir, scratch, *, timeout):
+def _render_shots(project, cameras, out_dir, scratch, *, timeout, log=None):
     """One PNG per camera via the studio render harness, run from `scratch`."""
     from studio.engine import godot
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -277,7 +315,7 @@ def _render_shots(project, cameras, out_dir, scratch, *, timeout):
     scene = main_scene(project)
     if scene:
         args.append(scene)
-    rc, out = _godot(project, args, timeout=timeout)
+    rc, out = _godot(project, args, timeout=timeout, log=log)
     shots = sorted(out_dir.glob("*.png"))
     if not shots:
         raise EvidenceError(
@@ -300,7 +338,7 @@ def _video(src_avi, out_stem):
     return mp4, gif
 
 
-def _flythrough(project, cameras, out_dir, scratch, *, timeout):
+def _flythrough(project, cameras, out_dir, scratch, *, timeout, log=None):
     harness = Path(scratch) / "capture.gd"
     harness.write_text(CAPTURE_HARNESS, encoding="utf-8")
     cam_file = Path(scratch) / "fly_cameras.json"
@@ -310,7 +348,7 @@ def _flythrough(project, cameras, out_dir, scratch, *, timeout):
                                config.EVIDENCE_RESOLUTION, "--write-movie", str(avi),
                                "--fixed-fps", str(config.EVIDENCE_FPS),
                                "--script", str(harness), "--", str(cam_file),
-                               str(config.EVIDENCE_SECONDS)], timeout=timeout)
+                               str(config.EVIDENCE_SECONDS)], timeout=timeout, log=log)
     if not avi.exists() or "EVIDENCE_CAPTURE_OK" not in out:
         from studio.engine import godot
         raise EvidenceError(f"flythrough recording failed (godot rc={rc}):\n"
@@ -318,19 +356,25 @@ def _flythrough(project, cameras, out_dir, scratch, *, timeout):
     return _video(avi, out_dir / "flythrough")
 
 
-def _playtest(project, out_dir, scratch, *, timeout):
-    """Record the scripted playtest, when the game has one. None otherwise.
+def _playtest(project, out_dir, scratch, *, timeout, log=None):
+    """Record the scripted playtest. Returns (video|None, note|None, reason).
+
+    `reason` says, in EVERY branch, why there is no playtest video — that is
+    what manifest['coverage']['playtest'] reports. A bare (None, None) used to
+    be indistinguishable from "the video was lost", which is exactly the
+    silence this task removes.
 
     A playtest that fails or crashes here is recorded as a warning, not an
     error: the verify gate already judged it, and the video of a failing run
     is exactly what a reviewer needs to see."""
     if not (Path(project) / "tools" / "playtest.gd").is_file():
-        return None, None
+        return None, None, _NO_PLAYTEST
     avi = Path(scratch) / "playtest.avi"
     rc, out = _godot(project, ["--rendering-driver", "opengl3", "--resolution",
                                config.EVIDENCE_RESOLUTION, "--write-movie", str(avi),
                                "--fixed-fps", str(config.EVIDENCE_FPS),
-                               "--script", "res://tools/playtest.gd"], timeout=timeout)
+                               "--script", "res://tools/playtest.gd"], timeout=timeout,
+                     log=log)
     note = None if rc == 0 else f"the playtest exited {rc} while being recorded"
     shots_src = Path(project) / "studio_shots"
     if shots_src.is_dir():
@@ -339,8 +383,8 @@ def _playtest(project, out_dir, scratch, *, timeout):
         for png in sorted(shots_src.glob("*.png"))[:12]:
             shutil.copy2(png, dest / png.name)
     if not avi.exists() or avi.stat().st_size == 0:
-        return None, note or "the playtest produced no video"
-    return _video(avi, out_dir / "playtest"), note
+        return None, note, f"playtest exited {rc} but wrote no video"
+    return _video(avi, out_dir / "playtest"), note, ""
 
 
 # --- comparing --------------------------------------------------------------
@@ -649,41 +693,117 @@ def merge_base(worktree, base):
     return _git(["merge-base", base, "HEAD"], worktree, check=False) or None
 
 
-def baseline(project, repo, sha, *, timeout):
+def baseline(project, repo, sha, *, timeout, log=None):
     """Screenshots of `sha` from the fixed cameras, rendered once and cached.
 
     Rendered in a throwaway detached worktree of the blessed clone, so the
     baseline is exactly the commit — no uncommitted state, no other task's
-    files. Returns the directory, or None when the commit cannot render (a
-    base that predates the scene has no "before")."""
+    files. Returns (dir|None, status, reason): `status` is one of captured,
+    skipped or failed and `reason` says which — a render that FAILED must not
+    read the same as a base commit that simply has no Godot project, because
+    only the first one is a defect a reviewer has to know about.
+
+    `log` collects the baseline render's own output, so a "no baseline" that is
+    really a Godot script error reaches manifest['godot_errors'] instead of
+    vanishing."""
     dest = Path(config.EVIDENCE_DIR) / _slug(project) / "baseline" / sha
     if any(dest.glob("*.png")):
-        return dest
+        return dest, "captured", ""
     lock = Path(config.EVIDENCE_DIR) / _slug(project) / ".baseline.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
         if any(dest.glob("*.png")):
-            return dest
+            return dest, "captured", ""
         with tempfile.TemporaryDirectory(prefix="arc-evidence-base-") as tmp:
             wt = Path(tmp) / "wt"
             _git(["worktree", "add", "--detach", str(wt), sha], repo)
             try:
                 if not is_godot_project(wt):
-                    return None
+                    return None, "skipped", "the base commit is not a Godot project"
                 from studio.engine import godot
                 godot.import_assets(wt, timeout=timeout)
                 try:
-                    _render_shots(wt, _cameras(wt), dest, tmp, timeout=timeout)
-                except EvidenceError:
+                    _render_shots(wt, _cameras(wt), dest, tmp, timeout=timeout,
+                                  log=log)
+                except EvidenceError as exc:
+                    # Keep the reason: "baseline render failed: <why>" is a
+                    # different finding from "this base predates the scene".
                     shutil.rmtree(dest, ignore_errors=True)
-                    return None
+                    return None, "failed", f"baseline render failed: {str(exc)[:200]}"
             finally:
                 _git(["worktree", "remove", "--force", str(wt)], repo, check=False)
-    return dest
+    return dest, "captured", ""
 
 
 # --- capture ----------------------------------------------------------------
+
+def _cover(manifest, kind, status, reason=""):
+    """Record what happened to ONE kind of evidence: captured, skipped, failed.
+
+    `reason` is mandatory in spirit: a non-captured kind with no reason is the
+    silent gap this exists to close ("nothing changed visually" and "the
+    capture did not happen" must never look the same to a reviewer)."""
+    manifest.setdefault("coverage", {})[kind] = {"status": status, "reason": reason}
+
+
+# A change a player can SEE: a script or a scene, not a test or a tool.
+_GAMEPLAY_SUFFIXES = (".gd", ".tscn", ".tres")
+_GAMEPLAY_EXCLUDED = ("tests/", "tools/")
+
+
+def _is_gameplay(path):
+    """Does a change to this ONE path change what the game looks like?
+
+    Tests and tools are excluded on purpose: `tests/foo.gd` has a gameplay
+    suffix, but a diff that only touches it is not a gameplay change. This is
+    the single definition `gameplay_diff` and `no_visible_change` both use, so
+    a hand-supplied gameplay list cannot disagree with the worktree scan."""
+    p = (path or "").strip()
+    return p.endswith(_GAMEPLAY_SUFFIXES) and not p.startswith(_GAMEPLAY_EXCLUDED)
+
+
+def gameplay_diff(worktree, ref):
+    """Paths this task changed that change what the game looks like."""
+    names = _git(["diff", "--name-only", ref or "HEAD"], worktree, check=False)
+    names += "\n" + "\n".join(sorted(_untracked(worktree)))
+    return sorted({p.strip() for p in names.splitlines() if _is_gameplay(p)})
+
+
+def scene_shots(scenes):
+    """The shots that ACTUALLY exist under manifest['scenes'].
+
+    `scenes` lists ATTEMPTED renders, so a nonempty list is not proof a scene
+    was drawn — an entry whose `shots` are missing (or never written) rendered
+    nothing, and must neither count as a captured scene nor suppress the
+    no-visible-change flag."""
+    return [s for sc in (scenes or []) for s in (sc.get("shots") or [])
+            if Path(s).exists()]
+
+
+def no_visible_change(compare_rows, gameplay, scenes, *, min_change=None):
+    """Whether a gameplay diff produced no visual change anyone can see.
+
+    True only when ALL of these hold (Rule 7d — the flag a reviewer needs): the
+    diff touches a .gd/.tscn/.tres outside tests/ and tools/, there is at least
+    one camera comparison to read, EVERY comparison moved less than
+    `config.EVIDENCE_MIN_CHANGE` of its pixels, and no scene render exists to
+    show the change instead.
+
+    Every clause guards against a false alarm. With no comparison row there is
+    nothing that could have been unchanged (the coverage table says why there
+    is none), a `new` viewpoint is not a "no change" reading, and a scene
+    render is another look at the same change — a scene entry with no image on
+    disk is not a render, so it does not count (see `scene_shots`)."""
+    min_change = config.EVIDENCE_MIN_CHANGE if min_change is None else min_change
+    if not any(_is_gameplay(p) for p in (gameplay or [])) or scene_shots(scenes):
+        return False
+    rows = list(compare_rows or [])
+    if not rows:
+        return False
+    return all(c.get("changed") is not None and c["changed"] < min_change
+               for c in rows)
+
 
 def capture(worktree, out_dir, *, repo=None, base=None, project="",
             timeout=None):
@@ -701,16 +821,21 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
     started = time.time()
-    manifest = {"worktree": str(worktree), "head": _git(["rev-parse", "HEAD"], worktree,
-                                                        check=False),
-                "shots": [], "videos": {}, "compare": [], "warnings": []}
+    glog = []                      # raw output of EVERY render call
+    manifest = {"worktree": str(worktree), "project": project,
+                "head": _git(["rev-parse", "HEAD"], worktree,
+                             check=False),
+                "shots": [], "videos": {}, "compare": [], "warnings": [],
+                "coverage": {}, "godot_errors": []}
     with tempfile.TemporaryDirectory(prefix="arc-evidence-") as scratch, \
             _leave_no_trace(worktree):
         godot.import_assets(worktree, timeout=timeout)
         cams = _cameras(worktree)
         shots = _render_shots(worktree, cams, out_dir / "shots", scratch,
-                              timeout=timeout)
+                              timeout=timeout, log=glog)
         manifest["shots"] = [str(s) for s in shots]
+        _cover(manifest, "fixed_cameras", "captured" if shots else "failed",
+               "" if shots else "no camera rendered a screenshot")
         for s in shots:
             share = blank_share(s)
             if share is not None and share >= config.EVIDENCE_BLANK_SHARE:
@@ -719,30 +844,93 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
                     f"({share:.0%} one colour): nothing visible from there, or "
                     "the scene failed to draw")
         try:
-            mp4, gif = _flythrough(worktree, cams, out_dir, scratch, timeout=timeout)
+            mp4, gif = _flythrough(worktree, cams, out_dir, scratch, timeout=timeout,
+                                   log=glog)
             manifest["videos"]["flythrough"] = {"mp4": str(mp4), "gif": str(gif)}
+            _cover(manifest, "flythrough", "captured")
         except EvidenceError as exc:
+            _cover(manifest, "flythrough", "failed", str(exc).splitlines()[0])
             manifest["warnings"].append(str(exc).splitlines()[0])
-        pt, note = _playtest(worktree, out_dir, scratch, timeout=timeout)
+        pt, note, reason = _playtest(worktree, out_dir, scratch, timeout=timeout,
+                                     log=glog)
         if pt:
             manifest["videos"]["playtest"] = {"mp4": str(pt[0]), "gif": str(pt[1])}
+            _cover(manifest, "playtest", "captured")
+        else:
+            _cover(manifest, "playtest",
+                   "skipped" if reason == _NO_PLAYTEST else "failed", reason)
         if note:
             manifest["warnings"].append(note)
         manifest["playtest_shots"] = [str(p) for p in
                                       sorted((out_dir / "playtest_shots").glob("*.png"))]
+        _cover(manifest, "playtest_shots",
+               "captured" if manifest["playtest_shots"] else "skipped",
+               "" if manifest["playtest_shots"] else
+               (_NO_PLAYTEST if not (worktree / "tools" / "playtest.gd").is_file()
+                else "the playtest wrote no screenshots to studio_shots/"))
     if repo and base:
         sha = merge_base(worktree, base)
-        if sha:
+        if not sha:
+            _cover(manifest, "baseline", "skipped", "no merge base")
+            _cover(manifest, "compare", "skipped", "no merge base")
+        else:
             try:
-                bdir = baseline(project or Path(repo).name, repo, sha, timeout=timeout)
+                bdir, bstatus, breason = baseline(project or Path(repo).name, repo,
+                                                  sha, timeout=timeout, log=glog)
             except (EvidenceError, subprocess.SubprocessError, OSError) as exc:
-                bdir = None
+                bdir, bstatus = None, "failed"
+                breason = f"baseline render failed: {str(exc)[:200]}"
+                # The baseline render's own Godot output, kept like any other:
+                # "the base commit will not render" is often a script error the
+                # reviewer should read, not a mystery.
                 manifest["warnings"].append(f"no baseline: {str(exc)[:200]}")
-            manifest["baseline"] = {"sha": sha, "dir": str(bdir) if bdir else None}
+            if bdir:
+                # Cached renders and fresh ones both land here.
+                bstatus, breason = "captured", ""
+            _cover(manifest, "baseline", bstatus, breason or f"no baseline at {sha[:10]}")
+            manifest["baseline"] = {"sha": sha, "dir": str(bdir) if bdir else None,
+                                    "status": bstatus, "reason": breason}
             if bdir:
                 manifest["compare"] = compare(
                     bdir, shots, out_dir / "compare",
                     before_sha=sha, after_sha=manifest.get("head", ""))
+                _cover(manifest, "compare", "captured" if manifest["compare"] else "failed",
+                       "" if manifest["compare"] else "no camera had a baseline image")
+            else:
+                _cover(manifest, "compare", "skipped",
+                       manifest["coverage"]["baseline"]["reason"]
+                       or "no baseline to compare against")
+    else:
+        _cover(manifest, "baseline", "skipped", "no merge base")
+        _cover(manifest, "compare", "skipped", "no merge base")
+    scenes = manifest.get("scenes") or []
+    # A scene entry with no shots on disk rendered nothing: `scenes` is a list
+    # of ATTEMPTED renders, so a nonempty list is not proof a scene was drawn.
+    drawn = scene_shots(scenes)
+    _cover(manifest, "scenes",
+           "captured" if drawn else ("skipped" if not scenes else "failed"),
+           "" if drawn else
+           ("no scene renders in this capture" if not scenes else
+            f"{len(scenes)} scene render(s) produced no image"))
+    man_glog, glog[:] = list(glog), []
+    manifest["godot_errors"] = godot_errors(*man_glog)
+    for line in manifest["godot_errors"]:
+        emit("godot_error", task=project, line=line[:300])
+    ref = (manifest.get("baseline") or {}).get("sha") or ""
+    gameplay = gameplay_diff(worktree, ref)
+    manifest["gameplay_diff"] = gameplay
+    # `scenes`, not `drawn`: no_visible_change applies scene_shots() itself, and
+    # passing the helper would iterate the function object (TypeError on any
+    # gameplay diff — which capture_evidence then swallows, losing the whole
+    # manifest). `drawn` is a list of shot PATHS and is not a scenes list.
+    if no_visible_change(manifest["compare"], gameplay, scenes):
+        manifest["no_visible_change"] = True
+        manifest["warnings"].append(
+            "NO VISIBLE CHANGE: this diff touches "
+            + ", ".join(gameplay[:5])
+            + f" but every camera changed <{config.EVIDENCE_MIN_CHANGE:.1%} of its "
+            "pixels and no scene render shows it either — either the change is "
+            "genuinely invisible, or the capture did not see it (see coverage)")
     sheet = contact_sheet(capture_shots(manifest), out_dir)
     if sheet:
         manifest["contact_sheet"] = str(sheet)
@@ -789,6 +977,23 @@ def review_images(manifest, limit=8):
     return [p for p in out if Path(p).exists()][:limit]
 
 
+def coverage_lines(manifest):
+    """One line per evidence kind: what was captured, what was not, and why.
+
+    A reviewer must be able to tell "nothing changed visually" apart from
+    "the capture did not happen", so a non-captured kind is never omitted."""
+    cov = manifest.get("coverage") or {}
+    out = []
+    for kind in ("fixed_cameras", "flythrough", "playtest", "playtest_shots",
+                 "baseline", "compare", "scenes"):
+        c = cov.get(kind)
+        if not c:
+            continue
+        out.append(f"- coverage {kind}: {c.get('status')}"
+                   + (f" — {c['reason']}" if c.get("reason") else ""))
+    return out
+
+
 def prompt_block(manifest):
     """Text for a reviewer prompt: what was captured, where, and what changed."""
     if not manifest:
@@ -796,6 +1001,25 @@ def prompt_block(manifest):
     lines = ["VISUAL EVIDENCE (captured after the verify gate passed). Look at it: "
              "a visual regression or a change that does not show what the task "
              "asks for is a blocking issue, exactly like a failing test."]
+    if manifest.get("no_visible_change"):
+        lines += [
+            "",
+            "*** NO VISIBLE CHANGE — READ THIS BEFORE APPROVING. ***",
+            "This diff touches gameplay files ("
+            + ", ".join(manifest.get("gameplay_diff") or [])[:300] + ") but the "
+            "evidence shows NO visual change: every camera differs from the branch "
+            "point by less than "
+            f"{config.EVIDENCE_MIN_CHANGE:.1%} of its pixels, and no scene render "
+            "shows the change either.",
+            "That is either a genuinely invisible change or a capture that missed "
+            "it — you cannot tell which from the images, and neither can the "
+            "orchestrator. So you MUST do one of these two things: (a) verify the "
+            "change another way and say which — the tests that fail without it, "
+            "the scene stats in the coverage table, a camera that should have "
+            "moved and why it did not; or (b) REJECT for missing evidence, "
+            "because a gameplay change nobody can see has not been demonstrated.",
+            "Approving on an unchanged screenshot is not an option.",
+            ""]
     for c in manifest.get("compare") or []:
         if c.get("new"):
             lines.append(f"- camera {c['name']}: new viewpoint (no baseline)")
@@ -809,9 +1033,32 @@ def prompt_block(manifest):
         lines.append(f"- {kind} video: {v.get('mp4')} (preview {v.get('gif')})")
     for p in manifest.get("playtest_shots") or []:
         lines.append(f"- playtest screenshot: {p}")
+    lines += coverage_lines(manifest)
+    for e in manifest.get("godot_errors") or []:
+        lines.append(f"- GODOT ERROR: {e}")
     for w in manifest.get("warnings") or []:
         lines.append(f"- WARNING: {w}")
     return "\n".join(lines) + "\n"
+
+
+def _coverage_table(manifest, short=False):
+    """The coverage table for a PR comment / board post: kind | status | reason.
+
+    `short` keeps a board line to one line: only the kinds that are not
+    captured, which are the ones a reader has to know about."""
+    cov = manifest.get("coverage") or {}
+    rows = [(k, c) for k, c in cov.items()
+            if not short or c.get("status") != "captured"]
+    if not rows:
+        return []
+    order = {k: i for i, k in enumerate(
+        ("fixed_cameras", "flythrough", "playtest", "playtest_shots",
+         "baseline", "compare", "scenes"))}
+    rows.sort(key=lambda kv: order.get(kv[0], 99))
+    out = ["| evidence | status | reason |", "|---|---|---|"]
+    out += [f"| {k} | {c.get('status') or '?'} | "
+            f"{(c.get('reason') or '—').replace('|', '/')} |" for k, c in rows]
+    return out
 
 
 def board_body(manifest):
@@ -822,9 +1069,38 @@ def board_body(manifest):
     body = f"evidence: {n} screenshot(s)" + (f", video: {vids}" if vids else "")
     if changed:
         body += "; changed vs branch point: " + ", ".join(changed[:6])
+    gaps = [f"{k}:{c.get('status')}"
+            + (f" ({c['reason'][:60]})" if c.get("reason") else "")
+            for k, c in (manifest.get("coverage") or {}).items()
+            if c.get("status") != "captured"]
+    if gaps:
+        body += "; gaps: " + ", ".join(gaps[:5])
+    if manifest.get("godot_errors"):
+        body += f"; {len(manifest['godot_errors'])} godot error(s)"
+    if manifest.get("no_visible_change"):
+        body += "; NO VISIBLE CHANGE for a gameplay diff"
     if manifest.get("warnings"):
         body += f"; {len(manifest['warnings'])} warning(s)"
-    return body + f" — {Path(manifest.get('shots', ['.'])[0]).parent.parent}"
+    body += f" — {Path(manifest.get('shots', ['.'])[0]).parent.parent}"
+    table = _coverage_table(manifest)
+    if table:
+        body += "\n\n**Evidence coverage**\n" + "\n".join(table)
+    errs = manifest.get("godot_errors") or []
+    if errs:
+        # Every unique line, in capture order. Only the total is bounded, so one
+        # chatty frame cannot push the remaining errors off the post.
+        body += "\n\n**Godot errors**\n"
+        budget, shown = 3000, 0
+        for e in errs:
+            if budget - len(e) < 0:
+                body += f"- (+{len(errs) - shown} more — see the PR comment)\n"
+                break
+            budget -= len(e)
+            shown += 1
+            body += f"- `{e[:300]}`\n"
+    if manifest.get("warnings"):
+        body += "\n\n**Warnings**\n" + "\n".join(f"- {w}" for w in manifest["warnings"])
+    return body
 
 
 # --- publishing to the game repo --------------------------------------------
@@ -928,6 +1204,18 @@ def pr_markdown(manifest, web_base, *, task_id, attempt):
         lines += ["**Playtest screenshots**", ""]
         lines += [f"![{Path(p).stem}]({url(p)})" for p in pts[:6]]
         lines.append("")
+    if manifest.get("no_visible_change"):
+        lines += ["**🚩 No visible change** — this diff touches gameplay files ("
+                  + ", ".join(f"`{p}`" for p in (manifest.get("gameplay_diff") or [])[:5])
+                  + ") but no camera moved and no scene render shows it. Either the "
+                  "change is invisible or the capture missed it; the coverage table "
+                  "below says which kinds ran.", ""]
+    table = _coverage_table(manifest)
+    if table:
+        lines += ["**Evidence coverage**", ""] + table + [""]
+    if manifest.get("godot_errors"):
+        lines += ["**Godot errors** (from the render runs — Godot exits 0 with these "
+                  "on stdout)", ""] + [f"- `{e}`" for e in manifest["godot_errors"]] + [""]
     if manifest.get("warnings"):
         lines += ["**Warnings**", ""] + [f"- ⚠️ {w}" for w in manifest["warnings"]] + [""]
     lines.append(f"<sub>Captured by arc-orchestrator (AGENTS.md Rule 7d) in "

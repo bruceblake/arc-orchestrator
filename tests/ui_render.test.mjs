@@ -282,7 +282,8 @@ const uext = [...usrc.matchAll(/<script[^>]+src="([^"]+)"/g)]
   .join("\n");
 const umod = new Function(uext + "\n" + ujs
   + "\nglobalThis.__setDaily = v => { DAILY = v; };"
-  + "\nreturn {updateUI, fillTotal, updateModels, updateDaily, updateDriverEvents};");
+  + "\nglobalThis.__setRange = (r, u) => { RANGE = r; if (u !== undefined) USAGE = u; };"
+  + "\nreturn {updateUI, fillTotal, updateModels, updateDaily, updateDriverEvents, RANGES, eventInRange};");
 const uapi = umod();
 
 // Fixture: one model at 60% (ok 3 / err 1 / failed 1 of 5 requests), one at
@@ -324,22 +325,78 @@ ok(document.querySelector("#total-waste").textContent === "1 failed · ≈4.0k t
 ok(document.querySelector("#total-tok").textContent === "48.0k", "usage: total tokens still rendered");
 ok(document.querySelector("#split-prompt").style.width === "62.5%", "usage: prompt/completion split still rendered");
 ok(document.querySelector("#range-label").textContent === "24H", "usage: range label rendered");
-ok(document.querySelector("#dir-tok").textContent === "▲ +100%", "usage: token direction vs yesterday up");
-ok(document.querySelector("#dir-req").textContent === "▼ -50%", "usage: request direction vs yesterday down");
-ok(document.querySelector("#dir-tok").className === "dir up" && document.querySelector("#dir-req").className === "dir down",
-   "usage: direction arrows carry up/down colour class");
+ok(document.querySelector("#total-cost").textContent === "—", "usage: missing cost stays a dash");
 const drows = document.querySelector("#daily-body").innerHTML;
 ok(drows.includes("2026-09-10") && drows.indexOf("2026-09-10") < drows.indexOf("2026-09-09"),
    "usage: daily breakdown rendered, newest first");
+ok(uapi.RANGES.join() === "1h,3h,6h,today,24h,7d,all", "usage: every range button the page shows is a real window");
 ok(document.querySelector("#fam-body").innerHTML.includes("kimi"), "usage: family chips still rendered");
 ok(document.querySelector("#drv-events").innerHTML.includes("boom"), "usage: driver events feed still rendered");
 uapi.updateDaily([]);
 ok(document.querySelector("#daily-box").style.display === "none", "usage: daily box hidden when no days");
 
-// A range with no comparable preceding window shows no arrow, not a fake one.
-uapi.fillTotal({ range: "1h", totals: usage.totals });
-ok(document.querySelector("#dir-tok").textContent === "" && document.querySelector("#dir-req").textContent === "",
-   "usage: 1h range has no direction arrow");
+uapi.fillTotal({ range: "1h", totals: Object.assign({cost: 1.5}, usage.totals) });
+ok(document.querySelector("#total-cost").textContent === "$1.50", "usage: cost renders from the totals");
+
+// ---- the "today" event window is the SERVER's, not the viewer's ---------------
+// /api/usage reports the cutoff its totals were summed from (the orchestrator's
+// local midnight for "today"). A viewer in another time zone has a different
+// midnight, so deriving the window from the browser clock listed events outside
+// the totals' range and hid events inside it. The server value must decide.
+{
+  const SRV_NOW = 1789000000;          // the orchestrator's clock
+  const SRV_MID = 1788998400;          // its local midnight (the cutoff)
+  __setRange("today", { range: "today", now: SRV_NOW, cutoff: SRV_MID });
+  ok(uapi.eventInRange({ ts: SRV_MID - 60 }) === false,
+     "usage: an event before the server's midnight is out of the 'today' range");
+  ok(uapi.eventInRange({ ts: SRV_MID + 60 }) === true,
+     "usage: an event after the server's midnight is in the 'today' range");
+  // The same two events must not change verdict with the viewer's clock. Node
+  // ignores a runtime TZ change, so the viewer's clock is moved instead: a
+  // browser hours away from the server must still get the server's window.
+  const probe = { ts: SRV_MID + 60 };
+  const before = uapi.eventInRange(probe);
+  const RealDate = Date;
+  const frozen = [SRV_NOW + 86400, SRV_NOW - 86400, SRV_MID + 7200];
+  const seen = frozen.map(t => {
+    globalThis.Date = class extends RealDate {
+      constructor(...a) { super(...(a.length ? a : [t * 1000])); }
+      static now() { return t * 1000; }
+    };
+    return uapi.eventInRange(probe);
+  });
+  globalThis.Date = RealDate;
+  ok(seen.every(v => v === before),
+     "usage: the 'today' window does not move with the viewer's clock");
+  // A boundary case a viewer-derived midnight gets wrong in either direction:
+  // an event that falls between the server's midnight and the viewer's.
+  const localMid = new Date().setHours(0, 0, 0, 0) / 1000;
+  const between = Math.max(SRV_MID, localMid) - 1;
+  ok(uapi.eventInRange({ ts: between }) === (between >= SRV_MID),
+     "usage: an event between the two midnights follows the SERVER's midnight");
+  // A stale payload for another range must not define this window's boundary.
+  __setRange("today", { range: "6h", now: SRV_NOW, cutoff: SRV_NOW - 21600 });
+  ok(uapi.eventInRange({ ts: SRV_MID + 60 }) === false,
+     "usage: a payload for another range does not set the 'today' cutoff");
+  // No cutoff in the payload (older server) → fall back to the local span,
+  // which is the viewer's own midnight and therefore uses the live clock.
+  __setRange("all", { range: "all", now: SRV_NOW });
+  ok(uapi.eventInRange({ ts: 1 }) === true, "usage: 'all' keeps every event");
+  __setRange("today", { range: "today", now: SRV_NOW });
+  const liveNow = Math.floor(Date.now() / 1000);
+  // Anchored to local midnight, not to liveNow: an event "1 minute ago" is in
+  // the previous day for the first minute after midnight and would flake.
+  ok(liveNow >= localMid
+     && uapi.eventInRange({ ts: localMid }) === true
+     && uapi.eventInRange({ ts: localMid - 60 }) === false,
+     "usage: without a server cutoff the 'today' fallback still filters locally");
+  ok(uapi.eventInRange({ ts: null }) === true, "usage: an event with no ts is kept");
+  __setRange("1h", { range: "1h", now: SRV_NOW, cutoff: SRV_NOW - 3600 });
+  ok(uapi.eventInRange({ ts: SRV_NOW - 1800 }) === true
+     && uapi.eventInRange({ ts: SRV_NOW - 7200 }) === false,
+     "usage: a rolling range filters by its server cutoff too");
+  __setRange("1h", null);
+}
 
 // Nothing below 90% → back to token order.
 uapi.updateModels([

@@ -163,7 +163,7 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 
 <section id="view-now" class="view on" aria-label="Now">
   <h1>Now <span id="stale" class="stale">stale data</span></h1>
-  <p class="sub" id="nowsub">auto-refresh 5s · paused while hidden</p>
+  <p class="sub" id="nowsub">loading…</p>
   <div class="figs" id="figs"></div>
   <div class="alert" id="alert" role="status"></div>
   <h2 class="sec">Agents</h2>
@@ -316,12 +316,14 @@ function failedCount() {
 function redLines() {
   var out = [];
   if (S.stale) out.push("data stale - refresh failing");
+  // Every inflight agent is considered, task or no task: /api/agents reports
+  // kimi-code sessions with "task": null (dashboard.py:417), and a stalled one
+  // of those is exactly as stalled as any other. The task is only ever a label
+  // here, so a missing one reads "?" rather than removing the agent.
   var ag = (S.agents && S.agents.agents) || [];
   for (var i = 0; i < ag.length; i++) {
     if (ag[i].stalled) out.push(short(ag[i].model) + " stalled on " + (ag[i].task || "?"));
   }
-  var f = failedCount();
-  if (f > 0) out.push(f + " failed/conflict node" + (f > 1 ? "s" : ""));
   if (S.gh && S.gh.ready) {
     var prs = S.gh.prs || [];
     for (var j = 0; j < prs.length; j++) {
@@ -330,6 +332,10 @@ function redLines() {
   }
   if (out.length > 6) out = out.slice(0, 6);
   return out;
+}
+
+function attr(s) {
+  return esc(s).replace(/"/g, "&quot;");
 }
 
 function kv(k, v) {
@@ -362,7 +368,7 @@ function agentCard(a) {
       "</div>";
   }
   return '<div class="card' + (open ? " open" : "") + '">' +
-    '<button type="button" class="card-head tap" data-key="' + esc(a.req_id) +
+    '<button type="button" class="card-head tap" data-key="' + attr(a.req_id) +
     '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="dot" style="background:' + (a.stalled ? "#f85149" : color) + '"></span>' +
     '<span class="c-title">' + esc(short(a.model)) + " · " + esc(role) + "</span>" +
@@ -430,10 +436,10 @@ function projectCard(p) {
   var total = (p.progress && p.progress.total) || 0;
   var pct = total > 0 ? Math.round((done / total) * 100) : 0;
   var act = p.last_activity ? tick(ageSec(p.last_activity)) + " ago" : "no activity";
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + attr(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="c-title">' + esc(p.title || p.file) + "</span>" +
     '<span class="c-sub">' + esc(p.file) + " · " + done + "/" + total +
-    (p.active ? " · running" : " · " + act) + "</span></span>" +
+    (p.active && p.run_pid ? " · running" : (p.active ? " · stale" : " · " + act)) + "</span></span>" +
     '<span class="chev" aria-hidden="true">›</span></button>';
   var body = "";
   if (open) {
@@ -445,21 +451,25 @@ function projectCard(p) {
     var ns = (p.dag && p.dag.nodes) || [];
     var rows = "";
     for (var i = 0; i < ns.length; i++) {
+      if (ns[i].kind === "chain" && ns[i].file) {
+        rows += '<button type="button" class="act" data-open-file="' + attr(ns[i].file) + '">' +
+          esc(ns[i].id || ns[i].file) + "</button>";
+        continue;
+      }
       rows += '<div class="kv"><span class="k">' +
         '<span class="dot" style="background:' + (STATUSC[ns[i].status] || STATUSC.pending) + '"></span>' +
         esc(ns[i].id) + "</span>" +
         '<span class="v">' + esc(ns[i].status) + (ns[i].live ? " · live" : "") + "</span></div>";
     }
     body = '<div class="card-body">' +
-      kv("progress", done + " / " + total + " (" + pct + "%)") +
       '<div class="pbar"><i style="width:' + pct + '%"></i></div>' +
       '<div class="chips">' + chips + "</div>" +
       rows +
       kv("models", esc((p.models || []).map(short).join(", "))) +
-      kv("reviewers", esc((p.reviewers || []).join(", "))) +
+      kv("reviewers", esc((p.reviewers || []).map(short).join(", "))) +
       kv("tokens", fmtK(p.tokens)) +
       kv("harness time", tick(p.seconds)) +
-      (p.file ? '<button class="act" data-run-file="' + esc(p.file) + '">▶ run</button>' : '') +
+      (p.file ? '<button class="act" data-run-file="' + attr(p.file) + '">▶ run</button>' : '') +
       (p.errors && p.errors.length ? kv("errors", esc(p.errors.map(function(e) {
         return e && typeof e === "object" ? (e.error || e.id || e.status || "?") : String(e);
       }).join(" · "))) : "") +
@@ -473,7 +483,7 @@ function prCard(p) {
   var state = esc(String(p.state || "OPEN").toUpperCase());
   var color = state === "MERGED" ? "var(--purple)" : (state === "CLOSED" ? "var(--grey)" : "var(--accent)");
   var ap = (p.approvals || []).length;
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + attr(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="dot" style="background:' + color + '"></span>' +
     '<span class="c-title">' + esc(p.title) + "</span>" +
     '<span class="c-sub">#' + esc(key) + " · " + state + (p.isDraft ? " · draft" : "") +
@@ -498,7 +508,7 @@ function prCard(p) {
       kv("reviewers", esc((p.reviewers || []).join(", "))) +
       rrows +
       (p.mergedAt ? kv("merged", tick(ageSec(p.mergedAt)) + " ago") : "") +
-      kv("link", '<a href="' + esc(p.url) + '" target="_blank" rel="noopener">open on github</a>') +
+      kv("link", '<a href="' + attr(p.url) + '" target="_blank" rel="noopener">open on github</a>') +
       "</div>";
   }
   return '<div class="card' + (open ? " open" : "") + '">' + head + body + "</div>";
@@ -508,7 +518,7 @@ function modelCard(m) {
   var key = m.model;
   var open = S.open.fleet === key;
   var color = COLORS[familyOf(m)] || "";
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + attr(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="dot" style="background:' + color + '"></span>' +
     '<span class="c-title">' + esc(m.pretty || m.model) + "</span>" +
     '<span class="c-sub">' + m.running + " running · " + m.waiting + " waiting · cap " + m.cap + "</span></span>" +
@@ -526,7 +536,7 @@ function modelCard(m) {
 function harnessCard(h) {
   var key = "h:" + h.harness;
   var open = S.open.fleet === key;
-  var head = '<button type="button" class="card-head tap" data-key="' + esc(key) + '" aria-expanded="' + open + '">' +
+  var head = '<button type="button" class="card-head tap" data-key="' + attr(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="c-title">' + esc(h.harness) + " harness</span>" +
     '<span class="c-sub">' + h.running + " running · " + h.waiting + " waiting · cap " + h.cap + "</span></span>" +
     '<span class="chev" aria-hidden="true">›</span></button>';
@@ -572,6 +582,10 @@ function renderNow() {
     al.innerHTML = lines.map(esc).join("<br>");
     al.style.display = lines.length ? "block" : "none";
   }
+  // Not filtered by task: an inflight row with "task": null (kimi-code
+  // sessions, dashboard.py:417) is a running agent, and dropping it made the
+  // view claim "no agents running" while one was. agentCard() already renders a
+  // missing task as an empty label, so nothing else is needed here.
   var ag = (S.agents && S.agents.agents) || [];
   var box = $("#agents");
   if (box) {
@@ -581,10 +595,15 @@ function renderNow() {
   }
   var sub = $("#nowsub");
   if (sub) {
-    // /api/agents returns runs as a LIST of run dicts, not a count; the old
-    // `runs + "..."` printed "[object Object]" the moment a run launched.
+    // runs is the list of dashboard-launched processes, not harness sessions
+    // finished today. The age moves only when a poll succeeds.
     var runs = (S.agents && S.agents.runs) || [];
-    sub.textContent = runs.length + " harness runs today · auto-refresh 5s · paused while hidden";
+    var when = S.syncedAt == null ? "waiting for a refresh"
+      : (Math.round((Date.now() - S.syncedAt) / 1000) < 60
+        ? Math.round((Date.now() - S.syncedAt) / 1000) + "s ago"
+        : Math.round((Date.now() - S.syncedAt) / 60000) + "m ago");
+    sub.textContent = runs.length + " dashboard runs · updated " + when +
+      (document.hidden ? " · paused" : "");
   }
   wire("#agents", "now");
 }
@@ -599,6 +618,15 @@ function renderProjects() {
   if (box) box.innerHTML = ps.length ? ps.map(projectCard).join("") : '<div class="empty">no projects yet</div>';
   wire("#projects", "projects");
   wireRun("#projects");
+  var jumps = document.querySelectorAll("#projects [data-open-file]");
+  for (var j = 0; j < jumps.length; j++) {
+    jumps[j].onclick = function () {
+      var file = this.getAttribute("data-open-file");
+      if (!file) return;
+      S.open.projects = file;
+      renderProjects();
+    };
+  }
 }
 
 function renderPRs() {
@@ -679,12 +707,28 @@ function showView(v) {
 }
 
 async function j(url) {
-  var res = await fetch(url);
+  var res = await fetch(url, {cache: "no-store"});
   return res.json();
 }
 
+function authHeaders() {
+  var t = null;
+  try { t = localStorage.getItem("arc.dashboard.token"); } catch (e) {}
+  return t ? {"Authorization": "Bearer " + t} : {};
+}
+
 async function jpost(u, body) {
-  const r = await fetch(u, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)});
+  var send = function () {
+    return fetch(u, {method: "POST", headers: Object.assign({"Content-Type": "application/json"}, authHeaders()), body: JSON.stringify(body)});
+  };
+  var r = await send();
+  if (r.status === 401 && typeof prompt === "function") {
+    var t = prompt("Dashboard token (ARC_DASHBOARD_TOKEN):");
+    if (t && String(t).trim()) {
+      try { localStorage.setItem("arc.dashboard.token", String(t).trim()); } catch (e) {}
+      r = await send();
+    }
+  }
   return {code: r.status, body: await r.json()};
 }
 
@@ -697,11 +741,12 @@ async function poll() {
     j("/api/queue").catch(function () { return null; })
   ]);
   var bad = false;
-  if (res[0]) { S.summary = res[0]; } else { bad = true; }
+  if (res[0]) S.summary = res[0];
   if (res[1]) { S.agents = res[1]; } else { bad = true; }
   if (res[2]) { S.projects = res[2].projects || []; } else { bad = true; }
-  if (res[3]) { S.gh = res[3]; } else { bad = true; }
+  if (res[3]) { S.gh = res[3]; } else { bad = true; S.gh = null; }
   if (res[4]) { S.queue = res[4]; } else { bad = true; }
+  if (res[1] || res[2] || res[4]) S.syncedAt = Date.now();
   S.stale = bad;
   refreshTx();
   renderAll();
@@ -804,7 +849,7 @@ function loadPlanRepos(selectPath) {
     if (!sel) return;
     const repos = (data && data.repos) || [];
     const opts = repos.map(function (r) {
-      return '<option value="' + esc(r.path) + '">' + esc(r.name) + "</option>";
+      return '<option value="' + attr(r.path) + '">' + esc(r.name) + "</option>";
     }).join("") + '<option value="__new__">new repo…</option>';
     sel.innerHTML = opts;
     let target = selectPath || planRepoPath;
@@ -906,7 +951,7 @@ async function loadPlanSessions() {
     known.unshift({ name: planSession, turns: planTurns.length, mtime: 0 });
   }
   sel.innerHTML = known.map(function (s) {
-    return '<option value="' + esc(s.name) + '">' + esc(s.name) + " (" + s.turns + ")</option>";
+    return '<option value="' + attr(s.name) + '">' + esc(s.name) + " (" + s.turns + ")</option>";
   }).join("");
   sel.value = planSession || "";
   sel.onchange = onPlanSessionChange;
@@ -1042,7 +1087,7 @@ function renderPlanTaskcard() {
   const file = latest.taskfile;
   card.innerHTML = '<div class="card"><div class="card-body" style="display:grid;">' +
     '<div>plan ready: ' + esc(file) + "</div>" +
-    '<button class="act" data-run-file="' + esc(file) + '">▶ run</button>' +
+    '<button class="act" data-run-file="' + attr(file) + '">▶ run</button>' +
     "</div></div>";
   wireRun("#plan-taskcard");
 }

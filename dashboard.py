@@ -1097,9 +1097,16 @@ def _usage(store=None, range_key=None, include_series=False, window=None, with_p
     families = [by_family[f] for f in config.FAMILY_ORDER]
     families += [v for k, v in sorted(by_family.items()) if k not in config.FAMILY_ORDER]
 
+    # `cutoff` is the SERVER's own window start, and the page filters its
+    # driver-event feed by it. The client cannot re-derive "today": it has only
+    # its own clock, and a viewer in another time zone has a different midnight
+    # from the one this window (and the daily rows) are keyed by — re-deriving
+    # it showed events outside the totals' range and hid events inside it.
+    # `now` is already the server's clock for the same reason.
     res = {"now": now, "range": range_key, "bucket_secs": bucket, "daily": daily,
            "models": models, "families": families, "inflight": inflight,
            "recent_driver_events": recent_driver,
+           "cutoff": cutoff,
            "totals": totals}
     if include_series:
         res["series"] = series
@@ -1625,6 +1632,7 @@ def _task_progress(ids):
     # indistinguishable from progress: the console says "writing code" while
     # the same gate rejects the same work over and over.
     gate_fail = {}
+    gate_log = {}
     for line in _load_event_lines():
         if '"task.gate"' not in line:
             continue
@@ -1635,6 +1643,15 @@ def _task_progress(ids):
         tid = e.get("module") or e.get("task")
         if tid in want:
             gate_fail[tid] = bool(e.get("passed"))
+            # The event carries the gate's OWN log path
+            # (`code_tasks.gate` emits `log=<path>`, absolute). Deriving the
+            # name here instead is what let the writer move to
+            # logs/gates/<project>/<task>/ while this kept handing the browser
+            # a flat name the route then 404'd. Reduced to the path RELATIVE
+            # to logs/gates, which is the form /api/gate-log serves.
+            rel = _gate_log_rel(e.get("log"))
+            if rel:
+                gate_log[tid] = rel
 
     out = {}
     now = time.time()
@@ -1654,7 +1671,9 @@ def _task_progress(ids):
             "stale_report_s": round(age) if age is not None else None,
             "moving": bool(moving),
             "last_gate_failed": gate_fail.get(tid) is False,
-            "gate_log": (f"{tid}-x{pr.get('attempt') or 1}.log"
+            # The event's own path — never a name rebuilt from the task id and
+            # attempt, which is how this reader fell behind the writer.
+            "gate_log": (gate_log.get(tid)
                          if gate_fail.get(tid) is False else None),
         }
     return out
@@ -3075,6 +3094,59 @@ def _exited_early(proc, seconds):
 
 
 _RUN_LOG_RE = re.compile(r"^(run|plan)-[\w.-]+\.log$")
+
+# A gate log's path RELATIVE to logs/gates/, the form /api/gate-log takes:
+# `<project>/<task>/x<attempt>.log` (code_tasks.gate_log_path), plus the flat
+# `<task>-x<attempt>.log` the writer used before that nested layout — old logs
+# on disk must keep opening. Each segment reuses the task-id pattern's
+# discipline: `.` and `-` are legal INSIDE a name, but a segment made only of
+# dots is a traversal, so `..` cannot climb out of logs/gates. Absolute paths
+# and backslashes are excluded by the pattern itself, and `_gate_log_file`
+# re-checks containment on the resolved path — a regex is a filter, not a
+# sandbox (AGENTS.md Rule 6b: this route is unauthenticated).
+_GATE_LOG_SEG = r"(?!\.+(?:/|$))[A-Za-z0-9_.-]{1,120}"
+_GATE_LOG_RE = re.compile(
+    # the nested layout gate_log_path writes: <project>/<task>/x<attempt>.log
+    rf"^(?:{_GATE_LOG_SEG}/){{2}}{_GATE_LOG_SEG}\.log$"
+    # and a bare .log basename, which is what this route served before that
+    # layout existed — the legacy flat `<task>-x<attempt>.log` and hand-placed
+    # files must keep opening.
+    rf"|^{_GATE_LOG_SEG}\.log$")
+
+
+def _gate_log_rel(log):
+    """A `task.gate` event's absolute `log` path as logs/gates-relative, or None.
+
+    Returns None for an event with no log (an older event, or a gate whose
+    write failed — both normal) and for a path that is outside logs/gates,
+    which is not something the dashboard should be linking to anyway.
+    """
+    if not log:
+        return None
+    try:
+        root = (Path(config.ROOT) / "logs" / "gates").resolve()
+        path = Path(str(log)).resolve()
+        rel = path.relative_to(root).as_posix()
+    except (OSError, ValueError):
+        return None
+    return rel if _GATE_LOG_RE.match(rel) else None
+
+
+def _gate_log_file(fn):
+    """Resolve a /api/gate-log `file` to a real path under logs/gates, or None.
+
+    Returns (path, error): `error` is the message to hand back, so the route
+    keeps one source of truth for both the 400 and the 404.
+    """
+    if not _GATE_LOG_RE.match(fn or ""):
+        return None, "bad file name"
+    root = (Path(config.ROOT) / "logs" / "gates").resolve()
+    path = (root / fn).resolve()
+    if root != path and root not in path.parents:
+        return None, "bad file name"
+    if not path.is_file():
+        return None, "no gate log for this attempt"
+    return path, None
 
 # --- task timeline: everything that happened to one task -------------------
 # Debugging a task used to mean grepping events.jsonl, the harness
@@ -4981,11 +5053,14 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == "/api/gate-log":
                 q = parse_qs(u.query)
                 fn = q.get("file", [""])[0]
-                if not re.fullmatch(r"[\w.-]+\.log", fn):
-                    return self._json({"error": "bad file name"}, 400)
-                path = Path(config.ROOT) / "logs" / "gates" / fn
-                if not path.is_file():
-                    return self._json({"error": "no gate log for this attempt"}, 404)
+                # The writer's layout and this route must not drift apart
+                # again: a nested `<project>/<task>/x<n>.log` is what
+                # code_tasks.gate_log_path writes now, and rejecting the slash
+                # made the project view's "why?" button 404 on every failure.
+                path, err = _gate_log_file(fn)
+                if err:
+                    return self._json({"error": err},
+                                      400 if err == "bad file name" else 404)
                 try:
                     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
                 except OSError as exc:

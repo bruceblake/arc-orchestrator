@@ -315,7 +315,39 @@ for.
 - The gate node (code_tasks.py:190) runs the task's `verify_cmd` as a shell
   command **in the worktree**, under `config.GATE_TIMEOUT` = **360 s**
   (override `ARC_GATE_TIMEOUT`); a timeout kills the process and fails the
-  gate. Only its stdout/stderr tail (last 2000 chars) is kept.
+  gate. **The gate's output is PERSISTED, not just windowed.**
+  `code_tasks.gate` writes the run's FULL stdout+stderr to
+  `logs/gates/<project>/<task>/x<attempt>.log` and names it on the
+  `task.gate` event as `log=<path>`. The file is capped at
+  `config.GATE_LOG_MAX_BYTES` (**5 MB**, override `ARC_GATE_LOG_MAX_BYTES`)
+  by `code_tasks.cap_log`, which keeps the head AND the tail and marks the
+  dropped middle with its byte count — a runaway test run must not fill the
+  disk, and both the first error and the summary are things a human opens
+  the log to find. A write failure is not a gate failure: the event carries
+  `log=null` and the round proceeds.
+- **What the implementer is handed is extracted, not blind.**
+  `code_tasks.gate_feedback` puts the FAILING SECTIONS first — for unittest
+  `FAIL:`/`ERROR:` blocks through their own traceback, for pytest the
+  `____ test_x ____` blocks, for Godot `FAIL:`/`SCRIPT ERROR` plus the stack
+  and echo lines under them — then the failing-check names, then the raw
+  tail, then the full log's path, all bounded to ~6000 **bytes**. The old
+  `output[-2000:]` lost the traceback: on a long run the failure sits
+  exactly where that cut throws it away, so the fix round started by
+  re-running the test to see an error the gate already had in hand.
+  **The log path is reserved before the rest, and is never what gets cut**
+  (`code_tasks.gate_feedback`): it is the one line a reader cannot
+  reconstruct, so the head is clipped to what remains after the path and a
+  guaranteed tail share — measured on the rejected first version, which
+  appended the path last and sliced the block from the front, three capped
+  sections produced a full 6000 bytes with no path at all.
+- **A reviewer's raw output is kept too.** When no verdict can be parsed the
+  reviewer is recorded `crashed` (Rule 2) and the response that failed to
+  parse goes to `logs/gates/<project>/<task>/review-x<attempt>.txt`
+  (`code_tasks.save_review_log`), named on the `driver.error` event as
+  `log=<path>` and in the retry's issue text — otherwise the retry repeated
+  the failure blind. A salvaged verdict (malformed JSON whose `pass` was
+  still readable) gets the same file, since its issue list is unreadable by
+  definition.
 - The gate MUST pass before review happens (edge `gate_<tid> ->
   review_<tid>` fires only `when r["passed"]`, code_tasks.py:256).
 - A gate or review failure loops back to `implement` with the failure output
