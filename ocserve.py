@@ -253,7 +253,7 @@ def start_server(binary=None, port=None, startup_timeout=None, cwd=None,
     without it the server would run at opencode's default window and never
     compact in time.
     """
-    binary = binary or config.OPENCODE_SERVE_BIN
+    binary = binary or config.opencode_serve_bin()
     if startup_timeout is None:
         startup_timeout = config.OPENCODE_SERVE_STARTUP_TIMEOUT
     port = port or _free_port()

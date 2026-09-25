@@ -8,7 +8,10 @@ failure the lease table exists to prevent.
 import pathlib
 import os
 import sys
+import tempfile
 import unittest
+from pathlib import Path
+from unittest import mock
 
 from helpers import capture_events, ENTRY, STRONGEST  # noqa: F401  (sys.path)
 
@@ -686,6 +689,34 @@ class InteractiveWorkGetsAReservedSlot(unittest.TestCase):
     def test_batch_never_drops_below_the_floor(self):
         for m in config.IMPLEMENTER_MODELS:
             self.assertGreaterEqual(config.driver_limit(m), 1)
+
+
+class OpencodeServeBin(unittest.TestCase):
+    """Non-login services need a resolved opencode path, not a bare name."""
+
+    def test_home_local_bin_when_not_on_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home_bin = Path(tmp) / ".local" / "bin" / "opencode"
+            home_bin.parent.mkdir(parents=True)
+            home_bin.write_text("#!/bin/sh\n", encoding="utf-8")
+            env = os.environ.copy()
+            env.pop("ARC_OPENCODE_SERVE_BIN", None)
+            with mock.patch.dict(os.environ, env, clear=True):
+                with mock.patch("shutil.which", return_value=None):
+                    with mock.patch("config.Path.home", return_value=Path(tmp)):
+                        self.assertEqual(config.opencode_serve_bin(), str(home_bin))
+
+    def test_env_override_wins(self):
+        with mock.patch.dict(os.environ, {"ARC_OPENCODE_SERVE_BIN": "/custom/opencode"}):
+            self.assertEqual(config.opencode_serve_bin(), "/custom/opencode")
+
+    def test_bare_name_when_nowhere_to_find_it(self):
+        env = os.environ.copy()
+        env.pop("ARC_OPENCODE_SERVE_BIN", None)
+        with mock.patch.dict(os.environ, env, clear=True):
+            with mock.patch("shutil.which", return_value=None):
+                with mock.patch("config.Path.home", return_value=Path("/nonexistent-home")):
+                    self.assertEqual(config.opencode_serve_bin(), "opencode")
 
 
 class MainCheckoutEnv(unittest.TestCase):
