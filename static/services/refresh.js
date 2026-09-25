@@ -47,7 +47,7 @@ function paint(el, html) {
 function sinceStamp(secondsAgo) {
   if (secondsAgo == null || secondsAgo === "") return "";
   const n = Number(secondsAgo);
-  if (!isFinite(n)) return "";
+  if (!Number.isFinite(n)) return "";
   return String(Math.round(Date.now() / 1000 - n));
 }
 

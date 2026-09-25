@@ -152,9 +152,14 @@ $("#work-map").onkeydown = ev => {
 };
 async function pollWorkStatus() {
   try {
-    const rev = await jgetRev("/api/work-status", "work");
-    if (rev.unchanged) { markFail("work-status", false); return; }
-    const data = rev.data;
+    let data;
+    if (typeof jgetRev !== "function") {
+      data = await jget("/api/work-status");
+    } else {
+      const rev = await jgetRev("/api/work-status", "work");
+      if (rev.unchanged) { markFail("work-status", false); return; }
+      data = rev.data;
+    }
     if (!data || data.error) {
       forgetEtag("work");
       throw new Error((data && data.error) || "empty work status");

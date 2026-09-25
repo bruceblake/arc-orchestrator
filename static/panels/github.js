@@ -62,10 +62,10 @@ function renderGithub() {
     </div>`;
   }).join("") || '<div class="empty">No pull requests yet.</div>';
   if (d.page && d.page.next_offset != null) {
-    html += '<button class="act" id="gh-more" type="button">Show more</button>';
+    html += '<button class="act" type="button" data-gh-more="1">Show more</button>';
   }
   if (paint($("#gh-prs"), html)) {
-    const more = $("#gh-more");
+    const more = $("#gh-prs").querySelector("[data-gh-more]");
     if (more) more.onclick = () => {
       GH_LIMIT += 10;
       forgetEtag("github:" + (GH_LIMIT - 10));
