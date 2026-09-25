@@ -202,6 +202,11 @@ PYEOF
     if ! node tests/studio_playtest_ui.test.mjs; then
         echo "FAIL: studio playtest view misbehaves"; rc=1
     fi
+    # The Needs-you queue (desktop panel + phone view): evidence, play,
+    # approve / request changes.
+    if ! node tests/review_ui.test.mjs; then
+        echo "FAIL: human review queue UI misbehaves"; rc=1
+    fi
     if ! node tests/projects_ui.test.mjs; then
         echo "FAIL: projects-list UI misbehaves"; rc=1
     fi

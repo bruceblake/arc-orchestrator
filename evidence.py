@@ -173,6 +173,8 @@ func _v(a: Array) -> Vector3:
 # neutral inspection light is added ONLY when the scene brings none.
 func _ensure_inspection_light(root: Node) -> void:
 \tif root.find_children("*", "Light3D", true, false).is_empty():
+\t\t# Said out loud: the capture is lit, but a PLAYER sees this scene black.
+\t\tprint("EVIDENCE_SCENE_UNLIT")
 \t\tvar sun := DirectionalLight3D.new()
 \t\tsun.name = "EvidenceInspectionSun"
 \t\tsun.rotation_degrees = Vector3(-50.0, 35.0, 0.0)
@@ -353,7 +355,13 @@ def _flythrough(project, cameras, out_dir, scratch, *, timeout, log=None):
         from studio.engine import godot
         raise EvidenceError(f"flythrough recording failed (godot rc={rc}):\n"
                             + "\n".join(godot.output_errors(out)[:15] or [out[-1500:]]))
-    return _video(avi, out_dir / "flythrough")
+    mp4, gif = _video(avi, out_dir / "flythrough")
+    return mp4, gif, "EVIDENCE_SCENE_UNLIT" in out
+
+
+UNLIT_WARNING = ("the scene has NO light of its own: these captures add a neutral "
+                 "inspection light, but a player running the game sees a black "
+                 "screen — add a DirectionalLight3D/WorldEnvironment to the scene")
 
 
 def _playtest(project, out_dir, scratch, *, timeout, log=None):
@@ -844,9 +852,12 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
                     f"({share:.0%} one colour): nothing visible from there, or "
                     "the scene failed to draw")
         try:
-            mp4, gif = _flythrough(worktree, cams, out_dir, scratch, timeout=timeout,
-                                   log=glog)
+            mp4, gif, unlit = _flythrough(worktree, cams, out_dir, scratch,
+                                          timeout=timeout, log=glog)
             manifest["videos"]["flythrough"] = {"mp4": str(mp4), "gif": str(gif)}
+            manifest["scene_unlit"] = unlit
+            if unlit:
+                manifest["warnings"].append(UNLIT_WARNING)
             _cover(manifest, "flythrough", "captured")
         except EvidenceError as exc:
             _cover(manifest, "flythrough", "failed", str(exc).splitlines()[0])

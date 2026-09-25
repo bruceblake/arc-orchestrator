@@ -157,6 +157,36 @@ def base_branch(repo):
 
 
 _BUILD_CACHE = {}          # project -> (ts, repo, [build dicts without "snapshot"])
+_SCENES_CACHE = {}         # (repo, sha) -> (main_scene, [res:// scene paths]); a sha is immutable
+MAX_SCENES = 200
+
+
+def scenes_at(repo, sha):
+    """(main_scene, scenes) of the build at `sha`, read from git — no checkout.
+
+    `scenes` is every .tscn in the tree as a res:// path, main scene first.
+    It is the allowlist a launch's `scene` is checked against. The dashboard
+    offers a picker because a game's run/main_scene is not always the scene a
+    human wants to play: prison-escape-test's is the bare cell-wing builder,
+    while the assembled prison with its HUD is scenes/graybox_prison.tscn.
+    """
+    key = (str(repo), sha)
+    hit = _SCENES_CACHE.get(key)
+    if hit is not None:
+        return hit
+    main = ""
+    pg = _git(repo, "show", f"{sha}:project.godot")
+    if pg.returncode == 0:
+        m = re.search(r'(?m)^run/main_scene="([^"]+)"', pg.stdout)
+        main = m.group(1) if m else ""
+    out = _git(repo, "ls-tree", "-r", "--name-only", sha)
+    found = sorted("res://" + f for f in out.stdout.splitlines()
+                   if f.endswith(".tscn") and not f.startswith((".", "addons/")))
+    scenes = ([main] if main else []) + [s for s in found if s != main]
+    res = (main, scenes[:MAX_SCENES])
+    if out.returncode == 0:
+        _SCENES_CACHE[key] = res
+    return res
 
 
 def _snapshot_dir(project, sha):
@@ -175,16 +205,27 @@ def builds(project):
         rows = []
         if repo and (Path(repo) / ".git").exists():
             base = base_branch(repo)
+            # A task branch that exists only on the remote (its worktree was
+            # reaped, or it was pushed from another checkout) is still a build
+            # someone may need to play. It is listed under the same task/<id>
+            # name, and a local branch of that name wins.
             out = _git(repo, "for-each-ref", "--sort=-committerdate",
                        "--format=%(refname)%1f%(objectname)%1f"
                        "%(committerdate:unix)%1f%(subject)",
-                       f"refs/heads/{base}", "refs/heads/task/").stdout
-            for line in out.splitlines():
+                       f"refs/heads/{base}", "refs/heads/task/",
+                       "refs/remotes/origin/task/").stdout
+            seen = set()
+            lines = sorted(out.splitlines(), key=lambda ln: ln.startswith("refs/remotes/"))
+            for line in lines:
                 parts = line.split("\x1f")
                 if len(parts) < 4:
                     continue
                 ref, sha, ts, subject = parts[0], parts[1], parts[2], parts[3]
-                bid = ref[len("refs/heads/"):]
+                bid = (ref[len("refs/remotes/origin/"):] if ref.startswith("refs/remotes/")
+                       else ref[len("refs/heads/"):])
+                if bid in seen:
+                    continue
+                seen.add(bid)
                 try:
                     ts = int(ts)
                 except ValueError:
@@ -193,8 +234,12 @@ def builds(project):
                              "subject": subject[:200], "ts": ts})
             rows.sort(key=lambda b: (b["id"] != base, -b["ts"]))
         _BUILD_CACHE[project] = (now, repo, rows)
-    return [dict(b, snapshot=(_snapshot_dir(project, b["sha"]) / READY_MARKER).exists())
-            for b in rows]
+    out = []
+    for b in rows:
+        main, scenes = scenes_at(repo, b["sha"]) if repo else ("", [])
+        out.append(dict(b, main_scene=main, scenes=scenes,
+                        snapshot=(_snapshot_dir(project, b["sha"]) / READY_MARKER).exists()))
+    return out
 
 
 def _build(project, build_id):
@@ -250,8 +295,18 @@ def ensure_snapshot(project, build_id, *, do_import=True):
         shutil.rmtree(snap, ignore_errors=True)
     tmp = snap.with_name(f"{snap.name}.tmp-{secrets.token_hex(3)}")
     try:
-        steps = (["git", "clone", "-q", "--local", "--no-checkout", str(repo), str(tmp)],
-                 ["git", "-C", str(tmp), "checkout", "-q", "--detach", b["sha"]],
+        clone = ["git", "clone", "-q", "--local", "--no-checkout", str(repo), str(tmp)]
+        p = subprocess.run(clone, capture_output=True, text=True, timeout=300)
+        if p.returncode != 0 and "cross-device" in (p.stderr or "").lower():
+            # --local hardlinks the objects, which cannot cross filesystems
+            # (ARC_STUDIO_DIR on another mount than the game repo). Copy.
+            shutil.rmtree(tmp, ignore_errors=True)
+            p = subprocess.run(clone[:4] + ["--no-hardlinks"] + clone[4:],
+                               capture_output=True, text=True, timeout=600)
+        if p.returncode != 0:
+            raise Unavailable(f"could not snapshot {build_id}: "
+                              f"{(p.stderr or p.stdout).strip()[:500]}")
+        steps = (["git", "-C", str(tmp), "checkout", "-q", "--detach", b["sha"]],
                  # The snapshot must never be able to push back to the blessed clone.
                  ["git", "-C", str(tmp), "remote", "remove", "origin"])
         for argv in steps:
@@ -377,12 +432,14 @@ def sessions(project, limit=SESSIONS_SHOWN):
     return out
 
 
-def launch(project, build_id, *, wait=True):
+def launch(project, build_id, *, wait=True, scene=None):
     """Start one human playtest session of `build_id`. Returns the session.
 
-    Raises KeyError for an unknown build, Unavailable when this machine cannot
-    run it. The argv is fixed; nothing in it comes from a request except the
-    build id, which must be one builds() lists.
+    Raises KeyError for an unknown build or scene, Unavailable when this
+    machine cannot run it. The argv is fixed; nothing in it comes from a
+    request except the build id, which must be one builds() lists, and the
+    optional `scene`, which must be one of that build's scenes (scenes_at).
+    No scene = the game's own run/main_scene.
 
     The first play of a sha clones and imports it, which can take minutes. With
     wait=False (the dashboard) that work runs on a thread and the session comes
@@ -400,6 +457,9 @@ def launch(project, build_id, *, wait=True):
     b = _build(project, build_id)
     if b is None:
         raise KeyError(f"unknown build {build_id!r}")
+    if scene and scene not in (b.get("scenes") or []):
+        raise KeyError(f"unknown scene {scene!r} for build {build_id!r}")
+    b = dict(b, launch_scene=scene or "")
     base = _sessions_dir(project)
     base.mkdir(parents=True, exist_ok=True)
     while True:
@@ -412,7 +472,8 @@ def launch(project, build_id, *, wait=True):
             continue
     (sess / "userdata").mkdir()
     s = {"id": sid, "build": build_id, "sha": b["sha"], "started": time.time(),
-         "ended": None, "pid": None, "status": "preparing", "survey": None}
+         "ended": None, "pid": None, "status": "preparing", "survey": None,
+         "scene": scene or b.get("main_scene") or ""}
     _write_json(sess / "session.json", s)
     ready = (_snapshot_dir(project, b["sha"]) / READY_MARKER).exists()
     if wait or ready:
@@ -424,6 +485,21 @@ def launch(project, build_id, *, wait=True):
     return s
 
 
+def play_env(display, userdata):
+    """The environment a played build runs in.
+
+    DISPLAY is always set explicitly: the dashboard usually runs under systemd,
+    which starts services with no DISPLAY at all, so inheriting it launched
+    nothing (config.STUDIO_DISPLAY finds WSLg's :0 on its own). WSLg's audio
+    server is wired in the same way when the caller's environment lacks it.
+    """
+    env = dict(os.environ, DISPLAY=display, XDG_DATA_HOME=str(userdata))
+    if not env.get("PULSE_SERVER") and Path(WSLG_PULSE).exists():
+        env["PULSE_SERVER"] = "unix:" + WSLG_PULSE
+    return env
+
+
+WSLG_PULSE = "/mnt/wslg/PulseServer"
 _PREPARING = {}            # session id -> thread making its snapshot (this process)
 PREPARE_STALE = 900        # a "preparing" session nobody here owns, older than this, died
 
@@ -446,9 +522,11 @@ def _start_session(project, sid, build_id, b, exe, display, *, raise_errors):
     path = sess / "session.json"
     try:
         snap = ensure_snapshot(project, build_id)
-        argv = [exe, "--path", str(snap), "--log-file", str(sess / "godot.log"), "--",
-                f"--arc-playtest-dir={sess}", f"--arc-build={b['sha']}"]
-        env = dict(os.environ, DISPLAY=display, XDG_DATA_HOME=str(sess / "userdata"))
+        argv = [exe, "--path", str(snap), "--log-file", str(sess / "godot.log")]
+        if b.get("launch_scene"):
+            argv.append(b["launch_scene"])
+        argv += ["--", f"--arc-playtest-dir={sess}", f"--arc-build={b['sha']}"]
+        env = play_env(display, sess / "userdata")
         try:
             with open(sess / "stdout.log", "wb") as log:
                 proc = subprocess.Popen(argv, cwd=str(snap), env=env, stdout=log,

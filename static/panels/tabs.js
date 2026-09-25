@@ -6,11 +6,13 @@
 // they answer; nothing is removed, and every panel keeps its element id.
 //
 //   Overview  what is running right now, and does anything need me?
+//   Needs you pull requests waiting for a human decision (review.js)
 //   Studio    the game being built: phases, gates, tasks, renders, verdicts
 //   Projects  every taskfile, pull requests, the pipeline diagram
 //   Activity  the full event log
 const TABS = {
   overview: ["summary-panel", "work-panel", "errs-panel", "agents-panel", "slots-panel", "health-panel"],
+  review:   ["review-panel"],
   studio:   ["studio-panel"],
   projects: ["projects-panel", "gh-panel", "topo-panel"],
   activity: ["activity-panel"],
@@ -19,7 +21,7 @@ const TABS = {
 // The panel each tab exists to show. The summary tier's auto-fold must never
 // close it, or switching to a tab would reveal a collapsed header and nothing
 // else — the original clutter problem in a new place.
-const TAB_PRIMARY = new Set(["work-panel", "agents-panel", "studio-panel", "projects-panel", "activity-panel", "messages-panel"]);
+const TAB_PRIMARY = new Set(["review-panel", "work-panel", "agents-panel", "studio-panel", "projects-panel", "activity-panel", "messages-panel"]);
 const TAB_KEY = "arc.tab";
 let TAB = "";
 

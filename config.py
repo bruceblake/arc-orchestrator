@@ -1842,7 +1842,25 @@ BLENDER_BIN = os.getenv("ARC_BLENDER_BIN", "")
 # RENDER here at all — `godot --headless` has no renderer and cannot produce
 # the screenshots the judge scores. Point this at an Xvfb display instead for
 # a deterministic software-rendered run.
-STUDIO_DISPLAY = os.getenv("ARC_STUDIO_DISPLAY", "") or os.getenv("DISPLAY", "")
+#
+# Last resort: the local X server's :0 socket. The dashboard runs under
+# systemd (deploy/arc-dashboard.service), and systemd starts it with NO
+# DISPLAY, so the playtest "Play" button said "display none" and launched
+# nothing even though WSLg's :0 was right there. ARC_STUDIO_DISPLAY=none
+# turns the fallback off (a machine with a socket but no screen to show).
+X0_SOCKET = "/tmp/.X11-unix/X0"
+
+
+def _studio_display():
+    v = os.getenv("ARC_STUDIO_DISPLAY", "")
+    if v:
+        return "" if v.lower() == "none" else v
+    if os.getenv("DISPLAY", ""):
+        return os.getenv("DISPLAY", "")
+    return ":0" if os.path.exists(X0_SOCKET) else ""
+
+
+STUDIO_DISPLAY = _studio_display()
 
 # OpenRouter is where every external model is served. The key is NOT an ARC_*
 # var because it is the provider's own credential, shared with the operator's

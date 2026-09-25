@@ -349,6 +349,16 @@ function ptFinding(f) {
   </div>`;
 }
 
+// Which scene to open: the game's main scene unless the human picks another.
+// A game's main scene is not always the playable one (prison-escape-test's is
+// the bare cell-wing builder; the assembled prison is graybox_prison.tscn).
+function ptScenePick(b) {
+  const scenes = b.scenes || [];
+  if (scenes.length < 2) return "";
+  return ptSelect("scene:" + b.id, "scene", "scene to open for " + b.id,
+    scenes.map(s => [s === b.main_scene ? "" : s, s === b.main_scene ? s + " (main)" : s]), "") + " ";
+}
+
 function studioPlaytestView(p) {
   const pt = p.playtest;
   if (!pt) return '<div class="empty">No playtest data for this project (the dashboard server predates human playtesting).</div>';
@@ -365,7 +375,7 @@ function studioPlaytestView(p) {
   const builds = (pt.builds || []).map(b => `<tr>
       <td>${esc(b.id)}</td><td><code>${esc(String(b.sha || "").slice(0, 7))}</code></td>
       <td>${esc(b.subject || "")}</td><td class="hint">${esc(ptWhen(b.ts))}</td>
-      <td><button class="pill" data-pt-launch="${attr(b.id)}"${reason ? ` disabled title="${attr(reason)}"` : ""}>▶ Play</button></td></tr>`).join("");
+      <td data-pt-form="launch">${ptScenePick(b)}<button class="pill" data-pt-launch="${attr(b.id)}"${reason ? ` disabled title="${attr(reason)}"` : ""}>▶ Play</button></td></tr>`).join("");
   const buildsHtml = builds
     ? `<table class="st-metrics"><thead><tr><th>build</th><th>sha</th><th>subject</th><th>age</th><th></th></tr></thead><tbody>${builds}</tbody></table>`
     : '<div class="empty">No playable builds (no <code>main</code> or <code>task/*</code> branch found).</div>';
@@ -508,7 +518,8 @@ document.addEventListener("click", async (e) => {
   const pl = e.target.closest("[data-pt-launch]");
   if (pl) {
     if (pl.disabled) return;
-    await ptPost("launch", {build: pl.getAttribute("data-pt-launch")});
+    const build = pl.getAttribute("data-pt-launch"), scene = ptDraft("scene:" + build, "");
+    await ptPost("launch", scene ? {build, scene} : {build});
     pollStudio(); return;
   }
   const ps = e.target.closest("[data-pt-stop]");

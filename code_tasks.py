@@ -28,6 +28,7 @@ import events
 import evidence
 import gitstore
 import graft
+import manual_review
 import drivers
 import gh_issues
 import plan_amend
@@ -104,9 +105,19 @@ def load_taskfile(path, policy=None):
     # it.
     allow_self = bool(pol.get("allow_self_review")) or \
         config.ALLOW_SAME_FAMILY_REVIEW
+    # Human checkpoints (Rule 5, manual review): project.human_review makes
+    # every task's fleet-approved PR wait for a person; a task's own
+    # human_review overrides it either way. Absent = the fleet-wide
+    # ARC_PR_MANUAL_REVIEW decides at run time (manual_review.wanted).
+    project_human = data["project"].get("human_review")
+    if project_human is not None and not isinstance(project_human, bool):
+        raise ValueError("project.human_review must be true or false")
     tasks = {}
     for t in data["project"]["tasks"]:
         tid = t["id"]
+        task_human = t.get("human_review")
+        if task_human is not None and not isinstance(task_human, bool):
+            raise ValueError(f"task {tid}: human_review must be true or false")
         if not isinstance(tid, str) or \
                 not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,60}", tid):
             raise ValueError(
@@ -169,6 +180,7 @@ def load_taskfile(path, policy=None):
             "files_hint": list(t.get("files_hint", [])),
             "probe_cmd": t.get("probe_cmd", "") or "",
             "when": _load_when(tid, t.get("when")),
+            "human_review": task_human if task_human is not None else project_human,
         }
         if not isinstance(tasks[tid]["probe_cmd"], str):
             raise ValueError(f"task {tid}: probe_cmd must be a string")
@@ -218,6 +230,8 @@ def load_taskfile(path, policy=None):
         log.warning("%s: pattern %r is not in the catalogue (%s)",
                     Path(path).name, raw_pattern, ", ".join(graph_shapes.PATTERN_IDS))
     return {"repo": repo, "tasks": tasks, "title": data.get("project", {}).get("title", ""),
+            "name": data.get("project", {}).get("name") or repo.name,
+            "human_review": project_human,
             "pattern": pattern,
             "policy": pol, "after": after}
 
@@ -715,8 +729,17 @@ def _is_fleet_comment(body):
     return bool(re.match(r"\*\*[^*]+\*\* \(round \d+\)", b))
 
 
-async def _await_manual_review(repo, tid, number, round_n):
-    """Hold a fleet-approved PR until a human labels it (config.PR_MANUAL_REVIEW).
+MANUAL_LOCAL_POLL = 2.0     # seconds between reads of the manual_reviews table
+
+
+async def _await_manual_review(repo, tid, number, round_n, *, project="",
+                               url="", title="", reviewers=None):
+    """Hold a fleet-approved PR until a human decides (manual_review.wanted).
+
+    Two ways to decide, whichever comes first:
+      * the dashboard's "Needs you" queue (desktop or phone), which writes the
+        decision to the manual_reviews table this loop polls;
+      * a GitHub label on the PR (manual-approved / manual-rejected + comment).
 
     Returns {"decision": "approved"|"rejected"|"timeout", "issues": [...]}.
     A timeout is reported as REJECTED with a clear issue rather than merged:
@@ -724,17 +747,59 @@ async def _await_manual_review(repo, tid, number, round_n):
     patience must never turn into a merge nobody approved.
     """
     started = time.time()
+    try:
+        held = manual_review.request(tid, number, round_n, project=project,
+                                     repo=str(repo), url=url, title=title,
+                                     reviewers=reviewers)
+    except Exception as exc:                        # noqa: BLE001
+        # The GitHub label path still works without the table.
+        errors.capture(exc, task=tid, node="manual_review.request")
+        held = None
     events.emit("task.pr_awaiting_manual", task=tid, pr=number, round=round_n,
+                project=project, url=url,
                 approve_label=config.PR_MANUAL_APPROVED_LABEL,
                 reject_label=config.PR_MANUAL_REJECTED_LABEL)
-    await gitstore._gh(["pr", "comment", str(number), "--body",
-                        f"**Awaiting manual review** (round {round_n}). The fleet "
-                        f"approved this PR. Label it `{config.PR_MANUAL_APPROVED_LABEL}` "
-                        f"to merge, or `{config.PR_MANUAL_REJECTED_LABEL}` and leave "
-                        "a comment saying what to change."], cwd=repo)
+    if not (held and held["status"] != "waiting"):
+        await gitstore._gh(["pr", "comment", str(number), "--body",
+                            f"**Awaiting manual review** (round {round_n}). The fleet "
+                            "approved this PR. Decide in the dashboard's **Needs you** "
+                            f"queue, or label it `{config.PR_MANUAL_APPROVED_LABEL}` "
+                            f"to merge, or `{config.PR_MANUAL_REJECTED_LABEL}` and leave "
+                            "a comment saying what to change."], cwd=repo)
+    last_gh = 0.0
     while True:
-        rc, out, _ = await gitstore._gh(
-            ["pr", "view", str(number), "--json", "labels,comments,state"], cwd=repo)
+        try:
+            held = manual_review.get(tid, number, round_n)
+        except Exception:                           # noqa: BLE001
+            held = None
+        if held and held["status"] in ("approved", "rejected"):
+            manual_review.settle(tid, number, round_n, held["status"])
+            by = held.get("decided_by") or "dashboard"
+            comment = (held.get("comment") or "").strip()
+            if held["status"] == "approved":
+                body = f"**Manual review** (round {round_n}) — approved by a human ({by})."
+                if comment:
+                    body += "\n\n" + comment
+                await gitstore._gh(["pr", "comment", str(number), "--body", body], cwd=repo)
+                events.emit("task.pr_manual", task=tid, pr=number, decision="approved",
+                            via=by, waited_s=round(time.time() - started))
+                return {"decision": "approved", "issues": []}
+            issues = [comment or "Rejected in manual review (no comment was left; "
+                                 "ask the reviewer what to change)."]
+            await gitstore._gh(["pr", "comment", str(number), "--body",
+                                f"**Manual review** (round {round_n}) — changes "
+                                f"requested by a human ({by}):\n\n{issues[0]}"], cwd=repo)
+            events.emit("task.pr_manual", task=tid, pr=number, decision="rejected",
+                        via=by, n_issues=1, waited_s=round(time.time() - started))
+            return {"decision": "rejected", "issues": issues}
+        # The table is local and cheap, so it is read every couple of seconds
+        # (a click in the dashboard takes effect at once); GitHub only every
+        # PR_MANUAL_POLL, since its API quota is shared by the whole fleet.
+        rc, out = 1, ""
+        if time.time() - last_gh >= config.PR_MANUAL_POLL:
+            last_gh = time.time()
+            rc, out, _ = await gitstore._gh(
+                ["pr", "view", str(number), "--json", "labels,comments,state"], cwd=repo)
         if rc == 0:
             try:
                 doc = json.loads(out)
@@ -742,8 +807,9 @@ async def _await_manual_review(repo, tid, number, round_n):
                 doc = {}
             labels = {l.get("name") for l in doc.get("labels") or []}
             if doc.get("state") == "MERGED" or config.PR_MANUAL_APPROVED_LABEL in labels:
+                manual_review.settle(tid, number, round_n, "approved", by="github label")
                 events.emit("task.pr_manual", task=tid, pr=number, decision="approved",
-                            waited_s=round(time.time() - started))
+                            via="github label", waited_s=round(time.time() - started))
                 return {"decision": "approved", "issues": []}
             if config.PR_MANUAL_REJECTED_LABEL in labels:
                 issues = []
@@ -762,16 +828,20 @@ async def _await_manual_review(repo, tid, number, round_n):
                 # instead of being rejected again by this one.
                 await gitstore._gh(["pr", "edit", str(number), "--remove-label",
                                     config.PR_MANUAL_REJECTED_LABEL], cwd=repo)
+                manual_review.settle(tid, number, round_n, "rejected", by="github label",
+                                     comment="\n\n".join(issues))
                 events.emit("task.pr_manual", task=tid, pr=number, decision="rejected",
-                            n_issues=len(issues), waited_s=round(time.time() - started))
+                            via="github label", n_issues=len(issues),
+                            waited_s=round(time.time() - started))
                 return {"decision": "rejected", "issues": issues}
         if config.PR_MANUAL_TIMEOUT and time.time() - started > config.PR_MANUAL_TIMEOUT:
+            manual_review.settle(tid, number, round_n, "timeout", by="timeout")
             events.emit("task.pr_manual", task=tid, pr=number, decision="timeout")
             return {"decision": "rejected",
                     "issues": [f"No manual review decision within "
                                f"{int(config.PR_MANUAL_TIMEOUT)}s "
                                "(ARC_PR_MANUAL_TIMEOUT)."]}
-        await asyncio.sleep(config.PR_MANUAL_POLL)
+        await asyncio.sleep(min(config.PR_MANUAL_POLL, MANUAL_LOCAL_POLL))
 
 
 def _tally_reviews(outcomes):
@@ -3576,11 +3646,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     await gitstore._gh(["pr", "comment", str(number),
                                         "--body", body], cwd=repo)
             manual = None
-            if approved and config.PR_MANUAL_REVIEW:
+            if approved and manual_review.wanted(t):
                 # The fleet agreed; now the human's word. Rejection here goes
                 # down the same path as a reviewer's: the comments become the
-                # implementer's feedback and a new PR round begins.
-                manual = await _await_manual_review(repo, tid, number, round_n)
+                # implementer's feedback and a new PR round begins. Whether
+                # this task wants a human is the taskfile's call
+                # (human_review), else ARC_PR_MANUAL_REVIEW.
+                pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
+                manual = await _await_manual_review(
+                    repo, tid, number, round_n,
+                    project=taskset.get("name") or Path(str(repo)).name,
+                    url=(pub.get("url") if pub.get("pr") == number else "") or "",
+                    title=t.get("title", tid),
+                    reviewers=manual_review.summarize_reviewers(outcomes))
                 if manual["decision"] == "rejected":
                     approved = False
                     issues = manual["issues"]
