@@ -551,8 +551,25 @@ PR** in the life of the repo.
 - Reviewers are told that a code change **must** ship tests that would fail
   without it (`config.REQUIRE_TESTS`), and to check for regressions in what
   calls the changed code. Documentation-only changes are exempt.
+- **Human checkpoints (manual review).** A task whose taskfile sets
+  `human_review` (per task, else `project.human_review`, else the fleet-wide
+  `ARC_PR_MANUAL_REVIEW`; the loader rejects a non-boolean) does not merge
+  on the fleet's approval alone: `pr_review` calls
+  `code_tasks._await_manual_review`, which records a hold in the
+  `manual_reviews` table (`manual_review.py`) and waits, spending no model
+  time, for a human. The human decides in the dashboard's **Needs you**
+  queue (desktop tab and the phone page's Review view, `review_routes.py`:
+  `GET /api/reviews`, `POST /api/reviews/decide` behind `_refuse_post`),
+  which shows the task's evidence (Rule 7d), the fleet verdicts and a
+  **Play this build** button; or with the `manual-approved` /
+  `manual-rejected` labels on GitHub. A rejection's comment becomes the
+  implementer's feedback exactly like a reviewer's issue. A decision made
+  while the run is down is kept and applied on resume; `ARC_PR_MANUAL_TIMEOUT`
+  ends as a rejection, never a merge. Events: `task.pr_awaiting_manual`,
+  `task.pr_manual` (`via` = dashboard | github label), `review.human_decision`.
 - Only `pr_merge` merges, via `gh pr merge --squash --delete-branch`, and only
-  after a unanimous `pr_review`. It then fast-forwards the local integration
+  after a unanimous `pr_review` (and, when the task wants one, a human
+  approval). It then fast-forwards the local integration
   branch to what GitHub merged and cleans up the worktree.
 
 **Every task is a GitHub issue** (`gh_issues.py`). At run start the
@@ -885,6 +902,11 @@ That evidence goes to every place a decision is made:
   private repo (anonymous requests 404; `raw.githubusercontent.com` without
   a token does too);
 - the **agent board** gets a `kind: "evidence"` post (`board.py`);
+- the **human** gets it in the dashboard's **Needs you** queue next to
+  Approve / Request changes (Rule 5, manual review), with a **Play this
+  build** button: `studio/playtest.py` snapshots `task/<id>` (or `main`, or
+  a remote-only `origin/task/*` branch) and opens it on the PC's display,
+  with a scene picker allowlisted to that build's own `.tscn` files;
 - the files stay under `logs/evidence/<project>/<task>/x<attempt>/`.
 
 Rules the code holds to:
@@ -899,7 +921,14 @@ Rules the code holds to:
 - **A machine that cannot capture never fails a task** — no display, Godot or
   ffmpeg is `evidence.unavailable`, an infrastructure gap, not the
   implementer's bug. Rendering needs a display: WSLg provides `:0`; elsewhere
-  run Xvfb and set `ARC_STUDIO_DISPLAY`.
+  run Xvfb and set `ARC_STUDIO_DISPLAY`. With no `DISPLAY` at all (the
+  dashboard runs under systemd) `config.STUDIO_DISPLAY` falls back to `:0`
+  when `/tmp/.X11-unix/X0` exists; `ARC_STUDIO_DISPLAY=none` turns that off.
+- **An unlit scene is said out loud.** The capture harness adds a neutral
+  inspection light to a scene that has none — so the evidence looked fine
+  while a player saw a black screen. It now records `scene_unlit` and a
+  warning in the manifest, so reviewers and the human are told the game
+  itself is unlit; the human playtest overlay lights it the same way (#139).
 - A publish or comment failure never fails publish (`evidence.publish_failed`
   with a fingerprint): the reviewers already had the images.
 - Events: `evidence.captured`, `evidence.failed`, `evidence.unavailable`,
@@ -1150,6 +1179,8 @@ Top-level Python modules (one role each):
 | `orchbench.py` | Orchestration variant benchmark (`main.py code bench`): 14 named policy variants of the governed code DAG (routing, reviewer, harness, fix-loop) on a fresh `filetoolkit` repo per variant, with merge/integration scoring — benchmarks the orchestration options set, not single models |
 | `agentboard.py` | The agent coordination board (Rule 4c): typed messages on channels with @mentions, leased path claims with overlap detection, per-reader digests (`digest_for`), expertise derived from results, and harvest of agents' `.arc/board.jsonl` lines (`ingest_file`); CLI `main.py board post|read|claims`. Prose: [docs/agent-board.md](docs/agent-board.md) |
 | `board.py` | Shared agent board: `.arc/board.jsonl` in the task worktree plus `logs/boards/<project>.jsonl`. A session id resumes only on the harness that posted it |
+| `manual_review.py` | Human checkpoints (Rule 5): the `manual_reviews` table of PRs waiting for a human decision, `wanted` (taskfile `human_review` over `ARC_PR_MANUAL_REVIEW`), `request` / `decide` / `settle` |
+| `review_routes.py` | Dashboard routes for the Needs-you queue: `GET /api/reviews` (holds + evidence URLs + play target), `POST /api/reviews/decide` |
 | `plan_amend.py` | The living-plan channel (Rule 4b): prompt schema, `.arc/plan_proposals.jsonl` harvest (read + delete before `git add -A`), loader-validated amendment of the taskfile with per-entry rollback, `plan_proposals` recording |
 | `project_contract.py` | The target repo's agent contract (Rule 10): discovers `AGENTS.md`, `CLAUDE.md`, and `.cursor/rules` inside the product repo, and supplies the planner, implementer, reviewer, captain, and chat prompts. This file stays fleet-only |
 | `pool.py` | `AsyncOpenAI` request pool for the research workload: per-family semaphores, retry/backoff, token accounting |

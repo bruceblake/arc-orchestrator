@@ -467,6 +467,31 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 .kb-t { color: var(--text); margin-bottom: 2px; } .kb-err { font-size: 10px; margin-top: 3px; }
 .cl-row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; padding: 4px 0; border-bottom: 1px solid #21262d; font-size: 12px; }
 .cl-d { width: 118px; } .cl-t { color: var(--text); }
+/* needs you: human checkpoint queue (panels/review.js) */
+.rv-badge { display: none; } .rv-badge.on { display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 3px;
+  border-radius: 8px; background: var(--warn); color: #0d1117; font-size: 11px; font-weight: 700; text-align: center; }
+.rv-card { border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin: 10px 0; }
+.rv-h { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; font-size: 13px; }
+.rv-card a { color: var(--accent); }
+.rv-cols { display: grid; grid-template-columns: minmax(0, 3fr) minmax(240px, 2fr); gap: 12px; margin-top: 8px; }
+@media (max-width: 900px) { .rv-cols { grid-template-columns: minmax(0, 1fr); } }
+.rv-card h4 { margin: 8px 0 4px; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; }
+.rv-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.rv-cmp { margin: 0; } .rv-cmp figcaption { font-size: 11px; margin-top: 2px; }
+.rv-shot img, .rv-cmp img { display: block; width: 100%; height: auto; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); }
+.rv-thumbs { display: flex; gap: 6px; flex-wrap: wrap; } .rv-thumbs .rv-shot img { width: 140px; }
+.rv-warn { color: var(--warn); font-size: 12px; margin: 4px 0; padding-left: 18px; }
+.rv-verdict { font-size: 12px; margin: 3px 0; } .rv-verdict ul { margin: 2px 0 4px; padding-left: 18px; }
+.rv-play { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; font-size: 12px; }
+.rv-play select, .rv-form textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border);
+  border-radius: 4px; padding: 3px 6px; font: inherit; font-size: 12px; }
+.rv-play .pill.good { border-color: var(--ok); color: var(--ok); }
+.rv-play button[disabled] { opacity: .45; cursor: not-allowed; }
+.rv-form textarea { width: 100%; box-sizing: border-box; resize: vertical; }
+.rv-btns { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+.rv-ok { border-color: var(--ok) !important; color: var(--ok) !important; }
+.rv-no { border-color: var(--err) !important; color: var(--err) !important; }
+.rv-recent { font-size: 12px; padding: 3px 0; border-bottom: 1px solid #21262d; }
 /* studio: human playtest view */
 .pt-head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin: 10px 0 4px; font-size: 12px; }
 .pt-head .pill.good b { color: var(--ok); } .pt-head .pill.bad b { color: var(--err); }
@@ -560,10 +585,15 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
   <div id="view-list">
     <div class="tabs" role="tablist" aria-label="dashboard sections">
       <button class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+      <button class="tab" role="tab" data-tab="review" aria-selected="false">Needs you <span id="rv-count" class="rv-badge"></span></button>
       <button class="tab" role="tab" data-tab="studio" aria-selected="false">Studio</button>
       <button class="tab" role="tab" data-tab="projects" aria-selected="false">Projects</button>
       <button class="tab" role="tab" data-tab="activity" aria-selected="false">Activity</button>
       <button class="tab" role="tab" data-tab="messages" aria-selected="false">Messages</button>
+    </div>
+    <div class="panel tab-hidden" id="review-panel">
+      <h2>Needs you <span class="hint">pull requests waiting for a human decision</span></h2>
+      <div id="reviews"><div class="empty">loading…</div></div>
     </div>
     <div class="panel tab-hidden" id="studio-panel">
       <h2>Studio <span class="hint" id="studio-meta"></span></h2>
@@ -831,6 +861,7 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/keyboard.js"></script>
 <script src="/panels/studio.js"></script>
 <script src="/panels/board.js"></script>
+<script src="/panels/review.js"></script>
 <script>
 loadHash(); syncFilterControls();
 pollProjects();
