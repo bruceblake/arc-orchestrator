@@ -8,71 +8,71 @@
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
   --dim: #8b949e; --accent: #bc8cff; --ok: #3fb950; --warn: #d29922;
-  --err: #f85149; --purple: #bc8cff;
+  --err: #f85149; --purple: #bc8cff; --comp: #56d4dd; --track: #21262d;
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
 body { min-height: 100vh; }
-.nav { display: flex; flex-basis: 100%; gap: 14px; align-items: center; padding: 2px 0 8px; }
-.nav a { color: var(--dim); text-decoration: none; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; letter-spacing: .3px; white-space: nowrap; }
+.nav { display: flex; gap: 14px; align-items: center; }
+.nav a { color: var(--dim); text-decoration: none; font-size: 13px; white-space: nowrap; }
 .nav a:hover { color: var(--accent); }
 .nav a.on { color: var(--accent); text-decoration: underline; pointer-events: none; cursor: default; }
-main { padding: 12px 14px; max-width: 1400px; margin: 0 auto; }
+main { padding: 16px; max-width: 1080px; margin: 0 auto; }
 
-/* sticky top toolbar */
-.toolbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-  padding: 10px 14px; border-bottom: 1px solid var(--border); background: var(--bg); }
-.toolbar h1 { font-size: 15px; margin: 0; color: var(--accent); white-space: nowrap; }
+.toolbar { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: color-mix(in srgb, var(--bg) 92%, transparent); }
+.toolbar h1 { font-size: 16px; margin: 0; color: var(--accent); white-space: nowrap; }
 .spacer { flex: 1; }
-.seg { padding: 8px 14px; min-height: 36px; border: 1px solid var(--border); background: none; color: var(--dim);
-  border-radius: 12px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
-.seg:hover { border-color: var(--accent); color: var(--accent); }
-.seg.on { border-color: var(--accent); color: var(--accent); background: #161b22; }
+#ranges { display: flex; gap: 4px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 3px; }
+.seg { padding: 8px 12px; min-height: 36px; border: 0; background: none; color: var(--dim);
+  border-radius: 11px; font: inherit; font-size: 13px; cursor: pointer; white-space: nowrap; }
+.seg:hover { color: var(--accent); }
+.seg.on { background: #21262d; color: var(--text); }
 .stat { color: var(--dim); font-size: 12px; white-space: nowrap; }
-.stat b { color: var(--text); font-weight: normal; }
-.badge { display: inline-block; padding: 2px 8px; min-height: 36px; line-height: 30px; border-radius: 12px;
-  border: 1px solid var(--warn); color: var(--warn); font-size: 11px; white-space: nowrap; }
+.stat b { color: var(--text); font-weight: 600; }
+.badge { display: inline-block; padding: 4px 10px; border-radius: 12px; border: 1px solid var(--warn); color: var(--warn); font-size: 12px; }
 
-/* panels */
-.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 14px; }
-.panel h2 { font-size: 12px; margin: 0 0 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; }
+.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 14px 16px; margin-bottom: 14px; }
+.panel h2 { font-size: 12px; margin: 0 0 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .08em; font-weight: 600; }
 h2 .hl { color: var(--accent); }
-
-/* grand-total banner */
-.totrow { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
-.big { font-size: 28px; color: var(--accent); }
-.big small { font-size: 12px; color: var(--dim); }
-.tot-kv { color: var(--dim); font-size: 12px; }
-.tot-kv b { color: var(--text); font-weight: normal; }
-.tot-kv .ok { color: var(--ok); } .tot-kv .err { color: var(--err); }
-.splitbar { display: flex; height: 8px; border-radius: 4px; overflow: hidden; background: #21262d; margin: 10px 0 2px; }
-.splitbar i { display: block; height: 100%; }
-.splitbar .p { background: var(--accent); } .splitbar .c { background: var(--purple); }
-.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--dim); font-size: 11px; margin-top: 4px; }
-.legend .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
-.dir { font-size: 12px; margin-left: 4px; vertical-align: middle; }
-.dir.up { color: var(--ok); } .dir.down { color: var(--err); }
 .snote { color: var(--dim); text-transform: none; letter-spacing: normal; font-weight: normal; }
 .snote.warn { color: var(--warn); }
 
-/* model cards */
-.modelgrid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
-.mcard { border: 1px solid var(--border); border-radius: 8px; background: #0d1117; padding: 10px 12px; }
-.mcard .mhead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
-.mcard .mname { font-size: 14px; }
-.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-.tag { display: inline-block; padding: 0 6px; border-radius: 8px; background: #21262d; color: var(--dim); font-size: 11px; white-space: nowrap; }
-.mtok { font-size: 22px; color: var(--text); }
+.glance { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 14px; }
+.gtile { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px 14px; min-width: 0; }
+.gl { display: block; color: var(--dim); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+.gv { display: block; font-size: clamp(18px, 2.2vw, 28px); font-weight: 700; line-height: 1.2; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.gv.err { color: var(--err); } .gv.ok { color: var(--ok); }
+.gs { display: block; color: var(--dim); font-size: 12px; margin-top: 4px; }
+.gs b, .gs .ok, .gs .err { font-weight: 600; }
+.gs .ok { color: var(--ok); } .gs .err { color: var(--err); }
+.splitwrap { grid-column: 1 / -1; background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 10px 14px 12px; }
+.splitbar { display: flex; height: 10px; border-radius: 6px; overflow: hidden; background: var(--track); }
+.splitbar i { display: block; height: 100%; }
+.splitbar .p { background: var(--accent); } .splitbar .c { background: var(--comp); }
+.legend { display: flex; gap: 16px; flex-wrap: wrap; color: var(--dim); font-size: 12px; margin-top: 8px; }
+.legend .dot, .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; vertical-align: middle; }
+
+.modelgrid { display: flex; flex-direction: column; gap: 8px; }
+.mcard { border: 1px solid var(--border); border-left-width: 4px; border-radius: 12px; background: var(--bg); padding: 10px 14px 8px; }
+.mcard .mhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcard .mname { font-size: 15px; }
+.tag { display: inline-block; padding: 1px 7px; border-radius: 8px; background: var(--track); color: var(--dim); font-size: 12px; }
+.mtok { font-size: 20px; margin-top: 2px; }
 .mtok small { font-size: 12px; color: var(--dim); }
-.mrow { color: var(--dim); font-size: 12px; margin: 2px 0; }
-.mrow b { color: var(--text); font-weight: normal; }
+.mrow { color: var(--dim); font-size: 13px; margin: 2px 0; }
+.mrow b { color: var(--text); font-weight: 600; }
 .mrow .ok { color: var(--ok); } .mrow .err { color: var(--err); }
-.sharebar { display: block; height: 6px; border-radius: 3px; background: #21262d; overflow: hidden; margin: 8px 0 3px; }
-.sharebar i { display: block; height: 100%; }
-.mcap { color: var(--dim); font-size: 11px; }
-.mtok .rate { font-size: 12px; margin-left: 6px; }
+.sharebar, .fmeter, .umeter { display: block; height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; margin: 8px 0 4px; }
+.sharebar i, .fmeter i, .umeter i { display: block; height: 100%; background: var(--accent); }
+.fmeter, .umeter { width: 88px; margin: 0; display: inline-block; vertical-align: middle; }
+.fmeter i { background: var(--ok); }
+tr.over .fmeter i, .umeter.hot i { background: var(--err); }
+tr.atcap .fmeter i, .umeter.warn i { background: var(--warn); }
+.mcap { color: var(--dim); font-size: 12px; }
+.mtok .rate { font-size: 13px; margin-left: 8px; font-weight: 700; }
 .rate.ok { color: var(--ok); } .rate.warn { color: var(--warn); } .rate.err { color: var(--err); }
-.mcard.bad { border-color: var(--err); }
+.mcard.bad { border-color: var(--err); background: rgba(248,81,73,.06); }
 
 /* family table */
 table { border-collapse: collapse; width: 100%; }
@@ -83,12 +83,17 @@ td { font-size: 12px; }
 tr.over td { background: rgba(248,81,73,.12); }
 tr.over td.f-in-cell { color: var(--err); font-weight: 600; }
 tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
-.capflag { font-size: 10px; padding: 1px 5px; border-radius: 4px; margin-left: 5px; }
-.capflag.over { background: var(--err); color: #fff; }
-.capflag.at { background: #d29922; color: #000; }
+.capflag { font-size: 11px; padding: 2px 6px; border-radius: 6px; margin-left: 6px; font-weight: 700; }
+.capflag.over { background: #ffdcd7; color: #6e1210; }
+.capflag.at { background: #f8e3a1; color: #3d2e00; }
 .tblwrap { overflow-x: auto; }
-#daily-box summary { cursor: pointer; color: var(--dim); }
-#daily-box[open] summary { margin-bottom: 8px; }
+.fold summary { cursor: pointer; color: var(--dim); font-size: 13px; }
+.fold[open] summary { margin-bottom: 8px; }
+.seat { display: grid; grid-template-columns: minmax(140px, 1.6fr) auto minmax(88px, 1fr) auto; gap: 8px 12px; align-items: center;
+  padding: 8px 0; border-bottom: 1px solid var(--border); }
+.seat .sn { font-weight: 600; }
+.seat .sm { color: var(--dim); font-size: 12px; }
+.seat.spent { box-shadow: inset 3px 0 0 var(--warn); padding-left: 8px; }
 
 /* hourly view — the date picker and its stacked bar chart */
 .hbar-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
@@ -98,41 +103,36 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
 .hbar-tools .navbtn { padding: 7px 12px; min-height: 36px; border: 1px solid var(--border); background: none;
   color: var(--dim); border-radius: 12px; font: inherit; font-size: 13px; cursor: pointer; }
 .hbar-tools .navbtn:hover { border-color: var(--accent); color: var(--accent); }
-.hbar-tools .hbar-sum { color: var(--dim); font-size: 12px; }
-.hbar-tools .hbar-sum b { color: var(--text); font-weight: normal; }
-#hourly-chart svg { display: block; width: 100%; }
-#hourly-chart .hbar-slot { fill: #21262d; }
-#hourly-chart .hbar-lab { fill: var(--dim); font-size: 9px; font-family: ui-monospace, monospace; }
+.hbar-sum { color: var(--dim); font-size: 13px; margin-left: auto; }
+.hbar-sum b { color: var(--text); font-weight: 600; }
+#hourly-chart svg { display: block; width: 100%; height: auto; }
+#hourly-chart .hbar-slot { fill: var(--track); }
+#hourly-chart .hbar-lab { fill: var(--dim); font-size: 11px; font-family: ui-monospace, monospace; }
 #hourly-chart .hbar-ax { stroke: var(--border); }
 #hourly-chart .hseg, #hourly-chart .hbar { cursor: pointer; }
-#hourly-body tr.hot td { background: #21262d; }
+#hourly-body tr.hot td { background: var(--track); }
 #hourly-chart .hseg:hover { opacity: .75; }
 #hourly-chart .hmiss { fill: var(--err); }
 
 /* driver events / errors panel */
-#drv-events { max-height: 320px; overflow: auto; }
-.evrow { display: flex; gap: 8px; padding: 4px 6px; border-bottom: 1px solid var(--border); font-size: 11px; align-items: baseline; }
-.evrow .et { white-space: nowrap; font-weight: 600; }
+#drv-events { max-height: 280px; overflow: auto; }
+.evrow { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; padding: 8px 4px; border-bottom: 1px solid var(--border); align-items: baseline; }
+.evrow .et { font-weight: 700; font-size: 12px; }
 .evrow .et.bad { color: var(--err); }
-.evrow .et.warn { color: #d29922; }
-.evrow .em { color: var(--dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.evrow .ew { color: var(--dim); white-space: nowrap; }
+.evrow .et.warn { color: var(--warn); }
+.evrow .em { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.evrow .ew { color: var(--dim); font-size: 12px; }
+.empty { color: var(--dim); font-size: 13px; padding: 8px 0; }
 
-.empty { color: var(--dim); font-size: 12px; padding: 10px 0; }
-
-@media (max-width: 640px) {
-  .toolbar { padding: 8px 10px; gap: 6px; }
-  .seg { padding: 8px 10px; font-size: 12px; }
-  main { padding: 10px; }
-  .modelgrid { grid-template-columns: 1fr; }
-  .tot-kv { display: block; }
+@media (max-width: 800px) {
+  .glance { grid-template-columns: 1fr 1fr; }
+  .toolbar { padding: 8px 12px; }
+  main { padding: 12px; }
+  .hbar-sum { margin-left: 0; }
+  .seat { grid-template-columns: 1fr auto; }
+  .seat .sm { grid-column: 1 / -1; }
 }
-@media (max-width: 700px) {
-  body { overflow-x: hidden; }
-  .modelgrid { grid-template-columns: 1fr; }
-  .nav a, .badge, .legend, .tag, .mcap, th, .evrow, .capflag { font-size: 12px; }
-}
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 </style>
 </head>
 <body>
@@ -142,8 +142,8 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
     <a class="on" href="/usage.html">Usage</a>
     <a href="/phone.html">Phone</a>
   </nav>
-  <h1>ARC · Usage</h1>
-  <div id="ranges" style="display:flex;gap:4px">
+  <h1>Usage</h1>
+  <div id="ranges">
     <button class="seg" data-r="1h">1h</button>
     <button class="seg" data-r="3h">3h</button>
     <button class="seg" data-r="6h">6h</button>
@@ -159,41 +159,38 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
   <span class="badge" id="stale" style="display:none">stale (retrying)</span>
 </header>
 <main>
-  <section class="panel">
-    <h2>total · <span class="hl" id="range-label">1h</span></h2>
-    <div class="totrow">
-      <span class="big"><b id="total-srate">—</b> <small>success</small></span>
-      <span class="tot-kv" id="total-srate-sub" title="ok / (ok + errors + failed attempts)">—</span>
-      <span class="big"><b id="total-tok">—</b> <small>tokens</small></span>
-      <span class="tot-kv">requests <b id="total-req">—</b></span>
-      <span class="tot-kv" title="priced from token counts; an upper bound where a call did not split prompt and completion">cost <b id="total-cost">—</b></span>
-      <span class="tot-kv" title="quota spent on nothing · ≈ = failed × avg per ok">waste <b id="total-waste">—</b></span>
-    </div>
-    <div class="splitbar"><i class="p" id="split-prompt" style="width:0%"></i><i class="c" id="split-comp" style="width:0%"></i></div>
-    <div class="legend">
-      <span><span class="dot" style="background:var(--accent)"></span>prompt <b class="hl" id="total-pr">—</b></span>
-      <span><span class="dot" style="background:var(--purple)"></span>completion <b class="hl" id="total-co">—</b></span>
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>Models · <span class="snote" id="sort-note"></span></h2>
-    <div class="modelgrid" id="modelgrid"></div>
-    <div class="empty" id="models-empty" style="display:none">No model activity in this range.</div>
-  </section>
-
-  <section class="panel">
-    <h2>Families <small style="color:var(--dim);font-weight:normal">requests and tokens follow the range above; inflight is live</small></h2>
-    <div class="tblwrap">
-      <table>
-        <thead><tr><th>family</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
-        <tbody id="fam-body"></tbody>
-      </table>
+  <section class="glance" aria-label="Window totals">
+    <article class="gtile">
+      <span class="gl">Success · <span id="range-label">1h</span></span>
+      <b class="gv" id="total-srate">—</b>
+      <span class="gs" id="total-srate-sub" title="ok / (ok + errors + failed attempts)">—</span>
+    </article>
+    <article class="gtile">
+      <span class="gl">Tokens</span>
+      <b class="gv" id="total-tok">—</b>
+      <span class="gs">requests <b id="total-req">—</b></span>
+    </article>
+    <article class="gtile">
+      <span class="gl">Cost</span>
+      <b class="gv" id="total-cost">—</b>
+      <span class="gs">priced from token counts</span>
+    </article>
+    <article class="gtile">
+      <span class="gl">Waste</span>
+      <b class="gv" id="total-waste">—</b>
+      <span class="gs">failed attempts × avg tokens per ok</span>
+    </article>
+    <div class="splitwrap">
+      <div class="splitbar" role="img" aria-label="prompt versus completion tokens"><i class="p" id="split-prompt" style="width:0%"></i><i class="c" id="split-comp" style="width:0%"></i></div>
+      <div class="legend">
+        <span><span class="dot" style="background:var(--accent)"></span>prompt <b id="total-pr">—</b></span>
+        <span><span class="dot" style="background:var(--comp)"></span>completion <b id="total-co">—</b></span>
+      </div>
     </div>
   </section>
 
   <section class="panel">
-    <h2>Hourly · <span class="snote" id="hourly-note">requests per hour (stacked by model)</span></h2>
+    <h2>Day · <span class="snote" id="hourly-note">bar height is requests, colour is the model</span></h2>
     <div class="hbar-tools">
       <button class="navbtn" id="hour-prev" type="button" aria-label="previous day">‹ prev</button>
       <label for="hour-date">day</label>
@@ -204,45 +201,58 @@ tr.atcap td.f-in-cell { color: var(--warn, #d29922); font-weight: 600; }
     </div>
     <div id="hourly-chart"></div>
     <div class="empty" id="hourly-empty" style="display:none">No traffic on this day.</div>
-    <div class="tblwrap" style="margin-top:10px">
-      <table>
-        <thead><tr><th>hour</th><th>model</th><th class="r">requests</th><th class="r">tokens</th></tr></thead>
-        <tbody id="hourly-body"></tbody>
-      </table>
-    </div>
-  </section>
-
-  <section class="panel">
-    <h2>Daily</h2>
-    <details id="daily-box">
-      <summary>calendar days, all history — not the range above</summary>
+    <details class="fold">
+      <summary>hours, one row per model</summary>
       <div class="tblwrap">
         <table>
-          <thead><tr><th>day</th><th class="r">requests</th><th class="r">tokens</th><th class="r">task runs</th></tr></thead>
-          <tbody id="daily-body"></tbody>
+          <caption class="snote">Requests and tokens by hour and model</caption>
+          <thead><tr><th>hour</th><th>model</th><th class="r">requests</th><th class="r">tokens</th></tr></thead>
+          <tbody id="hourly-body"></tbody>
         </table>
       </div>
     </details>
   </section>
 
   <section class="panel">
-    <h2>Seats · <span class="snote">24h busy, starved cap-waits, idle while other work waited</span></h2>
+    <h2>Models · <span class="snote" id="sort-note"></span></h2>
+    <div class="modelgrid" id="modelgrid"></div>
+    <div class="empty" id="models-empty" style="display:none">No model activity in this range.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Live seats <span class="snote">the bar is inflight against the cap; counts follow the range</span></h2>
     <div class="tblwrap">
       <table>
-        <thead><tr>
-          <th>model</th><th class="r">busy h</th><th class="r">cap</th>
-          <th class="r">util</th><th class="r">cap waits</th>
-          <th class="r">idle while waiting h</th><th class="r">errors</th><th>plan</th>
-        </tr></thead>
-        <tbody id="seat-body"></tbody>
+        <caption class="snote">Family concurrency</caption>
+        <thead><tr><th>family</th><th>fill</th><th class="r">cap</th><th class="r">requests</th><th class="r">tokens</th><th class="r">inflight</th></tr></thead>
+        <tbody id="fam-body"></tbody>
       </table>
     </div>
   </section>
 
   <section class="panel">
-    <h2>Driver events <small style="color:var(--dim);font-weight:normal">errors · stalls · timeouts · pruned phantoms · cap breaches</small></h2>
+    <h2>Seat hours <span class="snote">last 24h — busy, waiting, and whether the plan window is spent</span></h2>
+    <div id="seat-body"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Problems <span class="snote">errors, stalls, timeouts, cap breaches in this range</span></h2>
     <div id="drv-events"></div>
-    <div class="empty" id="drv-empty" style="display:none">No driver errors, stalls or cap breaches on record.</div>
+    <div class="empty" id="drv-empty" style="display:none">Quiet — nothing failed in this range.</div>
+  </section>
+
+  <section class="panel">
+    <h2>History</h2>
+    <details class="fold" id="daily-box">
+      <summary>calendar days, all history — not the range above</summary>
+      <div class="tblwrap">
+        <table>
+          <caption class="snote">Daily totals</caption>
+          <thead><tr><th>day</th><th class="r">requests</th><th class="r">tokens</th><th class="r">task runs</th></tr></thead>
+          <tbody id="daily-body"></tbody>
+        </table>
+      </div>
+    </details>
   </section>
 </main>
 
@@ -325,7 +335,7 @@ function fillTotal(u) {
   $("#total-req").textContent = fmt(t.requests);
   const wf = wasteFig(t), wl = $("#total-waste");
   wl.textContent = wf.failed || wf.est ? wf.failed + " failed · ≈" + fmt(wf.est) + " tok" : "none";
-  wl.className = wf.failed || wf.est ? "err" : "ok";
+  wl.className = "gv " + (wf.failed || wf.est ? "err" : "ok");
   const cost = $("#total-cost");
   if (cost) cost.textContent = t.cost == null ? "—" : "$" + Number(t.cost).toFixed(2);
   const p = t.prompt_tokens || 0, c = t.completion_tokens || 0, tot = p + c;
@@ -361,7 +371,7 @@ function modelCard(m, caps, totalTok) {
   const wasteRow = wf.failed || wf.est
     ? '<div class="mrow">waste <b class="err">' + fmt(wf.failed) + ' failed</b> · <b>≈' + fmt(wf.est) + ' tok</b>'
       + ' <span class="mcap">(failed × avg per ok)</span></div>' : "";
-  return '<div class="mcard' + (rate != null && rate < 0.9 ? " bad" : "") + '">'
+  return '<div class="mcard' + (rate != null && rate < 0.9 ? " bad" : "") + '" style="border-left-color:' + c + '">'
     + '<div class="mhead"><span class="dot" style="background:' + c + '"></span>'
     + '<b class="mname">' + esc(m.pretty || m.model) + '</b>'
     + '<span class="tag fam-tag">' + esc(m.family || "?") + '</span>'
@@ -391,8 +401,11 @@ function familyRowHtml(f) {
   const eff = f.inflight_shared != null ? f.inflight_shared : f.inflight;
   const flag = f.over_cap ? '<span class="capflag over">OVER LIMIT</span>'
     : f.at_cap ? '<span class="capflag at">AT LIMIT</span>' : "";
+  const pct = f.limit ? Math.min(100, (Number(eff) || 0) / f.limit * 100) : 0;
   return '<tr class="' + (f.over_cap ? "over" : f.at_cap ? "atcap" : "") + '">'
     + '<td><span class="dot" style="background:' + c + '"></span><span class="f-name">' + esc(f.family) + '</span></td>'
+    + '<td><span class="fmeter" title="inflight versus cap"><i style="width:' + pct.toFixed(0) + '%'
+    + (f.over_cap || f.at_cap ? "" : ";background:" + c) + '"></i></span></td>'
     + '<td class="r f-cap">' + (f.limit != null ? esc(f.limit) : "—") + '</td>'
     + '<td class="r f-req">' + fmt(f.requests) + '</td>'
     + '<td class="r f-tok">' + fmt(f.tokens) + '</td>'
@@ -405,7 +418,7 @@ function updateFamilies(families) {
     || (f.inflight || 0) || f.over_cap || f.at_cap);
   $("#fam-body").innerHTML = families.length
     ? families.map(familyRowHtml).join("")
-    : '<tr class="f-empty"><td colspan="5" class="empty">No family activity in this range.</td></tr>';
+    : '<tr class="f-empty"><td colspan="6" class="empty">No family activity in this range.</td></tr>';
 }
 
 // ---- hourly view ----------------------------------------------------------
@@ -424,13 +437,18 @@ let HOUR_DATE = "";
 // family token. An unrecognised model falls back to `unknown` rather than an
 // empty fill, so it stays visible instead of vanishing into the background.
 const FAM_BY_PREFIX = [["glm", "glm"], ["deepseek", "deepseek"], ["kimi", "kimi-code"],
-                       ["gpt-oss", "gpt-oss"]];
+                       ["gpt-oss", "gpt-oss"], ["gpt", "gpt"], ["claude", "claude"],
+                       ["grok", "grok"], ["gemini", "gemini"]];
+const SEAT_COLOR = {gpt: "#7ee787", claude: "#d2a8ff", grok: "#ffa657", gemini: "#56d4dd"};
 function modelFamilyOf(model) {
   const m = String(model || "").toLowerCase();
   for (const [prefix, fam] of FAM_BY_PREFIX) if (m.startsWith(prefix)) return fam;
   return "unknown";
 }
-const hourModelColor = m => COLORS[modelFamilyOf(m)] || COLORS.unknown;
+const hourModelColor = m => {
+  const fam = modelFamilyOf(m);
+  return SEAT_COLOR[fam] || COLORS[fam] || COLORS.unknown;
+};
 
 function hourlyAxis(h) {
   return String(h).padStart(2, "0") + ":00";
@@ -463,7 +481,7 @@ function renderHourly(payload) {
   const peak = Math.max(1, ...hours.map((h, i) =>
     stacks[i].reduce((s, x) => s + x.requests, 0)));
 
-  const W = 720, H = 170, PADL = 30, PADB = 20, PADT = 10;
+  const W = 720, H = 220, PADL = 36, PADB = 22, PADT = 8;
   const plotW = W - PADL - 6, plotH = H - PADB - PADT;
   const slotW = plotW / 24, barW = Math.max(6, slotW - 5);
   let s = "";
@@ -649,19 +667,20 @@ function renderSeats(data) {
   const num = v => { const n = Number(v); return Number.isFinite(n) ? n : null; };
   const hrs = v => { const n = num(v); return n == null ? "—" : n.toFixed(2); };
   const pct = v => { const n = num(v); return n == null ? "—" : Math.round(n) + "%"; };
-  $("#seat-body").innerHTML = rows.map(s => {
+  $("#seat-body").innerHTML = rows.length ? rows.map(s => {
     const plan = s.plan_spent
-      ? ("spent" + (s.resets_at ? " · " + new Date(s.resets_at * 1000).toLocaleString() : ""))
+      ? ("spent" + (s.resets_at ? " · resets " + new Date(s.resets_at * 1000).toLocaleString() : ""))
       : "open";
-    return "<tr><td>" + esc(s.model) + "</td>"
-      + '<td class="r">' + hrs(s.busy_hours) + "</td>"
-      + '<td class="r">' + (num(s.cap) == null ? "—" : num(s.cap)) + "</td>"
-      + '<td class="r">' + pct(s.utilization) + "</td>"
-      + '<td class="r">' + (num(s.cap_waits) == null ? "—" : num(s.cap_waits)) + "</td>"
-      + '<td class="r">' + hrs(s.idle_while_waiting_hours) + "</td>"
-      + '<td class="r">' + pct(num(s.error_rate) == null ? null : num(s.error_rate) * 100) + "</td>"
-      + "<td>" + esc(plan) + "</td></tr>";
-  }).join("");
+    const u = num(s.utilization);
+    const hot = u != null && u >= 90 ? " hot" : (u != null && u >= 70 ? " warn" : "");
+    return '<div class="seat' + (s.plan_spent ? " spent" : "") + '"><div><div class="sn">' + esc(short(s.model)) + "</div>"
+      + '<div class="sm">cap ' + (num(s.cap) == null ? "—" : num(s.cap)) + " · " + esc(plan)
+      + " · waits " + (num(s.cap_waits) == null ? "—" : num(s.cap_waits))
+      + " · idle " + hrs(s.idle_while_waiting_hours) + "h · err " + pct(num(s.error_rate) == null ? null : num(s.error_rate) * 100) + "</div></div>"
+      + "<div>" + hrs(s.busy_hours) + "h busy</div>"
+      + '<div class="umeter' + hot + '" title="utilization"><i style="width:' + (u == null ? 0 : Math.min(100, u)) + '%"></i></div>'
+      + "<div>" + pct(s.utilization) + "</div></div>";
+  }).join("") : '<div class="empty">No seat history yet.</div>';
 }
 
 async function load() {
