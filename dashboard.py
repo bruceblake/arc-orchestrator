@@ -599,6 +599,18 @@ def _collect_inflight(now, store=None):
                         del driver_starts[k]
                         driver_last.pop(k, None)
                         break
+        elif etype == "driver.usage_swap":
+            # A spent plan hands the attempt to another model. The substitute
+            # emits its own start/done; the original start gets no terminal
+            # event and its owning run is still alive, so without this it
+            # rendered as a live agent for a day (2026-09-24: 22 phantom
+            # GPT-6-Sol rows against one real codex lease).
+            for k in list(driver_starts):
+                if (k[0], k[1], k[3]) == (e.get("harness"), e.get("model"), e.get("task")) \
+                        and (not e.get("role") or k[2] == e.get("role")):
+                    del driver_starts[k]
+                    driver_last.pop(k, None)
+                    driver_progress.pop(k, None)
         elif etype == "request.stale":
             starts.pop(e.get("req_id"), None)
     # Prune phantom in-flight rows: starts that can no longer be real because

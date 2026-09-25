@@ -289,15 +289,19 @@ class ClientAgainstFake(unittest.TestCase):
 
         asyncio.run(client.prompt("hi"))          # warm any first-use handles
         before_threads, before_fds = len(sse_threads()), open_fds()
-        n = 5
+        # n is large on purpose: the leak is ONE fd per prompt, so it grows
+        # with n while incidental process-wide churn does not. With n=5 and a
+        # tolerance of 3, fds opened by other suites' background threads on a
+        # busy host failed this intermittently (2026-09-24: 4 and 5 extra fds
+        # under a full check.sh with a live fleet, 0 when run alone).
+        n = 20
         for _ in range(n):
             asyncio.run(client.prompt("hi"))
         self.assertEqual(sse_threads(), [])
         self.assertEqual(len(sse_threads()), before_threads)
         # No per-prompt leak: growth must stay well below the prompt count.
-        # The rejected attempt grew by exactly n (11 prompts, 11 fds); allow
-        # half that for incidental process-wide churn.
-        self.assertLess(open_fds() - before_fds, n // 2 + 1)
+        # The rejected attempt grew by exactly n (11 prompts, 11 fds).
+        self.assertLess(open_fds() - before_fds, n // 2)
 
     def test_tokens_fold_when_total_is_absent(self):
         self.assertEqual(ocserve._token_total(
