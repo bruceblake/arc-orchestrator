@@ -11,7 +11,7 @@
 :root {
   --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
   --dim: #8b949e; --accent: #bc8cff; --ok: #3fb950; --warn: #d29922;
-  --err: #f85149; --purple: #bc8cff; --grey: #484f58;
+  --err: #f85149; --purple: #bc8cff; --grey: #484f58; --track: #21262d;
   color-scheme: dark light;
 }
 /* Respect the viewer's colour scheme: same tokens, light values. */
@@ -19,23 +19,30 @@
   :root {
     --bg: #f6f8fa; --panel: #ffffff; --border: #d0d7de; --text: #1f2328;
     --dim: #57606a; --grey: #8c959f; --accent: #8250df; --ok: #1a7f37;
-    --warn: #9a6700; --err: #cf222e; --purple: #8250df;
+    --warn: #9a6700; --err: #cf222e; --purple: #8250df; --track: #eaeef2;
   }
 }
 * { box-sizing: border-box; }
 html { -webkit-text-size-adjust: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--text);
-  font: 13px/1.5 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-  padding-bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  font: 15px/1.45 ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
 }
-main { max-width: 640px; margin: 0 auto; padding: 12px 12px 8px; }
-h1 { font-size: 15px; margin: 0; letter-spacing: .02em; }
-h1 .stale { display: none; margin-left: 8px; color: var(--warn); font-size: 10px; }
-.sub { color: var(--dim); font-size: 11px; margin: 2px 0 10px; }
+.top { display: flex; align-items: center; gap: 14px; padding: 10px 14px 0; max-width: 640px; margin: 0 auto; }
+.top .brand { font-weight: 700; color: var(--accent); letter-spacing: .04em; }
+.top a { color: var(--dim); text-decoration: none; font-size: 13px; }
+.top a:hover { color: var(--accent); }
+main { max-width: 640px; margin: 0 auto; padding: 8px 14px 8px; }
+h1 { font-size: 22px; margin: 0; letter-spacing: -0.02em; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+h1 .stale { display: none; color: var(--warn); font-size: 13px; font-weight: 600; }
+.pulse { display: inline-block; font-size: 13px; font-weight: 700; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); color: var(--dim); }
+.pulse.live { color: var(--ok); border-color: var(--ok); }
+.pulse.bad { color: var(--err); border-color: var(--err); }
+.sub { color: var(--dim); font-size: 13px; margin: 4px 0 12px; }
 .sec {
-  font-size: 11px; color: var(--dim); text-transform: uppercase;
-  letter-spacing: .08em; margin: 14px 0 6px; font-weight: 600;
+  font-size: 12px; color: var(--dim); text-transform: uppercase;
+  letter-spacing: .08em; margin: 16px 0 8px; font-weight: 700;
 }
 
 /* Views: one visible at a time, switched by the bottom nav. */
@@ -50,37 +57,44 @@ h1 .stale { display: none; margin-left: 8px; color: var(--warn); font-size: 10px
   padding: 4px 0 calc(4px + env(safe-area-inset-bottom, 0px));
 }
 .bnav button {
-  flex: 1 1 0; margin: 0 4px; border-radius: 10px;
+  flex: 1 1 0; margin: 0 3px; border-radius: 12px;
   display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 3px; min-width: 44px; min-height: 48px;
+  gap: 2px; min-width: 44px; min-height: 48px;
   background: none; border: 0; color: var(--dim); font: inherit;
-  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
-  cursor: pointer; -webkit-tap-highlight-color: transparent;
+  font-size: 11px; text-transform: uppercase; letter-spacing: .04em; font-weight: 700;
+  cursor: pointer; -webkit-tap-highlight-color: transparent; position: relative;
 }
 .bnav button .ic { font-size: 16px; line-height: 1; }
-.bnav button.on { color: var(--accent); }
+.bnav button.on { color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.nbadge { position: absolute; top: 2px; right: 6px; min-width: 16px; height: 16px; padding: 0 4px;
+  border-radius: 8px; background: var(--err); color: #fff; font-size: 10px; line-height: 16px; font-weight: 700; }
+.nbadge:empty { display: none; }
 
 /* Canonical tap-target floor: anything tappable carries class="tap". */
 .tap { min-width: 44px; min-height: 44px; }
 
 /* Now view: figure cards, label above value, value carries the colour. */
-.figs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 0 0 10px; }
-.fig { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px 8px; }
-.fig .fl { display: block; font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; }
-.fig .fv { font-size: 26px; font-weight: 700; line-height: 1.25; }
+.figs { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin: 0 0 12px; }
+.fig { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; padding: 12px 14px 10px; }
+.fig .fl { display: block; font-size: 12px; color: var(--dim); text-transform: uppercase; letter-spacing: .05em; font-weight: 700; }
+.fig .fv { font-size: 32px; font-weight: 700; line-height: 1.15; letter-spacing: -0.03em; }
 
 /* Red-state banner. */
 .alert {
   display: none; border: 1px solid var(--err); color: var(--err);
-  background: var(--panel); border-radius: 12px; padding: 8px 12px;
-  font-size: 11.5px; margin: 0 0 10px;
+  background: color-mix(in srgb, var(--err) 12%, var(--panel)); border-radius: 14px; padding: 10px 14px;
+  font-size: 14px; font-weight: 600; margin: 0 0 12px;
 }
 .alert div { overflow-wrap: anywhere; }
 
 /* Cards: stacked full-width, one expanded at a time (progressive
    disclosure). The head is a real <button> so it is focusable and named. */
 .stack { display: grid; gap: 8px; }
-.card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.card { background: var(--panel); border: 1px solid var(--border); border-radius: 14px; overflow: hidden; }
+.meter { height: 6px; background: var(--track); }
+.meter i { display: block; height: 100%; background: var(--ok); }
+.meter.hot i { background: var(--err); }
+.meter.warn i { background: var(--warn); }
 .card-head {
   display: flex; width: 100%; align-items: center; gap: 8px;
   padding: 9px 12px; min-width: 44px; min-height: 48px;
@@ -88,11 +102,11 @@ h1 .stale { display: none; margin-left: 8px; color: var(--warn); font-size: 10px
   text-align: left; cursor: pointer; -webkit-tap-highlight-color: transparent;
 }
 .card-head .cmain { flex: 1 1 auto; min-width: 0; display: grid; gap: 2px; }
-.c-title { font-weight: 600; font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.c-sub { font-size: 11px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-title { font-weight: 700; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-sub { font-size: 13px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .chev { flex: 0 0 auto; color: var(--dim); font-size: 14px; transition: transform .15s ease; }
 .card.open .chev { transform: rotate(90deg); }
-.card-body { display: none; border-top: 1px solid var(--border); padding: 10px 12px 12px; font-size: 12px; }
+.card-body { display: none; border-top: 1px solid var(--border); padding: 12px; font-size: 14px; }
 .card.open .card-body { display: grid; gap: 6px; }
 .kv { display: flex; gap: 8px; align-items: baseline; }
 .kv .k { flex: 0 0 92px; color: var(--dim); }
@@ -101,14 +115,14 @@ h1 .stale { display: none; margin-left: 8px; color: var(--warn); font-size: 10px
 .tx {
   margin: 0; padding: 6px 0 0; max-height: 160px; overflow: auto;
   white-space: pre-wrap; overflow-wrap: anywhere;
-  font: 10.5px/1.4 inherit; color: var(--dim);
+  font: 12px/1.4 inherit; color: var(--dim); max-height: 200px;
 }
 
 /* Bits inside cards. */
 .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
 .chip {
   display: inline-block; border: 1px solid var(--border); border-radius: 999px;
-  padding: 0 8px; font-size: 10.5px; color: var(--dim); margin-right: 4px;
+  padding: 2px 8px; font-size: 12px; color: var(--dim); margin: 0 4px 4px 0;
 }
 .chip.hot { color: var(--err); border-color: var(--err); }
 .pbar { height: 6px; border-radius: 3px; background: var(--grey); overflow: hidden; margin: 2px 0 4px; }
@@ -121,8 +135,8 @@ a { color: var(--accent); text-decoration: none; }
 /* Shared controls: select and action buttons (same as index.html). */
 .fsel {
   background: var(--panel); color: var(--text); border: 1px solid var(--border);
-  border-radius: 12px; padding: 2px 4px; font: inherit; font-size: 11px;
-  max-width: 220px;
+  border-radius: 12px; padding: 8px 10px; font: inherit; font-size: 15px;
+  width: 100%; min-height: 44px; max-width: none;
 }
 .fsel:hover { border-color: var(--accent); }
 button.act {
@@ -142,12 +156,19 @@ button.act.danger { border-color: var(--err); color: var(--err); }
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 12px; padding: 8px; margin: 0 0 8px;
 }
-.plan-turn {
-  max-width: 86%; padding: 7px 10px; border-radius: 12px;
-  white-space: pre-wrap; overflow-wrap: anywhere;
-  font-size: 11.5px; line-height: 1.4;
+.composer { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
+.composer input {
+  width: 100%; min-height: 44px; border-radius: 12px; border: 1px solid var(--border);
+  background: var(--panel); color: var(--text); font: inherit; font-size: 16px; padding: 8px 12px;
 }
-.plan-turn small { display: block; color: var(--dim); font-size: 9.5px; margin-bottom: 2px; }
+.composer-actions { display: flex; gap: 8px; }
+.composer-actions .act { flex: 1; }
+.plan-turn {
+  max-width: 86%; padding: 8px 12px; border-radius: 14px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  font-size: 15px; line-height: 1.4;
+}
+.plan-turn small { display: block; color: var(--dim); font-size: 12px; margin-bottom: 2px; }
 .plan-turn.user { align-self: flex-end; background: var(--accent); color: #fff; }
 .plan-turn.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--border); }
 .plan-turn.err { border: 1px solid var(--err); color: var(--err); background: var(--panel); }
@@ -159,10 +180,15 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 </style>
 </head>
 <body>
+<header class="top">
+  <span class="brand">ARC</span>
+  <a href="/">Desktop</a>
+  <a href="/usage.html">Usage</a>
+</header>
 <main>
 
 <section id="view-now" class="view on" aria-label="Now">
-  <h1>Now <span id="stale" class="stale">stale data</span></h1>
+  <h1>Now <span id="pulse" class="pulse">…</span> <span id="stale" class="stale">stale data</span></h1>
   <p class="sub" id="nowsub">loading…</p>
   <div class="figs" id="figs"></div>
   <div class="alert" id="alert" role="status"></div>
@@ -192,15 +218,17 @@ button.act.danger { border-color: var(--err); color: var(--err); }
   <h1>Plan</h1>
   <p class="sub" id="plan-sub">Select a repo to start planning</p>
   <select class="fsel" id="plan-repo" aria-label="Repository"></select>
-  <div class="kv" style="margin-top:6px;">
-    <select class="fsel" id="plan-sessions" aria-label="Chat session" style="flex:1;"></select>
-    <button class="act" id="plan-new">New chat</button>
+  <div class="composer" style="margin-top:8px;">
+    <select class="fsel" id="plan-sessions" aria-label="Chat session"></select>
+    <button class="act" id="plan-new" type="button">New chat</button>
   </div>
   <div id="plan-transcript" class="empty">no chat yet</div>
-  <div class="kv" style="margin-top:8px;">
-    <input type="text" id="plan-input" placeholder="Ask the planner" style="flex:1;" aria-label="Chat message" />
-    <button class="act" id="plan-send">Send</button>
-    <button class="act" id="plan-mic" style="display:none;">🎤</button>
+  <div class="composer">
+    <input type="text" id="plan-input" placeholder="Ask the planner" aria-label="Chat message" />
+    <div class="composer-actions">
+      <button class="act primary" id="plan-send" type="button">Send</button>
+      <button class="act" id="plan-mic" type="button" style="display:none;" aria-label="Dictate">🎤</button>
+    </div>
   </div>
   <div id="plan-interim" class="interim"></div>
   <div id="plan-taskcard"></div>
@@ -209,10 +237,10 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 </main>
 
 <nav class="bnav" aria-label="Primary">
-  <button type="button" id="nav-now" class="tap on"><span class="ic" aria-hidden="true">◉</span>Now</button>
-  <button type="button" id="nav-projects" class="tap"><span class="ic" aria-hidden="true">▦</span>Projects</button>
-  <button type="button" id="nav-prs" class="tap"><span class="ic" aria-hidden="true">⇄</span>PRs</button>
-  <button type="button" id="nav-fleet" class="tap"><span class="ic" aria-hidden="true">☰</span>Fleet</button>
+  <button type="button" id="nav-now" class="tap on"><span class="ic" aria-hidden="true">◉</span>Now<span class="nbadge" id="badge-now"></span></button>
+  <button type="button" id="nav-projects" class="tap"><span class="ic" aria-hidden="true">▦</span>Projects<span class="nbadge" id="badge-projects"></span></button>
+  <button type="button" id="nav-prs" class="tap"><span class="ic" aria-hidden="true">⇄</span>PRs<span class="nbadge" id="badge-prs"></span></button>
+  <button type="button" id="nav-fleet" class="tap"><span class="ic" aria-hidden="true">☰</span>Fleet<span class="nbadge" id="badge-fleet"></span></button>
   <button type="button" id="nav-plan" class="tap"><span class="ic" aria-hidden="true">✎</span>Plan</button>
 </nav>
 
@@ -462,7 +490,6 @@ function projectCard(p) {
         '<span class="v">' + esc(ns[i].status) + (ns[i].live ? " · live" : "") + "</span></div>";
     }
     body = '<div class="card-body">' +
-      '<div class="pbar"><i style="width:' + pct + '%"></i></div>' +
       '<div class="chips">' + chips + "</div>" +
       rows +
       kv("models", esc((p.models || []).map(short).join(", "))) +
@@ -475,7 +502,8 @@ function projectCard(p) {
       }).join(" · "))) : "") +
       "</div>";
   }
-  return '<div class="card' + (open ? " open" : "") + '">' + head + body + "</div>";
+  return '<div class="card' + (open ? " open" : "") + '">' + head +
+    '<div class="pbar" aria-hidden="true"><i style="width:' + pct + '%"></i></div>' + body + "</div>";
 }
 function prCard(p) {
   var key = String(p.number);
@@ -518,11 +546,14 @@ function modelCard(m) {
   var key = m.model;
   var open = S.open.fleet === key;
   var color = COLORS[familyOf(m)] || "";
+  var fill = m.cap ? Math.min(100, Math.round((m.running / m.cap) * 100)) : 0;
+  var tone = fill >= 100 ? " hot" : (fill >= 75 ? " warn" : "");
   var head = '<button type="button" class="card-head tap" data-key="' + attr(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="dot" style="background:' + color + '"></span>' +
     '<span class="c-title">' + esc(m.pretty || m.model) + "</span>" +
     '<span class="c-sub">' + m.running + " running · " + m.waiting + " waiting · cap " + m.cap + "</span></span>" +
-    '<span class="chev" aria-hidden="true">›</span></button>';
+    '<span class="chev" aria-hidden="true">›</span></button>' +
+    '<div class="meter' + tone + '" aria-hidden="true"><i style="width:' + fill + '%"></i></div>';
   var body = "";
   if (open) {
     body = '<div class="card-body">' +
@@ -536,10 +567,12 @@ function modelCard(m) {
 function harnessCard(h) {
   var key = "h:" + h.harness;
   var open = S.open.fleet === key;
+  var fill = h.cap ? Math.min(100, Math.round((h.running / h.cap) * 100)) : 0;
   var head = '<button type="button" class="card-head tap" data-key="' + attr(key) + '" aria-expanded="' + open + '">' +
     '<span class="cmain"><span class="c-title">' + esc(h.harness) + " harness</span>" +
     '<span class="c-sub">' + h.running + " running · " + h.waiting + " waiting · cap " + h.cap + "</span></span>" +
-    '<span class="chev" aria-hidden="true">›</span></button>';
+    '<span class="chev" aria-hidden="true">›</span></button>' +
+    '<div class="meter" aria-hidden="true"><i style="width:' + fill + '%"></i></div>';
   var body = "";
   if (open) {
     body = '<div class="card-body">' + kv("free slots", h.free) + "</div>";
@@ -576,11 +609,18 @@ function renderNow() {
       fig(ghReady ? "merged today" : "merged", fmtK(mergedToday()), "var(--purple)") +
       fig("failed", fmtK(failedCount()), failedCount() > 0 ? "var(--err)" : "");
   }
+  var lines = redLines();
   var al = $("#alert");
   if (al) {
-    var lines = redLines();
     al.innerHTML = lines.map(esc).join("<br>");
     al.style.display = lines.length ? "block" : "none";
+  }
+  var pulse = $("#pulse");
+  if (pulse) {
+    var nAgents = ((S.agents && S.agents.agents) || []).length;
+    var working = (t.running || 0) > 0 || nAgents > 0;
+    pulse.textContent = lines.length ? "Needs a look" : (working ? "Working" : "Idle");
+    pulse.className = "pulse" + (lines.length ? " bad" : (working ? " live" : ""));
   }
   // Not filtered by task: an inflight row with "task": null (kimi-code
   // sessions, dashboard.py:417) is a running agent, and dropping it made the
@@ -661,9 +701,23 @@ function renderFleet() {
   wire("#fleet", "fleet");
 }
 
+function badge(id, n) {
+  var el = $(id);
+  if (el) el.textContent = n > 0 ? String(n) : "";
+}
 function renderMeta() {
   var st = $("#stale");
   if (st) st.style.display = S.stale ? "inline" : "none";
+  var stalled = ((S.agents && S.agents.agents) || []).filter(function (a) { return a.stalled; }).length;
+  badge("#badge-now", stalled);
+  var active = (S.projects || []).filter(function (p) { return p.active && !p.archived; }).length;
+  badge("#badge-projects", active);
+  var openPrs = (S.gh && S.gh.ready && S.gh.prs) ? S.gh.prs.filter(function (p) {
+    return String(p.state || "").toUpperCase() === "OPEN";
+  }).length : 0;
+  badge("#badge-prs", openPrs);
+  var waiting = (S.queue && S.queue.totals && S.queue.totals.waiting) || 0;
+  badge("#badge-fleet", waiting);
 }
 
 function renderAll() {
