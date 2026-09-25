@@ -1168,3 +1168,151 @@ class TheDailyAuditSchedulesItself(unittest.TestCase):
             audit.run = orig
         self.assertLessEqual(len(list(pathlib.Path(self.dir, "logs", "audit").glob("2*.json"))),
                              sa.KEEP_REPORTS)
+
+
+class SeatUtilization(unittest.TestCase):
+    """Four synthetic event logs: starved, idle, spent plan, error-dominated."""
+
+    def setUp(self):
+        import audit
+        self.audit = audit
+        roster = config.live_roster(check_api=False)
+        self.assertGreaterEqual(len(roster), 2)
+        self.a, self.a_harness = roster[0][0], roster[0][2]
+        self.b = roster[1][0]
+        self.now = 1_800_000_000.0
+        self.hours = 24.0
+        self.cutoff = self.now - self.hours * 3600.0
+
+    def _seats(self, events, runs=None):
+        rows = self.audit.seat_utilization(
+            self.hours, now=self.now, events=events, runs=runs or [], leases=[])
+        return {r["model"]: r for r in rows}
+
+    def test_a_full_seat_with_cap_waits_is_starved(self):
+        cap = config.driver_limit(self.a)
+        runs = [{"model": self.a, "seconds": self.hours * 3600, "created_at": self.now,
+                 "task_id": f"t{i}", "attempt": 1} for i in range(cap)]
+        events = [{"type": "driver.cap_wait", "model": self.a, "task": "queued",
+                   "ts": self.cutoff + 10}]
+        row = self._seats(events, runs)[self.a]
+        self.assertGreaterEqual(row["utilization"], 90)
+        self.assertGreaterEqual(row["cap_waits"], 1)
+        self.assertEqual(row["idle_while_waiting_hours"], 0.0)
+
+    def test_a_free_seat_while_another_cap_waits_is_idle(self):
+        events = [{"type": "driver.cap_wait", "model": self.a, "task": "queued",
+                   "ts": self.cutoff}]
+        row = self._seats(events)[self.b]
+        self.assertGreater(row["idle_while_waiting_hours"], 0.5 * self.hours)
+        self.assertEqual(row["cap_waits"], 0)
+        findings = self.audit.audit_seats(
+            int(self.hours * 3600), events=events, runs=[], leases=[], now=self.now)
+        idle = [f for f in findings if self.b in f["what"]]
+        self.assertTrue(idle)
+        self.assertEqual(idle[0]["severity"], "warning")
+        self.assertIn(idle[0]["action"],
+                      ("route more tiers to it", "raise its cap", "fix its errors"))
+
+    def test_a_future_reset_marks_the_plan_spent(self):
+        reset = self.now + 3600
+        events = [{"type": "driver.usage_limit", "harness": self.a_harness,
+                   "model": self.a, "ts": self.now - 30, "resets_at": reset}]
+        row = self._seats(events)[self.a]
+        self.assertTrue(row["plan_spent"])
+        self.assertEqual(row["resets_at"], reset)
+
+    def test_errors_dominate_when_most_runs_fail(self):
+        events = [{"type": "driver.error", "model": self.a, "task": f"e{i}",
+                   "ts": self.now - i} for i in range(1, 5)]
+        events.append({"type": "driver.done", "model": self.a, "task": "ok",
+                       "ts": self.now - 10, "seconds": 5})
+        row = self._seats(events)[self.a]
+        self.assertGreaterEqual(row["error_rate"], 0.5)
+
+    def test_a_store_written_run_is_iso_and_counts(self):
+        """created_at is store._now()'s ISO string, not an epoch."""
+        import store
+        from datetime import datetime, timezone
+        st = store.Store(":memory:")
+        self.addCleanup(st.conn.close)
+        old = datetime.fromtimestamp(self.now - 10 * 86400, tz=timezone.utc).isoformat(
+            timespec="seconds")
+        st.conn.execute(
+            "INSERT INTO harness_runs(task_id, harness, model, role, attempt, "
+            "exit_code, transcript, seconds, verdict, created_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
+            ("old", "opencode", self.a, "implementer", 1, 0, "", 999999, None, old))
+        st.conn.commit()
+        st.save_harness_run("t1", "opencode", self.a, "implementer", 1, 0, "", 3600)
+        rows = self.audit.seat_utilization(24, store=st, events=[], leases=[])
+        row = {r["model"]: r for r in rows}[self.a]
+        self.assertAlmostEqual(row["busy_hours"], 1.0, places=2)
+        self.assertLessEqual(row["utilization"], 100)
+
+    def test_a_stale_unmatched_start_does_not_fill_the_window(self):
+        events = [{"type": "driver.start", "model": self.a, "task": "old",
+                   "attempt": 1, "ts": self.now - 15 * 86400}]
+        row = self._seats(events)[self.a]
+        self.assertEqual(row["busy_hours"], 0.0)
+
+    def test_overlapping_runs_cannot_exceed_the_cap(self):
+        cap = config.driver_limit(self.a)
+        runs = [{"model": self.a, "seconds": self.hours * 3600, "created_at": self.now,
+                 "task_id": f"t{i}", "attempt": 1} for i in range(cap + 5)]
+        row = self._seats([], runs)[self.a]
+        self.assertLessEqual(row["utilization"], 100)
+        self.assertAlmostEqual(row["busy_hours"], cap * self.hours, places=1)
+
+    def test_a_stale_event_and_a_dead_pid_are_not_busy(self):
+        dead = 2 ** 31 - 1
+        events = [
+            {"type": "driver.start", "model": self.a, "task": "gone", "attempt": 1,
+             "pid": dead, "ts": self.cutoff},
+            {"type": "driver.heartbeat", "model": self.a, "task": "gone", "attempt": 1,
+             "ts": self.now - 10},
+            {"type": "driver.start", "model": self.a, "task": "pruned", "attempt": 1,
+             "ts": self.cutoff},
+            {"type": "driver.heartbeat", "model": self.a, "task": "pruned", "attempt": 1,
+             "ts": self.now - 10},
+            {"type": "driver.stale", "model": self.a, "task": "pruned", "attempt": 1,
+             "ts": self.cutoff + 30},
+        ]
+        row = self._seats(events)[self.a]
+        self.assertEqual(row["busy_hours"], 0.0)
+
+    def test_an_unmatched_start_ends_at_its_last_heartbeat(self):
+        events = [
+            {"type": "driver.start", "model": self.a, "task": "live", "attempt": 1,
+             "ts": self.cutoff},
+            {"type": "driver.heartbeat", "model": self.a, "task": "live", "attempt": 1,
+             "ts": self.cutoff + 3600},
+        ]
+        row = self._seats(events)[self.a]
+        self.assertAlmostEqual(row["busy_hours"], 1.0, places=2)
+        self.assertLess(row["utilization"], 50)
+
+    def test_a_wait_closes_on_a_terminal_event(self):
+        events = [
+            {"type": "driver.cap_wait", "model": self.a, "task": "q-x2",
+             "ts": self.cutoff},
+            {"type": "driver.cancelled", "model": self.a, "task": "q",
+             "ts": self.cutoff + 60},
+        ]
+        row = self._seats(events)[self.b]
+        self.assertLess(row["idle_while_waiting_hours"], 0.5 * self.hours)
+
+    def test_capacity_and_plan_refusals_are_not_the_error_rate(self):
+        events = [
+            {"type": "driver.error", "model": self.a, "task": "c", "capacity": True,
+             "error": "concurrent session limit reached", "ts": self.now - 5},
+            {"type": "driver.error", "model": self.a, "task": "u",
+             "error": "usage limit reached", "ts": self.now - 4},
+            {"type": "driver.done", "model": self.a, "task": "ok", "ts": self.now - 3},
+        ]
+        row = self._seats(events)[self.a]
+        self.assertEqual(row["error_rate"], 0.0)
+        events.append({"type": "driver.stale", "model": self.a, "task": "s",
+                       "ts": self.now - 2})
+        row = self._seats(events)[self.a]
+        self.assertGreaterEqual(row["error_rate"], 0.5)
