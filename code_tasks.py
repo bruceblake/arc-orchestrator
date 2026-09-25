@@ -172,6 +172,14 @@ def load_taskfile(path, policy=None):
         }
         if not isinstance(tasks[tid]["probe_cmd"], str):
             raise ValueError(f"task {tid}: probe_cmd must be a string")
+        # Rule 7d switches, read at run time (evidence.enabled_for and the
+        # reviewer's blocking rule). Kept only when written, so an absent key
+        # still means "the default".
+        for flag in ("evidence", "visual"):
+            if flag in t:
+                if not isinstance(t[flag], bool):
+                    raise ValueError(f"task {tid}: {flag} must be true or false")
+                tasks[tid][flag] = t[flag]
     for tid, t in tasks.items():
         for d in t["deps"]:
             if d not in tasks:
@@ -2791,8 +2799,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             from studio.engine import godot as _godot
             out = evidence.run_dir(project_slug, tid, attempt)
             try:
+                # Into the written manifest, not just this dict: a resumed
+                # review reads the manifest back from disk.
                 m = await asyncio.to_thread(evidence.capture, wt, out, repo=repo,
-                                            base=base, project=project_slug)
+                                            base=base, project=project_slug,
+                                            non_visual=evidence.non_visual(t))
             except evidence.EvidenceUnavailable as exc:
                 evidence.emit("unavailable", task=tid, reason=str(exc)[:300])
                 return None, None
@@ -2807,9 +2818,6 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 evidence.emit("error", task=tid, error=str(exc)[:300], fingerprint=fp)
                 return None, None
             m["attempt"] = attempt
-            # `"visual": false` marks a task whose change is not meant to be
-            # seen; everything else must SHOW its change (Rule 7d).
-            m["non_visual"] = t.get("visual") is False
             evidence.emit("captured", task=tid, attempt=attempt,
                           shots=len(m.get("shots") or []),
                           videos=sorted(m.get("videos") or {}),

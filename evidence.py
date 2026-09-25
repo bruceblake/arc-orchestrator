@@ -84,6 +84,12 @@ def enabled_for(worktree, task=None):
     return is_godot_project(worktree)
 
 
+def non_visual(task):
+    """True for a task marked `"visual": false`: its change is not meant to
+    be seen, so the reviewer is not told to reject an unchanged picture."""
+    return task is not None and task.get("visual") is False
+
+
 def run_dir(project, task_id, attempt):
     return (Path(config.EVIDENCE_DIR) / _slug(project) / _slug(task_id)
             / f"x{int(attempt)}")
@@ -475,11 +481,13 @@ def _playtest(project, out_dir, scratch, *, timeout, log=None):
     # Recorded through PLAYTEST_WRAPPER: the same script, plus inspection light
     # and a chase camera. The bare script recorded a graybox with no light
     # through a first-person camera — a 35 KB gif of black frames. A playtest
-    # the wrapper cannot extend (it fails to parse against it) is recorded
-    # bare rather than not at all.
+    # the wrapper cannot extend, or that exits non-zero under it, is recorded
+    # bare too; the wrapper's recording is kept only if the bare run leaves
+    # no video.
     wrapper = Path(scratch) / "playtest_evidence.gd"
     wrapper.write_text(PLAYTEST_WRAPPER, encoding="utf-8")
-    note = None
+    wrapped_avi = Path(scratch) / "playtest_wrapped.avi"
+    wrapped = None
     for script in (str(wrapper), "res://tools/playtest.gd"):
         avi.unlink(missing_ok=True)
         rc, out = _godot(project, ["--rendering-driver", "opengl3", "--resolution",
@@ -487,8 +495,16 @@ def _playtest(project, out_dir, scratch, *, timeout, log=None):
                                    "--fixed-fps", str(config.EVIDENCE_FPS),
                                    "--script", script], timeout=timeout, log=log)
         note = None if rc == 0 else f"the playtest exited {rc} while being recorded"
-        if script != str(wrapper) or "EVIDENCE_PLAYTEST_CAMERA" in out:
+        if script != str(wrapper):
             break
+        if rc == 0 and "EVIDENCE_PLAYTEST_CAMERA" in out:
+            break
+        if avi.exists() and avi.stat().st_size > 0:
+            os.replace(avi, wrapped_avi)
+            wrapped = (rc, note)
+    if (not avi.exists() or avi.stat().st_size == 0) and wrapped:
+        os.replace(wrapped_avi, avi)
+        rc, note = wrapped
     shots_src = Path(project) / "studio_shots"
     if shots_src.is_dir():
         dest = out_dir / "playtest_shots"
@@ -1354,8 +1370,12 @@ def no_visible_change(compare_rows, gameplay, scenes, *, min_change=None):
 
 
 def capture(worktree, out_dir, *, repo=None, base=None, project="",
-            timeout=None):
+            timeout=None, non_visual=False):
     """Capture every kind of evidence for `worktree` into `out_dir`.
+
+    `non_visual` (the task's `"visual": false`) is recorded in the manifest,
+    where prompt_block reads it — also when a resumed review loads the
+    manifest back from disk.
 
     Returns the manifest dict (also written to out_dir/manifest.json).
     Raises EvidenceUnavailable when this machine cannot capture at all, and
@@ -1375,7 +1395,8 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
                 "head": _git(["rev-parse", "HEAD"], worktree,
                              check=False),
                 "shots": [], "videos": {}, "compare": [], "warnings": [],
-                "coverage": {}, "godot_errors": []}
+                "coverage": {}, "godot_errors": [],
+                "non_visual": bool(non_visual)}
     with tempfile.TemporaryDirectory(prefix="arc-evidence-") as scratch, \
             _leave_no_trace(worktree):
         godot.import_assets(worktree, timeout=timeout)

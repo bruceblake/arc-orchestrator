@@ -765,7 +765,7 @@ class CaptureWiring(unittest.TestCase):
         (self.wt / "scripts" / "suspicion.gd").write_text("var hp = 1\n")
         (self.wt / "README.md").write_text("x\n")
 
-    def _capture(self, *, repo=None, base=None):
+    def _capture(self, *, repo=None, base=None, out=None, **kw):
         """capture() with renders stubbed: two PNGs, no videos, no playtest."""
         def fake_shots(project, cameras, out_dir, scratch, *, timeout, log=None):
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -792,8 +792,8 @@ class CaptureWiring(unittest.TestCase):
                     side_effect=evidence.EvidenceError("no movie")), \
                 unittest.mock.patch.object(evidence, "_playtest",
                                            return_value=(None, None, "no script")):
-            return evidence.capture(self.wt, self.d / "out", project="p",
-                                    repo=repo, base=base)
+            return evidence.capture(self.wt, out or self.d / "out", project="p",
+                                    repo=repo, base=base, **kw)
 
     def test_a_gameplay_diff_flags_without_raising(self):
         """Review: capture() passed the scene_shots FUNCTION, so any gameplay
@@ -1205,7 +1205,11 @@ class CaptureScenesWiring(unittest.TestCase):
                                            side_effect=fake_render), \
                 unittest.mock.patch.object(evidence, "_scene_video",
                                            side_effect=evidence.EvidenceError("x")), \
+                unittest.mock.patch.object(evidence, "_ffmpeg",
+                                           side_effect=evidence.EvidenceError("no ffmpeg")), \
                 unittest.mock.patch("studio.engine.godot.import_assets"):
+            # ffmpeg only draws the panels (CI has none); the measurement is
+            # frame_diff, pure Python, and is what this asserts.
             picked, skipped, warns = evidence.capture_scenes(
                 self.wt, self.d / "out", str(self.d), repo=self.wt, sha=self.base,
                 timeout=5)
@@ -1271,6 +1275,52 @@ class PlaytestRecording(unittest.TestCase):
         self.assertEqual(video, ("m.mp4", "m.gif"))
         self.assertEqual(reason, "")
 
+    def _record(self, results):
+        """_playtest with Godot faked: `results[name]` = (rc, out, video bytes)."""
+        runs, fed = [], []
+
+        def fake(project, args, *, timeout, log=None):
+            name = Path(args[args.index("--script") + 1]).name
+            runs.append(name)
+            rc, out, data = results[name]
+            if data:
+                Path(args[args.index("--write-movie") + 1]).write_bytes(data)
+            return rc, out
+
+        def fake_video(avi, stem):
+            fed.append(Path(avi).read_bytes())
+            return ("m.mp4", "m.gif")
+
+        with unittest.mock.patch.object(evidence, "_godot", side_effect=fake), \
+                unittest.mock.patch.object(evidence, "_video", side_effect=fake_video):
+            video, note, reason = evidence._playtest(self.d, self.d, self.d, timeout=1)
+        return runs, fed, video, note
+
+    def test_a_wrapper_that_exits_non_zero_falls_back_to_the_bare_script(self):
+        runs, fed, video, note = self._record({
+            "playtest_evidence.gd": (1, "EVIDENCE_PLAYTEST_CAMERA\nSCRIPT ERROR", b"wrapped"),
+            "playtest.gd": (0, "", b"bare")})
+        self.assertEqual(runs, ["playtest_evidence.gd", "playtest.gd"])
+        self.assertEqual(fed, [b"bare"])
+        self.assertIsNone(note)
+
+    def test_the_wrapper_video_is_kept_when_the_bare_run_records_nothing(self):
+        runs, fed, video, note = self._record({
+            "playtest_evidence.gd": (1, "EVIDENCE_PLAYTEST_CAMERA", b"wrapped"),
+            "playtest.gd": (1, "", b"")})
+        self.assertEqual(runs, ["playtest_evidence.gd", "playtest.gd"])
+        self.assertEqual(fed, [b"wrapped"])
+        self.assertEqual(video, ("m.mp4", "m.gif"))
+        self.assertIn("exited 1", note)
+
+    def test_a_clean_wrapper_run_is_not_repeated(self):
+        runs, fed, _video, note = self._record({
+            "playtest_evidence.gd": (0, "EVIDENCE_PLAYTEST_CAMERA", b"wrapped"),
+            "playtest.gd": (0, "", b"bare")})
+        self.assertEqual(runs, ["playtest_evidence.gd"])
+        self.assertEqual(fed, [b"wrapped"])
+        self.assertIsNone(note)
+
 
 class ResumedReviewsSeeEvidence(unittest.TestCase):
     def test_latest_manifest_is_the_highest_attempt(self):
@@ -1291,7 +1341,88 @@ class ResumedReviewsSeeEvidence(unittest.TestCase):
         src = (ROOT / "code_tasks.py").read_text()
         self.assertEqual(src.count("shown = review_evidence(ctx)"), 2)
         self.assertIn("evidence.latest_manifest(project_slug, tid)", src)
-        self.assertIn('m["non_visual"] = t.get("visual") is False', src)
+        self.assertIn("non_visual=evidence.non_visual(t)", src)
+
+
+def _load_task(tmp, **flags):
+    """One task loaded through the real loader, with `flags` on it."""
+    import code_tasks
+    model = config.ESCALATION_PATH[0]
+    task = {"id": "t1", "title": "T1", "prompt": "do it", "model": model,
+            "reviewer": config.cross_family_reviewer(model), **flags}
+    path = Path(tmp) / "tf.json"
+    path.write_text(json.dumps({"project": {"repo": str(tmp), "title": "t",
+                                            "tasks": [task]}}))
+    return code_tasks.load_taskfile(str(path))["tasks"]["t1"]
+
+
+class TaskFlagsReachRuntime(unittest.TestCase):
+    """`"visual": false` and `"evidence": false` survive the loader and change
+    what the pipeline does — the loader once rebuilt each task from a fixed
+    key set and silently dropped both."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, True)
+        (self.d / "project.godot").write_text("[application]\n")
+
+    def test_the_loader_keeps_the_flags(self):
+        t = _load_task(self.d, visual=False, evidence=False)
+        self.assertIs(t["visual"], False)
+        self.assertIs(t["evidence"], False)
+        plain = _load_task(self.d)
+        self.assertNotIn("visual", plain)
+        self.assertNotIn("evidence", plain)
+
+    def test_a_non_boolean_flag_is_rejected(self):
+        for flag in ("visual", "evidence"):
+            with self.assertRaises(ValueError) as cm:
+                _load_task(self.d, **{flag: "false"})
+            self.assertIn(f"{flag} must be true or false", str(cm.exception))
+
+    def test_evidence_false_turns_the_capture_off(self):
+        self.assertTrue(evidence.enabled_for(self.d, _load_task(self.d)))
+        self.assertFalse(evidence.enabled_for(self.d, _load_task(self.d, evidence=False)))
+
+    def test_visual_false_drops_the_blocking_rule(self):
+        m = {"shots": [], "compare": [], "scenes": []}
+        t = _load_task(self.d, visual=False)
+        self.assertTrue(evidence.non_visual(t))
+        text = evidence.prompt_block({**m, "non_visual": evidence.non_visual(t)})
+        self.assertNotIn("BLOCKING RULE", text)
+        self.assertIn("NON-VISUAL", text)
+        t = _load_task(self.d)
+        self.assertFalse(evidence.non_visual(t))
+        self.assertIn("BLOCKING RULE",
+                      evidence.prompt_block({**m, "non_visual": evidence.non_visual(t)}))
+
+
+class NonVisualSurvivesResume(unittest.TestCase):
+    """A resumed review reads the manifest from disk (review_evidence ->
+    latest_manifest), so the non-visual flag must be IN the written file."""
+
+    setUp = CaptureWiring.setUp
+    _capture = CaptureWiring._capture
+
+    def test_the_written_manifest_carries_the_flag(self):
+        old = config.EVIDENCE_DIR
+        config.EVIDENCE_DIR = self.d / "ev"
+        self.addCleanup(setattr, config, "EVIDENCE_DIR", old)
+        t = _load_task(self.d, visual=False)
+        self._capture(out=evidence.run_dir("p", "t1", 3),
+                      non_visual=evidence.non_visual(t))
+        m = evidence.latest_manifest("p", "t1")
+        self.assertIs(m["non_visual"], True)
+        self.assertNotIn("BLOCKING RULE", evidence.prompt_block(m))
+
+    def test_a_visual_task_still_gets_the_blocking_rule_on_resume(self):
+        old = config.EVIDENCE_DIR
+        config.EVIDENCE_DIR = self.d / "ev"
+        self.addCleanup(setattr, config, "EVIDENCE_DIR", old)
+        self._capture(out=evidence.run_dir("p", "t1", 1))
+        m = evidence.latest_manifest("p", "t1")
+        self.assertIs(m["non_visual"], False)
+        self.assertIn("BLOCKING RULE", evidence.prompt_block(m))
 
 
 if __name__ == "__main__":
