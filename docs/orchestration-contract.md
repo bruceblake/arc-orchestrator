@@ -313,3 +313,50 @@ verdict contract of the internal reviewers above — strict JSON
 thing. It is print-only unless `--post` submits the verdict via `gh pr
 review` (approve on pass, otherwise a comment listing the issues), and it
 plays no role in the governed merge gate described here.
+
+## Every task is a GitHub issue (`gh_issues`)
+
+A task used to leave no public record until its PR opened at the very end.
+Now the pipeline keeps one issue per task and one tracking (epic) issue per
+taskfile, through the REST API (`gh api`, a quota separate from GraphQL) and
+`gitstore._gh`, so the quota wait applies.
+
+| When | Issue effect |
+|---|---|
+| run start (`code_tasks.open_task_issues`, before the graph) | epic `[arc] <project>` (goal, the DAG as a checklist `- [ ] #N title (id, model → reviewer)`, pattern, a link to the dashboard's project detail view `#x=<taskfile name>` if `ARC_DASHBOARD_PUBLIC_URL`) + `[<project>] <title>` for every task not yet merged |
+| implement starts | `arc:implementing`, comment naming model and harness |
+| usage swap / escalation | one comment: from which model to which, and why — for the implementer, the pre-merge reviewer and each PR reviewer; an implementer change also moves the `model:<model>` label to the model now doing the work |
+| gate | failed: the extracted failing checks + tail, with the attempt; passed: one short line |
+| pre-merge review | the verdict (rejected / passed / crashed) with the issue list |
+| evidence posted | a link to the PR's evidence comment |
+| publish | the PR body carries `Closes #N` and `Part of #<epic>` — a PR found already open (resume) gets the keyword appended if its body lacks it; the PR link is commented once per (issue, PR), checked against the issue's own comments, so a backfilled issue or a failed first post still gets it; `arc:in-review` |
+| PR review round | the round's verdict summary |
+| merge | GitHub closes the issue through the keyword; `arc:merged`, epic box ticked. An empty diff is "merged" with no PR, so no keyword fires: the issue is commented and closed explicitly |
+| skipped (`when` false) | `arc:skipped` + the reason, on the task and every task downstream of it |
+| conflict | `arc:conflict` + the recorded reason |
+| fail | a comment + `arc:failed`; the issue stays OPEN for a human. A terminal publish failure (push rejected, PR not opened, no changes) never reaches `fail`, so the publish hook does the same |
+
+Rules:
+
+- **Best-effort, always.** Each hook is bounded by `ARC_GH_ISSUES_TIMEOUT`
+  (default 60 s). A failure is a `gh.issue_error` event with an
+  `errors.capture` fingerprint — never a failed or blocked task.
+- **One comment per state transition**, never per progress event.
+- **Redacted.** Comments are capped at 6000 chars; worktree and repo paths
+  become repo-relative, other home-directory paths keep only the file name,
+  and env values of `*TOKEN*/*KEY*/*SECRET*/*PASSWORD*` variables are removed.
+- **Idempotent.** `task_issues(repo, taskfile, task, issue, epic, created_at)`
+  in the run's database (`config.DB_PATH`, or `code run --db`, via
+  `gh_issues.use_db`) maps a task to its issue (`task = ''` is the epic);
+  without a row, an open issue with the exact same title — searched across
+  every page, whatever its labels, and not marked for another taskfile or
+  task (every body we write starts with a hidden
+  `<!-- arc: taskfile=<hash> task=<id> -->` marker) — is adopted (its body and labels brought
+  to what a fresh issue would have) before a new one is created. Labels (`arc-task`, `arc:<status>`, `model:<model>`) are
+  created once, idempotently.
+- **Switch:** `ARC_GH_ISSUES` = `auto` (default: on when `origin` is on
+  GitHub) | `on` | `off`. Dry runs and bench keys (no taskfile on disk) never
+  touch GitHub.
+- **Backfill:** `main.py code issues sync <taskfile>` creates the epic and
+  every task issue from `code_tasks` rows (merged ones closed);
+  `main.py code issues show <task>` prints what is recorded.

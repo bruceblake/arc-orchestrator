@@ -1433,6 +1433,18 @@ class PullRequestIsTheGate(unittest.TestCase):
         self.assertIn("base = config.BASE_BRANCH", src)
         self.assertNotIn('base = "main"', src)
 
+    def test_issue_hooks_leave_nodes_untouched_when_disabled(self):
+        # Every task is a GitHub issue (gh_issues.py) — but only when it can
+        # be: a taskfile that is not on disk (bench keys, this fixture) or
+        # ARC_GH_ISSUES=off keeps the bare node functions, no wrapper at all.
+        g = self.graph()
+        self.assertEqual(g.nodes["gate_t1"].fn.__name__, "gate")
+        path = taskfile([BASIC])
+        with mock.patch.object(config, "GH_ISSUES", "off"), capture_events():
+            g = code_tasks.build_code_graph(
+                FakeStore(), code_tasks.load_taskfile(path), taskfile=str(path))
+        self.assertEqual(g.nodes["publish_t1"].fn.__name__, "publish")
+
     def test_approval_parsing_fails_closed(self):
         self.assertFalse(code_tasks._parse_approval("looks fine to me")["approve"])
         self.assertTrue(code_tasks._parse_approval('{"approve": true}')["approve"])

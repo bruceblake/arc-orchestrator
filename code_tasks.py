@@ -29,6 +29,7 @@ import evidence
 import gitstore
 import graft
 import drivers
+import gh_issues
 import plan_amend
 import dossier as dossier_mod
 import project_contract
@@ -1754,6 +1755,104 @@ def _amendment_validator(taskfile, pol):
     return validate
 
 
+def _published_shot_urls(manifest, web):
+    """Public URLs of the screenshots evidence.publish just pushed.
+
+    `web` is the directory URL publish returns (`.../blob/<branch>/<task>/xN`).
+    Each shot is a file under that directory."""
+    shots = (manifest or {}).get("shots") or []
+    if not shots or not web:
+        return []
+    root = Path(shots[0]).parent.parent
+    urls = []
+    base = web.rstrip("/")
+    for shot in shots:
+        try:
+            rel = Path(shot).resolve().relative_to(root.resolve()).as_posix()
+        except (ValueError, OSError):
+            rel = Path(shot).name
+        urls.append(f"{base}/{rel}?raw=true")
+    return urls
+
+
+async def open_task_issues(store, taskset, taskfile):
+    """Run start: the taskfile's tracking issue plus an issue for every task
+    not yet merged. Best-effort and bounded. One GitHub failure is a
+    gh.issue_error event and the rest of the tasks are still opened. {} only
+    when issues are off, or when the whole call times out."""
+    repo = taskset["repo"]
+    try:
+        if not taskfile or not Path(taskfile).is_file() or not gh_issues.enabled(repo):
+            return {}
+        gh_issues.use_db(getattr(store, "path", None))
+
+        async def go():
+            name = gh_issues.project_name(taskfile)
+            rows = {r["id"]: r for r in store.code_tasks_for(taskfile)}
+            out = {}
+
+            async def one(op, tid, coro):
+                """One GitHub call. A failure is reported and skipped so the
+                next task still gets an issue."""
+                try:
+                    return await coro
+                except Exception as exc:                   # noqa: BLE001
+                    fp = errors.capture(exc, node="gh_issues_open", task=tid or None,
+                                        taskfile=str(taskfile))
+                    events.emit("gh.issue_error", op=op, task=tid or None,
+                                taskfile=str(taskfile), error=str(exc)[:200],
+                                fingerprint=fp)
+                    return None
+
+            epic = await one("epic", "", gh_issues.ensure_epic(repo, name, taskfile))
+            if epic is not None:
+                out[""] = epic
+            for tid in gh_issues.topo_ids(taskset["tasks"]):
+                row = rows.get(tid) or {}
+                if row.get("status") == "merged":
+                    continue
+                task = dict(taskset["tasks"][tid], id=tid)
+                # A resume that starts at publish never re-implements, so the
+                # issue must wear the model the row recorded after a swap or
+                # escalation, not the taskfile's planned one.
+                recorded = row.get("model")
+                if recorded:
+                    task["model"] = recorded
+                had = gh_issues.issue_for(repo, taskfile, tid)
+                n = await one("task", tid, gh_issues.ensure_task_issue(
+                    repo, name, taskfile, task, row.get("status") or "pending", epic))
+                if n is None:
+                    continue
+                out[tid] = n
+                if had and recorded:
+                    await one("model", tid, gh_issues.set_model(repo, n, recorded))
+                # A resume that re-attaches to an already-open PR may never
+                # publish again (no worktree, or nothing new to commit). The
+                # keyword has to be on the PR body or a merge leaves the issue
+                # open. sync_taskfile already does this; run start must too.
+                if row.get("status") in ("in_review", "conflict"):
+                    found = await one(
+                        "find_pr", tid,
+                        gitstore.find_pr(repo, tid, state="open"))
+                    if found and found[0]:
+                        number, url, _state = found
+                        await one("pr_closes", tid, gh_issues.ensure_pr_closes(
+                            repo, number, n, epic))
+                        await one("link_pr", tid, gh_issues.link_pr(
+                            repo, n, number, url or ""))
+            refreshed = await one("epic", "", gh_issues.ensure_epic(repo, name, taskfile))
+            if refreshed is not None:
+                out[""] = refreshed
+            return out
+        return await asyncio.wait_for(
+            go(), config.GH_ISSUES_TIMEOUT * (2 + len(taskset["tasks"])))
+    except Exception as exc:                                   # noqa: BLE001
+        fp = errors.capture(exc, node="gh_issues_open", taskfile=str(taskfile))
+        events.emit("gh.issue_error", op="open", taskfile=str(taskfile),
+                    error=str(exc)[:200], fingerprint=fp)
+        return {}
+
+
 def _resume_pr_start(repo, tid, *, known_open=False):
     """Choose the safe resume node for an open PR: gate if edits are pending.
 
@@ -2002,6 +2101,180 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         except Exception as exc:
             errors.capture(exc, task=tid, node=f"dossier_{tid}")
 
+    # Every task is a GitHub issue (gh_issues.py). Each state transition makes
+    # at most one comment; every call is bounded and best-effort — a gh
+    # failure is a gh.issue_error event with a fingerprint, never a failed or
+    # blocked task. Bench keys (no file on disk) never touch GitHub.
+    issues_on = bool(taskfile) and Path(taskfile).is_file() and \
+        gh_issues.enabled(repo)
+    issue_project = gh_issues.project_name(taskfile) if issues_on else ""
+    if issues_on:
+        # The run's own database (`code run --db`), not config.DB_PATH.
+        gh_issues.use_db(getattr(store, "path", None))
+
+    async def issue_step(tid, op, *, status=None, kind=None, body="",
+                         attempt=None, model=None, pr=None, failed=None,
+                         epic=False, closed=None, pr_closes=None,
+                         impl_model=None):
+        if not issues_on:
+            return
+
+        async def go():
+            n = gh_issues.issue_for(repo, taskfile, tid)
+            if n is None:
+                n = await gh_issues.ensure_task_issue(
+                    repo, issue_project, taskfile, dict(tasks[tid], id=tid))
+
+            async def step(name, coro):
+                """One GitHub call. A label or comment failure must not skip
+                the closing keyword (or the other way around)."""
+                try:
+                    await coro
+                except Exception as exc:                   # noqa: BLE001
+                    fp = errors.capture(exc, task=tid, node=f"gh_issue_{tid}",
+                                        op=f"{op}:{name}")
+                    events.emit("gh.issue_error", task=tid, op=f"{op}:{name}",
+                                error=str(exc)[:200], fingerprint=fp)
+
+            if pr_closes:
+                # Independent of labels and comments: a reattached PR whose
+                # body lacks `Closes #N` must still gain it.
+                await step("pr_closes", gh_issues.ensure_pr_closes(
+                    repo, pr_closes, n, gh_issues.issue_for(repo, taskfile, "")))
+            if failed is not None:
+                await step("close_failed", gh_issues.close_failed(repo, n, failed))
+            if status or impl_model:
+                await step("labels", gh_issues.swap_labels(
+                    repo, n, status=status, model=impl_model))
+            if pr:
+                await step("link_pr", gh_issues.link_pr(repo, n, *pr))
+            if kind:
+                await step("comment", gh_issues.comment(
+                    repo, n, kind, body, attempt=attempt, model=model))
+            if closed:
+                await step("close_merged", gh_issues.close_merged(repo, n, closed))
+            if epic:
+                await step("epic", gh_issues.ensure_epic(
+                    repo, issue_project, taskfile))
+        try:
+            await asyncio.wait_for(go(), config.GH_ISSUES_TIMEOUT)
+        except Exception as exc:                               # noqa: BLE001
+            fp = errors.capture(exc, task=tid, node=f"gh_issue_{tid}", op=op)
+            events.emit("gh.issue_error", task=tid, op=op,
+                        error=str(exc)[:200], fingerprint=fp)
+
+    def issue_refs(tid):
+        """'Closes #N' (+ the epic) for a PR body; '' when issues are off."""
+        if not issues_on:
+            return ""
+        try:
+            n = gh_issues.issue_for(repo, taskfile, tid)
+            epic = gh_issues.issue_for(repo, taskfile, "")
+        except Exception as exc:                               # noqa: BLE001
+            errors.capture(exc, task=tid, node=f"gh_issue_{tid}")
+            return ""
+        if n is None:
+            return ""
+        return "\n\n" + gh_issues.closes_refs(n, epic)
+
+    def with_issue(stage, tid, fn, t, cur):
+        """Wrap a pipeline node so its transition lands on the task issue."""
+        if not issues_on:
+            return fn
+
+        async def node(ctx):
+            runs = ctx.get("runs", {})
+            before = None
+            if stage == "implement":
+                before = cur(ctx)
+                await issue_step(
+                    tid, stage, status="implementing", kind="implementing",
+                    impl_model=before,
+                    body=f"{before} via {_harness_of(before)}",
+                    attempt=runs.get(f"implement_{tid}", 0) + 1, model=before)
+            r = await fn(ctx)
+            try:
+                await issue_after(stage, tid, t, ctx, r, before, cur)
+            except Exception as exc:                           # noqa: BLE001
+                fp = errors.capture(exc, task=tid, node=f"gh_issue_{tid}")
+                events.emit("gh.issue_error", task=tid, op=stage,
+                            error=str(exc)[:200], fingerprint=fp)
+            return r
+        return node
+
+    async def issue_after(stage, tid, t, ctx, r, before, cur):
+        r = r if isinstance(r, dict) else {}
+        attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) or None
+        if stage == "implement":
+            if r.get("model") and r["model"] != before:
+                await issue_step(tid, "usage_swap", kind="usage swap",
+                                 impl_model=r["model"],
+                                 body=f"{before} → {r['model']}: the plan "
+                                      f"window of {before} is spent.",
+                                 attempt=attempt, model=r["model"])
+        elif stage == "gate":
+            if r.get("passed"):
+                await issue_step(tid, stage, kind="gate passed",
+                                 body=f"`{(t.get('verify_cmd') or '(none)')[:300]}`",
+                                 attempt=attempt)
+            else:
+                await issue_step(tid, stage, kind="gate failed",
+                                 body="```\n" + (r.get("output") or "")[-3000:]
+                                      + "\n```", attempt=attempt)
+        elif stage == "review" and not r.get("skipped"):
+            who = r.get("reviewer_model") or reviewer_for(t, cur(ctx))
+            issues = r.get("issues") or []
+            listing = "\n".join(f"- {i}" for i in issues[:30])
+            kind = ("review crashed" if r.get("crashed") else
+                    "review passed" if r.get("pass") else "review rejected")
+            await issue_step(tid, stage, kind=kind, body=listing,
+                             attempt=attempt, model=who)
+        elif stage == "escalate":
+            await issue_step(tid, stage, kind="escalated",
+                             impl_model=r.get("to_model"),
+                             body=f"{r.get('from_model')} → {r.get('to_model')}: "
+                                  f"fix rounds exhausted on {r.get('from_model')}.",
+                             model=r.get("to_model"))
+        elif stage == "publish" and r.get("published") and r.get("pr"):
+            # link_pr is idempotent per (issue, PR) — it reads the issue's
+            # comments — so a reattached PR still links a backfilled issue,
+            # or one whose first link comment failed.
+            await issue_step(tid, stage, status="in-review", pr_closes=r["pr"],
+                             pr=(r["pr"], r.get("url") or ""))
+        elif (stage == "publish" and not r.get("published")
+              and not r.get("resolve") and not r.get("merged")
+              and f"alloc_{tid}" in ctx.get("results", {})):
+            # Terminal: the same condition under which no publish edge fires
+            # (push rejected, PR not opened, no changes) — `fail` is never
+            # reached, so the issue is failed here.
+            await issue_step(tid, stage, failed=f"publish failed: "
+                             f"{r.get('reason') or 'unknown'}", epic=True)
+        elif stage == "pr_review" and r.get("pr"):
+            if r.get("inconclusive"):
+                kind = "pull request review inconclusive"
+            else:
+                kind = ("pull request approved" if r.get("approved")
+                        else "pull request changes requested")
+            issues = r.get("issues") or []
+            await issue_step(tid, stage, kind=f"{kind} (round {r.get('round')})",
+                             body="\n".join(f"- {i}" for i in issues[:30]))
+        elif stage == "pr_merge":
+            if r.get("merged") and not r.get("pr"):
+                # No PR, so no `Closes #N` will ever fire: close it here.
+                await issue_step(tid, stage, epic=True,
+                                 closed="The change was empty, so it was "
+                                        "recorded as merged without a PR.")
+            elif r.get("merged"):
+                await issue_step(tid, stage, status="merged", epic=True)
+            elif r.get("reason") and not r.get("resynced"):
+                row = next((x for x in store.code_tasks_for(taskfile)
+                            if x["id"] == tid), None) or {}
+                await issue_step(tid, stage, status="conflict", kind="conflict",
+                                 body=str(row.get("error") or r["reason"])[:1500])
+        elif stage == "fail":
+            await issue_step(tid, stage, failed=str(r.get("reason") or "failed"),
+                             epic=True)
+
     # --- resume: statuses recorded by earlier runs of THIS taskfile ----------
     # Re-running `code run <taskfile>` is a resume of the same project: merged
     # tasks collapse into skip stubs, failed/conflict/stale/pending tasks run
@@ -2138,7 +2411,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             return {"skipped": True, "merged": False, "reason": reason,
                     "downstream": downstream}
 
-        g.node(f"skip_{tid}", skip)
+        async def skip_node(ctx):
+            r = await skip(ctx)
+            # The public lifecycle too: every skipped task is arc:skipped
+            # with its reason, not left reading arc:pending forever.
+            for sid in [tid] + downstream:
+                await issue_step(
+                    sid, "skip", status="skipped", kind="skipped",
+                    body=r["reason"] if sid == tid else
+                    f"depends on skipped `{tid}` ({r['reason']})",
+                    epic=sid == ([tid] + downstream)[-1])
+            return r
+
+        g.node(f"skip_{tid}", skip_node if issues_on else skip)
 
     def make_skip(t):
         """Merged task: collapse to a stub publish so dependents see it as done."""
@@ -2481,12 +2766,25 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     return
                 body = evidence.pr_markdown(shown, web, task_id=tid,
                                             attempt=shown.get("attempt", 0))
-                rc, _out, err = await gitstore._gh(
+                rc, out, err = await gitstore._gh(
                     ["pr", "comment", str(number), "--body", body], cwd=repo)
                 if rc != 0:
                     raise RuntimeError(f"gh pr comment: {err.strip()[:200]}")
                 shown["posted_pr"] = number
-                evidence.emit("posted", task=tid, pr=number, url=web)
+                comment_url = next((ln.strip() for ln in reversed((out or "").splitlines())
+                                    if ln.strip().startswith("http")), "")
+                shots = _published_shot_urls(shown, web)
+                evidence.emit("posted", task=tid, pr=number, url=comment_url or web)
+                lines = []
+                if comment_url:
+                    lines.append(f"Evidence comment on pull request #{number}: {comment_url}")
+                if shots:
+                    lines.append("Screenshots:")
+                    lines.extend(f"- {u}" for u in shots[:12])
+                elif not comment_url:
+                    lines.append(f"Pull request #{number}: {web}")
+                await issue_step(tid, "evidence", kind="visual evidence",
+                                 body="\n".join(lines))
             except Exception as exc:                           # noqa: BLE001
                 fp = errors.capture(exc, task=tid, node=f"publish_{tid}")
                 evidence.emit("publish_failed", task=tid, pr=number,
@@ -2722,6 +3020,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 dossier_call(tid, dossier_mod.note_model_change,
                              f"review round {attempt}: usage swap "
                              f"{driver.model} -> {ran_model} (plan window spent)")
+                await issue_step(tid, "usage_swap", kind="reviewer usage swap",
+                                 body=f"{driver.model} → {ran_model}: the plan "
+                                      f"window of {driver.model} is spent.",
+                                 attempt=attempt, model=ran_model)
             dossier_after(
                 tid, wt, attempt=attempt, model=ran_model, role="reviewer",
                 harness=ran_harness,
@@ -2963,7 +3265,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     f"Implemented by **{model}**, pre-review by **{rev_model or rev}**.\n"
                     f"Verify gate: `{t['verify_cmd'] or '(none)'}`\n\n"
                     f"{config.PR_REVIEWERS} independent reviewers must approve "
-                    f"before this merges.")
+                    f"before this merges.{issue_refs(tid)}")
             number, url, note = await gitstore.open_pr(
                 repo, tid, f"task({tid}): {t['title']}", body, base)
             if number is None:
@@ -3146,6 +3448,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 dossier_call(tid, dossier_mod.note_model_change,
                              f"PR review round {it['round']}: usage swap "
                              f"{model} -> {ran_model} (plan window spent)")
+                await issue_step(tid, "usage_swap", kind="PR reviewer usage swap",
+                                 body=f"{model} → {ran_model}: the plan window "
+                                      f"of {model} is spent (PR #{it.get('pr')}, "
+                                      f"round {it['round']}).", model=ran_model)
             dossier_after(
                 tid, wt, attempt=it["round"], model=ran_model, role="pr-reviewer",
                 harness=ran_harness,
@@ -3430,7 +3736,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                  "pr_fanout": pr_fanout, "pr_review": pr_review,
                  "pr_merge": pr_merge, "fail": fail}
         for suffix, fn in chain.items():
-            g.node(f"{suffix}_{tid}", releasing_on_cancel(tid, fn))
+            g.node(f"{suffix}_{tid}",
+                   with_issue(suffix, tid, releasing_on_cancel(tid, fn), t, cur_model))
         # One reviewer per node, with the per-node policy the fan-out makes
         # possible: a harness that dies on the way in is retried HERE, and the
         # join only ever sees crashes that survived the retries. The timeout is

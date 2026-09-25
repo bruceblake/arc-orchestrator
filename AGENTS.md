@@ -555,6 +555,20 @@ PR** in the life of the repo.
   after a unanimous `pr_review`. It then fast-forwards the local integration
   branch to what GitHub merged and cleans up the worktree.
 
+**Every task is a GitHub issue** (`gh_issues.py`). At run start the
+taskfile gets a tracking issue `[arc] <project>` (the DAG as a checklist) and
+every unmerged task an issue `[<project>] <title>`; each state transition
+(implement, usage swap, escalation, gate, review, evidence, publish, PR
+round, merge, conflict, skip, fail) posts at most ONE comment and swaps the
+`arc:<status>` label. The PR body carries `Closes #<issue>`, so the merge
+closes it (an empty diff merged without a PR is closed explicitly); a failed task is labelled `arc:failed` and left OPEN for a human.
+Every call is best-effort — a gh failure is a `gh.issue_error` event with a
+fingerprint, never a failed task. Comments are capped and redacted to
+repo-relative paths. `ARC_GH_ISSUES=off` disables it (default `auto`: on when
+origin is on GitHub); `main.py code issues sync <taskfile>` backfills.
+Detail: [docs/orchestration-contract.md](docs/orchestration-contract.md)
+§ "Every task is a GitHub issue".
+
 **A dependent task waits for its dependency's PR to MERGE**, not merely to
 open (`pr_merge_<dep> -> alloc_<tid>`) — otherwise it would branch from a base
 that does not yet contain the code it depends on.
@@ -1102,6 +1116,7 @@ Top-level Python modules (one role each):
 | `events.py` | Append-only JSONL event log `logs/events.jsonl` with contextvars attribution (`workload`/`round`/`iteration`/`module`) and 100 MiB rotation |
 | `fleetwatch.py` | Fleet watchdog (`deploy/arc-watchdog.service`, always on): records the argv/cwd/env of every live `code run`, re-runs any that died with unfinished work (the normal resume path), holds chained taskfiles until `chain_status` is ready, never overrules a `run.stopped` (operator Stop), and parks a taskfile after repeated quick exits. Never kills a run or touches git. State: `logs/watchdog/` |
 | `gh_ops.py` | GitHub operations agents over the `gh` CLI (`main.py gh …`): `issue-triager`, `issue-maker`, `pr-reviewer` — standalone tools outside the governed pipeline; preview by default, only `--apply-labels`/`--create`/`--post` write to GitHub |
+| `gh_issues.py` | Every task is a GitHub issue (Rule 5): epic + per-task issues over `gh api` REST through `gitstore._gh`, one comment per state transition, `arc:<status>` label swap, `task_issues` table, `code issues sync/show`; best-effort (`gh.issue_error`) |
 | `gitstore.py` | The only git actor: worktree `alloc`/`publish`/`sync_with_base`/`push_task_branch`/`open_pr`/`merge_pr`/`fast_forward_base`/`cleanup` on `task/<id>` branches (120 s per-git-op timeout); nothing merges locally |
 | `graph.py` | Generic async DAG engine: named nodes, conditional edges (`when=`), gather nodes, `max_steps` bound |
 | `main.py` | CLI entry point: `run`, `once`, `status`, `graph`, `studio`, `serve`, `bench` (micro), `chat` (one conversational planner turn over a session jsonl — module `orchchat.py`), `captain` (one state-aware supervisor turn — module `captain.py`), `board` (the agent board — module `agentboard.py`), and `code {plan,run,status,dream,bench}` |
