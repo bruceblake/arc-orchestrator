@@ -65,7 +65,8 @@ function renderGithub() {
     html += '<button class="act" type="button" data-gh-more="1">Show more</button>';
   }
   if (paint($("#gh-prs"), html)) {
-    const more = $("#gh-prs").querySelector("[data-gh-more]");
+    const box = $("#gh-prs");
+    const more = box.querySelector ? box.querySelector("[data-gh-more]") : null;
     if (more) more.onclick = () => {
       GH_LIMIT += 10;
       forgetEtag("github:" + (GH_LIMIT - 10));
