@@ -6,6 +6,7 @@ whether to throttle — so over-counting is not a cosmetic bug.
 import json
 import os
 import pathlib
+import shutil
 import tempfile
 import time
 import unittest
@@ -432,6 +433,74 @@ class ProjectPayloadShape(unittest.TestCase):
         src = pathlib.Path("dashboard.py").read_text()
         self.assertIn('"progress": {"done"', src,
                       "progress must stay the {done,total} rollup")
+
+
+class TaskProgressGateLog(unittest.TestCase):
+    """`task_progress[tid].gate_log` is what the project view's "why?" button
+    opens, so it must be a path `/api/gate-log` actually accepts.
+
+    It was rebuilt here as `f"{tid}-x{attempt}.log"` while the gate had been
+    moved to `logs/gates/<project>/<task>/x<attempt>.log`, so every button
+    404'd. The event's own `log` field is the only source that cannot drift
+    from the writer, and that is what this asserts.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.log = Path(self.dir) / "events.jsonl"
+        self._orig = (config.EVENTS_LOG, config.ROOT)
+        config.EVENTS_LOG = str(self.log)
+        config.ROOT = Path(self.dir)
+        dashboard._lines_cache["key"] = None
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        config.EVENTS_LOG, config.ROOT = self._orig
+        dashboard._lines_cache["key"] = None
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def _gate_event(self, log, passed=False, task="task-1"):
+        # `_task_progress` reports only tasks with an OPEN node, so the gate
+        # event is accompanied by the node_start that put the task there.
+        self.log.write_text(
+            "".join(json.dumps(e) + "\n" for e in (
+                {"type": "node_start", "node": f"gate_{task}", "ts": time.time()},
+                {"type": "task.gate", "module": task, "attempt": 2,
+                 "passed": passed, "log": log, "ts": time.time()})))
+        dashboard._lines_cache["key"] = None
+
+    def _abs(self, *parts):
+        return str(Path(self.dir) / "logs" / "gates" / Path(*parts))
+
+    def test_the_button_gets_the_events_own_nested_path(self):
+        """The relative path, because that is the form the route takes."""
+        self._gate_event(self._abs("proj", "task-1", "x2.log"))
+        got = dashboard._task_progress(["task-1"])["task-1"]
+        self.assertTrue(got["last_gate_failed"])
+        self.assertEqual(got["gate_log"], "proj/task-1/x2.log")
+        # and it must survive the route's own validation
+        self.assertIsNotNone(dashboard._GATE_LOG_RE.match(got["gate_log"]))
+
+    def test_a_failed_gate_with_no_log_offers_no_button(self):
+        """The timeout path and older events carry `log: None`; the button is
+        simply absent rather than pointing at a file that is not there."""
+        self._gate_event(None)
+        got = dashboard._task_progress(["task-1"])["task-1"]
+        self.assertTrue(got["last_gate_failed"])
+        self.assertIsNone(got["gate_log"])
+
+    def test_no_button_when_the_last_gate_passed(self):
+        self._gate_event(self._abs("proj", "task-1", "x2.log"), passed=True)
+        got = dashboard._task_progress(["task-1"])["task-1"]
+        self.assertFalse(got["last_gate_failed"])
+        self.assertIsNone(got["gate_log"])
+
+    def test_a_log_outside_the_gates_tree_is_never_offered(self):
+        """A hand-edited or hostile event must not turn the button into a
+        link to an arbitrary file."""
+        self._gate_event(str(Path(self.dir) / "secret.log"))
+        got = dashboard._task_progress(["task-1"])["task-1"]
+        self.assertIsNone(got["gate_log"])
 
 
 class LiveQueueView(unittest.TestCase):

@@ -9,6 +9,7 @@ by default; an explicit bench `policy` (see orchbench.py) may relax
 routing/review rules to measure what the governance defaults buy.
 """
 import asyncio
+import functools
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+import agentboard
 import board
 import config
 import errors
@@ -530,6 +532,13 @@ def _make_chain_wait(store, taskfile, after_keys):
     return chain_wait
 
 
+BOARD_ETIQUETTE = (
+    "COORDINATE ON THE BOARD: before editing files outside the files you are "
+    "expected to touch, check live claims (`./py main.py board claims`) and "
+    "post a claim for them; ask a question with @mentions instead of guessing "
+    "another task's interface; post a result line when you are done.\n")
+
+
 def _impl_prompt(t, feedback, hints="", roster=None, board="", contract="",
                  dossier=""):
     """The implementer's whole world: the task, where its code is, the rules.
@@ -590,7 +599,7 @@ def _impl_prompt(t, feedback, hints="", roster=None, board="", contract="",
         p += f"\nPrevious attempt was rejected. Fix these issues:\n{feedback}\n"
     p += dossier_mod.HANDOFF_PROMPT
     if board:
-        p += "\n" + board
+        p += "\n" + board + "\n" + BOARD_ETIQUETTE
     if roster:
         p += plan_amend.prompt_block(roster)
     return p
@@ -822,9 +831,10 @@ _GATE_FAILURE = re.compile(
 def _gate_failures(output, limit=12):
     """The gate-output lines that NAME what failed, first occurrence order.
 
-    The fix loop hands the implementer the last 2000 characters of gate
-    output — on a check.sh run that is the unittest summary and the shell's
-    own echo, which say THAT something failed, not WHAT. empty-diff-publish
+    The fix loop's feedback window is small, and on a check.sh run that
+    window used to be the unittest summary and the shell's own echo, which
+    say THAT something failed, not WHAT (code_tasks.gate_feedback now
+    extracts the failing sections ahead of that tail). empty-diff-publish
     failed its worktree gate on exactly one of 1046 tests, the failing line
     ("FAIL: test_every_edge_condition_reads_as_english ...") sat a hundred
     lines above the cut, and the implementer was told only "unit tests
@@ -859,12 +869,13 @@ _GATE_FULL_LIST_HEADER = "--- failing checks (full list) ---"
 def _gate_fail_lines(output, limit=40):
     """EVERY `FAIL:`/`ERROR:` line in the output, not just the ones near the cut.
 
-    Rule 4 keeps only the last 2000 characters of gate output, and a check.sh
+    Rule 4's feedback window is small, and a check.sh
     run puts the unittest summary and the shell's echo under that cut: on
     2026-09-15 a gate kept 1 of 15 failing test names, and three worktrees
     spent a fix round hunting for the other fourteen. _gate_failures() covers
     more formats but stops at 12 names; this is the narrower, longer list that
-    goes beside the tail in the log file (`logs/gates/<tid>-x<attempt>.log`)
+    goes beside the tail in the log file
+    (`logs/gates/<project>/<task>/x<attempt>.log`, code_tasks.gate_log_path)
     and in the `task.gate` event, so the names survive outside the cut.
     """
     hits, seen = [], set()
@@ -884,6 +895,259 @@ def _gate_full_list_block(lines):
     if not lines:
         return ""
     return _GATE_FULL_LIST_HEADER + "\n" + "\n".join(lines)
+
+
+_TRUNCATION_MARKER = "\n\n... [%d bytes omitted] ...\n\n"
+
+
+def cap_log(text, max_bytes=None):
+    """Head + tail of `text`, with the dropped middle named in BYTES.
+
+    Rule 4 keeps the gate's full output on disk, and an unbounded file is how
+    a runaway test run fills the disk. Bytes, not characters: the cap is a
+    disk budget, and a harness transcript is full of multi-byte text (a
+    len(str)-based cap would let a 5 MB file be several times that).
+
+    Head AND tail, deliberately: for a test run the failure is usually in the
+    middle (the traceback) but the SUMMARY is at the end, and for a build the
+    first error is at the top. Cutting either end loses something a human
+    opens the log to find. Decoding is errors="replace" so a cut cannot land
+    mid-codepoint and make the file unreadable.
+    """
+    limit = config.GATE_LOG_MAX_BYTES if max_bytes is None else int(max_bytes)
+    raw = text.encode("utf-8", errors="replace")
+    if limit <= 0 or len(raw) <= limit:
+        return text
+    marker = _TRUNCATION_MARKER % (len(raw) - limit)
+    mlen = len(marker.encode("utf-8"))
+    # The marker is part of the budget: `limit` is the cap on the FILE, which
+    # has already been overrun by omitting anything at all.
+    room = max(limit - mlen, 0)
+    head, tail = room // 2, room - room // 2
+    # Move both cuts off any UTF-8 continuation byte. `errors="replace"` turns
+    # a split codepoint into a 3-byte U+FFFD — the file then comes out OVER
+    # the cap it was capped to (measured: 305 bytes for a 300-byte cap), which
+    # defeats the one guarantee this function makes. `raw` is valid UTF-8 by
+    # construction (it was encoded with the same handler), so aligning the two
+    # cuts is enough.
+    head_end, tail_start = head, len(raw) - tail
+    while head_end and raw[head_end] & 0xC0 == 0x80:
+        head_end -= 1
+    while tail_start < len(raw) and raw[tail_start] & 0xC0 == 0x80:
+        tail_start += 1
+    return (raw[:head_end].decode("utf-8", errors="replace") + marker
+            + raw[tail_start:].decode("utf-8", errors="replace"))
+
+
+# The failing BLOCKS, not just their first lines. `_gate_failures` gives the
+# implementer the NAMES of what failed; that is enough to know where to look
+# and not enough to know what broke. The lines under a `FAIL:` header are the
+# test's own traceback, and under untittest that is the entire answer.
+_SECTION_START = re.compile(
+    r"^(FAIL|ERROR): "                      # unittest and Godot both use this
+    r"|^_{2,}\s*\S.*_{2,}$"                 # pytest FAILURES-section separator
+    r"|^SCRIPT ERROR"                       # Godot: a script blew up
+    r"|^Traceback \(most recent call last\)")
+# Where a block ends: the run's SUMMARY, not its fences. `----` fences open
+# unittest's failure sections (right under the `FAIL:` header) as well as
+# closing them, so treating a fence as an end kept only the header line and
+# threw the traceback away — the exact loss this function exists to prevent.
+_SECTION_END = re.compile(r"^Ran \d+ tests?\b|^OK$|^FAILED\b")
+# What may START the next block. `Traceback` is deliberately NOT here: inside
+# a unittest `FAIL:` block it is the block's OWN traceback, so breaking on it
+# truncated every block to its header line.
+_SECTION_BREAK = re.compile(
+    r"^(FAIL|ERROR): |^_{2,}\s*\S.*_{2,}$|^SCRIPT ERROR")
+# What CONTINUES a block on an unindented line. `Traceback (most recent call
+# last)` is here and NOT in _SECTION_BREAK: inside a unittest `FAIL:` block it
+# is that block's own traceback, and treating it as the next block's start
+# split every failure in two (header+fence, then a headerless traceback) and
+# burned one of the three section slots on the fragment.
+_SECTION_CONT = re.compile(
+    r"^Traceback \(most recent call last\)"
+    r"|^\w*(Error|Exception|Warning)\b"
+    r"|^E\s+\w*(Error|Exception)\b"
+    r"|^\s*at: "                            # Godot stack frame
+    r"|^(res://|godot|Godot)"               # Godot echo / version banner
+    r"|^-{10,}$|^=+$")                      # unittest section fences
+
+
+def _failing_sections(output, limit=3, block_bytes=1500):
+    """The FAILING sections of a gate log, each headed by its own failure line.
+
+    The tail (and even the names list) tells the implementer WHAT failed; the
+    traceback under the name tells it WHY. On a check.sh run the tracebacks
+    sit exactly where the 2000-char cut throws them away — the summary and the
+    shell's echo are what survive — so the fix round starts by re-running the
+    test to see the error the gate already had in hand.
+
+    Covers unittest (`FAIL:`/`ERROR:` then its own traceback), pytest
+    (`____ test_x ____` separators) and Godot (`FAIL:`/`SCRIPT ERROR`, whose
+    stack and echo lines the block keeps), all bounded by the run's summary.
+
+    Bounded on both axes (few sections, bounded bytes each): this goes into a
+    PROMPT, so an extractor that can emit the whole log is no better than the
+    tail it replaced.
+    """
+    lines = output.splitlines()
+    out, i = [], 0
+    while i < len(lines) and len(out) < limit:
+        if not _SECTION_START.match(lines[i].strip()):
+            i += 1
+            continue
+        start = i
+        i += 1
+        # Inside a unittest traceback every line is indented or blank, and the
+        # block ends at the first unindented line that is neither the next
+        # failure's header nor a Godot stack/echo line. Capped so one runaway
+        # traceback cannot consume the whole prompt budget.
+        while i < len(lines) and i - start < 80:
+            probe = lines[i].strip()
+            if _SECTION_END.match(probe):
+                break
+            if probe and not lines[i][:1].isspace():
+                if _SECTION_BREAK.match(probe):
+                    break
+                # An unindented line belongs to this block only when it is one
+                # of the block's own continuation shapes.
+                if not _SECTION_CONT.match(probe):
+                    break
+            i += 1
+        block = "\n".join(lines[start:i]).strip()
+        out.append(block.encode("utf-8")[:block_bytes].decode("utf-8", "replace"))
+    return out
+
+
+_FEEDBACK_SEP = "\n\n"
+_FEEDBACK_SEP_B = len(_FEEDBACK_SEP.encode("utf-8"))
+# The tail's guaranteed share. The tail is what makes the block elastic, but
+# "elastic" must not mean "evicted": a feedback block that explains the
+# failures and then shows NO output is worse than a slightly shorter one.
+_TAIL_FLOOR = 600
+
+
+def _clip_bytes(text, limit, from_end=False):
+    """`text` cut to at most `limit` BYTES, never mid-codepoint.
+
+    Byte-exact, like `cap_log` and for the same reason: the budget is a prompt
+    budget, and a cut that lands inside a multi-byte character decodes to a
+    3-byte U+FFFD and puts the result over the limit it was cut to.
+    """
+    raw = text.encode("utf-8")
+    if limit <= 0:
+        return ""
+    if len(raw) <= limit:
+        return text
+    if from_end:
+        start = len(raw) - limit
+        while start < len(raw) and raw[start] & 0xC0 == 0x80:
+            start += 1
+        return raw[start:].decode("utf-8", "replace")
+    end = limit
+    while end and raw[end] & 0xC0 == 0x80:
+        end -= 1
+    return raw[:end].decode("utf-8", "replace")
+
+
+def gate_feedback(output, log_path=None, names=None, budget=6000):
+    """What the implementer is handed after a failed gate: the failing SECTIONS,
+    then the tail, and the path to the full log.
+
+    Replaces the blind `output[-2000:]` that Rule 4 used to specify. Every
+    part is bounded, so the whole thing fits a prompt the way the 2000-char
+    window did.
+
+    The allocation order is the whole point, and it is: **path, sections,
+    tail** — the reverse of how this was first written. The path was appended
+    LAST and the assembled block was sliced from the FRONT, so it was the
+    first thing evicted: with three sections at their cap the block came out
+    at 6000 bytes with no path, and a long name list at 6221 with neither
+    path nor tail — over its own budget as well as missing the one line a
+    reader cannot reconstruct. So the path is reserved first, the head is
+    clipped to what is left after the tail's floor, and only the tail absorbs
+    the remainder.
+    """
+    budget = int(budget)
+    path_part = f"full log: {log_path}" if log_path else ""
+
+    sections = _failing_sections(output)
+    head = []
+    if sections:
+        head.append("failing sections:\n" + "\n\n".join(sections))
+    if names:
+        head.append("failing checks:\n" + "\n".join(f"  {n}" for n in names))
+    raw_head = _FEEDBACK_SEP.join(head)
+
+    tail = output[-2000:].strip()
+    tail_header = "gate output (tail):\n"
+
+    # Set aside the path and the tail's floor, then clip the HEAD to what is
+    # left. An unbounded head is what pushed the block over budget; the
+    # sections lead the head, so a clip takes the names first.
+    reserve = len(path_part.encode("utf-8")) + _FEEDBACK_SEP_B if path_part else 0
+    floor = len(tail_header.encode("utf-8")) + _TAIL_FLOOR if tail else 0
+    head_text = _clip_bytes(raw_head, max(budget - reserve - floor - _FEEDBACK_SEP_B, 0))
+    if head_text != raw_head and "\n" in head_text:
+        # A clipped head must not end mid-line: half a test name reads as a
+        # real one, and the name list is the only line-shaped part here.
+        head_text = head_text.rsplit("\n", 1)[0]
+
+    parts = (1 if head_text else 0) + (1 if tail else 0) + (1 if path_part else 0)
+    fixed = (len(head_text.encode("utf-8")) + len(path_part.encode("utf-8"))
+             + _FEEDBACK_SEP_B * max(parts - 1, 0))
+    room = max(budget - fixed, 0)
+    # The tail keeps its END — the run's summary is the newest line, and the
+    # header is dropped only when it cannot fit at all.
+    body = _clip_bytes(tail, max(room - len(tail_header.encode("utf-8")), 0),
+                       from_end=True)
+    tail_text = (tail_header + body) if body else ""
+    return _FEEDBACK_SEP.join(
+        p for p in (head_text, tail_text, path_part) if p)
+
+
+def _slug(s):
+    """A task/project id as one safe path segment (no separators, no '..')."""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(s or "x")).strip("-.") or "x"
+
+
+def gate_log_path(project, tid, attempt):
+    """Where a gate's full output goes: logs/gates/<project>/<task>/x<n>.log.
+
+    Returns the path as a string. The directory is NOT created here — the
+    caller writes the file immediately and treats an OSError as "no log"
+    rather than failing the gate over a diagnostic.
+
+    Mirrors `save_review_log`'s layout on purpose: one directory per task
+    holds the gate log and the raw reviewer output of every attempt, so an
+    operator asking "what did round 3 actually see?" opens one folder.
+    """
+    return str(Path(config.ROOT) / "logs" / "gates"
+               / _slug(project) / _slug(tid) / f"x{int(attempt)}.log")
+
+
+def save_review_log(project, tid, attempt, model, text, kind="review"):
+    """The raw reviewer output, kept when no verdict could be parsed.
+
+    A reviewer that ends its session without the verdict JSON is recorded as
+    `crashed` and the review is simply retried — so the ONE artefact that says
+    why (it asked a question? it wrote prose? its JSON was truncated?) was
+    previously thrown away, and the retry started with no more information
+    than the first attempt had. Written under
+    logs/gates/<project>/<task>/ beside the gate logs: same evidence trail,
+    and never inside the worktree (publish's `git add -A` would ship it).
+
+    Returns the path, or None if it could not be written — a diagnostic write
+    must never be the thing that fails a review.
+    """
+    try:
+        d = Path(config.ROOT) / "logs" / "gates" / _slug(project) / _slug(tid)
+        d.mkdir(parents=True, exist_ok=True)
+        path = d / f"{_slug(kind)}-x{int(attempt)}.txt"
+        path.write_text(cap_log(
+            f"model: {model}\nrole: reviewer\nattempt: {attempt}\n\n{text}"))
+        return str(path)
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _resume_session(results, tid, model, harness=None):
@@ -1564,6 +1828,109 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             errors.capture(exc, task=tid, node=f"dossier_{tid}", role=role)
             return ""
 
+    # The agent board (agentboard.py, Rule 4c): digests IN to every prompt,
+    # agents' .arc/board.jsonl lines OUT after every run, claims on the
+    # task's files, and the orchestrator's own status/result/question posts.
+    # Every helper swallows its errors: the board coordinates, it never gates.
+    def board_digest(tid, wt, role, model):
+        """The reader's digest; the old raw tail only when the digest is
+        empty. Marks the inbox read, so a mention or broadcast posted after
+        this prompt is delivered to the NEXT one — nothing interrupts a
+        running harness."""
+        text = ""
+        try:
+            text = agentboard.digest_for(
+                project_slug, task=tid, role=role, model=model,
+                files_hint=tasks[tid].get("files_hint") or (), mark_seen=True)
+        except Exception as exc:
+            errors.capture(exc, task=tid, model=model, node=f"board_{tid}",
+                           role=role)
+        return text or board.prompt_block(wt, project=project_slug, task=tid)
+
+    def board_ingest(tid, wt, role, model):
+        """Land what the agent wrote to .arc/board.jsonl on the board. Runs
+        next to every plan-proposal harvest, crash paths included."""
+        if wt is None:
+            return
+        try:
+            agentboard.ingest_file(project_slug, wt, task=tid, role=role,
+                                   model=model)
+        except Exception as exc:
+            errors.capture(exc, task=tid, model=model, node=f"board_{tid}",
+                           role=role)
+
+    def board_post(tid, kind, body, **kw):
+        kw.setdefault("author_task", tid)
+        try:
+            return agentboard.post(project_slug, author=f"{tid}/orchestrator",
+                                   channel=kw.pop("channel", f"task:{tid}"),
+                                   kind=kind, body=body, **kw)
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"board_{tid}")
+
+    def claim_ttl():
+        budget = config.total_timeout_for("implementer")
+        return float(budget) if budget and budget > 0 else 4 * 3600.0
+
+    def claim_files(tid):
+        """(Re)take the implementer's lease on files_hint. Returns the prompt
+        text naming overlapping claims ("" when none) and pings each other
+        task, mentioning both, so the two coordinate instead of colliding."""
+        author = f"{tid}/implementer"
+        paths = tasks[tid].get("files_hint") or []
+        try:
+            agentboard.release(project_slug, tid, author)
+            cid = agentboard.claim(project_slug, task=tid, author=author,
+                                   paths=paths, ttl_s=claim_ttl(),
+                                   note="implementer lease on files_hint")
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"board_{tid}")
+            return ""
+        lines = []
+        for c in getattr(cid, "conflicts", ()) or ():
+            other = c.get("task") or agentboard.split_agent(c["author"])[0]
+            shared = ", ".join(c.get("paths") or [])
+            lines.append(f"- {c['author']} holds {shared}")
+            if other and other != tid:
+                board_post(tid, "ping", channel=f"task:{other}",
+                           body=(f"@{other} @{tid}: both tasks claim "
+                                 f"overlapping files ({shared}). Coordinate "
+                                 f"on the board before editing them."),
+                           mentions=[other, tid])
+        if not lines:
+            return ""
+        return ("CLAIM CONFLICTS — other live tasks hold files you are "
+                "expected to touch. Ask them (@mention) before editing:\n"
+                + "\n".join(lines) + "\n")
+
+    def release_files(tid):
+        try:
+            agentboard.release(project_slug, tid, f"{tid}/implementer")
+        except Exception as exc:
+            errors.capture(exc, task=tid, node=f"board_{tid}")
+
+    def releasing_on_cancel(tid, fn):
+        """Wrap a task's node: a cancelled graph releases the implementer's
+        claim wherever the task is (gate, publish, merge, ...) — nobody will
+        edit those files any more. The cancellation still propagates."""
+        @functools.wraps(fn)
+        async def node(ctx):
+            try:
+                return await fn(ctx)
+            except asyncio.CancelledError:
+                release_files(tid)
+                raise
+        return node
+
+    def ask_implementer(tid, source, issues):
+        """A rejection as an OPEN question addressed to the implementer, so
+        the next round's digest lists it until it is answered."""
+        who = f"{tid}/implementer"
+        body = (f"@{who} {source} rejected this change. Fix or answer "
+                "(kind=answer, reply_to=<this id>):\n"
+                + "\n".join(f"- {i}" for i in (issues or ["(no issues listed)"])[:20]))
+        board_post(tid, "question", body, mentions=[who])
+
     def dossier_after(tid, wt, *, attempt, model, role, outcome=None,
                       harness="", summary="", failure_excerpt="", files=(),
                       session_id=None):
@@ -1926,7 +2293,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # the worktree is per-task): drivers.py argv treats a truthy
             # session_id as exactly that flag.
             resume = _resume_session(results, tid, model, driver.harness)
-            thread = board.prompt_block(wt, project=project_slug, task=tid)
+            # Lease files_hint for this round (re-taken every fix round, so
+            # the lease never lapses under a live agent), then the digest.
+            conflicts = claim_files(tid)
+            board_post(tid, "status",
+                       f"implementing: attempt {attempt} on {model}")
+            thread = conflicts + board_digest(tid, wt, "implementer", model)
             # Which model this attempt actually RAN on. A spent plan window can
             # substitute another driver (drivers.usage_substitute), and the
             # checkpoint written in the `finally` below must name the model
@@ -1957,6 +2329,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             model=model, attempt=attempt,
                             error=str(exc)[:200], fingerprint=fp)
                 harvest_proposals(tid, wt, "implementer", model)
+                board_ingest(tid, wt, "implementer", model)
                 dossier_after(tid, wt, attempt=attempt, model=model,
                               role="implementer", outcome="crashed",
                               harness=driver.harness,
@@ -1966,6 +2339,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                            body=str(exc)[:400], project=project_slug)
                 return {"crashed": True, "error": str(exc)[:200],
                         "harness": driver.harness}
+            except asyncio.CancelledError:
+                # A cancelled graph releases the lease: nobody is editing.
+                board_ingest(tid, wt, "implementer", model)
+                release_files(tid)
+                raise
             finally:
                 # A worktree is state: save what this attempt produced before
                 # anything — a reset, a cancel, a reboot — can discard it.
@@ -1983,6 +2361,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.save_harness_run(tid, ran_harness, ran_model, "implementer",
                                    attempt, res.exit_code, res.transcript_path, res.seconds)
             harvest_proposals(tid, wt, "implementer", ran_model)
+            board_ingest(tid, wt, "implementer", ran_model)
             # The outcome of this attempt is the gate's to record; here only
             # the agent's handoff is harvested — and a plan-window swap is
             # written down, so the next model knows why it changed.
@@ -2108,23 +2487,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                               role="implementer", outcome="gate_failed",
                               harness=prev.get("harness", ""),
                               summary=f"gate timed out after {config.GATE_TIMEOUT}s")
+                board_post(tid, "status", f"gate failed: gate timed out after "
+                           f"{config.GATE_TIMEOUT}s: {cmd[:200]}"[:300])
                 return {"passed": False, "output": f"gate timed out after {config.GATE_TIMEOUT}s",
                         "log_path": None}
             full = out.decode(errors="replace")
             passed = proc.returncode == 0
             names = _gate_failures(full)
-            output = full[-2000:]
-            if names and not passed:
-                # Names first, tail second: the implementer reads this top
-                # down, and WHICH check failed matters more than the last
-                # screenful of output above the unittest summary (which is
-                # where the names used to be lost — see _gate_failures).
-                # Failure-only: on a pass the output is observability, not
-                # feedback, and a names-looking line in green output (a
-                # caught exception printed by an expected-error test) would
-                # be a lie.
-                block = "failing checks:\n" + "\n".join(f"  {n}" for n in names)
-                output = (block + "\n...\n" + full[-1400:])[:2400]
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0)
             # The FULL `FAIL:`/`ERROR:` list, not just the window the 2000-char
             # cut keeps: on 2026-09-15 a gate kept 1 of 15 failing test names
@@ -2136,13 +2505,26 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             fail_block = "" if passed else _gate_full_list_block(_gate_fail_lines(full))
             log_path = None
             try:
-                log_dir = Path(config.ROOT) / "logs" / "gates"
-                log_dir.mkdir(parents=True, exist_ok=True)
-                log_path = str(log_dir / f"{tid}-x{attempt}.log")
+                log_path = gate_log_path(project_slug, tid, attempt)
+                Path(log_path).parent.mkdir(parents=True, exist_ok=True)
+                # Rule 4: the FULL output, not the 2000-char window the fix
+                # loop hands the implementer — a failing line a hundred lines
+                # above that cut is the usual reason a fix round starts by
+                # re-running the test. Capped, head and tail, so a runaway
+                # run cannot fill the disk.
                 Path(log_path).write_text(
-                    full + ("\n\n" + fail_block if fail_block else ""))
+                    cap_log(full + ("\n\n" + fail_block if fail_block else "")))
             except OSError:
                 log_path = None
+            # What the implementer is handed. Sections first (the traceback of
+            # each failure — the part the blind tail threw away), then the
+            # names, then the tail, then where the full log is. Failure-only
+            # for the sections and names: on a pass a FAIL:-shaped line is a
+            # caught exception printed by an expected-error test, and a
+            # "failing checks" header over it would be a lie.
+            output = (gate_feedback(full, log_path,
+                                    names if not passed else None)
+                      if not passed else full[-2000:])
             # Attribution and a reason, not just a boolean: a bare
             # {"passed": false} in the log cannot be tied to a task or acted
             # on, and this is the per-node progress signal the dashboard reads.
@@ -2151,7 +2533,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             elif names:
                 tail = ("failing: " + "; ".join(names))[-400:]
             else:
-                tail = output.strip()[-400:]
+                # The raw output's own tail, not `output`'s: `output` is the
+                # feedback block now, so slicing it would put the log path in
+                # a field meant to be the last lines the gate printed.
+                tail = full.strip()[-400:]
             if fail_block:
                 # The log-tail field carries the names too: the tail alone is
                 # a 400-char window of the output that just hid them, so the
@@ -2193,6 +2578,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                           failure_excerpt="" if passed else (tail or output)[-1200:],
                           files=await _changed_files(wt, base),
                           session_id=prev.get("session_id"))
+            if not passed:
+                board_post(tid, "status", "gate failed: "
+                           + " ".join((tail or output or cmd).split())[:300])
             return {"passed": passed, "output": output, "log_path": log_path,
                     "verdict": verdict, "evidence": shown}
 
@@ -2228,13 +2616,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             try:
                 res = await driver.run(
                     _review_prompt(t, diff, impact, roster,
-                                   board.prompt_block(wt, project=project_slug, task=tid)
+                                   board_digest(tid, wt, "reviewer", driver.model)
                                    + evidence.prompt_block(shown),
                                    project_contract.role_block(wt, "reviewer"),
                                    dossier=dossier_block(tid, "reviewer")),
                     wt, task_id=f"{tid}-x{attempt}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
+            except asyncio.CancelledError:
+                # A cancelled graph: land what the reviewer wrote, and end the
+                # implementer's lease — nobody will edit these files now.
+                board_ingest(tid, wt, "reviewer", driver.model)
+                release_files(tid)
+                raise
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
                     raise
@@ -2256,6 +2650,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # that was never rejected. Same distinction pr_review already
                 # makes — the diff has not been read, so retry the REVIEW.
                 harvest_proposals(tid, wt, "reviewer", driver.model)
+                board_ingest(tid, wt, "reviewer", driver.model)
                 dossier_after(tid, wt, attempt=attempt, model=driver.model,
                               role="reviewer", outcome="crashed",
                               harness=driver.harness,
@@ -2272,6 +2667,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
             harvest_proposals(tid, wt, "reviewer", ran_model)
+            board_ingest(tid, wt, "reviewer", ran_model)
             if ran_model != driver.model:
                 dossier_call(tid, dossier_mod.note_model_change,
                              f"review round {attempt}: usage swap "
@@ -2290,20 +2686,31 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # with a question). Same rule as a crash: the diff was never
                 # judged, so retry the REVIEW — don't bounce the implementer to
                 # fix issues that were never delivered.
+                # The raw output is the ONLY evidence of what the reviewer did
+                # instead of voting (asked a question, wrote prose, emitted
+                # truncated JSON), and this path used to discard it — the
+                # retry then repeated the same failure blind.
+                rlog = save_review_log(project_slug, tid, attempt, ran_model,
+                                       res.text)
                 events.emit("driver.error", task=tid, role="reviewer",
                             fingerprint="reviewer.no_verdict",
-                            model=ran_model,
+                            model=ran_model, log=rlog,
                             error="review ended without a parseable verdict")
                 return {"pass": False, "crashed": True,
                         "reviewer_model": ran_model,
                         "reviewer_family": config.MODEL_FAMILY.get(ran_model),
-                        "issues": ["reviewer session ended without a verdict"]}
+                        "review_log": rlog,
+                        "issues": ["reviewer session ended without a verdict"
+                                   + (f" (raw output: {rlog})" if rlog else "")]}
             issues = verdict.get("issues") or []
             board.post(wt, task=tid, role="reviewer", model=ran_model,
                        harness=ran_harness, kind="note",
                        body=("pass" if verdict.get("pass") else
                              "reject: " + "; ".join(str(i) for i in issues)[:300]),
                        project=project_slug)
+            if not verdict.get("pass"):
+                ask_implementer(tid, f"pre-merge review (round {attempt}, "
+                                f"{ran_model})", issues)
             events.emit("task.reviewed", task=tid, passed=verdict["pass"],
                         # The family that ACTUALLY reviewed; the planned
                         # token rides beside it when capacity moved the review.
@@ -2324,6 +2731,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         # rejection with no readable issue list — surfaced so
                         # a thin rejection is visible rather than mysterious.
                         salvaged=verdict.get("salvaged", False),
+                        # The raw output of a salvaged verdict: its issue list
+                        # is unreadable by definition, so without this file the
+                        # recorded rejection points at nothing a human (or the
+                        # next round) can inspect.
+                        log=(save_review_log(project_slug, tid, attempt,
+                                             ran_model, res.text, kind="review")
+                             if verdict.get("salvaged") else None),
                         # Pre-existing findings a reviewer filed while reading
                         # the full diff: recorded so they are not lost, and
                         # deliberately NOT in `issues` — they must never block
@@ -2341,6 +2755,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             store.upsert_code_task(taskfile, tid, t["title"], nxt, rev, "running")
             events.emit("task.escalated", task=tid, from_model=src, to_model=nxt,
                         n=esc_n(ctx) + 1)
+            board_post(tid, "status", f"escalated {src} -> {nxt} (escalation "
+                       f"{esc_n(ctx) + 1}: fix rounds exhausted on {src})")
             dossier_call(tid, dossier_mod.note_model_change,
                          f"escalation {esc_n(ctx) + 1}: {src} -> {nxt} "
                          f"(fix rounds exhausted on {src})")
@@ -2388,7 +2804,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                              "on resume without re-implement")
                             await gitstore.cleanup(repo, tid)
                             return {"published": False, "merged": True,
-                                    "empty": True, "head": None}
+                                    "empty": True, "head": None,
+                                    "pr": number, "url": url}
                     return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)
@@ -2398,6 +2815,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # does `git add -A`, so without this sweep the channel file would
             # land in the PR. Also catches proposals from PR-review rework.
             harvest_proposals(tid, wt, "publish-sweep", "")
+            board_ingest(tid, wt, "publish-sweep", "")
             dossier_after(tid, wt, attempt=0, model="", role="publish-sweep")
             impl = results.get(f"implement_{tid}", {})
             model = cur_model(ctx)
@@ -2476,6 +2894,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     error=("rework after PR rejection produced no changes"
                            if reworked else "implementer produced no changes"),
                     finished=True)
+                release_files(tid)
                 events.emit("task.failed", task=tid,
                             reason=("rework produced no changes" if reworked
                                     else "no changes to publish"))
@@ -2486,6 +2905,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "failed", error=f"push failed: {note}",
                                        finished=True)
+                release_files(tid)
                 events.emit("task.failed", task=tid, reason=f"push failed: {note}")
                 return {"published": False, "reason": note}
             body = (f"Task `{tid}` from `{Path(taskfile).name if taskfile else '?'}`\n\n"
@@ -2500,6 +2920,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                        "failed", error=f"could not open PR: {note}",
                                        finished=True)
+                release_files(tid)
                 events.emit("task.failed", task=tid, reason=f"pr: {note}")
                 return {"published": False, "reason": note}
             store.upsert_code_task(taskfile, tid, t["title"], model, rev,
@@ -2637,19 +3058,24 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await drv.run(
                     _pr_review_prompt(t, it["diff"], it["n_reviewers"], it["round"],
                                       it["prior_issues"], impact, roster,
-                                      board.prompt_block(wt, project=project_slug, task=tid)
+                                      board_digest(tid, wt, "pr-reviewer", model)
                                       + evidence.prompt_block(shown),
                                       project_contract.role_block(wt, "reviewer"),
                                       dossier=dossier_block(tid, "pr-reviewer")),
                     wt, task_id=f"{tid}-pr{it['round']}",
                     avoid_families={config.MODEL_FAMILY[wrote_the_code(
                         ctx, tid, cur_model(ctx), store)]})
+            except asyncio.CancelledError:
+                board_ingest(tid, wt, "pr-reviewer", model)
+                release_files(tid)
+                raise
             except (DriverError, ValueError) as exc:
                 # A reviewer that crashed did NOT review. Reported as such —
                 # never as a rejection — so the join retries the review rather
                 # than sending the implementer to fix nothing.
                 if wt is not None:
                     harvest_proposals(tid, wt, "pr-reviewer", model)
+                    board_ingest(tid, wt, "pr-reviewer", model)
                 dossier_after(tid, wt, attempt=it["round"], model=model,
                               role="pr-reviewer", outcome="crashed",
                               failure_excerpt=str(exc)[:600])
@@ -2660,6 +3086,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    it["round"], res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
             harvest_proposals(tid, wt, "pr-reviewer", model)
+            board_ingest(tid, wt, "pr-reviewer", model)
             ran_model = getattr(res, "model", None) or model
             ran_harness = getattr(res, "harness", None) or drv.harness
             if ran_model != model:
@@ -2678,9 +3105,19 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 # Session ended without a verdict — a reviewer that never
                 # reviewed. Crashed, not a rejection: the join retries the
                 # round from PR_MAX_INCONCLUSIVE, not the implementer's rounds.
+                # Its raw output is kept for the same reason as the pre-merge
+                # one: an inconclusive round retried blind just repeats itself.
+                rlog = save_review_log(project_slug, tid, it["round"],
+                                       ran_model, res.text, kind="pr-review")
+                events.emit("driver.error", task=tid, role="pr-reviewer",
+                            fingerprint="reviewer.no_verdict", model=ran_model,
+                            log=rlog,
+                            error="PR reviewer session ended without a verdict")
                 return {"model": model, "approve": False, "crashed": True,
+                        "review_log": rlog,
                         "issues": [f"reviewer {model} session ended without "
-                                   "a verdict"]}
+                                   "a verdict"
+                                   + (f" (raw output: {rlog})" if rlog else "")]}
             verdict["model"] = model
             return verdict
 
@@ -2752,6 +3189,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     approved = False
                     issues = manual["issues"]
             if not approved and not inconclusive:
+                ask_implementer(tid, f"PR #{number} review (round {round_n})",
+                                issues)
                 await gitstore._gh(
                     ["pr", "comment", str(number), "--body",
                      "**Changes requested** (round %d) — returning to the "
@@ -2775,6 +3214,15 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
             if pub.get("empty") and pub.get("merged"):
                 gate_res = ctx.get("results", {}).get(f"gate_{tid}") or {}
+                release_files(tid)
+                # No diff reached main here (or the PR was merged before this
+                # run): the result still lands, with no files.
+                pr_ref = pub.get("url") or (
+                    f"PR #{pub['pr']}" if pub.get("pr") is not None else "")
+                board_post(tid, "result",
+                           f"merged {pr_ref or '(no PR: empty diff)'}: "
+                           f"{t['title']} (0 file(s) changed)",
+                           refs={"files": [], "pr": pr_ref})
                 return {"merged": True, "pr": None,
                         "verdict": gate_res.get("verdict")}
             state = await gitstore.pr_state(repo, number)
@@ -2807,6 +3255,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 events.emit("task.conflict", task=tid, pr=number, reason=note,
                             files=conflicts[:20])
                 return {"merged": False, "reason": "conflict"}
+            # The files this PR changes, read BEFORE the merge moves the base
+            # (after it the merge base can equal HEAD and the diff is empty).
+            try:
+                merged_files = await _changed_files(await worktree(ctx), base)
+            except Exception:
+                merged_files = []
             if state.get("state") == "MERGED":
                 # Someone merged it while the fleet was still reviewing — an
                 # operator from the GitHub UI, or a hand merge of a backlog.
@@ -2833,6 +3287,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    "merged", finished=True)
             events.emit("task.merged", task=tid, pr=number,
                         approvals=rv.get("approvals"))
+            release_files(tid)
+            pr_url = (pub.get("url") if pub.get("pr") == number else None) or (
+                f"PR #{number}" if number is not None else "")
+            board_post(tid, "result",
+                       f"merged {pr_url}: {t['title']} "
+                       f"({len(merged_files)} file(s) changed)",
+                       refs={"files": merged_files, "pr": pr_url})
             dossier_after(tid, None, attempt=0, model=model, role="orchestrator",
                           outcome="merged", summary=f"PR #{number} merged")
             dossier_call(tid, dossier_mod.set_pr, None)
@@ -2891,8 +3352,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             detail = ""
             if not gate_res.get("passed", True):
                 # gate() returns {"passed", "output", "log_path", "verdict"} —
-                # `output` is the tail it kept (last 2000 chars), and on a
-                # check.sh run that is the unittest summary naming the tests.
+                # `output` is the feedback block (failing sections, names,
+                # tail, log path), bounded by gate_feedback.
                 detail = (gate_res.get("output") or "")[-800:]
             elif rev_res and not rev_res.get("pass", True):
                 detail = "; ".join(str(i) for i in
@@ -2902,6 +3363,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                    (pr_res.get("issues") or [])[:5])[:800]
             if not detail:
                 detail = why
+            release_files(tid)
+            board_post(tid, "status", f"failed: {why}"[:300])
             events.emit("task.failed", task=tid, reason=why[:400],
                         detail=detail[:800], model=last,
                         escalations=escalations,
@@ -2914,7 +3377,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                  "pr_fanout": pr_fanout, "pr_review": pr_review,
                  "pr_merge": pr_merge, "fail": fail}
         for suffix, fn in chain.items():
-            g.node(f"{suffix}_{tid}", fn)
+            g.node(f"{suffix}_{tid}", releasing_on_cancel(tid, fn))
         # One reviewer per node, with the per-node policy the fan-out makes
         # possible: a harness that dies on the way in is retried HERE, and the
         # join only ever sees crashes that survived the retries. The timeout is
@@ -2923,7 +3386,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # bounds silence), so a reviewer cannot hold the join open indefinitely.
         from graph import Retry
         _rev_total = config.total_timeout_for("reviewer")
-        g.node(f"pr_reviewer_{tid}", pr_reviewer,
+        g.node(f"pr_reviewer_{tid}", releasing_on_cancel(tid, pr_reviewer),
                retry=Retry(attempts=3, backoff=20.0, max_backoff=120.0,
                            on=(DriverError,)),
                timeout=(_rev_total + 600) if _rev_total > 0 else None)

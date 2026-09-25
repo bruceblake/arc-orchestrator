@@ -462,11 +462,11 @@ class LeavesNoTrace(unittest.TestCase):
 
 def _manifest(d):
     shots = d / "shots"
-    shots.mkdir(parents=True)
+    shots.mkdir(parents=True, exist_ok=True)
     for n in ("overview", "corridor"):
         _png(shots / f"{n}.png", lambda x, y: (9, 9, 9))
     cmp = d / "compare"
-    cmp.mkdir()
+    cmp.mkdir(exist_ok=True)
     _png(cmp / "overview.png", lambda x, y: (9, 9, 9))
     for f in ("flythrough.mp4", "flythrough.gif", "playtest.mp4", "playtest.gif"):
         (d / f).write_bytes(b"x")
@@ -480,6 +480,12 @@ def _manifest(d):
                          "side_by_side": str(cmp / "overview.png")},
                         {"name": "corridor", "new": True}],
             "baseline": {"sha": "0123456789abc"},
+            "coverage": {"fixed_cameras": {"status": "captured", "reason": ""},
+                         "flythrough": {"status": "captured", "reason": ""},
+                         "playtest": {"status": "skipped",
+                                      "reason": "tools/playtest.gd not found"},
+                         "baseline": {"status": "captured", "reason": ""}},
+            "godot_errors": ["SCRIPT ERROR: Invalid access to property 'hp'"],
             "warnings": ["camera 'x' rendered a nearly solid frame"],
             "playtest_shots": [], "seconds": 40}
 
@@ -520,6 +526,300 @@ class Presenting(unittest.TestCase):
         self.assertIn("2 screenshot(s)", body)
         self.assertIn("flythrough", body)
         self.assertIn("overview 12.3%", body)
+
+    def test_prompt_block_carries_the_coverage_and_godot_errors(self):
+        text = evidence.prompt_block(self.m)
+        self.assertIn("coverage playtest: skipped — tools/playtest.gd not found", text)
+        self.assertIn("coverage fixed_cameras: captured", text)
+        self.assertIn("GODOT ERROR: SCRIPT ERROR: Invalid access", text)
+
+    def test_pr_markdown_shows_the_coverage_table_and_godot_errors(self):
+        md = evidence.pr_markdown(self.m, "https://github.com/o/r/blob/arc-evidence/t/x2",
+                                  task_id="t", attempt=2)
+        self.assertIn("**Evidence coverage**", md)
+        self.assertIn("| playtest | skipped | tools/playtest.gd not found |", md)
+        self.assertIn("**Godot errors**", md)
+        self.assertIn("`SCRIPT ERROR: Invalid access to property 'hp'`", md)
+
+    def test_board_body_names_the_gaps_without_a_table(self):
+        body = evidence.board_body(self.m)
+        self.assertIn("gaps: playtest:skipped (tools/playtest.gd not found)", body)
+        self.assertIn("1 godot error(s)", body)
+
+
+class Coverage(unittest.TestCase):
+    """No silent gaps: every skipped or empty part is recorded AND flagged."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, True)
+
+    def test_playtest_without_the_script_says_so(self):
+        video, note, reason = evidence._playtest(self.d, self.d, self.d, timeout=1)
+        self.assertEqual((video, note), (None, None))
+        self.assertEqual(reason, "tools/playtest.gd not found")
+
+    def test_playtest_that_exits_0_with_no_video_says_so(self):
+        """The x17 case: rc=0, no .avi — which used to read as 'no warning'."""
+        (self.d / "tools").mkdir()
+        (self.d / "tools" / "playtest.gd").write_text("# playtest\n")
+        with unittest.mock.patch.object(evidence, "_godot", return_value=(0, "")):
+            video, note, reason = evidence._playtest(self.d, self.d, self.d, timeout=1)
+        self.assertIsNone(video)
+        self.assertIsNone(note, "rc=0 is not a warning — the REASON carries it")
+        self.assertEqual(reason, "playtest exited 0 but wrote no video")
+
+    def test_godot_errors_are_parsed_deduped_and_capped(self):
+        out = ("Godot Engine v4.3\n"
+               "SCRIPT ERROR: Invalid access to property 'hp'\n"
+               "ERROR: Cannot instantiate the scene\n"
+               "  at: push_error (core/variant/variant_utility.cpp:1)\n"
+               "Parse Error: unexpected token\n"
+               "SCRIPT ERROR: Invalid access to property 'hp'\n"
+               "this line is fine\n")
+        errs = evidence.godot_errors(out)
+        self.assertEqual(errs, ["SCRIPT ERROR: Invalid access to property 'hp'",
+                                "ERROR: Cannot instantiate the scene",
+                                "at: push_error (core/variant/variant_utility.cpp:1)",
+                                "Parse Error: unexpected token"],
+                         "deduped, in order, including push_error frames")
+        self.assertEqual(evidence.godot_errors("nothing here\n"), [])
+        self.assertEqual(evidence.godot_errors(None, ""), [])
+        self.assertEqual(len(evidence.godot_errors(*[f"ERROR: {i}" for i in range(90)])), 30)
+
+    def test_every_render_call_is_logged_for_the_parser(self):
+        log = []
+        with unittest.mock.patch("studio.engine.godot._run",
+                                 return_value=(0, "SCRIPT ERROR: boom")):
+            evidence._godot(self.d, ["--version"], timeout=1, log=log)
+        self.assertEqual(log, ["SCRIPT ERROR: boom"])
+        self.assertEqual(evidence.godot_errors(*log), ["SCRIPT ERROR: boom"])
+
+    def test_no_visible_change_flag_on_and_off(self):
+        rows = [{"name": "overview", "changed": 0.0},
+                {"name": "corridor", "changed": 0.001}]
+        self.assertTrue(evidence.no_visible_change(rows, ["player.gd"], []))
+        # Off: something moved.
+        self.assertFalse(evidence.no_visible_change(
+            [{"name": "overview", "changed": 0.4}], ["player.gd"], []))
+        # Off: not a gameplay diff (docs, tests, tools).
+        self.assertFalse(evidence.no_visible_change(rows, [], []))
+        self.assertFalse(evidence.no_visible_change(rows, ["tests/t.gd"], []))
+        # Off: a scene render shows the change instead (an entry whose image is
+        # really on disk — an ATTEMPTED scene with no file is not a render, see
+        # test_a_scene_entry_with_no_image_is_not_a_scene_render).
+        _png(self.d / "scene.png", lambda x, y: (9, 9, 9))
+        self.assertFalse(evidence.no_visible_change(
+            rows, ["player.gd"],
+            [{"path": "res://w.tscn", "shots": [str(self.d / "scene.png")]}]))
+        # Still ON when that same scene entry rendered nothing.
+        self.assertTrue(evidence.no_visible_change(
+            rows, ["player.gd"], [{"path": "res://w.tscn", "shots": []}]))
+        # Off: nothing to compare (a `new` viewpoint is not "unchanged").
+        self.assertFalse(evidence.no_visible_change([{"name": "n", "new": True}],
+                                                    ["player.gd"], []))
+        self.assertFalse(evidence.no_visible_change([], ["player.gd"], []))
+
+    def test_the_threshold_is_configurable(self):
+        rows = [{"name": "overview", "changed": 0.02}]
+        self.assertFalse(evidence.no_visible_change(rows, ["player.gd"], []))
+        self.assertTrue(evidence.no_visible_change(rows, ["player.gd"], [],
+                                                   min_change=0.05))
+
+    def test_gameplay_diff_ignores_tests_and_tools(self):
+        subprocess.run(["git", "init", "-q", str(self.d)], check=True)
+        for rel in ("player.gd", "world.tscn", "art/mat.tres",
+                    "tests/test_player.gd", "tools/playtest.gd", "README.md"):
+            path = self.d / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("x")
+        (self.d / "new.gd").write_text("y")            # untracked, still a change
+        self.assertEqual(evidence.gameplay_diff(self.d, "HEAD"),
+                         ["art/mat.tres", "new.gd", "player.gd", "world.tscn"])
+
+    def test_prompt_block_leads_with_the_no_visible_change_demand(self):
+        m = _manifest(self.d)
+        m["no_visible_change"] = True
+        m["gameplay_diff"] = ["scripts/suspicion.gd"]
+        text = evidence.prompt_block(m)
+        self.assertIn("NO VISIBLE CHANGE", text)
+        self.assertIn("scripts/suspicion.gd", text)
+        self.assertIn("REJECT for missing evidence", text)
+        self.assertLess(text.index("NO VISIBLE CHANGE"), text.index("camera overview"))
+        # Off by default: an ordinary capture does not carry the demand.
+        self.assertNotIn("NO VISIBLE CHANGE",
+                         evidence.prompt_block(_manifest(self.d)))
+
+    def test_a_failed_baseline_render_is_failed_not_skipped(self):
+        """Review: baseline() swallowed the render error and returned None.
+
+        "the base commit will not render" and "this base has no Godot project"
+        are different findings: the first is a defect a reviewer must read, the
+        second is legal. Both used to collapse into one silent `skipped`."""
+        repo = self.d / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "project.godot").write_text("[application]\n")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.email=a@b",
+                        "-c", "user.name=t", "commit", "-qm", "init"], check=True)
+        sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+        with unittest.mock.patch.object(config, "EVIDENCE_DIR", str(self.d / "ev")), \
+                unittest.mock.patch.object(evidence, "_git"), \
+                unittest.mock.patch.object(evidence, "is_godot_project",
+                                           return_value=True), \
+                unittest.mock.patch.object(evidence, "_cameras", return_value=[]), \
+                unittest.mock.patch("studio.engine.godot.import_assets"), \
+                unittest.mock.patch.object(
+                    evidence, "_render_shots",
+                    side_effect=evidence.EvidenceError("no camera rendered")):
+            bdir, status, reason = evidence.baseline("p", str(repo), sha, timeout=1)
+        self.assertIsNone(bdir)
+        self.assertEqual(status, "failed")
+        self.assertIn("baseline render failed", reason)
+        self.assertIn("no camera rendered", reason, "the render error itself is lost")
+        # A base that is not a Godot project is skipped, and says which.
+        with unittest.mock.patch.object(config, "EVIDENCE_DIR", str(self.d / "ev2")), \
+                unittest.mock.patch.object(evidence, "_git"), \
+                unittest.mock.patch.object(evidence, "is_godot_project",
+                                           return_value=False):
+            bdir, status, reason = evidence.baseline("p", str(repo), sha, timeout=1)
+        self.assertIsNone(bdir)
+        self.assertEqual(status, "skipped")
+        self.assertIn("not a Godot project", reason)
+
+    def test_a_scene_entry_with_no_image_is_not_a_scene_render(self):
+        """Review: a nonempty `scenes` list used to suppress the flag on its own."""
+        _png(self.d / "real.png", lambda x, y: (9, 9, 9))
+        rows = [{"name": "overview", "changed": 0.0}]
+        # An entry whose shot is on disk is a real render: it suppresses the flag.
+        real = [{"path": "res://w.tscn", "shots": [str(self.d / "real.png")]}]
+        self.assertEqual(evidence.scene_shots(real), [str(self.d / "real.png")])
+        self.assertFalse(evidence.no_visible_change(rows, ["player.gd"], real))
+        # An entry that rendered nothing (no shots, or a missing file) is not.
+        for empty in ([{"path": "res://w.tscn", "shots": []}],
+                      [{"path": "res://w.tscn"}],
+                      [{"path": "res://w.tscn", "shots": [str(self.d / "gone.png")]}]):
+            self.assertEqual(evidence.scene_shots(empty), [],
+                             f"{empty} claims a render it does not have")
+            self.assertTrue(evidence.no_visible_change(rows, ["player.gd"], empty),
+                            "an image-less scene entry hid a no-visible-change diff")
+
+    def test_board_body_shows_every_row_and_every_error_line(self):
+        """Review: the board showed '5 gaps' and a count, not the table/text.
+
+        Rule 7d says the evidence goes to the agent board, so a reviewer who
+        never opens the PR must be able to read WHICH kind was skipped and WHAT
+        Godot said — a count hides exactly the part they need."""
+        m = _manifest(self.d)
+        m["coverage"] = {k: {"status": "captured", "reason": ""} for k in
+                         ("fixed_cameras", "baseline")}
+        m["coverage"]["playtest"] = {"status": "skipped",
+                                     "reason": "tools/playtest.gd not found"}
+        m["coverage"]["flythrough"] = {"status": "failed",
+                                       "reason": "flythrough recording failed"}
+        m["coverage"]["compare"] = {"status": "captured", "reason": ""}
+        m["godot_errors"] = ["SCRIPT ERROR: Invalid access to property 'hp'",
+                             "Parse Error: unexpected token"]
+        body = evidence.board_body(m)
+        # Every row, captured ones included — not just the gaps.
+        for kind in ("fixed_cameras", "flythrough", "playtest", "baseline", "compare"):
+            self.assertIn(f"| {kind} |", body, f"{kind} missing from the board table")
+        self.assertIn("| playtest | skipped | tools/playtest.gd not found |", body)
+        self.assertIn("| flythrough | failed | flythrough recording failed |", body)
+        # The error TEXT, not a count.
+        self.assertIn("SCRIPT ERROR: Invalid access to property 'hp'", body)
+        self.assertIn("Parse Error: unexpected token", body)
+
+    def test_board_body_still_leads_with_one_summary_line(self):
+        """The legacy 400-char JSONL line keeps the summary; the table follows."""
+        m = _manifest(self.d)
+        m["coverage"] = {"playtest": {"status": "skipped", "reason": "no script"}}
+        body = evidence.board_body(m)
+        self.assertTrue(body.startswith("evidence: "),
+                        "the board's one-line summary must come first")
+        self.assertLess(body.index("evidence: "), body.index("**Evidence coverage**"))
+        self.assertLess(len(body.splitlines()[0]), 400,
+                        "the summary line itself exceeds the legacy cap")
+
+
+class CaptureWiring(unittest.TestCase):
+    """capture() itself, driven end to end with the renderers stubbed out.
+
+    The unit tests above call the pieces; these call capture(), which is where
+    the arguments are actually wired. A wrong argument (passing the
+    scene_shots FUNCTION where a list belongs) raises only on the real path,
+    and code_tasks.capture_evidence swallows it — the reviewer then got no
+    images, no coverage and no flag, and nothing said so."""
+
+    def setUp(self):
+        self.d = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.d, True)
+        self.wt = self.d / "wt"
+        (self.wt / "scripts").mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(self.wt)], check=True)
+        (self.wt / "project.godot").write_text("[application]\n")
+        (self.wt / "scripts" / "suspicion.gd").write_text("var hp = 1\n")
+        (self.wt / "README.md").write_text("x\n")
+
+    def _capture(self, *, repo=None, base=None):
+        """capture() with renders stubbed: two PNGs, no videos, no playtest."""
+        def fake_shots(project, cameras, out_dir, scratch, *, timeout, log=None):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            made = []
+            for i, name in enumerate(("overview", "corridor")):
+                p = out_dir / f"{name}.png"
+                _png(p, lambda x, y, i=i: (9 + i, 9, 9))
+                made.append(p)
+            return made
+
+        old = config.EVIDENCE_DIR
+        config.EVIDENCE_DIR = self.d / "ev"
+        self.addCleanup(setattr, config, "EVIDENCE_DIR", old)
+        with unittest.mock.patch.object(evidence, "_require_tools"), \
+                unittest.mock.patch("studio.engine.godot.import_assets"), \
+                unittest.mock.patch.object(evidence, "_cameras",
+                                           return_value=[{"name": "overview"},
+                                                         {"name": "corridor"}]), \
+                unittest.mock.patch.object(evidence, "_render_shots",
+                                           side_effect=fake_shots), \
+                unittest.mock.patch.object(
+                    evidence, "_flythrough",
+                    side_effect=evidence.EvidenceError("no movie")), \
+                unittest.mock.patch.object(evidence, "_playtest",
+                                           return_value=(None, None, "no script")):
+            return evidence.capture(self.wt, self.d / "out", project="p",
+                                    repo=repo, base=base)
+
+    def test_a_gameplay_diff_flags_without_raising(self):
+        """Review: capture() passed the scene_shots FUNCTION, so any gameplay
+        diff raised TypeError before the manifest was written — and
+        capture_evidence swallowed it, dropping the capture entirely."""
+        m = self._capture()                  # no merge base -> no compare rows
+        self.assertEqual(m["gameplay_diff"], ["scripts/suspicion.gd"],
+                         "the gameplay diff was not detected")
+        self.assertEqual(len(m["shots"]), 2, "the capture produced no manifest")
+        # No comparison row means "nothing to compare", not "no change".
+        self.assertNotIn("no_visible_change", m)
+        self.assertEqual(m["coverage"]["fixed_cameras"]["status"], "captured")
+        self.assertEqual(m["coverage"]["baseline"]["reason"], "no merge base")
+
+    def test_an_unchanged_gameplay_diff_sets_the_flag(self):
+        """The same call with compare rows that all moved under the threshold."""
+        rows = [{"name": "overview", "changed": 0.0},
+                {"name": "corridor", "changed": 0.001}]
+        with unittest.mock.patch.object(evidence, "compare", return_value=rows), \
+                unittest.mock.patch.object(evidence, "merge_base",
+                                           return_value="a" * 40), \
+                unittest.mock.patch.object(evidence, "baseline",
+                                           return_value=(Path("/nonexistent"),
+                                                         "captured", "")):
+            m = self._capture(repo=str(self.wt), base="main")
+        self.assertTrue(m.get("no_visible_change"),
+                        "an invisible gameplay diff went unflagged")
+        self.assertEqual(m["compare"], rows)
+        self.assertTrue(any("NO VISIBLE CHANGE" in w for w in m["warnings"]))
 
 
 class PipelineWiring(unittest.TestCase):

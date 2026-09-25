@@ -478,12 +478,12 @@ All paths are under `/home/proxyie/arc-orchestrator` unless shown absolute.
 | `~/worktrees/<project>/<task-id>` | Per-task git worktrees; `gitstore.py` branches `task/<task-id>` from `main` and removes them after a clean merge. |
 | `logs/events.jsonl` | Append-only event log the dashboard tails. |
 | `logs/harness/` | One JSONL transcript per harness firing, named `<task-id>-<role>-<attempt>.jsonl` (e.g. `foo-x2-implementer-1.jsonl`). |
-| `logs/gates/` | Verify‑gate output (`<task>-x<attempt>.log`) kept out of version control. |
+| `logs/gates/` | The verify‑gate output of every attempt, at `logs/gates/<project>/<task>/x<attempt>.log`, kept out of version control. The raw reviewer output of an attempt whose verdict could not be parsed is saved beside it as `review-x<attempt>.txt`. |
 | `logs/server.log` | Dashboard stdout/stderr. |
 | `orchestrator.db` | SQLite store; the code workload lives in tables `code_tasks` and `harness_runs`. |
-| `config.py` | All the knobs: `DRIVER_TIMEOUT`, `GATE_TIMEOUT`, `MAX_FIX_ROUNDS`, `CHAIN_TIMEOUT`, `WORKTREE_ROOT`, `TASKS_DIR`, driver/model caps. |
+| `config.py` | All the knobs: `DRIVER_TIMEOUT`, `GATE_TIMEOUT`, `GATE_LOG_MAX_BYTES`, `MAX_FIX_ROUNDS`, `CHAIN_TIMEOUT`, `WORKTREE_ROOT`, `TASKS_DIR`, driver/model caps. |
 
-Verify‑gate output is written to `logs/gates/<task>-x<attempt>.log`. These logs capture the stdout/stderr of each gate run and are intentionally excluded from version control via `.gitignore`.
+Verify‑gate output is written to `logs/gates/<project>/<task>/x<attempt>.log` and capped at `GATE_LOG_MAX_BYTES` (5 MB default, head and tail kept with a marker naming the bytes dropped). These logs capture the stdout/stderr of each gate run and are intentionally excluded from version control via `.gitignore`. The project view's *why?* button opens one through `/api/gate-log`, which serves a path relative to `logs/gates/` and refuses anything that escapes it.
 
 ## 5. Recovery
 

@@ -343,9 +343,12 @@ def _usable_backups_today(dest_dir, today=None):
                 continue
             if p.stat().st_size <= 0:
                 continue
-            with sqlite3.connect(f"file:{p}?mode=ro", uri=True) as con:
+            con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+            try:
                 if con.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
                     continue
+            finally:
+                con.close()
         except (OSError, sqlite3.Error):
             continue  # vanished between glob and stat, or not a database
         out.append(p)
@@ -402,11 +405,23 @@ def audit_db_backup(db_path=None, snapshot=False, keep_days=DB_BACKUP_KEEP_DAYS)
             newest_age_h = 0.0
             return out
         try:
-            with sqlite3.connect(str(src)) as a, sqlite3.connect(str(dest)) as b:
+            # A connection used as a context manager commits, it does not
+            # close. An open handle can recreate a WAL/SHM file after
+            # rmtree has listed the directory, and the rmdir then fails
+            # with ENOTEMPTY.
+            a = sqlite3.connect(str(src))
+            b = sqlite3.connect(str(dest))
+            try:
                 a.backup(b)
-            with sqlite3.connect(str(dest)) as chk:
+            finally:
+                a.close()
+                b.close()
+            chk = sqlite3.connect(str(dest))
+            try:
                 ok = chk.execute("PRAGMA integrity_check").fetchone()[0]
                 n_tasks = chk.execute("SELECT COUNT(*) FROM code_tasks").fetchone()[0]
+            finally:
+                chk.close()
             if ok != "ok":
                 dest.unlink(missing_ok=True)
                 out.append(_finding("critical", "backup",

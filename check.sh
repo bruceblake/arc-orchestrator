@@ -75,7 +75,15 @@ step "unit tests"
 # ARC_ALLOW_SAME_FAMILY_REVIEW is deliberately left set: the "taskfile validity"
 # step validates the operator's real ~/tasks files, authored for whichever
 # review mode the fleet is running.
-TESTENV=(env -u ARC_ESCALATION_PATH)
+#
+# ARC_FLEET is the same leak. A studio-fleet run exports ARC_FLEET=studio, and
+# config.py reads it at import, so the suite's local-fleet assertions ("no
+# studio model is routable locally") fail on a diff that did not touch the
+# roster. The gate tests the defaults, not whichever fleet launched the run.
+# Measured on a PRISTINE tree: 9 failures with the var set, 0 without — so this
+# is the shell leaking in, not the diff under test. The "taskfile validity" step
+# below is unaffected: it sets ARC_FLEET per taskfile (project.fleet).
+TESTENV=(env -u ARC_ESCALATION_PATH -u ARC_FLEET)
 # pipefail keeps unittest's status through tail; one reported run is the gate.
 if ! "${TESTENV[@]}" "$PY" -m unittest discover -s tests -t tests 2>&1 | tail -20; then
     echo "FAIL: unit tests"; rc=1
@@ -138,14 +146,21 @@ sys.exit(bad)
 PYEOF
     rm -rf "$tmp"
     # Parsing is not running: render the real page against live API payloads.
-    if [ -f tests/render_check.mjs ] && curl -s -m 2 -o /dev/null "http://localhost:8787/api/health"; then
+    # A slow dashboard (health answers, /api/projects does not finish inside
+    # the curl budget) used to write a truncated body and fail this step with
+    # "Unexpected end of JSON input". That is the server being busy, not a
+    # JS throw — skip the sample, the same as when nothing is listening.
+    if [ -f tests/render_check.mjs ] && curl -sf -m 2 -o /dev/null "http://localhost:8787/api/health"; then
         d=$(mktemp -d)
-        curl -s -m 5 "http://localhost:8787/api/health"   > "$d/h.json"
-        curl -s -m 5 "http://localhost:8787/api/projects" > "$d/p.json"
-        f=$(curl -s -m 5 "http://localhost:8787/api/projects" | "$PY" -c "import json,sys;ps=json.load(sys.stdin)['projects'];print(ps[0]['file'] if ps else '')" 2>/dev/null)
-        curl -s -m 5 "http://localhost:8787/api/project?file=$f" > "$d/d.json"
-        if ! node tests/render_check.mjs "$d/h.json" "$d/p.json" "$d/d.json" 2>&1 | tail -12; then
-            echo "FAIL: the dashboard JS throws on real data"; rc=1
+        if curl -sf -m 5 "http://localhost:8787/api/health" > "$d/h.json" \
+           && curl -sf -m 5 "http://localhost:8787/api/projects" > "$d/p.json" \
+           && f=$(curl -sf -m 5 "http://localhost:8787/api/projects" | "$PY" -c "import json,sys;ps=json.load(sys.stdin)['projects'];print(ps[0]['file'] if ps else '')") \
+           && curl -sf -m 5 "http://localhost:8787/api/project?file=$f" > "$d/d.json"; then
+            if ! node tests/render_check.mjs "$d/h.json" "$d/p.json" "$d/d.json" 2>&1 | tail -12; then
+                echo "FAIL: the dashboard JS throws on real data"; rc=1
+            fi
+        else
+            echo "(dashboard too slow to sample — skipping the live render check)"
         fi
         rm -rf "$d"
     else

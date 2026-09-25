@@ -303,8 +303,47 @@ class HttpParamsGateLog(EndpointCase):
         self.assertIn("no gate log", body["error"])
 
     def test_traversal_names_are_rejected_without_leaking_files(self):
-        """A file param is one path segment, never a path."""
+        """A file param is never a path out of logs/gates."""
         self.assert_traversal_rejected()
+
+    def test_the_nested_project_task_layout_is_served(self):
+        """The layout gate_log_path writes: <project>/<task>/x<attempt>.log.
+
+        This route rejected the slash while the writer had already moved, so
+        the project view's "why?" button 404'd on every failed gate. The
+        writer and this reader must accept the same shape.
+        """
+        nested = self.tmp / "logs" / "gates" / "proj" / "task-1"
+        nested.mkdir(parents=True)
+        (nested / "x2.log").write_text("boom\nFAILED (failures=1)\n",
+                                       encoding="utf-8")
+        req = self.get("/api/gate-log?file=proj/task-1/x2.log")
+        self.assertEqual(req.status, 200)
+        body = req.json()
+        self.assertEqual(body["file"], "proj/task-1/x2.log")
+        self.assertEqual(body["lines"], ["boom", "FAILED (failures=1)"])
+
+    def test_a_nested_name_that_climbs_out_is_refused(self):
+        """Allowing a slash must not allow `..`: the segment pattern refuses
+        a dots-only segment, and containment is re-checked on the resolved
+        path. A traversal is a 400, never a 404 that would prove a file
+        outside the gate-log root was sought."""
+        outside = self.tmp / "logs" / "secret.log"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_text("rootx: secret\n", encoding="utf-8")
+        for name in ("proj/../../secret.log", "../secret.log",
+                     "a/../secret.log", "..%2fsecret.log", "/etc/passwd",
+                     "proj/task-1/../../../secret.log"):
+            with self.subTest(name=name):
+                req = self.get(f"/api/gate-log?file={name}")
+                self.assert_error(req, 400)
+                self.assertNotIn(b"rootx: secret", b"".join(req.chunks))
+
+    def test_the_legacy_flat_name_still_opens(self):
+        """Logs written by the pre-nested writer are still on disk, and an
+        operator debugging an old task must still be able to open one."""
+        req = self.get("/api/gate-log?file=g1.log")
+        self.assertEqual(req.status, 200)
 
 
 class HttpParamsTranscript(EndpointCase):
@@ -467,7 +506,7 @@ class HttpParamsUsage(EndpointCase):
 
     def test_documented_ranges_are_accepted(self):
         """Every value the picker offers must round-trip."""
-        for r in ("1h", "24h", "7d", "all"):
+        for r in ("1h", "3h", "6h", "today", "24h", "7d", "all"):
             with self.subTest(range=r):
                 req = self.get(f"/api/usage?range={r}")
                 self.assertEqual(req.status, 200)
@@ -486,6 +525,37 @@ class HttpParamsUsage(EndpointCase):
         self.assertIsInstance(body["families"], list)
         self.assertIsInstance(body["totals"], dict)
         self.assertIn("inflight", body)
+
+    def test_cutoff_is_the_server_window_start(self):
+        """`cutoff` is the instant the totals were summed from, on the
+        SERVER's clock — the usage page filters its driver-event feed by it
+        because a browser in another time zone cannot re-derive the
+        orchestrator's midnight."""
+        now = time.time()
+        for r in ("1h", "3h", "6h", "24h", "7d"):
+            with self.subTest(range=r):
+                body = self.get(f"/api/usage?range={r}").json()
+                self.assertIsInstance(body["cutoff"], (int, float))
+                # Within the window's own width of the server's `now`, allowing
+                # the request itself a few seconds.
+                width = dashboard._RANGE_SECONDS[r]
+                self.assertAlmostEqual(body["now"] - body["cutoff"], width, delta=30)
+        body = self.get("/api/usage?range=all").json()
+        self.assertIsNone(body["cutoff"], "no cutoff bounds the all-history window")
+
+    def test_today_cutoff_is_the_servers_local_midnight(self):
+        """'today' is a CALENDAR day on the orchestrator, not a rolling 24h and
+        not the viewer's midnight."""
+        body = self.get("/api/usage?range=today").json()
+        cut = body["cutoff"]
+        self.assertEqual(time.localtime(cut)[:3], time.localtime(body["now"])[:3],
+                         "today starts on the server's own date")
+        self.assertEqual(time.localtime(cut)[3:6], (0, 0, 0),
+                         "today starts at the server's local midnight")
+        # No "now - cut != 86400" assertion: in the last minute of a local day
+        # a correct midnight cutoff IS ~86400s back, and the two checks above
+        # (same local date, h/m/s zero) already pin it to a calendar midnight
+        # rather than a rolling 24h window.
 
 
 class HttpParamsPlanProposals(EndpointCase):

@@ -762,6 +762,13 @@ MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "20"))
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
 
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "360"))
+# Rule 4: the gate's FULL stdout/stderr is kept on disk, not just the 2000-char
+# window the fix loop used to hand the implementer — when a gate fails on a
+# long test run the actual failure is usually above that cut. The file keeps
+# its head and its tail with a marker naming the bytes dropped between them,
+# so a runaway log cannot fill the disk. Bytes, not characters: a harness
+# transcript is full of multi-byte text.
+GATE_LOG_MAX_BYTES = int(os.getenv("ARC_GATE_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "16"))
 
 # Dream-RSI (arXiv:2609.14858): improve HOW the fleet explores by replaying
@@ -1711,6 +1718,9 @@ EVIDENCE_RESOLUTION = os.getenv("ARC_EVIDENCE_RESOLUTION", "1280x720")
 EVIDENCE_TIMEOUT = float(os.getenv("ARC_EVIDENCE_TIMEOUT", "600"))
 # A screenshot this dominated by one colour is flagged as a blank render.
 EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
+# Below this share of changed pixels a camera counts as "nothing to see", and
+# a gameplay diff whose every camera is under it is flagged no_visible_change.
+EVIDENCE_MIN_CHANGE = float(os.getenv("ARC_EVIDENCE_MIN_CHANGE", "0.005"))
 
 # Project-wide agent board (board.py). Per-task threads live in the worktree
 # at .arc/board.jsonl and are excluded from publish; this directory is the
