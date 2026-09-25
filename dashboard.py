@@ -2686,7 +2686,11 @@ def _work_status(store):
                 activity = "waiting"
             elif stage:
                 activity = "working"
-                ev_age = now - (_ts(ev.get("ts")) or 0)
+                # node_start clears driver_event. A missing timestamp is not
+                # ancient: now - 0 is seconds since the epoch, so a node that
+                # just opened would look stalled until the first driver event.
+                ev_ts = _ts(ev.get("ts"))
+                ev_age = (now - ev_ts) if ev_ts is not None else 0
                 if ev.get("type") in ("driver.usage_limit", "driver.usage_wait") and ev_age < 420:
                     reset = ev.get("resets_at")
                     activity, reason = "usage_wait", (
@@ -2703,7 +2707,8 @@ def _work_status(store):
                     activity, reason = "stalled", "agent idle past stall threshold"
                 elif ev.get("type") == "driver.stalled" and ev_age < 420:
                     activity, reason = "stalled", "agent reported a stall"
-                elif stage in ("implement", "review", "pr_reviewer") and not agent and ev_age > 420:
+                elif (stage in ("implement", "review", "pr_reviewer") and not agent
+                      and ev_ts is not None and ev_age > 420):
                     activity, reason = "stalled", "no recent agent heartbeat"
                 elif stage == "chain_wait":
                     activity, reason = "waiting", "waiting for upstream project to merge"
