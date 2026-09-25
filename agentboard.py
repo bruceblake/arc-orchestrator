@@ -257,7 +257,9 @@ def post(project, *, author, channel="project", kind="note", body="",
         ments = _norm_mentions(list(mentions or ()) + parse_mentions(body))
         rec = {
             "id": mid, "project": str(project or ""), "channel": channel,
-            "ts": float(ts if ts is not None else round(time.time(), 3)),
+            # Microseconds, not milliseconds: read marks compare ts strictly,
+            # and two posts in one millisecond must still be ordered.
+            "ts": float(ts if ts is not None else round(time.time(), 6)),
             "author": str(author or ""), "author_model": str(author_model or ""),
             "author_role": str(author_role or a_role),
             "author_task": str(author_task or a_task), "kind": kind,
@@ -548,8 +550,15 @@ def _fmt(m, width=300):
 
 
 @_safe("")
-def digest_for(project, *, task, role, model, files_hint=(), limit_chars=3000):
-    """A prompt block for one reader, in priority order, under limit_chars."""
+def digest_for(project, *, task, role, model, files_hint=(), limit_chars=3000,
+               mark_seen=False):
+    """A prompt block for one reader, in priority order, under limit_chars.
+
+    ``mark_seen`` marks the reader's inbox read up to what this digest
+    DELIVERED — not the clock (a clock mark both re-delivers and drops posts
+    that share its timestamp tick). Unread mentions are then listed oldest
+    first, and any the digest could not fit (more than eight, or over the
+    char budget) stay unread for the next prompt."""
     agent = f"{task}/{role}" if task else role
     hint = [p for p in (_norm_path(x) for x in files_hint or ()) if p]
     msgs = _select(project, "author!=?", (agent,))
@@ -560,9 +569,14 @@ def digest_for(project, *, task, role, model, files_hint=(), limit_chars=3000):
         return m["ts"] > max(last_inbox, reads.get(m["channel"], 0))
 
     sections = []
-    mine = [m for m in msgs if _addressed(m, agent, model) and unread(m)
+    # A project-channel ping is a broadcast: it reaches every reader, once
+    # (the pipeline marks the inbox read when it delivers a digest).
+    mine = [m for m in msgs if (_addressed(m, agent, model) or (
+                m["kind"] == "ping" and m["channel"] == "project"))
+            and unread(m)
             and not (m["kind"] == "question" and m["state"] == "open")]
-    sections.append(("Unread mentions and DMs for you:", [_fmt(m) for m in mine[-8:]]))
+    shown = mine[:8] if mark_seen else mine[-8:]
+    sections.append(("Unread mentions and DMs for you:", [_fmt(m) for m in shown]))
     questions = [m for m in msgs if m["kind"] == "question" and m["state"] == "open"
                  and (_addressed(m, agent, model) or m["channel"] == f"task:{task}")]
     sections.append(("Open questions addressed to you (answer with kind=answer, "
@@ -598,7 +612,8 @@ def digest_for(project, *, task, role, model, files_hint=(), limit_chars=3000):
     head = f"AGENT BOARD for {project} (you are {agent}):"
     budget = max(0, int(limit_chars) - len(HOW_TO_POST) - len(head) - 2)
     out = []
-    for title, lines in sections:
+    delivered = 0     # how many of `shown` (the first section) made it in
+    for i, (title, lines) in enumerate(sections):
         if not lines:
             continue
         block = [title]
@@ -608,8 +623,16 @@ def digest_for(project, *, task, role, model, files_hint=(), limit_chars=3000):
             block.append(line)
         if len(block) > 1:
             out.extend(block)
+            if i == 0:
+                delivered = len(block) - 1
         else:
             break
+    if mark_seen and msgs:
+        left = mine[delivered:]
+        cut = left[0]["ts"] if left else float("inf")
+        mark = max((m["ts"] for m in msgs if m["ts"] < cut), default=None)
+        if mark is not None:
+            mark_read(project, agent, "inbox", mark)
     return "\n".join([head] + out + [HOW_TO_POST])[:max(0, int(limit_chars))]
 
 

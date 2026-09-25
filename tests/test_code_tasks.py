@@ -3021,3 +3021,300 @@ class DossierWiring(unittest.TestCase):
         self.assertIn("wire the CLI", prompts[1])
         self.assertFalse(Path(wt, ".arc", "handoff.md").exists())
 
+
+
+class AgentBoardWiring(unittest.TestCase):
+    """Every governed run uses the agent board (agentboard.py, Rule 4c):
+    claims on files_hint, the reader's digest in every prompt, agents'
+    .arc/board.jsonl ingested after every run (crash paths too), and the
+    orchestrator's own status / result / question posts."""
+
+    def setUp(self):
+        import agentboard
+        self.ab = agentboard
+        self.repo = tempfile.mkdtemp(prefix="arc-board-repo-")
+        self.wt = tempfile.mkdtemp(prefix="arc-board-wt-")
+        self.addCleanup(shutil.rmtree, self.repo, ignore_errors=True)
+        self.addCleanup(shutil.rmtree, self.wt, ignore_errors=True)
+        self.project = Path(self.repo).name
+        self.ts = code_tasks.load_taskfile(taskfile([{
+            "id": "bw1", "title": "T", "prompt": "do it", "verify_cmd": "true",
+            "model": "GLM-5.3", "reviewer": "deepseek",
+            "files_hint": ["pkg/a.py"]}], repo=self.repo))
+        self.prompts = []
+
+    def _drv(self, text="ok", crash=None, line=None):
+        prompts = self.prompts
+
+        class Res:
+            exit_code, transcript_path, seconds = 0, "", 1.0
+            session_id, model, harness = "s1", None, None
+
+        Res.text = text
+
+        class Drv:
+            harness, model, images = "opencode", "GLM-5.3", None
+
+            async def run(self, prompt, cwd, **kw):
+                prompts.append(prompt)
+                if line is not None:
+                    arc = Path(cwd, ".arc")
+                    arc.mkdir(exist_ok=True)
+                    with open(arc / "board.jsonl", "a") as f:
+                        f.write(json.dumps(line) + "\n")
+                if crash:
+                    raise code_tasks.DriverError(crash)
+                return Res()
+        return Drv()
+
+    def _graph(self):
+        return code_tasks.build_code_graph(FakeStore(), self.ts, taskfile="tf.json")
+
+    def _implement(self, g, runs=None):
+        async def hints(t, wt):
+            return ""
+        with mock.patch.object(code_tasks.graft, "hints", hints):
+            return asyncio.run(g.nodes["implement_bw1"].fn(
+                {"results": {"alloc_bw1": {"worktree": self.wt}},
+                 "runs": runs or {}}))
+
+    def _msgs(self, **kw):
+        return self.ab.thread(self.project, **kw)
+
+    def test_the_claim_is_taken_and_released_on_fail(self):
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
+                capture_events():
+            g = self._graph()
+            self._implement(g)
+            live = self.ab.claims(self.project)
+            self.assertEqual([(c["author"], c["paths"]) for c in live],
+                             [("bw1/implementer", ["pkg/a.py"])])
+            # A fix round renews the lease rather than stacking a second one.
+            self._implement(g, {"implement_bw1": 1})
+            self.assertEqual(len(self.ab.claims(self.project)), 1)
+            asyncio.run(g.nodes["fail_bw1"].fn({"results": {}, "runs": {}}))
+        self.assertEqual(self.ab.claims(self.project), [])
+
+    def test_a_conflicting_claim_pings_the_other_task_and_reaches_the_prompt(self):
+        self.ab.claim(self.project, task="other", author="other/implementer",
+                      paths=["pkg"])
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
+                capture_events():
+            self._implement(self._graph())
+        self.assertIn("CLAIM CONFLICTS", self.prompts[0])
+        self.assertIn("other/implementer holds pkg", self.prompts[0])
+        pings = [m for m in self._msgs(channel="task:other") if m["kind"] == "ping"]
+        self.assertEqual(len(pings), 1)
+        self.assertTrue({"other", "bw1"} <= set(pings[0]["mentions"]))
+
+    def test_the_digest_replaces_the_old_block(self):
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
+                mock.patch.object(code_tasks.board, "prompt_block",
+                                  lambda *a, **k: "OLD-BLOCK"), capture_events():
+            g = self._graph()
+            self._implement(g)
+            with mock.patch.object(code_tasks.agentboard, "digest_for",
+                                   lambda *a, **k: ""):
+                self._implement(g, {"implement_bw1": 1})
+        self.assertIn(f"AGENT BOARD for {self.project}", self.prompts[0])
+        self.assertNotIn("OLD-BLOCK", self.prompts[0])
+        self.assertIn("board claims", self.prompts[0])
+        self.assertIn("OLD-BLOCK", self.prompts[1], "fallback when the digest is empty")
+
+    def test_implement_posts_its_status(self):
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
+                capture_events():
+            self._implement(self._graph())
+        st = [m for m in self._msgs(channel="task:bw1") if m["kind"] == "status"]
+        self.assertTrue(st and "implementing" in st[0]["body"])
+
+    def test_ingest_happens_after_a_crash(self):
+        line = {"kind": "note", "body": "half-way: the parser is done"}
+        with mock.patch.object(code_tasks, "_driver",
+                               lambda m, r, p: self._drv(crash="boom", line=line)), \
+                capture_events():
+            out = self._implement(self._graph())
+        self.assertTrue(out["crashed"])
+        self.assertIn("half-way: the parser is done",
+                      [m["body"] for m in self._msgs()])
+
+    def test_a_broadcast_reaches_the_next_prompt_once(self):
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \
+                capture_events():
+            g = self._graph()
+            self._implement(g)
+            self.ab.post(self.project, author="operator", channel="project",
+                         kind="ping", body="BROADCAST: base moved, rebase")
+            self._implement(g, {"implement_bw1": 1})
+            self._implement(g, {"implement_bw1": 2})
+        self.assertNotIn("BROADCAST", self.prompts[0])
+        self.assertIn("BROADCAST", self.prompts[1])
+        self.assertNotIn("BROADCAST", self.prompts[2], "delivered once, as unread")
+
+    def test_a_reviewer_rejection_becomes_an_addressed_question(self):
+        async def diff(*a, **k):
+            return "diff --git a/x b/x"
+
+        async def blast(*a, **k):
+            return ""
+        rej = json.dumps({"pass": False, "issues": ["the null check is missing"]})
+        drv = self._drv(text=rej)
+        drv.model = "DeepSeek-V4.1-Flash-thinking-max"
+        with mock.patch.object(code_tasks, "_reviewer_driver", lambda *a: drv), \
+                mock.patch.object(code_tasks, "_driver", lambda *a: drv), \
+                mock.patch.object(code_tasks, "_select_reviewer",
+                                  lambda tok, *a: (config.REVIEW_FAMILIES.get(tok, tok), "planned")), \
+                mock.patch.object(code_tasks.gitstore, "diff_full", diff), \
+                mock.patch.object(code_tasks.graft, "blast", blast), capture_events():
+            out = asyncio.run(self._graph().nodes["review_bw1"].fn(
+                {"results": {"alloc_bw1": {"worktree": self.wt}}, "runs": {}}))
+        self.assertFalse(out["pass"])
+        qs = [m for m in self._msgs() if m["kind"] == "question"]
+        self.assertEqual(len(qs), 1)
+        self.assertIn("bw1/implementer", qs[0]["mentions"])
+        self.assertIn("the null check is missing", qs[0]["body"])
+        self.assertEqual(qs[0]["state"], "open")
+        digest = self.ab.digest_for(self.project, task="bw1", role="implementer",
+                                    model="GLM-5.3")
+        self.assertIn("the null check is missing", digest)
+
+    def test_the_merge_result_carries_its_files(self):
+        async def pr_state(repo, n):
+            return {"state": "OPEN", "mergeable": "MERGEABLE"}
+
+        async def ok(*a, **k):
+            return True, ""
+
+        async def nothing(*a, **k):
+            return None
+
+        async def changed(wt, base):
+            return ["pkg/a.py", "tests/test_a.py"]
+        url = "https://github.com/o/r/pull/7"
+        self.ab.claim(self.project, task="bw1", author="bw1/implementer",
+                      paths=["pkg/a.py"])
+        with mock.patch.object(code_tasks.gitstore, "pr_state", pr_state), \
+                mock.patch.object(code_tasks.gitstore, "merge_pr", ok), \
+                mock.patch.object(code_tasks.gitstore, "fast_forward_base", ok), \
+                mock.patch.object(code_tasks.gitstore, "cleanup", nothing), \
+                mock.patch.object(code_tasks, "_changed_files", changed), \
+                capture_events():
+            out = asyncio.run(self._graph().nodes["pr_merge_bw1"].fn(
+                {"results": {"alloc_bw1": {"worktree": self.wt},
+                             "publish_bw1": {"published": True, "pr": 7, "url": url},
+                             "pr_review_bw1": {"approved": True, "pr": 7}},
+                 "runs": {}}))
+        self.assertTrue(out["merged"])
+        res = [m for m in self._msgs() if m["kind"] == "result"]
+        self.assertEqual(len(res), 1)
+        self.assertEqual(res[0]["refs"]["files"], ["pkg/a.py", "tests/test_a.py"])
+        self.assertEqual(res[0]["refs"]["pr"], url)
+        self.assertEqual(self.ab.claims(self.project), [], "merge releases the claim")
+
+    def _cancelling_drv(self, role):
+        line = {"kind": "note", "body": f"{role} was half-way"}
+        drv = self._drv(line=line)
+        drv.model = "DeepSeek-V4.1-Flash-thinking-max"
+        inner = drv.run
+
+        async def run(prompt, cwd, **kw):
+            await inner(prompt, cwd, **kw)
+            raise asyncio.CancelledError()
+        drv.run = run
+        return drv
+
+    def _assert_cancel_cleanup(self, role):
+        self.assertIn(f"{role} was half-way", [m["body"] for m in self._msgs()])
+        self.assertEqual(self.ab.claims(self.project), [],
+                         "a cancelled run releases the implementer's claim")
+
+    def test_a_cancelled_reviewer_ingests_and_releases(self):
+        async def diff(*a, **k):
+            return "diff --git a/x b/x"
+
+        async def blast(*a, **k):
+            return ""
+        self.ab.claim(self.project, task="bw1", author="bw1/implementer",
+                      paths=["pkg/a.py"])
+        drv = self._cancelling_drv("reviewer")
+        with mock.patch.object(code_tasks, "_reviewer_driver", lambda *a: drv), \
+                mock.patch.object(code_tasks, "_driver", lambda *a: drv), \
+                mock.patch.object(code_tasks, "_select_reviewer",
+                                  lambda tok, *a: (config.REVIEW_FAMILIES.get(tok, tok), "planned")), \
+                mock.patch.object(code_tasks.gitstore, "diff_full", diff), \
+                mock.patch.object(code_tasks.graft, "blast", blast), capture_events():
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(self._graph().nodes["review_bw1"].fn(
+                    {"results": {"alloc_bw1": {"worktree": self.wt}}, "runs": {}}))
+        self._assert_cancel_cleanup("reviewer")
+
+    def test_a_cancelled_pr_reviewer_ingests_and_releases(self):
+        async def blast(*a, **k):
+            return ""
+        self.ab.claim(self.project, task="bw1", author="bw1/implementer",
+                      paths=["pkg/a.py"])
+        drv = self._cancelling_drv("pr-reviewer")
+        item = {"model": drv.model, "pr": 7, "round": 1, "diff": "d",
+                "n_reviewers": 1, "prior_issues": []}
+        with mock.patch.object(code_tasks, "_driver", lambda *a: drv), \
+                mock.patch.object(code_tasks.graft, "blast", blast), capture_events():
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(self._graph().nodes["pr_reviewer_bw1"].fn(
+                    {"results": {"alloc_bw1": {"worktree": self.wt}},
+                     "runs": {}, "spawn": item}))
+        self._assert_cancel_cleanup("pr-reviewer")
+
+    def test_an_empty_diff_merge_still_posts_its_result(self):
+        self.ab.claim(self.project, task="bw1", author="bw1/implementer",
+                      paths=["pkg/a.py"])
+        url = "https://github.com/o/r/pull/9"
+        with capture_events():
+            g = self._graph()
+            out = asyncio.run(g.nodes["pr_merge_bw1"].fn(
+                {"results": {"publish_bw1": {"published": False, "merged": True,
+                                             "empty": True, "pr": 9, "url": url}},
+                 "runs": {}}))
+            asyncio.run(g.nodes["pr_merge_bw1"].fn(
+                {"results": {"publish_bw1": {"published": False, "merged": True,
+                                             "empty": True}}, "runs": {}}))
+        self.assertTrue(out["merged"])
+        res = [m for m in self._msgs() if m["kind"] == "result"]
+        self.assertEqual([(m["refs"]["files"], m["refs"]["pr"]) for m in res],
+                         [([], url), ([], "")])
+        self.assertEqual(self.ab.claims(self.project), [])
+
+    def _slow_gate_graph(self, cmd):
+        self.ts = code_tasks.load_taskfile(taskfile([{
+            "id": "bw1", "title": "T", "prompt": "do it", "verify_cmd": cmd,
+            "model": "GLM-5.3", "reviewer": "deepseek",
+            "files_hint": ["pkg/a.py"]}], repo=self.repo))
+        self.ab.claim(self.project, task="bw1", author="bw1/implementer",
+                      paths=["pkg/a.py"])
+        return self._graph()
+
+    GATE_CTX = property(lambda self: {
+        "results": {"alloc_bw1": {"worktree": self.wt},
+                    "implement_bw1": {"model": "GLM-5.3", "harness": "opencode"}},
+        "runs": {"implement_bw1": 1}})
+
+    def test_a_gate_timeout_posts_its_status(self):
+        with mock.patch.object(config, "GATE_TIMEOUT", 0.3), capture_events():
+            out = asyncio.run(self._slow_gate_graph("sleep 5")
+                              .nodes["gate_bw1"].fn(self.GATE_CTX))
+        self.assertFalse(out["passed"])
+        st = [m["body"] for m in self._msgs(channel="task:bw1")
+              if m["kind"] == "status"]
+        self.assertTrue(any("gate timed out" in b for b in st), st)
+
+    def test_cancelling_the_graph_during_a_gate_releases_the_claim(self):
+        g = self._slow_gate_graph("sleep 5")
+
+        async def go():
+            job = asyncio.ensure_future(g.nodes["gate_bw1"].fn(self.GATE_CTX))
+            await asyncio.sleep(0.3)
+            job.cancel()
+            await job
+        with capture_events():
+            with self.assertRaises(asyncio.CancelledError):
+                asyncio.run(go())
+        self.assertEqual(self.ab.claims(self.project), [])
