@@ -50,12 +50,12 @@
     },
     {
       "name": "projects-desktop-light",
-      "changed": 4.7839506172839504e-05,
+      "changed": 2.2376543209876542e-05,
       "box": [
-        36,
-        53,
-        1388,
-        202
+        134,
+        93,
+        176,
+        16
       ],
       "side_by_side": null
     },
@@ -126,9 +126,7 @@
       "side_by_side": null
     }
   ],
-  "warnings": [
-    "NO VISIBLE CHANGE: this diff touches  but none of the captured views changed a pixel. Either the change is outside the captured views (a dialog, a hover state, another tab), or it does not do what it claims."
-  ],
+  "warnings": [],
   "coverage": {
     "views": {
       "status": "captured",
@@ -151,7 +149,6 @@
   },
   "new_page_errors": {},
   "changed_views": [],
-  "no_visible_change": true,
   "contact_sheet": "/tmp/claude-1000/-home-proxyie-arc-orchestrator/cd7d5a23-f004-496e-af67-4abb1f23ca17/scratchpad/demo-real/contact_sheet.png",
-  "seconds": 12.8
+  "seconds": 7.2
 }
