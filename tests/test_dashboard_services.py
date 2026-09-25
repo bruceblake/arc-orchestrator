@@ -7,6 +7,7 @@ contract (a missing If-None-Match is never a 304).
 
 import unittest
 
+import config
 import dashboard
 from dashboard_services.page import apply, requested
 from dashboard_services.refresh import etag_for, not_modified, revision
@@ -55,6 +56,13 @@ class RefreshTests(unittest.TestCase):
         self.assertNotEqual(etag_for(a), etag_for(b))
         self.assertFalse(not_modified(etag_for(a), b))
 
+    def test_elapsed_time_does_not_change_the_etag(self):
+        a = {"agents": [{"task": "t", "started": 10, "elapsed_s": 1}]}
+        b = {"agents": [{"task": "t", "started": 10, "elapsed_s": 40}]}
+        self.assertEqual(revision(a), revision(b))
+        c = {"agents": [{"task": "t", "started": 10, "elapsed_s": 40, "stalled": True}]}
+        self.assertNotEqual(revision(a), revision(c))
+
     def test_nested_event_timestamps_stay_in_the_hash(self):
         a = {"events": [{"type": "task.merged", "ts": 10}]}
         b = {"events": [{"type": "task.merged", "ts": 11}]}
@@ -98,6 +106,51 @@ class ConditionalJsonTests(unittest.TestCase):
         self.assertEqual(miss.status, 200)
         self.assertIn(b'"ready": true', b"".join(miss.chunks))
         self.assertIn(("ETag", etag_for(payload)), miss.sent)
+
+
+class _Get(dashboard.Handler):
+    def __init__(self, path):
+        self.path = path
+        self.status = None
+        self.chunks = []
+        self.wfile = self
+
+    def send_response(self, code, message=None):
+        self.status = code
+
+    def send_header(self, name, value):
+        pass
+
+    def end_headers(self):
+        pass
+
+    def write(self, chunk):
+        self.chunks.append(chunk)
+
+
+class PanelScriptRouteTests(unittest.TestCase):
+    def test_a_panel_name_with_an_underscore_is_served(self):
+        import tempfile
+        from pathlib import Path
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        panel = root / "static" / "panels"
+        panel.mkdir(parents=True)
+        (panel / "work_status.js").write_text(
+            "function pollWorkStatus(){}\n", encoding="utf-8")
+        old = config.ROOT
+        config.ROOT = root
+        self.addCleanup(setattr, config, "ROOT", old)
+        req = _Get("/panels/work_status.js")
+        req.do_GET()
+        self.assertEqual(req.status, 200)
+        self.assertIn(b"pollWorkStatus", b"".join(req.chunks))
+
+    def test_a_panel_path_cannot_leave_the_static_tree(self):
+        req = _Get("/panels/../../etc/passwd")
+        req.do_GET()
+        self.assertEqual(req.status, 404)
 
 
 if __name__ == "__main__":

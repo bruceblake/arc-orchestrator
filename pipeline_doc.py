@@ -45,6 +45,7 @@ EDGE_MEANING = {
     ("pr_review", "implement"): "a reviewer asked for changes",
     ("pr_review", "fail"): "still rejected after the last round",
     ("pr_merge", "pr_fanout"): "the base moved, the branch was resynced — review the new diff",
+    ("pr_merge", "pr_merge"): "GitHub is not mergeable yet — checks running or mergeability still unknown; retry the merge, do not record a conflict",
 }
 
 NODES = {
@@ -158,7 +159,9 @@ NODES = {
                "front of it.",
         "watch": "If GitHub reports a conflict it resyncs the branch and sends it "
                  "back for review rather than giving up — the diff changed, so the "
-                 "approval it already has no longer covers it.",
+                 "approval it already has no longer covers it. If checks are still "
+                 "running, or GitHub has not computed mergeability, the node retries "
+                 "itself instead of calling that a conflict.",
     },
     "fail": {
         "title": "fail — stop, and say why",

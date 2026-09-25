@@ -10,7 +10,10 @@ import hashlib
 import json
 
 # Durations that grow with wall time. The browser ticks these locally.
-_DURATIONS = frozenset({"idle_s", "last_event_s", "seconds"})
+# `elapsed_s` is "now minus started" on live agents and the task map; leaving
+# it in the hash made those polls miss 304 on every tick. Cumulative totals
+# that are not this field stay in the hash.
+_DURATIONS = frozenset({"idle_s", "last_event_s", "seconds", "elapsed_s"})
 
 
 def _strip(obj, top=True):
