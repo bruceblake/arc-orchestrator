@@ -192,12 +192,24 @@ CREATE TABLE IF NOT EXISTS task_dossier(
   data TEXT NOT NULL,
   PRIMARY KEY (project, task)
 );
+-- Every task is a GitHub issue (gh_issues.py). task = '' is the taskfile's
+-- tracking (epic) issue.
+CREATE TABLE IF NOT EXISTS task_issues(
+  repo TEXT NOT NULL,
+  taskfile TEXT NOT NULL,
+  task TEXT NOT NULL,
+  issue INTEGER NOT NULL,
+  epic INTEGER,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (repo, taskfile, task)
+);
 """
 
 
 class Store:
     def __init__(self, path):
         self.lock = threading.Lock()
+        self.path = str(path)
         self.conn = sqlite3.connect(path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         with self.lock:

@@ -183,6 +183,8 @@ def cmd_code(args):
         return
     if args.code_cmd == "context":
         sys.exit(cmd_code_context(args))
+    if args.code_cmd == "issues":
+        sys.exit(cmd_code_issues(args))
 
     async def run():
         if args.code_cmd == "plan":
@@ -323,6 +325,10 @@ def cmd_code(args):
                         reason=f"repo not PR-ready: {gh.get('reason')}")
             if not args.force:
                 sys.exit(1)
+        # Every task is a GitHub issue: the epic plus one issue per unmerged
+        # task, before any work starts (best-effort; gh_issues.py).
+        from code_tasks import open_task_issues
+        await open_task_issues(store, taskset, tf)
         graph = build_code_graph(store, taskset, taskfile=tf)
         # SIGTERM (the dashboard's Stop button, systemd, `kill <pid>`) and
         # SIGINT must unwind through the cleanup below rather than killing the
@@ -572,6 +578,28 @@ def cmd_code_context(args):
     if args.note:
         dossier.import_notes(project, args.task, args.note, args.author)
     print(dossier.export(project, args.task, "json" if args.json else "md"))
+    return 0
+
+
+def cmd_code_issues(args):
+    """`code issues sync <taskfile>` backfills GitHub issues and the epic from
+    code_tasks rows; `code issues show <task>` prints the recorded issues."""
+    import gh_issues
+    if args.db:
+        config.DB_PATH = args.db
+    if args.issues_cmd == "sync":
+        out = asyncio.run(gh_issues.sync_taskfile(str(Path(args.taskfile).resolve())))
+        print(f"epic #{out.pop('', None)}")
+        for tid, n in out.items():
+            print(f"  #{n}  {tid}")
+        return 0
+    rows = gh_issues.rows_for_task(args.task)
+    if not rows:
+        print(f"no issue recorded for task {args.task!r}", file=sys.stderr)
+        return 1
+    for r in rows:
+        print(f"#{r['issue']}  {r['task']}  epic #{r['epic'] or '-'}  "
+              f"{Path(r['taskfile']).name}  {r['repo']}  {r['created_at']}")
     return 0
 
 
@@ -1076,6 +1104,15 @@ def main():
                       help="inject an operator/captain note before printing")
     cx_p.add_argument("--author", default="operator", help="author of --note")
     cx_p.add_argument("--db", default=None, help="sqlite database path")
+    ci_p = code_sub.add_parser(
+        "issues", help="GitHub issue per task: backfill a taskfile or show one task")
+    ci_sub = ci_p.add_subparsers(dest="issues_cmd", required=True)
+    cis = ci_sub.add_parser("sync", help="backfill issues + the epic from code_tasks rows")
+    cis.add_argument("taskfile")
+    cis.add_argument("--db", default=None, help="sqlite database path")
+    cish = ci_sub.add_parser("show", help="print the issues recorded for a task id")
+    cish.add_argument("task")
+    cish.add_argument("--db", default=None, help="sqlite database path")
     cl_p = code_sub.add_parser("list", help="list every task file in the tasks dir")
     cl_p.add_argument("--json", action="store_true",
                       help="emit the same data as JSON instead of a table")

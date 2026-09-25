@@ -840,6 +840,18 @@ NET_RETRY_DELAYS = [float(x) for x in os.getenv(
 # quota waits until the reset time `gh api rate_limit` reports (that endpoint
 # does not count against the quota), bounded per call by this many seconds.
 GH_QUOTA_MAX_WAIT = float(os.getenv("ARC_GH_QUOTA_MAX_WAIT", "3600"))
+# Every task is a GitHub issue (gh_issues.py): opened at run start, commented
+# at every state change, closed by its PR's `Closes #N`, rolled up under one
+# tracking issue per taskfile. `auto` (default) = on when the repo's origin is
+# on GitHub; `off` disables; `on` forces it. Best-effort: a gh failure emits
+# gh.issue_error and never fails or blocks a task — each hook is bounded by
+# GH_ISSUES_TIMEOUT seconds (the quota wait inside gitstore._gh included).
+GH_ISSUES = (os.getenv("ARC_GH_ISSUES", "auto").strip().lower() or "auto")
+GH_ISSUES_TIMEOUT = float(os.getenv("ARC_GH_ISSUES_TIMEOUT", "60"))
+# Public base URL of the dashboard (optional). When set, the tracking issue
+# links the project view; unset, no link is posted (the dashboard is
+# unauthenticated and LAN-only by default — Rule 6b).
+DASHBOARD_PUBLIC_URL = os.getenv("ARC_DASHBOARD_PUBLIC_URL", "").rstrip("/")
 
 # Model escalation (code workload): when a task exhausts its fix rounds at its
 # current tier, it retries one tier stronger with a fresh fix budget instead of
