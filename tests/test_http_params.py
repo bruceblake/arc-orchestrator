@@ -303,8 +303,47 @@ class HttpParamsGateLog(EndpointCase):
         self.assertIn("no gate log", body["error"])
 
     def test_traversal_names_are_rejected_without_leaking_files(self):
-        """A file param is one path segment, never a path."""
+        """A file param is never a path out of logs/gates."""
         self.assert_traversal_rejected()
+
+    def test_the_nested_project_task_layout_is_served(self):
+        """The layout gate_log_path writes: <project>/<task>/x<attempt>.log.
+
+        This route rejected the slash while the writer had already moved, so
+        the project view's "why?" button 404'd on every failed gate. The
+        writer and this reader must accept the same shape.
+        """
+        nested = self.tmp / "logs" / "gates" / "proj" / "task-1"
+        nested.mkdir(parents=True)
+        (nested / "x2.log").write_text("boom\nFAILED (failures=1)\n",
+                                       encoding="utf-8")
+        req = self.get("/api/gate-log?file=proj/task-1/x2.log")
+        self.assertEqual(req.status, 200)
+        body = req.json()
+        self.assertEqual(body["file"], "proj/task-1/x2.log")
+        self.assertEqual(body["lines"], ["boom", "FAILED (failures=1)"])
+
+    def test_a_nested_name_that_climbs_out_is_refused(self):
+        """Allowing a slash must not allow `..`: the segment pattern refuses
+        a dots-only segment, and containment is re-checked on the resolved
+        path. A traversal is a 400, never a 404 that would prove a file
+        outside the gate-log root was sought."""
+        outside = self.tmp / "logs" / "secret.log"
+        outside.parent.mkdir(parents=True, exist_ok=True)
+        outside.write_text("rootx: secret\n", encoding="utf-8")
+        for name in ("proj/../../secret.log", "../secret.log",
+                     "a/../secret.log", "..%2fsecret.log", "/etc/passwd",
+                     "proj/task-1/../../../secret.log"):
+            with self.subTest(name=name):
+                req = self.get(f"/api/gate-log?file={name}")
+                self.assert_error(req, 400)
+                self.assertNotIn(b"rootx: secret", b"".join(req.chunks))
+
+    def test_the_legacy_flat_name_still_opens(self):
+        """Logs written by the pre-nested writer are still on disk, and an
+        operator debugging an old task must still be able to open one."""
+        req = self.get("/api/gate-log?file=g1.log")
+        self.assertEqual(req.status, 200)
 
 
 class HttpParamsTranscript(EndpointCase):
@@ -1114,3 +1153,26 @@ class HttpParamsTimeline(EndpointCase):
         hit = dashboard._timeline_events("ta")            # served from cache
         self.assertEqual(hit["events"][0]["note"], "A")
         self.assertIs(hit, first, "the cached value must be the one stored for this key")
+
+
+class HttpParamsSeats(EndpointCase):
+    """GET /api/seats is read-only: no query and no body select a command."""
+
+    def test_get_returns_one_row_per_live_model(self):
+        req = self.get("/api/seats")
+        self.assertEqual(req.status, 200)
+        body = req.json()
+        self.assertIsInstance(body.get("seats"), list)
+        models = {r["model"] for r in body["seats"]}
+        for name, *_rest in config.live_roster(check_api=False):
+            self.assertIn(name, models)
+        for row in body["seats"]:
+            for key in ("busy_hours", "cap", "utilization", "cap_waits",
+                        "idle_while_waiting_hours", "error_rate",
+                        "plan_spent", "resets_at"):
+                self.assertIn(key, row)
+
+    def test_a_query_string_does_not_change_the_window(self):
+        plain = self.get("/api/seats").json()
+        queried = self.get("/api/seats?since_hours=1&model=nope").json()
+        self.assertEqual(queried, plain)

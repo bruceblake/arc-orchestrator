@@ -478,12 +478,12 @@ All paths are under `/home/proxyie/arc-orchestrator` unless shown absolute.
 | `~/worktrees/<project>/<task-id>` | Per-task git worktrees; `gitstore.py` branches `task/<task-id>` from `main` and removes them after a clean merge. |
 | `logs/events.jsonl` | Append-only event log the dashboard tails. |
 | `logs/harness/` | One JSONL transcript per harness firing, named `<task-id>-<role>-<attempt>.jsonl` (e.g. `foo-x2-implementer-1.jsonl`). |
-| `logs/gates/` | Verify‑gate output (`<task>-x<attempt>.log`) kept out of version control. |
+| `logs/gates/` | The verify‑gate output of every attempt, at `logs/gates/<project>/<task>/x<attempt>.log`, kept out of version control. The raw reviewer output of an attempt whose verdict could not be parsed is saved beside it as `review-x<attempt>.txt`. |
 | `logs/server.log` | Dashboard stdout/stderr. |
 | `orchestrator.db` | SQLite store; the code workload lives in tables `code_tasks` and `harness_runs`. |
-| `config.py` | All the knobs: `DRIVER_TIMEOUT`, `GATE_TIMEOUT`, `MAX_FIX_ROUNDS`, `CHAIN_TIMEOUT`, `WORKTREE_ROOT`, `TASKS_DIR`, driver/model caps. |
+| `config.py` | All the knobs: `DRIVER_TIMEOUT`, `GATE_TIMEOUT`, `GATE_LOG_MAX_BYTES`, `MAX_FIX_ROUNDS`, `CHAIN_TIMEOUT`, `WORKTREE_ROOT`, `TASKS_DIR`, driver/model caps. |
 
-Verify‑gate output is written to `logs/gates/<task>-x<attempt>.log`. These logs capture the stdout/stderr of each gate run and are intentionally excluded from version control via `.gitignore`.
+Verify‑gate output is written to `logs/gates/<project>/<task>/x<attempt>.log` and capped at `GATE_LOG_MAX_BYTES` (5 MB default, head and tail kept with a marker naming the bytes dropped). These logs capture the stdout/stderr of each gate run and are intentionally excluded from version control via `.gitignore`. The project view's *why?* button opens one through `/api/gate-log`, which serves a path relative to `logs/gates/` and refuses anything that escapes it.
 
 ## 5. Recovery
 
@@ -1198,6 +1198,43 @@ outage is picked up here.
 Install: `cp deploy/arc-watchdog.service ~/.config/systemd/user/ &&
 systemctl --user enable --now arc-watchdog`. On WSL, run
 `sudo loginctl enable-linger $USER` once so it survives closed terminals.
+
+### Surviving a reboot
+
+A taskfile lives outside the repo (`~/tasks`, sometimes `/tmp`) and the
+watchdog holds only its PATH. A reboot takes the ones under `/tmp` with it:
+after the 2026-09-24 WSL restart seven runs were parked as "taskfile
+unreadable", their `code_tasks` rows stayed `running` forever, and the
+watchdog itself did not come back either. Three things now cover that:
+
+- **Durable copies.** The first time the watchdog sees a live run it copies
+  that run's taskfile to `logs/watchdog/taskfiles/<stem>.<path-digest>.json`
+  and records the path in `runs.json` (`watchdog.taskfile_kept`). The copy is
+  taken once, on first sight; a later change to the source replaces it only
+  when it came from the same path AND is strictly newer than the copy — so a
+  rollback that preserved mtimes, or a tick that read stale bytes, cannot
+  overwrite the good copy with older content, and two plans that share a
+  basename cannot swap files.
+- **Relaunch from the copy.** When the original is gone (a wipe, a move), the
+  copy is written back to that exact path before the run is resumed, so
+  `deps`, `project.after` and chain gates resolve as before
+  (`watchdog.taskfile_restored`). Nothing else notices a plan that no longer
+  exists — the row just sits at `running`.
+- **Warnings.** A watched taskfile under `/tmp` or `/var/tmp` logs a
+  `watchdog.tmp_taskfile` event (once per run) naming the copy and telling you
+  to move the plan to `~/tasks`. And `main.py audit` reports a WARNING when no
+  `fleetwatch.py` process is alive, and another when
+  `loginctl show-user $USER -p Linger` is not `Linger=yes` — a systemd user
+  unit is stopped when the last session ends, which is exactly what a WSL
+  restart is. Both findings carry the command to fix them
+  (`systemctl --user start arc-watchdog`,
+  `sudo loginctl enable-linger $USER`). `loginctl` being absent is skipped
+  quietly: no loginctl, no finding.
+
+So after a restart: check `main.py audit`, start the watchdog if it is down,
+and leave it alone — it resumes the runs itself. Only a taskfile with no
+durable copy anywhere still ends up parked, and that is a taskfile the
+watchdog never saw a live run for.
 
 ## The captain autopilot
 

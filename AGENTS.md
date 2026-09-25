@@ -90,6 +90,21 @@ Routing is decided at plan time (by GLM-5.3 in
 | GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 10 |
 
+Subscription seats (studio profile, operator directive 2026-09-24) are sized
+to the plan, not a flat 32. The plan window is the real limit; local caps
+(`config._SEAT_CAP`, override `ARC_DRIVER_LIMIT_<FAMILY>`) keep a burst from
+spending it. Routine review prefers the unlimited ARC seats (deepseek, then
+glm) and then the subscription seat with the most headroom and no recent
+`driver.usage_limit`. Claude is last, kept for planning, final escalation
+and hard reviews. Rule 2 stays exact: the implementer's own family is skipped.
+
+| Seat | Plan | Harness | Local cap |
+|---|---|---|---|
+| GPT-6-Sol (Codex) | ChatGPT Pro (5-hour + weekly) | `codex` | 4 |
+| Cursor-Grok-4.7 | Cursor Pro | `cursor` | 3 |
+| Antigravity-Gemini (`gemini-3.8-flash-high`, `ARC_AGY_MODEL`) | Google AI Pro (5-hour + weekly) | `agy` | 3 |
+| Claude-Opus-5.5 | Claude Pro (smallest window) | `claude` | 2 |
+
 **GLM-5.3 is the fleet's strongest model** — operator decision 2026-09-12:
 hard tier, the planner, and the last escalation stage. Its cap of 4 is the
 official ARC docs value (docs.arc.vt.edu model table, checked 2026-09-15:
@@ -188,8 +203,8 @@ on `reasonix`).
   remapped off a retired one — a normal taskfile with a same-family reviewer is
   rejected, not flipped. With two families the cross-review pairing
   is exact: **GLM-5.3 work is reviewed by deepseek; DeepSeek-V4.1-Flash-thinking-max
-  work is reviewed by glm** (`config.cross_family_reviewer`: the strongest
-  review-capable family that is not the implementer's).
+  work is reviewed by glm** (`config.cross_family_reviewer` prefers deepseek,
+  then glm, and always skips the implementer's family).
 - The taskfile `reviewer` token stays the deterministic plan. The review
   node resolves it through `config.REVIEW_FAMILIES` and, **before**
   instantiating a driver, asks `code_tasks._select_reviewer` whether that
@@ -197,8 +212,9 @@ on `reasonix`).
   does, that model reviews. When it does not, the node picks another model
   whose driver can be constructed for `reviewer`, from a family other than
   the model that **actually implemented** (`wrote_the_code`), at the same or
-  a stronger tier, and with real headroom right now — least contended, then
-  stronger. Otherwise it keeps the planned reviewer and waits. It never
+  a stronger tier, and with real headroom right now — deepseek, then glm,
+  then the subscription seat with the most headroom, with Claude last.
+  Otherwise it keeps the planned reviewer and waits. It never
   allows a same-family review, never drops to a weaker tier, and never skips
   the review. A bench `policy` and `ARC_ALLOW_SAME_FAMILY_REVIEW` do not
   swap: those runs measure or replace the named reviewer on purpose. A
@@ -299,7 +315,39 @@ for.
 - The gate node (code_tasks.py:190) runs the task's `verify_cmd` as a shell
   command **in the worktree**, under `config.GATE_TIMEOUT` = **360 s**
   (override `ARC_GATE_TIMEOUT`); a timeout kills the process and fails the
-  gate. Only its stdout/stderr tail (last 2000 chars) is kept.
+  gate. **The gate's output is PERSISTED, not just windowed.**
+  `code_tasks.gate` writes the run's FULL stdout+stderr to
+  `logs/gates/<project>/<task>/x<attempt>.log` and names it on the
+  `task.gate` event as `log=<path>`. The file is capped at
+  `config.GATE_LOG_MAX_BYTES` (**5 MB**, override `ARC_GATE_LOG_MAX_BYTES`)
+  by `code_tasks.cap_log`, which keeps the head AND the tail and marks the
+  dropped middle with its byte count — a runaway test run must not fill the
+  disk, and both the first error and the summary are things a human opens
+  the log to find. A write failure is not a gate failure: the event carries
+  `log=null` and the round proceeds.
+- **What the implementer is handed is extracted, not blind.**
+  `code_tasks.gate_feedback` puts the FAILING SECTIONS first — for unittest
+  `FAIL:`/`ERROR:` blocks through their own traceback, for pytest the
+  `____ test_x ____` blocks, for Godot `FAIL:`/`SCRIPT ERROR` plus the stack
+  and echo lines under them — then the failing-check names, then the raw
+  tail, then the full log's path, all bounded to ~6000 **bytes**. The old
+  `output[-2000:]` lost the traceback: on a long run the failure sits
+  exactly where that cut throws it away, so the fix round started by
+  re-running the test to see an error the gate already had in hand.
+  **The log path is reserved before the rest, and is never what gets cut**
+  (`code_tasks.gate_feedback`): it is the one line a reader cannot
+  reconstruct, so the head is clipped to what remains after the path and a
+  guaranteed tail share — measured on the rejected first version, which
+  appended the path last and sliced the block from the front, three capped
+  sections produced a full 6000 bytes with no path at all.
+- **A reviewer's raw output is kept too.** When no verdict can be parsed the
+  reviewer is recorded `crashed` (Rule 2) and the response that failed to
+  parse goes to `logs/gates/<project>/<task>/review-x<attempt>.txt`
+  (`code_tasks.save_review_log`), named on the `driver.error` event as
+  `log=<path>` and in the retry's issue text — otherwise the retry repeated
+  the failure blind. A salvaged verdict (malformed JSON whose `pass` was
+  still readable) gets the same file, since its issue list is unreadable by
+  definition.
 - The gate MUST pass before review happens (edge `gate_<tid> ->
   review_<tid>` fires only `when r["passed"]`, code_tasks.py:256).
 - A gate or review failure loops back to `implement` with the failure output
@@ -485,10 +533,17 @@ PR** in the life of the repo.
   `config.PR_MAX_RESYNCS` (`ARC_PR_MAX_RESYNCS`, default 12). A real textual conflict still stops,
   recording which files disagree.
 - **Resuming a task whose PR is open re-attaches to it.** `in_review` and
-  `conflict` tasks restart at `publish`, which finds the existing worktree and
-  the open PR and hands it straight to review. Do not "fix" this by starting
-  at `alloc`: alloc RESETS `task/<id>` to the base and discards the branch the
-  PR was opened from.
+  `conflict` tasks, and any other non-merged row with an OPEN pull request
+  for `task/<id>`, reuse the existing worktree. A clean worktree restarts at
+  `publish`; one with unfinished local edits restarts at `gate`, so the edits
+  pass `verify_cmd` and cross-family review before they can be committed.
+  A reboot leaves the row `running` (stale-reset then writes `failed`) while
+  the PR is still open, and that task must not start at `alloc`. A gh failure
+  is not an open PR: resume keeps today's path and does not crash. `alloc` refuses to
+  reset a branch whose tip is not an ancestor of base while that PR is open;
+  it reuses the branch and emits `task.branch_kept`. Do not "fix" a resume by
+  starting at `alloc` unconditionally: alloc RESETS `task/<id>` to the base
+  when no open PR is found and discards the branch the PR was opened from.
 - **A sibling's failure must not orphan an open PR.** The `publish ->
   pr_review -> pr_merge` edges are marked `on_drain=True`, so they keep firing
   after the graph starts draining. The rework edge deliberately is not:
@@ -526,7 +581,7 @@ merged work.
 |---|---|---|---|---|
 | Per-account API caps | `config.FAMILIES[*].limit` (ARC rejects over-limit per model) | 10 | 4 | `ARC_LIMIT_<FAMILY>` |
 | Driver semaphores + leases | `config._MODEL_DRIVER_CAP` — ARC **sessions** divided by how many one harness process holds at once (GLM is pinned at its full account budget, `config._DRIVER_CAP_PIN`) | 10 | 4 | `ARC_DRIVER_LIMIT_<FAMILY>` |
-| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | opencode (glm): **5** total | reasonix (deepseek): **10** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
+| **Harness pool** | `config.harness_limit` via `drivers._harness_gate` + a `harness:<name>` lease | reasonix (deepseek): **10** total | opencode (glm): **5** total | `ARC_HARNESS_LIMIT_<HARNESS>` |
 
 **A harness process is not one ARC session.** The session ceilings measured
 on this fleet were gpt-oss 5, DeepSeek(V4-Flash) 5, GLM 4, Kimi 3 — that was
@@ -539,7 +594,8 @@ cap set equal to the session limit over-subscribed by that factor. Since
 2026-09-16 that per-attempt spawn is gone for opencode: it runs through ONE
 persistent `opencode serve` server, with ONE session per run — the "two
 sessions per process" factor is a property of the retired spawn, not of the
-serve path, and reasonix keeps the assumed-2 factor until measured. Measured
+serve path. Reasonix is 1 session per process (2026-09-24), not the old
+assumed 2. Measured
 from the event log: 23 capacity rejections in four hours, GLM-5.3 refused with
 as few as TWO of our drivers live against a ceiling of four — and the
 backend's rejection text has twice contradicted the official table: "max 3 in

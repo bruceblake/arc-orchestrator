@@ -80,6 +80,9 @@ step "unit tests"
 # config.py reads it at import, so the suite's local-fleet assertions ("no
 # studio model is routable locally") fail on a diff that did not touch the
 # roster. The gate tests the defaults, not whichever fleet launched the run.
+# Measured on a PRISTINE tree: 9 failures with the var set, 0 without — so this
+# is the shell leaking in, not the diff under test. The "taskfile validity" step
+# below is unaffected: it sets ARC_FLEET per taskfile (project.fleet).
 TESTENV=(env -u ARC_ESCALATION_PATH -u ARC_FLEET)
 # pipefail keeps unittest's status through tail; one reported run is the gate.
 if ! "${TESTENV[@]}" "$PY" -m unittest discover -s tests -t tests 2>&1 | tail -20; then

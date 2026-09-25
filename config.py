@@ -295,25 +295,23 @@ def _zen_roster_rows():
              ZEN_MODEL_CAP, ("implementer",), None, None)
             for slug in ZEN_OPENCODE_SLUGS]
 
-# The concurrency ceiling for the SUBSCRIPTION seats (Claude Code, Codex).
-# Operator directive 2026-09-22: no local session limit on the studio's plan
-# models — let the fleet run as many Claude / GPT-6 sessions as the work
-# offers, and let the PLAN say no. When it does (a 5-hour or weekly usage
-# window runs out) the driver first moves the attempt onto an implementer
-# whose harness is not blocked (Cursor CLI, then Claude, then the API
-# models) and only waits out the reset when every other seat is blocked
-# too: see USAGE_SWAP and Driver.run. This used to be
-# claude 1 / codex 2, sized for "one human at one terminal"; a large number
-# rather than a sentinel keeps every cap consumer (semaphores, leases,
-# admission) on plain integers. ARC_SUBSCRIPTION_SESSION_CAP=1 restores a
-# polite single seat when the operator wants their plan back.
-SUBSCRIPTION_SESSION_CAP = max(1, int(os.getenv("ARC_SUBSCRIPTION_SESSION_CAP", "32")))
-# The OpenRouter profile's per-model cap for the same two models. Their
+# Local concurrency per subscription seat. Operator directive 2026-09-24:
+# the plan window is the real limit; these keep a burst from spending a
+# 5-hour window in minutes. ARC_DRIVER_LIMIT_<FAMILY> overrides the driver
+# cap (config.driver_limit). Codex 4 (ChatGPT Pro), Cursor 3 (Cursor Pro),
+# Antigravity 3 (Google AI Pro), Claude 2 (Claude Pro, the smallest window).
+_SEAT_CAP = {"openai": 4, "cursor": 3, "google": 3, "anthropic": 2}
+# Docs-truth scans this file for override names. driver_limit / family_limit
+# build them from the family, so the literals have to appear here too:
+# ARC_LIMIT_OPENAI ARC_DRIVER_LIMIT_OPENAI
+# ARC_LIMIT_CURSOR ARC_DRIVER_LIMIT_CURSOR
+# ARC_LIMIT_GOOGLE ARC_DRIVER_LIMIT_GOOGLE
+# ARC_LIMIT_ANTHROPIC ARC_DRIVER_LIMIT_ANTHROPIC
+# The OpenRouter profile's per-model cap for the frontier models. Their
 # driver cap is this // 2 (opencode holds two sessions per process), so 10
 # makes the binding ceiling the opencode harness pool — a measured local
 # cliff, not a provider limit.
 _STUDIO_API_FRONTIER_CAP = 10
-_FRONTIER_CAP = _STUDIO_API_FRONTIER_CAP if STUDIO_API else SUBSCRIPTION_SESSION_CAP
 
 
 @dataclass(frozen=True)
@@ -419,22 +417,30 @@ if STUDIO_OPENAI_MODEL not in _STUDIO_OPENAI_CHOICES:
 # harness pool (_HARNESS_CAP["opencode"] = 5), which every studio model runs
 # through. Tighten per family with ARC_LIMIT_<FAMILY> the moment OpenRouter
 # starts returning 429s; that is the honest knob, not these numbers.
+def _studio_family_limit(family, api_limit):
+    """Subscription seats use _SEAT_CAP; the API profile keeps its own ceiling."""
+    if FLEET == "studio-api":
+        return api_limit
+    return _SEAT_CAP[family]
+
+
 _STUDIO_FAMILIES = {
-    "anthropic": Family("anthropic", _FRONTIER_CAP, {"default": "Claude-Opus-5.5"}),
-    "openai":    Family("openai",    _FRONTIER_CAP, {"default": STUDIO_OPENAI_MODEL}),
+    "anthropic": Family("anthropic", _studio_family_limit("anthropic", _STUDIO_API_FRONTIER_CAP),
+                        {"default": "Claude-Opus-5.5"}),
+    "openai":    Family("openai", _studio_family_limit("openai", _STUDIO_API_FRONTIER_CAP),
+                        {"default": STUDIO_OPENAI_MODEL}),
     "xai":       Family("xai",       4, {"default": "Grok-4.7"}),
     # studio-api: Gemini-3.8-Flash is the judge and keeps the lane of 6.
-    # studio: Antigravity is a plan seat, so it uses the same frontier cap
-    # as Claude, Codex and Cursor, and the family default names that row.
+    # studio: Antigravity is a plan seat (_SEAT_CAP["google"]).
     "google":    Family(
         "google",
-        6 if FLEET == "studio-api" else _FRONTIER_CAP,
+        6 if FLEET == "studio-api" else _SEAT_CAP["google"],
         {"default": (
             "Gemini-3.8-Flash" if FLEET == "studio-api" else "Antigravity-Gemini")},
     ),
     # Cursor Agent CLI on the operator's Cursor subscription. Subscription
     # profile only: studio-api reaches models through OpenRouter, not `agent`.
-    "cursor":    Family("cursor",    _FRONTIER_CAP, {"default": "Cursor-Grok-4.7"}),
+    "cursor":    Family("cursor", _SEAT_CAP["cursor"], {"default": "Cursor-Grok-4.7"}),
 }
 if STUDIO:
     # Only the families a LIVE roster row names. A family with no row raises
@@ -762,6 +768,13 @@ MAX_REVIEW_CRASHES = int(os.getenv("ARC_MAX_REVIEW_CRASHES", "20"))
 REQUIRE_TESTS = os.getenv("ARC_REQUIRE_TESTS", "1").lower() not in ("0", "false", "no", "")
 
 GATE_TIMEOUT = float(os.getenv("ARC_GATE_TIMEOUT", "360"))
+# Rule 4: the gate's FULL stdout/stderr is kept on disk, not just the 2000-char
+# window the fix loop used to hand the implementer — when a gate fails on a
+# long test run the actual failure is usually above that cut. The file keeps
+# its head and its tail with a marker naming the bytes dropped between them,
+# so a runaway log cannot fill the disk. Bytes, not characters: a harness
+# transcript is full of multi-byte text.
+GATE_LOG_MAX_BYTES = int(os.getenv("ARC_GATE_LOG_MAX_BYTES", str(5 * 1024 * 1024)))
 MAX_FIX_ROUNDS = int(os.getenv("ARC_MAX_FIX_ROUNDS", "16"))
 
 # Dream-RSI (arXiv:2609.14858): improve HOW the fleet explores by replaying
@@ -897,8 +910,8 @@ ROSTER = [
     # "max 3 in flight per user on this backend" on 2026-09-14 (basis of
     # PR #59's pin to 3, since reverted) and "max 5 in flight" on 2026-09-15
     # — other consumers of the key share the account cap. The derived driver
-    # cap 4 // 2 = 2 lets the two in-house runs share GLM; dips below 4 are
-    # absorbed by the lease + capacity backoff. ARC_DRIVER_LIMIT_GLM=1
+    # cap is pinned at 4; dips below 4 are absorbed by the lease + capacity
+    # backoff. ARC_DRIVER_LIMIT_GLM=1
     # re-serialises GLM harnesses if the backend tightens persistently.
     ("GLM-5.3",             "glm",      "opencode", "hard",   4,
      ALL_ROLES,                                            None,         None),
@@ -907,9 +920,8 @@ ROSTER = [
     # plans. It is far faster than GLM-5.3, so it carries the implementation
     # load. The 10 is the provider-published per-account concurrency on the
     # refreshed ARC docs page (docs.arc.vt.edu, 2026-09-12), per the operator —
-    # not the carried-over measured 5; the driver semaphore stays the derived
-    # 10 // 2 = 5 while dsh is assumed (unmeasured, 2026-09-12) to hold ~2 API
-    # sessions per process the way opencode does.
+    # not the carried-over measured 5. Reasonix is counted as one session per
+    # process (operator directive 2026-09-24), so the driver cap is 10 // 1 = 10.
     # Harness: "reasonix" — Reasonix (github.com/esengine/DeepSeek-Reasonix,
     # npm `reasonix`), the DeepSeek-native cache-first agent, by operator
     # decision 2026-09-13, replacing dsh (2026-09-12..13). It streams every
@@ -949,24 +961,23 @@ _STUDIO_SUB_ROSTER = [
     # names (`codex exec -m gpt-6-astra` etc.). Verified 2026-09-22: the plan
     # serves gpt-6-astra (its default), gpt-6-sol and gpt-6-luna. This is the
     # spec's 3D/asset operator, on the subscription.
-    (STUDIO_OPENAI_MODEL, "openai",   "codex",  "hard",   SUBSCRIPTION_SESSION_CAP,
+    (STUDIO_OPENAI_MODEL, "openai",   "codex",  "hard",   _SEAT_CAP["openai"],
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
     # Cursor Agent CLI (`agent --print`) on the Cursor subscription, running
     # Grok 4.7 (`grok-4.7-high`, `agent --list-models`). A distinct roster
     # name from OpenRouter's Grok-4.7 so the two prices and families stay
     # apart. Not the planner: Claude stays last on purpose.
-    ("Cursor-Grok-4.7", "cursor", "cursor", "hard", SUBSCRIPTION_SESSION_CAP,
+    ("Cursor-Grok-4.7", "cursor", "cursor", "hard", _SEAT_CAP["cursor"],
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
     # Antigravity CLI (`agy --print`) on the Google account. Tried after
-    # Cursor when a plan window is spent. Empty ARC_AGY_MODEL leaves the
-    # CLI's own default, because `agy models` is empty until the account
-    # is signed in.
-    ("Antigravity-Gemini", "google", "agy", "hard", SUBSCRIPTION_SESSION_CAP,
+    # Cursor when a plan window is spent. ARC_AGY_MODEL defaults to the
+    # Gemini 3.8 Flash slug `agy models` lists.
+    ("Antigravity-Gemini", "google", "agy", "hard", _SEAT_CAP["google"],
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
     # Claude Code on the Claude plan: architect, netcode, and the studio
-    # PLANNER. Uncapped locally (SUBSCRIPTION_SESSION_CAP); the plan's usage
-    # window is the real limit, and a refusal waits for its reset.
-    ("Claude-Opus-5.5",  "anthropic", "claude", "hard",   SUBSCRIPTION_SESSION_CAP,
+    # PLANNER. Local cap is _SEAT_CAP["anthropic"] (the smallest plan);
+    # the plan's usage window is the real limit.
+    ("Claude-Opus-5.5",  "anthropic", "claude", "hard",   _SEAT_CAP["anthropic"],
      ALL_ROLES,                                            None, None),
 ]
 
@@ -1016,10 +1027,10 @@ CODEX_CLI_MODEL = os.getenv("ARC_CODEX_MODEL", "") or STUDIO_OPENAI_MODEL.lower(
 # Cursor Agent CLI model id (`agent --model`). grok-4.7-high is Grok 4.7
 # on the Cursor plan (`agent --list-models`), not OpenRouter's Grok-4.7.
 CURSOR_CLI_MODEL = os.getenv("ARC_CURSOR_MODEL", "grok-4.7-high")
-# Antigravity CLI model slug (`agy --model`). Empty leaves the signed-in
-# account's default; `agy models` lists slugs only after `agy` has been
-# signed in once.
-AGY_CLI_MODEL = os.getenv("ARC_AGY_MODEL", "")
+# Antigravity CLI model slug (`agy --model`). Default is Gemini 3.8 Flash
+# at high effort — the slug `agy models` listed on 2026-09-24 — so the
+# Google seat runs the model the operator pays for. ARC_AGY_MODEL overrides.
+AGY_CLI_MODEL = os.getenv("ARC_AGY_MODEL", "gemini-3.8-flash-high")
 
 # Reasoning effort for `codex exec`, passed as -c model_reasoning_effort=...
 # Set EXPLICITLY because the model's own default is not what was chosen:
@@ -1237,16 +1248,36 @@ def model_may(model, role):
     return role in MODEL_ROLES.get(model, set())
 
 
+# Who reviews, when several families may. Unlimited ARC seats first, then
+# subscription seats, Claude (anthropic) last — the smallest plan stays for
+# planning, final escalation and hard reviews. Operator directive 2026-09-24.
+# Rule 2 still holds: the implementer's own family is skipped, so the next
+# family in this order is the reviewer.
+_REVIEW_SEAT_ORDER = (
+    "deepseek", "glm",
+    "openai", "cursor", "google", "xai",
+    "anthropic",
+)
+
+
 def cross_family_reviewer(impl_model):
     """The family token that reviews `impl_model`'s work, or None.
 
-    Cross-review means a DIFFERENT family. Deterministic: the STRONGEST
-    review-capable family that is not the implementer's. With the 2026-09-12
-    two-model fleet that pairs glm<->deepseek in both directions: GLM-5.3
-    (the fleet's strongest) reviews DeepSeek work, DeepSeek reviews GLM work.
+    Cross-review means a DIFFERENT family (Rule 2). Preference, not raw
+    strength: unlimited ARC seats (deepseek, then glm), then the other
+    review-capable families, Claude last. When the preferred family is the
+    implementer's own, the next family in that order is used. On the
+    two-model fleet this is still glm <-> deepseek.
     """
     fam = MODEL_FAMILY.get(impl_model)
+    seen = []
+    for f in _REVIEW_SEAT_ORDER:
+        if f in REVIEW_FAMILIES and f not in seen:
+            seen.append(f)
     for f in REVIEW_FAMILIES:
+        if f not in seen:
+            seen.append(f)
+    for f in seen:
         if f != fam:
             return f
     return None
@@ -1455,8 +1486,8 @@ def kimi_plan_mode_on():
 # ceiling of four in flight. Two processes reaching four sessions is two
 # sessions per process, so a cap of 4 was really asking for ~8. On 2026-09-14
 # the backend's own rejection text stated "max 3 in flight per user on this
-# backend" — once while ZERO fleet drivers were alive — so the roster ceiling
-# is now 3 (driver cap 1) and the historical 4 survives only in this comment.
+# backend" — once while ZERO fleet drivers were alive. The current roster
+# follows the official cap of 4; the driver is pinned at 4 and retries dips.
 #
 # GLM was the only model to show it because it is the most-used opencode model
 # and the only one whose account limit is small enough for the doubling to
@@ -1465,8 +1496,6 @@ def kimi_plan_mode_on():
 # dsh's factor is ASSUMED 2 until measured: its shipped base profile includes
 # subagent-spawning tools, like opencode's — re-measure before trusting a
 # higher cap.
-# reasonix also ships subagent profiles, so it inherits dsh's assumed factor
-# of 2 until the event log shows otherwise.
 # The subscription CLIs each hold ONE upstream session per process: they are
 # single-agent terminal tools, not fleets, and none of them fans out into
 # parallel sub-sessions the way opencode does.
@@ -1548,35 +1577,21 @@ _MODEL_DRIVER_CAP = {
 #
 # No empty-output failures and no ARC capacity rejections — no local
 # contention anywhere up to 7, unlike opencode's sqlite cliff at 6. The pool
-# goes to 7. Note the tension with _SESSIONS_PER_PROCESS=2 below: if a
-# reasonix process really does hold two ARC sessions at once the way opencode
-# does, 7 processes would over-subscribe the account cap of 10 — the probe
-# showing zero capacity rejections at 7 says they don't in practice (mostly
-# single-flight, HTTP/2-multiplexed connections), but if ARC 400s ever
-# reappear under a full reasonix pool, this is the knob
-# (ARC_HARNESS_LIMIT_REASONIX) to turn first.
+# is 10 (the account ceiling; operator directive 2026-09-24). If ARC 400s
+# reappear under a full reasonix pool, ARC_HARNESS_LIMIT_REASONIX is the knob.
 # ("kimi" stays in _SESSIONS_PER_PROCESS only so a historical transcript's
 # harness still resolves; no live model maps to that harness. "dsh" stays in
 # _HARNESS_CAP for the same reason since reasonix replaced it on 2026-09-13.)
-# Subscription harnesses were once capped LOW (claude 1, codex 2) on the
-# grounds that a consumer plan is metered for one developer at one terminal —
-# Claude on 5-hour and weekly windows, ChatGPT similarly — so a wide fleet
-# spends the allowance fast and competes with the human on the same plan.
-# That trade is now the operator's to make, and they made it:
-# claude and codex are NOT capped low any more (operator directive
-# 2026-09-22): SUBSCRIPTION_SESSION_CAP lets them run as wide as the work
-# offers, and the plan's usage window — swapped off by Driver.run when
-# another harness is free, otherwise waited out, not failed — is the real
-# limit. gemini keeps 2: no live roster row uses the old Gemini CLI.
-# cursor and agy are subscription CLIs and share the same cap knob.
-# reasonix goes to 10, the account's DeepSeek ceiling (operator directive
-# 2026-09-24: 10 unlimited sessions, use them all). ARC_HARNESS_LIMIT_REASONIX
-# is still the first knob if 400s appear under a full pool.
+# Subscription harnesses match _SEAT_CAP (operator directive 2026-09-24):
+# the plan window is the real limit, and a flat 32 spent it in minutes.
+# gemini keeps 2: no live roster row uses the old Gemini CLI.
+# reasonix is 10, the account's DeepSeek ceiling. ARC_HARNESS_LIMIT_<HARNESS>
+# still overrides a pool; ARC_DRIVER_LIMIT_<FAMILY> overrides the driver cap.
 _HARNESS_CAP = {"opencode": 5, "dsh": 5, "reasonix": 10,
-                "claude": SUBSCRIPTION_SESSION_CAP,
-                "codex": SUBSCRIPTION_SESSION_CAP,
-                "cursor": SUBSCRIPTION_SESSION_CAP,
-                "agy": SUBSCRIPTION_SESSION_CAP, "gemini": 2}
+                "claude": _SEAT_CAP["anthropic"],
+                "codex": _SEAT_CAP["openai"],
+                "cursor": _SEAT_CAP["cursor"],
+                "agy": _SEAT_CAP["google"], "gemini": 2}
 
 
 def kimi_wire_model():
@@ -1711,6 +1726,9 @@ EVIDENCE_RESOLUTION = os.getenv("ARC_EVIDENCE_RESOLUTION", "1280x720")
 EVIDENCE_TIMEOUT = float(os.getenv("ARC_EVIDENCE_TIMEOUT", "600"))
 # A screenshot this dominated by one colour is flagged as a blank render.
 EVIDENCE_BLANK_SHARE = float(os.getenv("ARC_EVIDENCE_BLANK_SHARE", "0.97"))
+# Below this share of changed pixels a camera counts as "nothing to see", and
+# a gameplay diff whose every camera is under it is flagged no_visible_change.
+EVIDENCE_MIN_CHANGE = float(os.getenv("ARC_EVIDENCE_MIN_CHANGE", "0.005"))
 
 # Project-wide agent board (board.py). Per-task threads live in the worktree
 # at .arc/board.jsonl and are excluded from publish; this directory is the
