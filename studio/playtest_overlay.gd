@@ -122,13 +122,6 @@ func _ensure_inspection_light() -> void:
 
 
 func _input(event: InputEvent) -> void:
-	if _panel != null and not _panel.visible and event is InputEventMouseButton \
-			and event.pressed and event.button_index == MOUSE_BUTTON_LEFT \
-			and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
-		# The player never captures the mouse itself, so look never starts.
-		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
-		get_viewport().set_input_as_handled()
-		return
 	if not (event is InputEventKey) or not event.pressed or event.echo:
 		return
 	if _panel.visible:
@@ -136,8 +129,23 @@ func _input(event: InputEvent) -> void:
 			_close()
 			get_viewport().set_input_as_handled()
 		return
+	if event.keycode == KEY_ESCAPE and Input.mouse_mode == Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_VISIBLE
+		get_viewport().set_input_as_handled()
+		return
 	if event.keycode == KEY_F8:
 		_open()
+		get_viewport().set_input_as_handled()
+
+
+func _unhandled_input(event: InputEvent) -> void:
+	# After GUI controls. A menu or this overlay's own buttons get the click
+	# first. The player never captures the mouse itself, so look never starts
+	# until a click nothing else wanted.
+	if _panel != null and not _panel.visible and event is InputEventMouseButton \
+			and event.pressed and event.button_index == MOUSE_BUTTON_LEFT \
+			and Input.mouse_mode != Input.MOUSE_MODE_CAPTURED:
+		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
 		get_viewport().set_input_as_handled()
 
 
