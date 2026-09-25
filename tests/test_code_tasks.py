@@ -3587,8 +3587,39 @@ class AgentBoardWiring(unittest.TestCase):
                 self._implement(g, {"implement_bw1": 1})
         self.assertIn(f"AGENT BOARD for {self.project}", self.prompts[0])
         self.assertNotIn("OLD-BLOCK", self.prompts[0])
-        self.assertIn("board claims", self.prompts[0])
+        self.assertIn("board post", self.prompts[0])
+        self.assertIn("your agent ID is bw1/implementer", self.prompts[0])
         self.assertIn("OLD-BLOCK", self.prompts[1], "fallback when the digest is empty")
+
+    def test_files_the_attempt_changed_are_leased_after_the_run(self):
+        """Most taskfiles carry no files_hint, so the pre-run lease covered
+        nothing (every prison-escape claim had paths=[]). What the attempt
+        actually changed is leased, so a sibling's digest warns it off."""
+        import subprocess as sp
+        for c in (["init", "-q", "-b", config.BASE_BRANCH],
+                  ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                  ["commit", "-q", "--allow-empty", "-m", "base"]):
+            sp.run(["git", *c], cwd=self.wt, check=True, capture_output=True)
+        base = self._drv()
+
+        class Writes:
+            harness, model, images = base.harness, base.model, None
+
+            async def run(self, prompt, cwd, **kw):
+                Path(cwd, "pkg").mkdir(exist_ok=True)
+                Path(cwd, "pkg", "b.py").write_text("x = 1\n")
+                return await base.run(prompt, cwd, **kw)
+        with mock.patch.object(code_tasks, "_driver", lambda m, r, p: Writes()), \
+                mock.patch.object(code_tasks.gitstore, "checkpoint",
+                                  mock.AsyncMock(return_value=None)), \
+                capture_events():
+            self._implement(self._graph())
+        live = self.ab.claims(self.project)
+        self.assertEqual(len(live), 1, "renewed in place, not stacked")
+        self.assertEqual(sorted(live[0]["paths"]), ["pkg/a.py", "pkg/b.py"])
+        d = self.ab.digest_for(self.project, task="sib", role="implementer",
+                               model="m", files_hint=["pkg/b.py"])
+        self.assertIn("bw1/implementer holds", d)
 
     def test_implement_posts_its_status(self):
         with mock.patch.object(code_tasks, "_driver", lambda m, r, p: self._drv()), \

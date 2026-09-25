@@ -956,6 +956,8 @@ def cmd_doctor(args):
 def cmd_board(args):
     """`main.py board post|read|claims` — the agent coordination board."""
     import agentboard
+    if getattr(args, "db", None):
+        config.DB_PATH = args.db
     project = args.project or agentboard.infer_project()[0]
     if not project:
         print("board: --project is required outside ~/worktrees/<project>/<task>",
@@ -1318,6 +1320,10 @@ def main():
     brd.add_argument("--since", type=float)
     bcl = board_sub.add_parser("claims", help="list live path claims")
     bcl.add_argument("--project")
+    for bp in (bpo, brd, bcl):
+        # Agents run this from a task worktree, where config.DB_PATH would
+        # resolve to <worktree>/orchestrator.db. The prompt passes the fleet's.
+        bp.add_argument("--db", default=None, help="sqlite database path")
 
     args = ap.parse_args()
     setup_logging(getattr(args, "verbose", False))

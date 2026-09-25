@@ -691,6 +691,8 @@ def _collect_inflight(now, store=None):
         last = driver_last.get((harness, model, role, task, attempt)) or e
         last_ts = _ts(last.get("ts")) or started
         rows.append({"req_id": f"driver/{harness}:{model}:{role}:{task}",
+                     "agent": _agent_label(task, role, e.get("agent")),
+                     "session_id": e.get("session_id"),
                      "family": config.MODEL_FAMILY.get(model, "harness"), "model": model,
                      "pretty": _pretty(model), "source": f"driver:{harness}",
                      "purpose": f"{harness} {role}", "harness": harness,
@@ -2313,6 +2315,22 @@ def _project_detail(store, fname):
             "git": _git_block(repo_v, gh)}, 200
 
 
+def _agent_label(task, role, stamped=None):
+    """The stable board ID `<task>/<role>` for an agents-view row. Driver runs
+    are named `<task>-x3` / `<task>-pr2`, and a usage swap or escalation
+    changes the model: neither may change who the agent IS, which is also the
+    address other agents and the operator DM (`dm:<task>/<role>`)."""
+    if stamped:
+        return stamped
+    if not task:
+        return None
+    try:
+        import agentboard
+        return agentboard.agent_id(task, role or "")
+    except Exception:  # noqa: BLE001
+        return f"{task}/{role or ''}"
+
+
 def _recent_agent_runs(store, limit=40):
     """Finished harness runs, newest first — the other half of an agents view.
 
@@ -2341,6 +2359,7 @@ def _recent_agent_runs(store, limit=40):
         except (TypeError, ValueError):
             pass
         out.append({
+            "agent": _agent_label(r.get("task_id"), r.get("role")),
             "task": r.get("task_id"), "model": r.get("model"),
             "pretty": _pretty(r.get("model")), "harness": r.get("harness"),
             "role": r.get("role"), "attempt": r.get("attempt"),

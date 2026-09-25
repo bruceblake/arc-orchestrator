@@ -201,7 +201,8 @@ class Digest(BoardCase):
         self.assertIn("refactoring", text)
         self.assertIn("locks done", text)            # latest sibling status wins
         self.assertNotIn("locks at 50%", text)
-        self.assertTrue(text.rstrip().endswith(agentboard.HOW_TO_POST))
+        self.assertTrue(text.rstrip().endswith(
+            agentboard.how_to_post(P, "doors/implementer")))
         self.assertIn(".arc/board.jsonl", text)
         self.assertIn("main.py board post", text)
 
@@ -209,12 +210,14 @@ class Digest(BoardCase):
         self._seed()
         for i in range(30):
             agentboard.post(P, author="captain", body=f"@doors ping {i} " + "z" * 150)
+        howto = agentboard.how_to_post(P, "doors/implementer")
+        cap = len(howto) + 600
         text = agentboard.digest_for(P, task="doors", role="implementer", model="m",
-                                     files_hint=["scripts/locks/"], limit_chars=900)
-        self.assertLessEqual(len(text), 900)
+                                     files_hint=["scripts/locks/"], limit_chars=cap)
+        self.assertLessEqual(len(text), cap)
         self.assertIn("Unread mentions", text)
         self.assertNotIn("Who knows", text)
-        self.assertTrue(text.endswith(agentboard.HOW_TO_POST))
+        self.assertTrue(text.endswith(howto))
 
     def test_another_role_on_the_same_task_is_shown_its_claims(self):
         agentboard.claim(P, task="doors", author="doors/reviewer",
@@ -713,7 +716,8 @@ class PipelineDelivery(BoardCase):
         for _ in range(6):
             d = agentboard.digest_for(P, task="doors", role="implementer",
                                       model="m", mark_seen=True,
-                                      limit_chars=len(agentboard.HOW_TO_POST) + 700)
+                                      limit_chars=len(agentboard.how_to_post(
+                                          P, "doors/implementer")) + 700)
             got |= {i for i in range(4) if f"long-{i} " in d}
         self.assertEqual(got, {0, 1, 2, 3})
 
