@@ -69,9 +69,13 @@ function renderSlots(q) {
 
 async function pollSlots() {
   try {
-    const rev = await jgetRev("/api/queue", "queue");
-    if (rev.unchanged) { markFail("queue", false); return; }
-    renderSlots(rev.data);
+    if (typeof jgetRev !== "function") {
+      renderSlots(await jget("/api/queue"));
+    } else {
+      const rev = await jgetRev("/api/queue", "queue");
+      if (rev.unchanged) { markFail("queue", false); return; }
+      renderSlots(rev.data);
+    }
     markFail("queue", false);
   } catch (e) { markFail("queue", true); }
 }

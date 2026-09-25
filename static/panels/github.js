@@ -3,9 +3,14 @@
 let GH_LIMIT = 10;
 async function pollGithub() {
   try {
-    const rev = await jgetRev("/api/github" + pageQuery(GH_LIMIT, 0), "github:" + GH_LIMIT);
-    if (rev.unchanged) return;
-    GH = rev.data;
+    const q = (typeof pageQuery === "function") ? pageQuery(GH_LIMIT, 0) : "";
+    if (typeof jgetRev !== "function") {
+      GH = await jget("/api/github" + q);
+    } else {
+      const rev = await jgetRev("/api/github" + q, "github:" + GH_LIMIT);
+      if (rev.unchanged) return;
+      GH = rev.data;
+    }
   } catch (e) { return; }
   renderGithub();
 }

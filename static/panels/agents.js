@@ -9,9 +9,14 @@ const agentId = a => {
 };
 async function pollAgents() {
   try {
-    const rev = await jgetRev("/api/agents", "agents");
-    if (rev.unchanged) { markFail("agents", false); return; }
-    const d = rev.data;
+    const d = (typeof jgetRev !== "function")
+      ? await jget("/api/agents")
+      : await (async () => {
+          const rev = await jgetRev("/api/agents", "agents");
+          if (rev.unchanged) { markFail("agents", false); return null; }
+          return rev.data;
+        })();
+    if (!d) return;
     AGENTS = (d.agents || []).filter(a => a.task);
     RECENT = d.recent || [];
     markFail("agents", false);

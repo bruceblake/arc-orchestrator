@@ -832,25 +832,30 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 <script src="/panels/board.js"></script>
 <script>
 // ---- boot: staggered polls so nothing fires all at once ----
+// refresh.js defines every/startClock. If that file 404s, fall back to a
+// plain interval so one missing script does not stop the rest of the page.
 loadHash(); syncFilterControls();
 pollProjects();
-every(pollWorkStatus, 5000, 600);
+const schedule = (typeof every === "function") ? every : function(fn, ms, delay) {
+  setTimeout(function() { fn(); setInterval(fn, ms); }, delay || 0);
+};
+schedule(pollWorkStatus, 5000, 600);
 initEvents();
-every(pollFleet, 5000, 1600);
-every(pollSlots, 3000, 400);
-every(pollErrors, 15000, 2000);
-every(pollActivity, 10000, 2200);
-every(pollAgents, 4500, 800);
-every(pollHealth, 6000, 2400);
-every(pollEvents, 8000, 1200);
-every(pollGithub, 20000, 800);
-every(pollTopos, 30000, 2000);
+schedule(pollFleet, 5000, 1600);
+schedule(pollSlots, 3000, 400);
+schedule(pollErrors, 15000, 2000);
+schedule(pollActivity, 10000, 2200);
+schedule(pollAgents, 4500, 800);
+schedule(pollHealth, 6000, 2400);
+schedule(pollEvents, 8000, 1200);
+schedule(pollGithub, 20000, 800);
+schedule(pollTopos, 30000, 2000);
 // Studio: poll fast only while its tab is showing; the snapshot runs gate
 // checks and reads render archives, which there is no point doing unseen.
 jget("/api/studio").then(d => { STUDIO = d; initTabs(((d || {}).projects || []).length > 0); renderStudio(); })
   .catch(() => initTabs(false));
 setInterval(() => { if (TAB === "studio") pollStudio(); }, 5000);
-startClock();
+if (typeof startClock === "function") startClock();
 </script>
 </body>
 </html>
