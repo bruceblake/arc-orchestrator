@@ -88,6 +88,25 @@ class ResetParsing(unittest.TestCase):
         self.assertGreater(at, NOW)
         self.assertLessEqual(at - NOW, 86400)
 
+    def test_codex_absolute_date_is_america_new_york(self):
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/New_York")
+        expected = datetime.datetime(2026, 9, 29, 16, 17, tzinfo=tz).timestamp()
+        now = datetime.datetime(2026, 9, 28, 12, 0, tzinfo=tz).timestamp()
+        self.assertLess(now, expected)
+        self.assertEqual(drivers.usage_reset_at(
+            "try again at Sep 29th, 2026 4:17 PM", now), expected)
+        self.assertEqual(drivers.usage_reset_at(
+            "try again at September 29, 2026 4:17 PM", now), expected)
+        chicago = ZoneInfo("America/Chicago")
+        self.assertEqual(drivers.usage_reset_at(
+            "try again at Sep 29th, 2026 4:17 PM America/Chicago", now),
+            datetime.datetime(2026, 9, 29, 16, 17, tzinfo=chicago).timestamp())
+        earlier = ("cache resets May 1st, 2020 12:00 AM. "
+                   "See America/Los_Angeles docs. "
+                   "try again at Sep 29th, 2026 4:17 PM")
+        self.assertEqual(drivers.usage_reset_at(earlier, now), expected)
+
 
 class ActivePlanWindows(unittest.TestCase):
     def test_a_future_reset_stays_up_after_the_swap(self):
@@ -126,6 +145,54 @@ class ActivePlanWindows(unittest.TestCase):
                 "model": "GPT-6-Sol", "ts": now - drivers._PLAN_UNKNOWN_HOLD_S - 1,
                 "resets_at": None, "error": "usage limit reached"}]
         self.assertEqual(drivers.active_plan_windows(old, now), [])
+
+
+class RefreshUsageBlocks(unittest.TestCase):
+    def test_a_codex_dated_refusal_blocks_until_that_instant(self):
+        import tempfile
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo("America/New_York")
+        now = datetime.datetime(2026, 9, 28, 12, 0, tzinfo=tz).timestamp()
+        drivers._usage_blocked_until.clear()
+        self.addCleanup(drivers._usage_blocked_until.clear)
+        line = json.dumps({
+            "type": "driver.usage_limit", "harness": "codex",
+            "model": "GPT-6-Sol", "ts": now - 60,
+            "error": "You've hit your usage limit. try again at Sep 29th, 2026 4:17 PM",
+        })
+        noise = json.dumps({"type": "driver.start", "task": "not-a-plan-window"})
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "events.jsonl"
+            path.write_text(noise + "\n" + line + "\n", encoding="utf-8")
+            with mock.patch.object(config, "EVENTS_LOG", str(path)), \
+                    mock.patch.object(drivers.time, "time", lambda: now):
+                first = drivers.refresh_usage_blocks()
+                again = drivers.refresh_usage_blocks()
+        self.assertEqual(len(first), 1)
+        self.assertEqual(first[0]["harness"], "codex")
+        self.assertGreater(drivers._usage_blocked_until["codex"], now)
+        self.assertEqual(again[0]["resets_at"], first[0]["resets_at"])
+        self.assertEqual(drivers._usage_blocked_until["codex"], first[0]["resets_at"])
+
+    def test_a_later_done_clears_a_block_this_process_still_held(self):
+        import tempfile
+        now = 1_000_000.0
+        drivers._usage_blocked_until.clear()
+        self.addCleanup(drivers._usage_blocked_until.clear)
+        drivers._usage_blocked_until["codex"] = now + 5000
+        rows = [
+            {"type": "driver.usage_limit", "harness": "codex", "model": "GPT-6-Sol",
+             "ts": now - 100, "resets_at": now + 3600},
+            {"type": "driver.done", "harness": "codex", "ts": now - 10},
+        ]
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "events.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows),
+                            encoding="utf-8")
+            with mock.patch.object(config, "EVENTS_LOG", str(path)), \
+                    mock.patch.object(drivers.time, "time", lambda: now):
+                drivers.refresh_usage_blocks()
+        self.assertNotIn("codex", drivers._usage_blocked_until)
 
 
 class ScriptedDriver(Driver):
@@ -486,24 +553,34 @@ class SwapsOffAFullCap(unittest.TestCase):
 
 
 class CapSwapInTheLeaseWait(unittest.TestCase):
-    def test_the_wait_raises_capswap_only_after_the_threshold(self):
-        clock = [1000.0]
+    def _bind(self):
         ctx = drivers._cap_swap_ctx.set(("GLM-5.3", "opencode", "implementer",
                                          frozenset(), frozenset({"deepseek"})))
         self.addCleanup(drivers._cap_swap_ctx.reset, ctx)
+
+    def test_the_first_failed_acquire_raises_capswap(self):
+        self._bind()
+        clock = [1000.0]
         with mock.patch.object(config, "CAP_SWAP_AFTER", 600.0), \
                 mock.patch.object(drivers, "cap_substitute",
                                   return_value="Cursor-Grok-4.7") as sub, \
                 mock.patch.object(drivers.time, "monotonic", lambda: clock[0]):
-            drivers._maybe_cap_swap("GLM-5.3", 1000.0, 0)      # 0 s waited
-            sub.assert_not_called()
-            clock[0] += 601
             drivers._maybe_cap_swap("GLM-5.3", 1000.0, 1)      # not a check tick
             sub.assert_not_called()
             with self.assertRaises(drivers.CapSwap) as cm:
-                drivers._maybe_cap_swap("GLM-5.3", 1000.0, 3)
+                drivers._maybe_cap_swap("GLM-5.3", 1000.0, 0)  # 0 s waited
         self.assertEqual(cm.exception.to_model, "Cursor-Grok-4.7")
+        self.assertEqual(cm.exception.waited_s, 0)
         self.assertEqual(sub.call_args.kwargs["avoid_families"], frozenset({"deepseek"}))
+
+    def test_cap_swap_after_zero_never_swaps(self):
+        self._bind()
+        with mock.patch.object(config, "CAP_SWAP_AFTER", 0.0), \
+                mock.patch.object(drivers, "cap_substitute",
+                                  return_value="Cursor-Grok-4.7") as sub:
+            drivers._maybe_cap_swap("GLM-5.3", 1000.0, 0)
+            drivers._maybe_cap_swap("GLM-5.3", 0.0, 3)
+        sub.assert_not_called()
 
     def test_no_context_means_no_swap(self):
         with mock.patch.object(drivers, "cap_substitute") as sub:

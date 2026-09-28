@@ -334,9 +334,8 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
     This runs after alloc, which has already reset the branch to base, so the
     patch applies against the merge base it was taken from. `--3way` is what
     lets a partially overlapping patch recover its non-conflicting parts; a
-    genuinely conflicting file is then REPORTED and the whole apply rolled back
-    rather than left half-applied — a conflicted tree would otherwise be
-    published as if it were the attempt's own work.
+    genuinely conflicting file is reported. Clean files are then applied from
+    the same patch while the conflicting file stays at the new base version.
     """
     wt = Path(wt)
     meta = {}
@@ -357,8 +356,27 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
         return {"restored": False, "path": str(path), "files": [],
                 "conflicts": [], "meta": meta,
                 "reason": f"checkpoint not found: {path}"}
-    rc, _, _ = await _git(["apply", "--3way", "--whitespace=nowarn",
-                           str(Path(path).resolve())], cwd=wt, check=False)
+    patch_path = str(Path(path).resolve())
+    excluded = set()
+    # A patch may contain many independent files. Retry without paths that
+    # genuinely conflict with today's base, so an unrelated test scene does
+    # not discard an implementer's scripts, tests, and assets as well.
+    for _ in range(max(2, len(meta.get("files") or []) + 1)):
+        rc, _, _ = await _git(
+            ["apply", "--3way", "--whitespace=nowarn",
+             *(f"--exclude={p}" for p in sorted(excluded)), patch_path],
+            cwd=wt, check=False)
+        _, unmerged_raw, _ = await _git_bytes(
+            ["ls-files", "-u", "-z"], cwd=wt, check=False)
+        found = {f.split("\t")[-1] for f in _null_split(unmerged_raw) if f}
+        if rc == 0 and not found:
+            break
+        # Every failed apply is discarded before another attempt. A conflict
+        # marker or a staged partial patch must never reach an implementer.
+        await _git(["reset", "-q", "--hard", "HEAD"], cwd=wt, check=False)
+        if not found or found <= excluded:
+            break
+        excluded.update(found)
     # A conflicting `--3way` apply leaves conflict markers in the files AND
     # unmerged entries in the index (exit 1, "Applied patch ... with
     # conflicts"). Neither the exit code alone nor the message may be the test:
@@ -366,19 +384,15 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
     # stage — its `--name-only` is silently ignored.
     # -z here too: the conflict list is what an operator reads and what the
     # event records, and a C-quoted `"caf\303\251.txt"` names nothing.
-    _, unmerged_raw, _ = await _git_bytes(["ls-files", "-u", "-z"], cwd=wt,
-                                          check=False)
-    conflicts = sorted({f.split("\t")[-1]
-                        for f in _null_split(unmerged_raw) if f})
+    conflicts = sorted(excluded)
     _, applied_raw, _ = await _git_bytes(
         ["diff", "--name-only", "-z", config.BASE_BRANCH, "--", "."],
         cwd=wt, check=False)
+    checkpoint_files_set = set(meta.get("files") or [])
     files = sorted({p for p in _null_split(applied_raw)
-                    if p and p not in conflicts})
-    if conflicts or rc != 0:
-        # Leave nothing half-applied: a tree carrying conflict markers, or one
-        # where only part of the patch landed, would be published as though it
-        # were the attempt's own work. Worse than not restoring at all.
+                    if p and p not in conflicts
+                    and (not checkpoint_files_set or p in checkpoint_files_set)})
+    if rc != 0:
         await _git(["reset", "-q", "--hard", "HEAD"], cwd=wt, check=False)
         events.emit("task.checkpoint_conflict", task=str(task_id),
                     path=str(path), conflicts=conflicts, exit=rc)
@@ -386,16 +400,30 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
                 "conflicts": conflicts,
                 "reason": (f"{len(conflicts)} conflicting file(s)" if conflicts
                            else "git apply refused the patch")}
+    if not files:
+        # The retry excluded every changed path. Report the conflict, but do
+        # not claim that an interrupted attempt's work was restored.
+        events.emit("task.checkpoint_conflict", task=str(task_id),
+                    path=str(path), conflicts=conflicts, exit=0)
+        return {"restored": False, "path": str(path), "files": [],
+                "meta": meta, "conflicts": conflicts,
+                "reason": f"{len(conflicts)} conflicting file(s)"}
     # Unstage. `--3way` implies `--index`, so a clean apply stages everything it
     # wrote, and an implementer that starts work on a tree with a pre-staged
     # index publishes a diff it did not choose (publish's `git add -A` would
     # have masked this, but a reviewer reading `git diff` would not). The work
     # belongs in the FILES, exactly as the checkpoint recorded it.
     await _git(["reset", "-q", "--mixed", "HEAD"], cwd=wt, check=False)
+    if conflicts:
+        events.emit("task.checkpoint_conflict", task=str(task_id),
+                    path=str(path), conflicts=conflicts, exit=0,
+                    restored_files=len(files))
     events.emit("task.checkpoint_restored", task=str(task_id), path=str(path),
-                files=len(files), conflicts=0)
+                files=len(files), conflicts=len(conflicts))
     return {"restored": True, "path": str(path), "files": files,
-            "conflicts": [], "meta": meta, "reason": ""}
+            "conflicts": conflicts, "meta": meta,
+            "reason": (f"{len(conflicts)} conflicting file(s) skipped"
+                       if conflicts else "")}
 
 
 async def _git(args, cwd, check=True):
@@ -1193,17 +1221,69 @@ async def _retry_transient(label, attempt_fn):
     return ok, note
 
 
+async def _remote_has_branch(repo, branch):
+    """Does `origin` currently have refs/heads/<branch>? True / False / None.
+
+    `git ls-remote` asks the REMOTE, which is the whole point: the local
+    `refs/remotes/origin/<branch>` can be a stale leftover of a branch GitHub
+    has already deleted, and no local ref can tell the two apart.
+
+    None means the lookup itself did not answer (network, auth, timeout) and
+    the caller must keep today's lease: guessing "absent" from a failed lookup
+    would turn one network blip into a spurious push refusal.
+
+    The `GitError` catch is required, not decorative: `_git` raises it on
+    GIT_TIMEOUT even with `check=False` (gitstore.py:408-411), so a hung
+    `ls-remote` would otherwise escape `push_task_branch`'s `except GitError`
+    and fail the publish node, instead of falling back to the plain lease like
+    every other git failure in that function.
+    """
+    try:
+        rc, out, _ = await _git(["ls-remote", "origin", f"refs/heads/{branch}"],
+                                cwd=repo, check=False)
+    except GitError:
+        return None
+    if rc != 0:
+        return None
+    want = f"refs/heads/{branch}"
+    return any(len(parts) == 2 and parts[1] == want
+               for parts in (line.split() for line in out.splitlines()))
+
+
 async def push_task_branch(repo, task_id):
-    """Push task/<id> to origin. Returns (ok, note)."""
+    """Push task/<id> to origin. Returns (ok, note).
+
+    Plain `--force-with-lease` leases against the LOCAL tracking ref, so a
+    task whose remote branch was deleted after merge (GitHub removes it on
+    merge; `git fetch --prune` is what clears the leftover) is refused with
+    "stale info" even though there is no remote ref left to protect. The
+    branch is then un-pushable and the task dies on its FIRST publication.
+
+    So when the remote says it has NO such branch, the push carries the
+    "must not exist" lease `--force-with-lease=task/<id>:`. A concurrent
+    creation of that branch is still refused ("reference already exists" —
+    measured), so the stale ref is refreshed without weakening the lease.
+
+    Every other case keeps plain `--force-with-lease` byte-for-byte: a branch
+    the remote still has, and a lookup that did not answer, are both leased
+    against the local tracking ref exactly as before. The lease is never
+    rebased onto a sha we did not fetch — adopting a branch another actor
+    moved to would overwrite the very update the lease exists to protect.
+    """
     repo = Path(repo).resolve()
     rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
     if not remotes.strip():
         return False, "no git remote configured"
+    branch = f"task/{task_id}"
 
     async def once():
+        on_remote = await _remote_has_branch(repo, branch)
+        # None (lookup failed) and True both mean "lease as usual"; only a
+        # confirmed absence switches to the must-not-exist lease.
+        lease = ("--force-with-lease" if on_remote is not False
+                 else f"--force-with-lease={branch}:")
         try:
-            await _git(["push", "-u", "--force-with-lease", "origin",
-                        f"task/{task_id}"], cwd=repo)
+            await _git(["push", "-u", lease, "origin", branch], cwd=repo)
         except GitError as exc:
             return False, f"push failed: {exc}"[:400]
         return True, "pushed"

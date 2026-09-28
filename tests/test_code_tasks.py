@@ -5,6 +5,7 @@ import time
 import shutil
 import os
 import subprocess
+import sys
 import json
 import pathlib
 import re
@@ -20,6 +21,7 @@ from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
 
 import code_tasks
 import config
+import drivers
 import gitstore
 
 
@@ -3969,3 +3971,260 @@ class AgentBoardWiring(unittest.TestCase):
             with self.assertRaises(asyncio.CancelledError):
                 asyncio.run(go())
         self.assertEqual(self.ab.claims(self.project), [])
+
+
+def _studio_stdout(snippet, **env_extra):
+    """Run `snippet` in a fresh interpreter with ARC_FLEET=studio.
+
+    Config binds the roster at import, so the studio prose has to be read
+    in a subprocess. Same shape as tests/test_studio.py `in_studio`.
+    """
+    root = Path(__file__).resolve().parent.parent
+    env = dict(os.environ, ARC_FLEET="studio", PYTHONPATH=str(root))
+    env.pop("ARC_ZEN_FREE", None)
+    env.pop("ARC_ESCALATION_PATH", None)
+    env.update(env_extra)
+    proc = subprocess.run(
+        [sys.executable, "-c", snippet], capture_output=True, text=True,
+        env=env, cwd=str(root), timeout=120)
+    if proc.returncode != 0:
+        raise AssertionError(
+            f"studio subprocess failed:\n{proc.stdout}\n{proc.stderr}")
+    return proc.stdout
+
+
+class RoutingProsePrefersDeepSeekAndOpenSeats(unittest.TestCase):
+    """The planner is told who actually implements, from the live roster.
+
+    The hardest tasks prefer DeepSeek only when DeepSeek is on the hard
+    tier. On this commit DeepSeek is medium and GLM-5.3 is the hard ARC
+    seat, so the hardest work names GLM and a hard task is not sent to a
+    medium model the loader would reject. Cursor and Antigravity take the
+    other independent hard tasks while their windows are open. Claude is
+    the studio planner, not a routine implementer. A spent Codex or Claude
+    window is named and left out of the enforced list. The local fleet has
+    neither subscription seat, so that spread sentence is absent.
+    """
+
+    STUDIO_PROSE = """
+import os, code_tasks
+blocked = set(filter(None, os.environ.get("BLOCKED", "").split(",")))
+code_tasks._blocked_harnesses = lambda: set(blocked)
+text = code_tasks._routing_tiers_prose()
+print("OPENAI=" + __import__("config").STUDIO_OPENAI_MODEL)
+print("---")
+print(text)
+"""
+
+    def test_studio_prose_spreads_open_seats_and_names_closed_windows(self):
+        out = _studio_stdout(self.STUDIO_PROSE, BLOCKED="codex,claude")
+        openai, text = out.split("---", 1)
+        openai = openai.split("OPENAI=", 1)[1].strip()
+        body, closed = text.split("Plan windows closed right now:", 1)
+        self.assertIn("The hardest tasks prefer GLM-5.3", body)
+        self.assertNotIn(
+            "The hardest tasks prefer DeepSeek-V4.1-Flash-thinking-max", body)
+        hard_line = next(line for line in body.splitlines()
+                         if "hard tasks that need" in line)
+        self.assertNotIn("Claude-Opus-5.5", hard_line)
+        self.assertNotIn(openai, hard_line)
+        self.assertIn("Cursor-Grok-4.7", hard_line)
+        self.assertIn(
+            "Spread OTHER independent hard tasks across Cursor-Grok-4.7 and "
+            "Antigravity-Gemini", body)
+        self.assertIn("Do not send every hard task to GLM-5.3", body)
+        self.assertIn("Claude-Opus-5.5 is not a routine implementer", body)
+        self.assertIn("Do not assign it as an implementer", body)
+        self.assertIn(f"{openai} has a spent plan window. Do not assign it.", body)
+        self.assertIn("Claude-Opus-5.5 has a spent plan window. Do not assign it.",
+                      body)
+        self.assertNotIn("is the fleet's strongest", text)
+        self.assertIn("reviewed by", body)
+        self.assertIn(f"codex/{openai}", closed)
+        self.assertIn("claude/Claude-Opus-5.5", closed)
+        self.assertNotIn("Cursor-Grok-4.7", closed)
+        self.assertNotIn("cursor/", closed)
+        self.assertIn("medium tasks", body)
+
+    def test_local_prose_keeps_deepseek_and_omits_the_subscription_spread(self):
+        with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
+            text = code_tasks._routing_tiers_prose()
+        self.assertIn("The hardest tasks prefer GLM-5.3", text)
+        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", text)
+        self.assertNotIn(
+            "The hardest tasks prefer DeepSeek-V4.1-Flash-thinking-max", text)
+        self.assertNotIn("Cursor-Grok-4.7", text)
+        self.assertNotIn("Antigravity-Gemini", text)
+        self.assertNotIn("Spread OTHER independent hard tasks", text)
+        self.assertNotIn("is the fleet's strongest", text)
+        self.assertIn("reviewed by", text)
+        self.assertIn("Plan windows closed right now: none", text)
+
+    def test_blocked_harnesses_reads_the_log_and_never_raises(self):
+        with mock.patch.object(drivers, "refresh_usage_blocks", None, create=True), \
+             mock.patch.object(config, "EVENTS_LOG",
+                               "/nonexistent/arc-fleet-events.jsonl"):
+            self.assertEqual(code_tasks._blocked_harnesses(), set())
+        now = time.time()
+        line = json.dumps({
+            "type": "driver.usage_limit", "harness": "codex",
+            "model": "GPT-6-Sol", "ts": now, "resets_at": now + 3600,
+        })
+        fh = tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False)
+        fh.write(line + "\n")
+        fh.close()
+        self.addCleanup(os.remove, fh.name)
+        with mock.patch.object(drivers, "refresh_usage_blocks", None, create=True), \
+             mock.patch.object(config, "EVENTS_LOG", fh.name):
+            self.assertEqual(code_tasks._blocked_harnesses(), {"codex"})
+
+    def test_refresh_usage_blocks_is_used_when_it_exists(self):
+        def refresh():
+            drivers._usage_blocked_until["claude"] = time.time() + 1000
+
+        with mock.patch.dict(drivers._usage_blocked_until, {}, clear=True), \
+             mock.patch.object(drivers, "refresh_usage_blocks", refresh, create=True):
+            self.assertEqual(code_tasks._blocked_harnesses(), {"claude"})
+
+
+class PreMergeReviewHandsOffUnderPressure(unittest.TestCase):
+    """A half-busy ARC reviewer yields to an idle cursor seat, then agy.
+
+    Pressure 0 stays on the planned reviewer. A full seat still uses the
+    existing fallback and does not take the handoff reason.
+    """
+
+    def setUp(self):
+        self.cursor = "Cursor-Seat"
+        self.agy = "Agy-Seat"
+        self.seats = {
+            self.cursor: ("cursor", "cursor", 4),
+            self.agy: ("google", "agy", 4),
+        }
+        top = config.TIER_ORDER[-1]
+        real_dl = config.driver_limit
+        caps = {m: spec[2] for m, spec in self.seats.items()}
+        real = code_tasks._driver
+
+        def _drv(m, role, pol):
+            if m in self.seats:
+                return mock.Mock(model=m, harness=self.seats[m][1], images=None)
+            return real(m, role, pol)
+
+        patches = [
+            mock.patch.dict(config.MODEL_ROLES,
+                            {m: {"reviewer"} for m in self.seats}),
+            mock.patch.dict(config.MODEL_FAMILY,
+                            {m: spec[0] for m, spec in self.seats.items()}),
+            mock.patch.dict(config.MODEL_TIER, {m: top for m in self.seats}),
+            mock.patch.dict(config.MODEL_HARNESS,
+                            {m: spec[1] for m, spec in self.seats.items()}),
+            mock.patch.object(
+                config, "driver_limit",
+                lambda m, interactive=False: caps[m] if m in caps
+                else real_dl(m, interactive)),
+            mock.patch.object(code_tasks, "_driver", _drv),
+            mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _pick(self, usage):
+        return code_tasks._select_reviewer("deepseek", "GLM-5.3", None, usage)
+
+    def test_pressure_zero_stays_on_the_planned_deepseek_reviewer(self):
+        model, reason = self._pick({})
+        self.assertEqual((model, reason),
+                         (config.REVIEW_FAMILIES["deepseek"], "planned"))
+
+    def test_half_pressure_yields_to_an_idle_cursor_seat(self):
+        ds = config.REVIEW_FAMILIES["deepseek"]
+        model, reason = self._pick({ds: config.driver_limit(ds) * 0.5})
+        self.assertEqual((model, reason),
+                         (self.cursor, "planned_pressure_subscription"))
+
+    def test_a_blocked_cursor_harness_falls_through_to_agy(self):
+        code_tasks._blocked_harnesses.return_value = {"cursor"}
+        ds = config.REVIEW_FAMILIES["deepseek"]
+        model, reason = self._pick({ds: config.driver_limit(ds) * 0.5})
+        self.assertEqual((model, reason),
+                         (self.agy, "planned_pressure_subscription"))
+
+    def test_a_cursor_usage_limit_falls_through_to_agy(self):
+        ds = config.REVIEW_FAMILIES["deepseek"]
+        model, reason = self._pick({
+            ds: config.driver_limit(ds) * 0.5,
+            "usage_limit:cursor": 1,
+        })
+        self.assertEqual((model, reason),
+                         (self.agy, "planned_pressure_subscription"))
+
+    def test_both_subscription_seats_busy_stays_on_the_plan(self):
+        ds = config.REVIEW_FAMILIES["deepseek"]
+        model, reason = self._pick({
+            ds: config.driver_limit(ds) * 0.5,
+            self.cursor: config.driver_limit(self.cursor),
+            self.agy: config.driver_limit(self.agy),
+        })
+        self.assertEqual((model, reason), (ds, "planned"))
+
+    def test_a_full_planned_seat_still_uses_the_existing_fallback(self):
+        ds = config.REVIEW_FAMILIES["deepseek"]
+        model, reason = self._pick({ds: config.driver_limit(ds)})
+        self.assertEqual(reason, "planned_full_fallback")
+        self.assertNotEqual(model, ds)
+        self.assertIn(model, (self.cursor, self.agy))
+
+    def test_a_blocked_planned_seat_uses_the_full_fallback(self):
+        code_tasks._blocked_harnesses.return_value = {"reasonix"}
+        ds = config.REVIEW_FAMILIES["deepseek"]
+        model, reason = self._pick({ds: config.driver_limit(ds) * 0.5})
+        self.assertEqual(reason, "planned_full_fallback")
+        self.assertEqual(model, self.cursor)
+
+    def test_pressure_zero_stays_when_the_planned_harness_is_blocked(self):
+        code_tasks._blocked_harnesses.return_value = {"reasonix"}
+        model, reason = self._pick({})
+        self.assertEqual((model, reason),
+                         (config.REVIEW_FAMILIES["deepseek"], "planned"))
+
+
+class EscalationSkipsSpentPlanWindows(unittest.TestCase):
+    """Escalation walks the path and skips a harness with a closed window."""
+
+    def test_nothing_blocked_matches_today(self):
+        with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
+            self.assertEqual(code_tasks._next_tier_m("some-off-path-model"),
+                             config.ESCALATION_PATH[0])
+            self.assertEqual(code_tasks._next_tier_m(config.ESCALATION_PATH[0]),
+                             config.ESCALATION_PATH[1])
+            self.assertIsNone(code_tasks._next_tier_m(config.ESCALATION_PATH[-1]))
+
+    def test_a_blocked_next_harness_skips_to_the_following_model(self):
+        path = ["Tier-A", "Tier-B", "Tier-C"]
+        harnesses = {"Tier-A": "ha", "Tier-B": "hb", "Tier-C": "hc"}
+        with mock.patch.object(config, "ESCALATION_PATH", path), \
+             mock.patch.dict(config.MODEL_HARNESS, harnesses), \
+             mock.patch.object(code_tasks, "_blocked_harnesses",
+                               return_value={"hb"}):
+            self.assertEqual(code_tasks._next_tier_m("Tier-A"), "Tier-C")
+            self.assertEqual(code_tasks._next_tier_m("not-on-path"), "Tier-A")
+
+    def test_every_later_model_blocked_returns_none(self):
+        path = ["Tier-A", "Tier-B", "Tier-C"]
+        harnesses = {"Tier-A": "ha", "Tier-B": "hb", "Tier-C": "hc"}
+        with mock.patch.object(config, "ESCALATION_PATH", path), \
+             mock.patch.dict(config.MODEL_HARNESS, harnesses), \
+             mock.patch.object(code_tasks, "_blocked_harnesses",
+                               return_value={"hb", "hc"}):
+            self.assertIsNone(code_tasks._next_tier_m("Tier-A"))
+
+    def test_off_path_skips_a_blocked_entry_seat(self):
+        path = ["Tier-A", "Tier-B", "Tier-C"]
+        harnesses = {"Tier-A": "ha", "Tier-B": "hb", "Tier-C": "hc"}
+        with mock.patch.object(config, "ESCALATION_PATH", path), \
+             mock.patch.dict(config.MODEL_HARNESS, harnesses), \
+             mock.patch.object(code_tasks, "_blocked_harnesses",
+                               return_value={"ha"}):
+            self.assertEqual(code_tasks._next_tier_m("not-on-path"), "Tier-B")

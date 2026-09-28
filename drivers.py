@@ -215,6 +215,21 @@ def is_usage_limit(text):
 
 
 _UNIT_S = {"d": 86400, "h": 3600, "m": 60, "s": 1}
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9,
+    "oct": 10, "october": 10, "nov": 11, "november": 11,
+    "dec": 12, "december": 12,
+}
+# "Sep 29th, 2026 4:17 PM" and "September 29, 2026 4:17 PM": optional ordinal,
+# optional comma, 12-hour clock. Codex names the reset this way.
+_ABS_DATE_RE = re.compile(
+    r"(?:resets?\s+(?:at\s+)?|try again at\s+)"
+    r"([A-Za-z]+)\s+(\d{1,2})(?:st|nd|rd|th)?"
+    r",?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*([ap]m)\b",
+    re.I)
+_ZONE_RE = re.compile(r"\b([A-Za-z]+(?:/[A-Za-z0-9_+-]+)+)\b")
 
 
 def _rejected_window(text):
@@ -245,7 +260,9 @@ def usage_reset_at(text, now=None):
     Checked most-specific first: an explicit epoch (Claude's `...|<epoch>`
     suffix, or a stream `rate_limit_event` marked rejected with `resetsAt`),
     then a relative "try again in 2 hours 13 minutes" / `resets_in_seconds`,
-    then a wall-clock "resets 3pm (Zone)" — the next such time after `now`.
+    then an absolute "try again at Sep 29th, 2026 4:17 PM" (fleet clock
+    America/New_York unless the text names a zone), then a wall-clock
+    "resets 3pm (Zone)" — the next such time after `now`.
     A stray `resets_in_seconds` on a window that is NOT exhausted (Codex
     reports every window on every turn) is ignored unless it sits in an
     object that says the limit was reached.
@@ -271,6 +288,35 @@ def usage_reset_at(text, now=None):
                     for n, u in re.findall(r"(\d+)\s*([a-z]+)", m.group(1), re.I))
         if total:
             return now + total
+    matches = list(_ABS_DATE_RE.finditer(text))
+    if matches:
+        # The last dated reset is the one that applies. An earlier
+        # "resets May 1st, 2020" in the same blob must not win, and a
+        # zone name that appears before the date (a doc path, a URL) is
+        # not the clock for this instant. Look only just after the match.
+        m = matches[-1]
+        month = _MONTHS.get(m.group(1).lower())
+        if month:
+            try:
+                import datetime
+                from zoneinfo import ZoneInfo
+                tz = None
+                window = text[m.end():m.end() + 80]
+                for zm in _ZONE_RE.finditer(window):
+                    try:
+                        tz = ZoneInfo(zm.group(1))
+                        break
+                    except Exception:
+                        continue
+                if tz is None:
+                    tz = ZoneInfo("America/New_York")
+                hour = int(m.group(4)) % 12 + (12 if m.group(6).lower() == "pm" else 0)
+                at = datetime.datetime(
+                    int(m.group(3)), month, int(m.group(2)),
+                    hour, int(m.group(5)), tzinfo=tz)
+                return at.timestamp()
+            except Exception:
+                pass
     m = re.search(r"(?:resets?\s+(?:at\s+)?|try again at\s+)"
                   r"(\d{1,2})(?::(\d{2}))?\s*([ap]m)"
                   r"(?:\s*\(([A-Za-z_]+/[A-Za-z_/]+)\))?", text, re.I)
@@ -371,6 +417,57 @@ def active_plan_windows(lines, now=None):
 # this process, so once one attempt learns the plan is out, its siblings wait
 # for the same reset instead of each spending a refusal to find out.
 _usage_blocked_until = {}
+
+_USAGE_LINE_MARKS = ('"driver.usage_limit"', '"driver.usage_swap"', '"driver.done"')
+
+
+def _usage_log_lines(path):
+    """Yield usage-limit, usage-swap, and done lines without parsing the rest.
+
+    The event log is tens of megabytes. Callers that only need plan windows
+    must not json-decode every driver.start on the way there."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        for line in fh:
+            if any(mark in line for mark in _USAGE_LINE_MARKS):
+                yield line
+
+
+def refresh_usage_blocks(now=None):
+    """Load spent plan windows from the event log into this process.
+
+    Streams config.EVENTS_LOG, keeps the usage lines, and asks
+    active_plan_windows which harnesses are still spent. A future
+    `resets_at` is stored as-is. A window that is still active with no
+    stated reset is held until `_PLAN_UNKNOWN_HOLD_S` after its event —
+    the same hold the window list already applied, not a second one.
+    Never raises. Returns the active windows. Idempotent: a second call
+    on the same log writes the same epochs. A harness the log no longer
+    reports as spent is dropped, including one this process still holds
+    from an earlier refresh — a later ``driver.done`` clears the window.
+    """
+    now = time.time() if now is None else now
+    try:
+        windows = active_plan_windows(_usage_log_lines(config.EVENTS_LOG), now)
+        active = {}
+        for w in windows:
+            harness = w.get("harness")
+            if not harness:
+                continue
+            resets = w.get("resets_at")
+            if isinstance(resets, (int, float)) and resets > now:
+                until = float(resets)
+            else:
+                until = float(w.get("since") or 0) + _PLAN_UNKNOWN_HOLD_S
+            if until > now:
+                active[harness] = until
+        for harness in list(_usage_blocked_until):
+            if harness not in active:
+                del _usage_blocked_until[harness]
+        _usage_blocked_until.update(active)
+        return windows
+    except Exception:
+        return []
+
 
 # Failover order when a plan window is spent. Cursor is its own subscription,
 # so it is tried before Claude: a Codex refusal should not spend the planner's
@@ -672,20 +769,20 @@ async def _lease_wait_loop(model, task_id, emit_ctx, cap, shown, deadline, sub,
 
 
 def _maybe_cap_swap(lease, t0, waits):
-    """Raise CapSwap when this wait has lasted CAP_SWAP_AFTER and a seat is free.
+    """Raise CapSwap on a check tick when another legal seat is free.
 
-    Checked about once a minute (every third 20 s poll) so a long queue does
-    not hammer the lease table."""
+    CAP_SWAP_AFTER <= 0 disables the swap. Any positive value enables it
+    at once: the first failed lease acquire is waits == 0, which is a
+    check tick, so the attempt moves even when it has waited 0 seconds.
+    Later polls stay on every third wait so a long queue does not hammer
+    the lease table."""
     ctx = _cap_swap_ctx.get()
     if ctx is None or config.CAP_SWAP_AFTER <= 0 or waits % 3:
-        return
-    waited = time.monotonic() - t0
-    if waited < config.CAP_SWAP_AFTER:
         return
     model, harness, role, tried, avoid = ctx
     sub = cap_substitute(model, harness, role, exclude=tried, avoid_families=avoid)
     if sub:
-        raise CapSwap(sub, waited, lease)
+        raise CapSwap(sub, time.monotonic() - t0, lease)
 
 
 def _lease_release(model, task_id):
