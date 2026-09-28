@@ -389,8 +389,11 @@ class LlmActions(unittest.TestCase):
             "drivers.driver_for = fake_driver_for\n"
             "import captain_autopilot as ap\n"
             "ap._llm_call('prompt')\n"
+            "import captain\n"
             "import json; print(json.dumps({'asked': asked,\n"
-            "  'captain': config.CAPTAIN_MODEL, 'planner': config.PLANNER_MODEL}))\n"
+            "  'captain': config.CAPTAIN_MODEL, 'planner': config.PLANNER_MODEL,\n"
+            "  'persona_names_captain': ('running on ' + config.CAPTAIN_MODEL)\n"
+            "      in captain.CAPTAIN_PERSONA}))\n"
         )
         root = Path(__file__).resolve().parent.parent
         env = dict(os.environ, ARC_FLEET="studio", PYTHONPATH=str(root))
@@ -404,6 +407,8 @@ class LlmActions(unittest.TestCase):
         self.assertEqual(d["asked"]["model"], d["captain"],
                          "_llm_call must ask for the captain's own seat")
         self.assertEqual(d["asked"]["role"], "planner")
+        self.assertTrue(d["persona_names_captain"],
+                        "the persona must name the captain seat, not the studio planner")
 
     def test_the_guard_and_the_authors_follow_the_captain_seat(self):
         """`ask_llm` tests, and the board credits, the seat that did the turn.

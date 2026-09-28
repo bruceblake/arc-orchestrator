@@ -66,7 +66,7 @@ _SCARCE_MODEL, _SCARCE_CAP = config.scarcest_seat()
 
 CAPTAIN_PERSONA = (
     f"You are the CAPTAIN of the ARC multi-model coding fleet, running on "
-    f"{config.PLANNER_MODEL}. You are a supervisor, not an implementer: you "
+    f"{config.CAPTAIN_MODEL}. You are a supervisor, not an implementer: you "
     "do not write code and you never run git. The fleet "
     f"({config.tier_sentence()}) builds software as a governed task DAG — every "
     "task gets its own git worktree, a deterministic verify gate, a "

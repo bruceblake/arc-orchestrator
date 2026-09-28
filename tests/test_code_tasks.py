@@ -3996,14 +3996,13 @@ def _studio_stdout(snippet, **env_extra):
 class RoutingProsePrefersDeepSeekAndOpenSeats(unittest.TestCase):
     """The planner is told who actually implements, from the live roster.
 
-    The hardest tasks prefer DeepSeek only when DeepSeek is on the hard
-    tier. On this commit DeepSeek is medium and GLM-5.3 is the hard ARC
-    seat, so the hardest work names GLM and a hard task is not sent to a
-    medium model the loader would reject. Cursor and Antigravity take the
-    other independent hard tasks while their windows are open. Claude is
-    the studio planner, not a routine implementer. A spent Codex or Claude
-    window is named and left out of the enforced list. The local fleet has
-    neither subscription seat, so that spread sentence is absent.
+    The hardest tasks prefer DeepSeek when DeepSeek is on the hard tier,
+    which is this roster: GLM-5.3 is medium and must not be given that
+    work. Cursor and Antigravity take the other independent hard tasks
+    while their windows are open. Claude is the studio planner, not a
+    routine implementer. A spent Codex or Claude window is named and left
+    out of the enforced list. The local fleet has neither subscription
+    seat, so that spread sentence is absent.
     """
 
     STUDIO_PROSE = """
@@ -4021,18 +4020,21 @@ print(text)
         openai, text = out.split("---", 1)
         openai = openai.split("OPENAI=", 1)[1].strip()
         body, closed = text.split("Plan windows closed right now:", 1)
-        self.assertIn("The hardest tasks prefer GLM-5.3", body)
-        self.assertNotIn(
+        self.assertIn(
             "The hardest tasks prefer DeepSeek-V4.1-Flash-thinking-max", body)
+        self.assertNotIn("The hardest tasks prefer GLM-5.3", body)
         hard_line = next(line for line in body.splitlines()
                          if "hard tasks that need" in line)
         self.assertNotIn("Claude-Opus-5.5", hard_line)
         self.assertNotIn(openai, hard_line)
         self.assertIn("Cursor-Grok-4.7", hard_line)
+        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", hard_line)
         self.assertIn(
             "Spread OTHER independent hard tasks across Cursor-Grok-4.7 and "
             "Antigravity-Gemini", body)
-        self.assertIn("Do not send every hard task to GLM-5.3", body)
+        self.assertIn(
+            "Do not send every hard task to DeepSeek-V4.1-Flash-thinking-max",
+            body)
         self.assertIn("Claude-Opus-5.5 is not a routine implementer", body)
         self.assertIn("Do not assign it as an implementer", body)
         self.assertIn(f"{openai} has a spent plan window. Do not assign it.", body)
@@ -4049,10 +4051,10 @@ print(text)
     def test_local_prose_keeps_deepseek_and_omits_the_subscription_spread(self):
         with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
             text = code_tasks._routing_tiers_prose()
-        self.assertIn("The hardest tasks prefer GLM-5.3", text)
-        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", text)
-        self.assertNotIn(
+        self.assertIn(
             "The hardest tasks prefer DeepSeek-V4.1-Flash-thinking-max", text)
+        self.assertIn("GLM-5.3", text)
+        self.assertNotIn("The hardest tasks prefer GLM-5.3", text)
         self.assertNotIn("Cursor-Grok-4.7", text)
         self.assertNotIn("Antigravity-Gemini", text)
         self.assertNotIn("Spread OTHER independent hard tasks", text)
