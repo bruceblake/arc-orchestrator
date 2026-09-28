@@ -2271,11 +2271,11 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
         self.assertLess(code_tasks._tier_rank(weaker), code_tasks._tier_rank(planned))
 
-    def test_fallback_prefers_free_arc_then_headroom_and_claude_last(self):
-        """Unlimited ARC seats, then the subscription seat with the most headroom.
+    def test_fallback_prefers_claude_then_gpt_then_the_other_seats(self):
+        """A full planned seat falls through to Claude, then GPT-6.
 
-        A recent usage_limit skips that seat. Claude sorts last. The
-        implementer's own family is never the fallback.
+        A recent usage_limit skips that seat. The implementer's own family
+        is never the fallback.
         """
         seats = {
             "Codex-X": ("openai", "codex", 4),
@@ -2328,9 +2328,8 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         model, reason = code_tasks._select_reviewer(
             "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
         self.assertEqual(reason, "planned_full_fallback")
-        self.assertEqual(model, "Cursor-X")
+        self.assertEqual(model, "Claude-X")
         self.assertNotEqual(config.MODEL_FAMILY[model], "deepseek")
-        self.assertNotEqual(model, "Claude-X")
 
     def test_a_crashed_fallback_reviewer_is_recorded_and_is_not_a_rejection(self):
         # The plan is the MEDIUM family's reviewer (glm, since 2026-09-25), so
@@ -3994,15 +3993,14 @@ def _studio_stdout(snippet, **env_extra):
 
 
 class RoutingProsePrefersDeepSeekAndOpenSeats(unittest.TestCase):
-    """The planner is told who actually implements, from the live roster.
+    """The planner is told who implements ordinary code, from the live roster.
 
-    The hardest tasks prefer DeepSeek when DeepSeek is on the hard tier,
-    which is this roster: GLM-5.3 is medium and must not be given that
-    work. Cursor and Antigravity take the other independent hard tasks
-    while their windows are open. Claude is the studio planner, not a
-    routine implementer. A spent Codex or Claude window is named and left
-    out of the enforced list. The local fleet has neither subscription
-    seat, so that spread sentence is absent.
+    GLM-5.3 takes medium work. Hard implementation spreads across DeepSeek,
+    Cursor and Antigravity while their windows are open. Claude implements
+    only Blender, modelling and animation. Claude then GPT-6 plan and
+    review. A spent window is named and left out of the enforced list.
+    The local fleet has neither subscription seat, so those sentences are
+    absent and DeepSeek stays the hard implementer.
     """
 
     STUDIO_PROSE = """
@@ -4020,9 +4018,7 @@ print(text)
         openai, text = out.split("---", 1)
         openai = openai.split("OPENAI=", 1)[1].strip()
         body, closed = text.split("Plan windows closed right now:", 1)
-        self.assertIn(
-            "The hardest tasks prefer DeepSeek-V4.1-Flash-thinking-max", body)
-        self.assertNotIn("The hardest tasks prefer GLM-5.3", body)
+        self.assertNotIn("The hardest tasks prefer", body)
         hard_line = next(line for line in body.splitlines()
                          if "hard tasks that need" in line)
         self.assertNotIn("Claude-Opus-5.5", hard_line)
@@ -4030,13 +4026,13 @@ print(text)
         self.assertIn("Cursor-Grok-4.7", hard_line)
         self.assertIn("DeepSeek-V4.1-Flash-thinking-max", hard_line)
         self.assertIn(
-            "Spread OTHER independent hard tasks across Cursor-Grok-4.7 and "
-            "Antigravity-Gemini", body)
+            "Spread hard implementation across DeepSeek-V4.1-Flash-thinking-max "
+            "and Cursor-Grok-4.7 and Antigravity-Gemini", body)
         self.assertIn(
-            "Do not send every hard task to DeepSeek-V4.1-Flash-thinking-max",
-            body)
-        self.assertIn("Claude-Opus-5.5 is not a routine implementer", body)
-        self.assertIn("Do not assign it as an implementer", body)
+            "Claude-Opus-5.5 implements ONLY 3D asset design", body)
+        self.assertIn(
+            f"Initial planning is Claude-Opus-5.5, then {openai}", body)
+        self.assertIn("prefer Claude-Opus-5.5, then", body)
         self.assertIn(f"{openai} has a spent plan window. Do not assign it.", body)
         self.assertIn("Claude-Opus-5.5 has a spent plan window. Do not assign it.",
                       body)
@@ -4051,16 +4047,52 @@ print(text)
     def test_local_prose_keeps_deepseek_and_omits_the_subscription_spread(self):
         with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
             text = code_tasks._routing_tiers_prose()
-        self.assertIn(
-            "The hardest tasks prefer DeepSeek-V4.1-Flash-thinking-max", text)
+        self.assertNotIn("The hardest tasks prefer", text)
         self.assertIn("GLM-5.3", text)
-        self.assertNotIn("The hardest tasks prefer GLM-5.3", text)
+        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", text)
         self.assertNotIn("Cursor-Grok-4.7", text)
         self.assertNotIn("Antigravity-Gemini", text)
-        self.assertNotIn("Spread OTHER independent hard tasks", text)
+        self.assertNotIn("Spread hard implementation", text)
+        self.assertNotIn("3D asset design", text)
         self.assertNotIn("is the fleet's strongest", text)
         self.assertIn("reviewed by", text)
         self.assertIn("Plan windows closed right now: none", text)
+
+    def test_local_planning_stays_on_deepseek_and_the_planned_reviewer(self):
+        self.assertEqual(drivers.planning_model(), config.PLANNER_MODEL)
+        model, reason = code_tasks._select_reviewer(
+            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, {})
+        self.assertEqual((model, reason), (config.REVIEW_FAMILIES["glm"], "planned"))
+
+    def test_studio_planning_uses_gpt_when_claude_is_closed(self):
+        script = """
+import drivers
+drivers.refresh_usage_blocks = lambda *a, **k: None
+drivers._usage_blocked_until.clear()
+drivers._usage_blocked_until["claude"] = 9e9
+print(drivers.planning_model())
+"""
+        out = _studio_stdout(script).strip()
+        self.assertTrue(out.startswith("GPT-6"), out)
+
+    def test_studio_review_prefers_claude_then_gpt(self):
+        script = """
+import code_tasks, drivers
+drivers.refresh_usage_blocks = lambda *a, **k: None
+drivers._usage_blocked_until.clear()
+model, reason = code_tasks._select_reviewer("glm", "GLM-5.3", None, {})
+print(model)
+print(reason)
+drivers._usage_blocked_until["claude"] = 9e9
+model, reason = code_tasks._select_reviewer("glm", "GLM-5.3", None, {})
+print(model)
+print(reason)
+"""
+        lines = _studio_stdout(script).strip().splitlines()
+        self.assertEqual(lines[0], "Claude-Opus-5.5")
+        self.assertEqual(lines[1], "frontier_review")
+        self.assertTrue(lines[2].startswith("GPT-6"), lines)
+        self.assertEqual(lines[3], "frontier_review")
 
     def test_blocked_harnesses_reads_the_log_and_never_raises(self):
         with mock.patch.object(drivers, "refresh_usage_blocks", None, create=True), \
