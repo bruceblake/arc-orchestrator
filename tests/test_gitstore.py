@@ -1196,3 +1196,159 @@ class GitHubQuota(unittest.TestCase):
         self.assertIn("head=task/t1", calls[-1])
         self.assertIn("git.rest_fallback", [t for t, _ in evs.seen])
         self.assertNotIn(["api", "rate_limit"], calls, "REST path must not wait first")
+
+
+class StaleTrackingRefDoesNotBlockFirstPush(unittest.TestCase):
+    """A stale tracking ref must not make task/<id> un-pushable.
+
+    push_task_branch used plain --force-with-lease, which leases against the
+    LOCAL refs/remotes/origin/<branch>. GitHub deletes the head branch when a
+    PR merges, and nothing prunes the local ref, so it survives as a leftover
+    sha for a branch that no longer exists. The next task on that id was then
+    refused with "stale info" although there was no remote ref left to
+    protect — measured on task/checkpoint-conflict-recovery at 5b4b69f, whose
+    first publication failed against a remote that had no such branch at all.
+
+    The lease now comes from the remote: absence is leased as "must not
+    exist", which still refuses a concurrent creation.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        base = Path(self.dir)
+        self.repo = base / "repo"
+        self.repo.mkdir()
+        git(self.repo, "init", "-q", "-b", "main")
+        git(self.repo, "config", "user.email", "t@t")
+        git(self.repo, "config", "user.name", "t")
+        (self.repo / "a.txt").write_text("one\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "init")
+        # A real bare origin, and a SECOND clone that plays the concurrent
+        # actor — pushing to origin from the repo under test would go through
+        # gitstore and prove nothing about what another machine did.
+        self.origin = base / "origin.git"
+        git(base, "init", "-q", "--bare", str(self.origin))
+        git(self.repo, "remote", "add", "origin", str(self.origin))
+        git(self.repo, "push", "-q", "-u", "origin", "main")
+        self.other = base / "other"
+        git(base, "clone", "-q", str(self.origin), str(self.other))
+        git(self.other, "config", "user.email", "o@o")
+        git(self.other, "config", "user.name", "o")
+
+    def commit_task_branch(self, fname="b.txt", text="two\n", msg="work"):
+        git(self.repo, "checkout", "-q", "-B", "task/t1", "main")
+        (self.repo / fname).write_text(text)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", msg)
+
+    def remote_tip(self, branch="task/t1"):
+        out = git(self.repo, "ls-remote", "origin", f"refs/heads/{branch}")
+        return out.split()[0] if out.strip() else ""
+
+    def test_first_push_succeeds_after_the_remote_branch_was_deleted(self):
+        self.commit_task_branch()
+        git(self.repo, "push", "-q", "-u", "origin", "task/t1")
+        # The PR merged and GitHub deleted the head branch...
+        git(self.repo, "--git-dir", str(self.origin), "update-ref", "-d",
+            "refs/heads/task/t1")
+        self.assertEqual(self.remote_tip(), "", "remote branch must be gone")
+        # ...while the local tracking ref survives as a stale leftover.
+        git(self.repo, "rev-parse", "refs/remotes/origin/task/t1")
+
+        (self.repo / "c.txt").write_text("three\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-qm", "more work")
+
+        ok, note = asyncio.run(gitstore.push_task_branch(self.repo, "t1"))
+        self.assertTrue(ok, f"first publication was blocked: {note}")
+        self.assertEqual(self.remote_tip(),
+                         git(self.repo, "rev-parse", "HEAD").strip())
+
+    def test_a_concurrent_remote_update_is_never_overwritten(self):
+        # No tracking ref at all: this is the OLD dangerous shape of the bug,
+        # where "refresh the lease" would have adopted whatever the remote has.
+        self.commit_task_branch(msg="ours")
+        ours = git(self.repo, "rev-parse", "HEAD")
+
+        # Another actor creates task/t1 on the remote with different work.
+        git(self.other, "checkout", "-q", "-B", "main", "origin/main")
+        (self.other / "theirs.txt").write_text("theirs\n")
+        git(self.other, "add", "-A")
+        git(self.other, "commit", "-qm", "theirs")
+        git(self.other, "push", "-q", "origin", "HEAD:refs/heads/task/t1")
+        theirs = self.remote_tip()
+
+        ok, note = asyncio.run(gitstore.push_task_branch(self.repo, "t1"))
+        self.assertFalse(ok, "a concurrent update must not be overwritten")
+        self.assertIn("rejected", note)
+        self.assertEqual(self.remote_tip(), theirs, "remote tip was clobbered")
+        self.assertNotEqual(self.remote_tip(), ours)
+
+    def test_a_concurrent_creation_between_lookup_and_push_is_refused(self):
+        # The window that remains after the lookup: the branch is created on
+        # the remote DURING the push. A pre-push hook makes that ordering
+        # deterministic instead of racy.
+        self.commit_task_branch()
+        ours = git(self.repo, "rev-parse", "HEAD")
+        git(self.other, "checkout", "-q", "-B", "main", "origin/main")
+        (self.other / "theirs.txt").write_text("theirs\n")
+        git(self.other, "add", "-A")
+        git(self.other, "commit", "-qm", "theirs")
+        marker = Path(self.dir) / "injected"
+        git_dir = Path(git(self.repo, "rev-parse", "--git-dir").strip())
+        if not git_dir.is_absolute():
+            git_dir = self.repo / git_dir
+        hook = git_dir / "hooks" / "pre-push"
+        hook.write_text(
+            "#!/bin/sh\n"
+            f"if [ ! -f {marker} ]; then\n"
+            f"  touch {marker}\n"
+            f"  git -C {self.other} push -q origin HEAD:refs/heads/task/t1\n"
+            "fi\n"
+            "exit 0\n")
+        hook.chmod(0o755)
+
+        ok, note = asyncio.run(gitstore.push_task_branch(self.repo, "t1"))
+        self.assertTrue(marker.exists(), "the race was never exercised")
+        self.assertFalse(ok, "a branch created mid-push must not be overwritten")
+        self.assertNotEqual(self.remote_tip(), ours)
+
+    def test_a_failed_lookup_is_not_read_as_absence(self):
+        # A dead remote is not evidence of absence: the ordinary lease must
+        # survive, or one network blip would fake a "must not exist" push.
+        self.commit_task_branch()
+        git(self.repo, "remote", "set-url", "origin", str(Path(self.dir) / "gone.git"))
+        self.assertIsNone(
+            asyncio.run(gitstore._remote_has_branch(self.repo, "task/t1")))
+
+    def test_a_lookup_that_times_out_falls_back_to_the_plain_lease(self):
+        # `_git` raises GitError on GIT_TIMEOUT even with check=False
+        # (gitstore.py:408-411), so a hung ls-remote does not "return None" on
+        # its own. If the helper let that through, it would escape
+        # push_task_branch's `except GitError` and fail the publish node
+        # instead of falling back to the ordinary lease — the opposite of
+        # what the helper documents.
+        self.commit_task_branch()
+        real_git = gitstore._git
+        seen = []
+
+        async def flaky(args, cwd, check=True):
+            seen.append(list(args))
+            if args[:1] == ["ls-remote"]:
+                raise gitstore.GitError("git ls-remote timed out")
+            return await real_git(args, cwd, check=check)
+
+        with mock.patch.object(gitstore, "_git", flaky):
+            ok, note = asyncio.run(gitstore.push_task_branch(self.repo, "t1"))
+
+        self.assertTrue(ok, f"a hung lookup must not fail the push: {note}")
+        self.assertTrue([a for a in seen if a[:1] == ["ls-remote"]],
+                        "the lookup was never attempted")
+        pushes = [a for a in seen if a[:1] == ["push"]]
+        self.assertEqual(len(pushes), 1)
+        # Leased the ordinary way, NOT as "must not exist": a lookup that
+        # timed out is not evidence that the remote branch is gone.
+        self.assertIn("--force-with-lease", pushes[0])
+        self.assertNotIn("--force-with-lease=task/t1:", pushes[0])
