@@ -725,11 +725,14 @@ USAGE_LIMIT_MARGIN = float(os.getenv("ARC_USAGE_LIMIT_MARGIN", "60"))
 # models. ARC_USAGE_SWAP=0 restores the old behaviour: wait out the window on
 # the same model.
 USAGE_SWAP = os.getenv("ARC_USAGE_SWAP", "1").lower() not in ("0", "false", "no", "")
-# Capacity swap (drivers.cap_substitute): an attempt still queued for a slot
-# after this many seconds moves to a seat with a FREE slot at the same tier or
-# above, never into the family it must stay out of (Rules 1 and 2 -- the same
-# rules as the usage swap). 0 turns it off. Measured 2026-09-25: GLM-5.3
-# logged 5254 cap-waits in 24 h while two hard-tier seats sat idle.
+# Capacity swap (drivers.cap_substitute): when a model lease cannot be
+# acquired, the attempt moves to a seat with a FREE slot at the same tier
+# or above, never into the family it must stay out of (Rules 1 and 2 --
+# the same rules as the usage swap). The 600s delay is retired: a positive
+# value enables an immediate move on the first failed lease acquire, and 0
+# disables it. The default stays 600 so existing deployments stay enabled.
+# Measured 2026-09-25: GLM-5.3 logged 5254 cap-waits in 24 h while two
+# hard-tier seats sat idle.
 CAP_SWAP_AFTER = float(os.getenv("ARC_CAP_SWAP_AFTER", "600"))
 # Driver leases (store.driver_leases) enforce per-model driver caps ACROSS
 # orchestrator processes — a terminal queue and dashboard-launched runs cannot

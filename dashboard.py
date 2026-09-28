@@ -4975,7 +4975,11 @@ def _escalate_task(body):
     if not target:
         target = code_tasks._next_tier(current)
         if target is None:
-            return {"error": f"{current} is already the top tier"}, 409
+            top = config.ESCALATION_PATH[-1] if config.ESCALATION_PATH else None
+            if current == top:
+                return {"error": f"{current} is already the top tier"}, 409
+            return {"error": f"{current} has no open higher tier "
+                             "(later seats are usage-blocked)"}, 409
     if target not in config.IMPLEMENTER_MODELS:
         return {"error": f"unknown model {target!r}; choose from "
                          f"{sorted(config.IMPLEMENTER_MODELS)}"}, 400
