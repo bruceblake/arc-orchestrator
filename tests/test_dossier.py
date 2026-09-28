@@ -145,11 +145,14 @@ class Render(unittest.TestCase):
             "## Done\nDONE-CLAIM\n## Remaining\nREMAINING-X\n## Decisions\n- DEC-1\n"
             "## Dead ends\n- DEAD-1\n## Gotchas\nGOTCHA-1\n## Next step\nNEXT-1\n")
         dossier.harvest_handoff(p, t, wt, attempt=1, model="m", role="implementer")
-        for i, m in enumerate(["DeepSeek-V4.1-Flash-thinking-max", "GLM-5.3"], 1):
+        # The escalation shape the 2026-09-25 roster dictates: GLM-5.3 is the
+        # medium/weaker tier, DeepSeek the hard one, so a task escalates
+        # UPWARD to DeepSeek.
+        for i, m in enumerate(["GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"], 1):
             dossier.record_attempt(p, t, attempt=i, model=m, outcome="gate_failed",
                                    failure_excerpt=f"EXCERPT-{i}",
                                    files_changed=["a.py"])
-        dossier.note_model_change(p, t, "escalation 1: DS -> GLM")
+        dossier.note_model_change(p, t, "escalation 1: GLM -> DS")
         dossier.set_pr(p, t, 42, "https://x/pull/42")
         dossier.import_notes(p, t, "OPERATOR-SAYS", "captain")
         return p, t
@@ -165,8 +168,8 @@ class Render(unittest.TestCase):
         self.assertEqual(pos, sorted(pos))
         self.assertIn("do not relitigate", text)
         self.assertIn("do not retry", text)
-        self.assertIn("escalation 1: DS -> GLM", text)
-        self.assertIn("GLM-5.3 [hard]", text)
+        self.assertIn("escalation 1: GLM -> DS", text)
+        self.assertIn("DeepSeek-V4.1-Flash-thinking-max [hard]", text)
         self.assertNotIn("DONE-CLAIM", text)
 
     def test_reviewer_sees_the_claimed_done(self):

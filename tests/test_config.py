@@ -107,9 +107,10 @@ class RoutingInvariants(unittest.TestCase):
     def test_the_planner_holds_a_planner_capable_roster_role(self):
         """PLANNER_MODEL must be a roster model the roster TRUSTS to plan.
 
-        The two-model fleet (2026-09-12): GLM-5.3 plans; DeepSeek-V4.1-Flash-
-        thinking-max implements and reviews but never plans. Stated as the
-        rule — not "PLANNER_MODEL == GLM-5.3" — so a roster move that grants
+        Operator decision 2026-09-25 (the 2026-09-12 note had this reversed):
+        DeepSeek-V4.1-Flash-thinking-max is the planner; GLM-5.3 is the other
+        family and does not plan. Stated as the rule — not "PLANNER_MODEL ==
+        DeepSeek-V4.1-Flash-thinking-max" — so a roster move that grants
         planner to another model does not need this test edited.
         """
         planner = config.PLANNER_MODEL
@@ -121,6 +122,106 @@ class RoutingInvariants(unittest.TestCase):
         # And it is constructible: roster role and driver enforcement must agree.
         drivers = __import__("drivers")
         self.assertEqual(drivers.driver_for(planner, "planner").role, "planner")
+
+    def test_the_captain_starts_on_deepseek_in_every_profile(self):
+        """The captain's turn seat is DeepSeek, whatever PLANNER_MODEL is.
+
+        Operator directive 2026-09-25. On the studio profile PLANNER_MODEL is
+        Claude-Opus-5.5 (the plan-backed architect, deliberately last in the
+        roster), and the always-on captain firing driver.usage_swap about every
+        10 minutes off a spent Claude weekly window was the bug. Stated as the
+        RULE (a planner-capable DeepSeek seat, constructible for the planner
+        role), not as a hardcoded string, so a roster move that changes the
+        captain's family does not need this test rewritten.
+        """
+        import json
+        import subprocess
+        import sys
+        snippet = (
+            "import config, json\n"
+            "print(json.dumps({'captain': config.CAPTAIN_MODEL,\n"
+            "  'planner': config.PLANNER_MODEL,\n"
+            "  'family': config.MODEL_FAMILY.get(config.CAPTAIN_MODEL),\n"
+            "  'planner_role': config.model_may(config.CAPTAIN_MODEL, 'planner')}))\n"
+        )
+        root = pathlib.Path(__file__).resolve().parent.parent
+        seen = {}
+        for fleet in ("local", "studio", "studio-api"):
+            env = dict(os.environ, ARC_FLEET=fleet, PYTHONPATH=str(root))
+            env.pop("ARC_CAPTAIN_MODEL", None)
+            p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
+                               text=True, env=env, cwd=str(root), timeout=60)
+            self.assertEqual(p.returncode, 0, f"{fleet}: {p.stderr}")
+            d = seen[fleet] = json.loads(p.stdout)
+            self.assertEqual(d["captain"], "DeepSeek-V4.1-Flash-thinking-max",
+                             f"{fleet}: the captain must start on DeepSeek")
+            self.assertEqual(d["family"], "deepseek", fleet)
+            self.assertTrue(d["planner_role"],
+                            f"{fleet}: the captain's seat must hold the planner role")
+        # The two settings are independent, and each profile must be read from
+        # its OWN import — never from this process's ambient profile. Local
+        # keeps them equal (DeepSeek is that planner too); studio's planner is
+        # Claude, the seat the captain no longer starts on.
+        self.assertEqual(seen["local"]["captain"], seen["local"]["planner"])
+        self.assertEqual(seen["studio"]["planner"], "Claude-Opus-5.5")
+        self.assertNotEqual(seen["studio"]["captain"],
+                            seen["studio"]["planner"],
+                            "studio: the captain must not start on the planner seat")
+
+    def test_tier_sentence_is_derived_from_the_roster(self):
+        """The sentence the personas quote must follow IMPLEMENT_TIERS.
+
+        A tier may hold SEVERAL models (studio hard does), so the
+        assertion is on the derived phrase, not on one model per tier.
+        """
+        text = config.tier_sentence()
+        for tier, models in config.IMPLEMENT_TIERS.items():
+            self.assertIn(f"{' or '.join(models)} is the {tier} tier", text)
+        for model in sorted(config.IMPLEMENTER_MODELS):
+            if config.model_may(model, "planner"):
+                self.assertIn(model, text.split("may plan")[0])
+            else:
+                self.assertNotIn(model, text.split(";")[-1])
+        # Weakest tier first, matching TIER_ORDER.
+        order = [t for t in config.TIER_ORDER if t in config.IMPLEMENT_TIERS]
+        self.assertTrue(order)
+        self.assertLess(text.index(f"is the {order[0]} tier"),
+                        text.index(f"is the {order[-1]} tier"))
+
+    def test_scarcest_seat_is_the_smallest_driver_cap(self):
+        """The captain's pressure note must name the scarce slot, not the planner."""
+        model, cap = config.scarcest_seat()
+        self.assertIsNotNone(model)
+        self.assertIn(model, config.IMPLEMENTER_MODELS)
+        live = {m: config.driver_limit(m, interactive=True)
+                for m in config.IMPLEMENTER_MODELS}
+        self.assertEqual(cap, live[model])
+        self.assertEqual(cap, min(live.values()),
+                         f"{model} is not the scarcest of {live}")
+        # On the local profile the scarce seat is NOT the planner any more:
+        # after 2026-09-25 the planner holds 10 and GLM-5.3 holds 4.
+        if config.PLANNER_MODEL is not None and min(live.values()) < live[
+                config.PLANNER_MODEL]:
+            self.assertNotEqual(model, config.PLANNER_MODEL)
+
+    def test_a_captain_seat_that_cannot_plan_falls_back_not_breaks(self):
+        """A bad ARC_CAPTAIN_MODEL must not leave the captain seatless."""
+        import json
+        import subprocess
+        import sys
+        snippet = ("import config, json; print(json.dumps("
+                   "{'m': config.CAPTAIN_MODEL, "
+                   "'ok': config.model_may(config.CAPTAIN_MODEL, 'planner')}))")
+        root = pathlib.Path(__file__).resolve().parent.parent
+        for bad in ("Kimi-K3", "GLM-5.3", ""):
+            env = dict(os.environ, ARC_FLEET="studio", ARC_CAPTAIN_MODEL=bad,
+                       PYTHONPATH=str(root))
+            p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
+                               text=True, env=env, cwd=str(root), timeout=60)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            d = json.loads(p.stdout)
+            self.assertTrue(d["ok"], f"ARC_CAPTAIN_MODEL={bad!r} -> {d['m']}")
+            self.assertIsNotNone(d["m"])
 
     def test_every_model_below_the_top_has_an_escalation_successor(self):
         """A non-top implementer must reach a stronger tier on escalation."""

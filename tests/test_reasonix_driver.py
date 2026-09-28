@@ -62,8 +62,12 @@ class Routing(unittest.TestCase):
         self.assertIsInstance(old, drivers.DeepseekDriver, "dsh stays pinnable for benches")
 
     def test_roles_still_come_from_the_roster(self):
+        # 2026-09-25: DeepSeek HOLDS the planner role now (it is the hard tier
+        # and the captain's seat), so the roster refusal is shown with a model
+        # that does NOT: GLM-5.3 is medium and holds no planner role. A retired
+        # model is refused outright, and bench=True is still the override.
         with self.assertRaises(ValueError):
-            drivers.ReasonixDriver(DS, "planner")       # DeepSeek never plans
+            drivers.ReasonixDriver("GLM-5.3", "planner")   # GLM-5.3 does not plan
         with self.assertRaises(ValueError):
             drivers.ReasonixDriver("Kimi-K3", "implementer")   # retired
         drivers.ReasonixDriver(DS, "planner", bench=True)   # a bench may override

@@ -2,7 +2,7 @@
 
 The multi-model code fleet is tiered by task difficulty and role. Every
 routing decision below is made at plan time — by
-GLM-5.3 in `main.py code plan`
+DeepSeek-V4.1-Flash-thinking-max in `main.py code plan`
 (`config.PLANNER_MODEL`), or by whoever writes a task file by hand — and is
 enforced again by `code_tasks.load_taskfile`, which remaps retired model
 names and rejects anything else that violates it. There is no runtime
@@ -10,12 +10,13 @@ triage.
 
 ## Model fleet
 
-Two models, two harnesses (operator decision 2026-09-12):
+Two models, two harnesses (operator decision 2026-09-12; tiers and roles
+corrected 2026-09-25 — the 2026-09-12 note had them reversed):
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
-| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 10 |
+| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 10 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement, Review, PR-review | 4 | 4 |
 
 Subscription seats (studio profile, 2026-09-24) are not unlimited. The plan
 window is the real limit; local caps in `config._SEAT_CAP` keep a burst from
@@ -36,10 +37,11 @@ Context windows and defaults per the official ARC docs
 `reasoning_effort` max; **DeepSeek-V4.1-Flash** (and all thinking variants)
 512k context, concurrency 10, default `reasoning_effort` high.
 
-**GLM-5.3 is the fleet's strongest model** — hard tier, the planner, the last
-escalation stage. **DeepSeek-V4.1-Flash-thinking-max (DS-max) is the
-medium-tier workhorse**: much faster, carries the implementation load,
-reviews, and **never plans**.
+**DeepSeek-V4.1-Flash-thinking-max (DS-max) is the fleet's strongest
+model** — operator decision 2026-09-25, and the 2026-09-12 note that said
+otherwise was corrected to match: hard tier, the planner, the last
+escalation stage. **GLM-5.3 is the other family, on the medium tier**: it
+implements, reviews and PR-reviews, and **never plans**.
 
 - **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 4,
   `deepseek` 10). GLM's 4 is the official ARC docs value (docs.arc.vt.edu,
@@ -67,9 +69,13 @@ reviews, and **never plans**.
   batch callers on the
   planner model see one slot fewer while the reserve can afford to give
   (`INTERACTIVE_RESERVE`, reduced by `_apply_reserve` while it would leave
-  batch under `MIN_BATCH_SLOTS` = 2), so with GLM at 4 batch sees 3 and
-  interactive the full 4 — `ARC_INTERACTIVE_RESERVE=0` hands batch the
-  fourth slot when nobody is chatting. `ARC_DRIVER_LIMIT_GLM=1` re-serialises
+  batch under `MIN_BATCH_SLOTS` = 2). The planner is
+  DeepSeek-V4.1-Flash-thinking-max (cap 10), so batch DeepSeek sees 9 and
+  interactive the full 10, while GLM-5.3 keeps its whole 4 for batch — the
+  reserve deliberately does NOT touch it (pinning it to the planner is why
+  `tests/test_config.py::test_no_other_model_loses_a_slot` holds).
+  `ARC_INTERACTIVE_RESERVE=0` hands the planner's slot to batch when nobody
+  is chatting. `ARC_DRIVER_LIMIT_GLM=1` re-serialises
   GLM if the backend tightens persistently.
 - GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
   **`reasonix`** (`drivers.ReasonixDriver`, binary via `config.reasonix_bin()`).
@@ -96,13 +102,13 @@ rather than rejecting a decomposition that is still good.
 
 | Tier | Work | Model |
 |---|---|---|
-| medium | moderate AND very basic/mechanical implementation | DeepSeek-V4.1-Flash-thinking-max |
-| hard | complex / multi-file / architectural | GLM-5.3 |
+| medium | moderate AND very basic/mechanical implementation | GLM-5.3 |
+| hard | complex / multi-file / architectural | DeepSeek-V4.1-Flash-thinking-max |
 
 There is no basic tier: with gpt-oss-120b retired (2026-09-11) the medium
 tier is the floor. Within the fleet,
-GLM-5.3 takes the hardest tasks — it is the fleet's
-strongest model (operator decision, 2026-09-12), and there is no tier above
+DeepSeek-V4.1-Flash-thinking-max takes the hardest tasks — it is the fleet's
+strongest model (operator decision 2026-09-25), and there is no tier above
 it to escalate to.
 
 Examples of medium: boilerplate, renames, simple utilities, config edits,
@@ -112,7 +118,9 @@ design, or architectural judgment.
 
 ## Planning and review
 
-- **Both live models may review; only GLM-5.3 may plan.** In the task file
+- **Both live models may review; on the local profile only
+  DeepSeek-V4.1-Flash-thinking-max may plan** (the studio profile adds
+  Claude-Opus-5.5). In the task file
   schema the
   reviewer field names a review *family* — `glm`, or `deepseek`
   (`config.REVIEW_FAMILIES`, which maps each token to the live model that
@@ -125,14 +133,19 @@ design, or architectural judgment.
   and the driver constructors enforce it — `OpencodeDriver` and
   `DeepseekDriver`
   raise `ValueError` when constructed with a role the model's roster row does
-  not allow. There is no per-model if-chain; DeepSeek's row simply has no
-  `planner`.
-- GLM-5.3 is the main orchestrator/planner:
-  `main.py code plan` invokes `plan_tasks`, which runs
-  `OpencodeDriver(config.PLANNER_MODEL, "planner")`. GLM-5.3 planning is slow
-  on big goals — fine: total budgets are unlimited by default and the planner
-  idle budget is 3000 s. See [runbook.md](runbook.md) § "Planning a large
-  goal".
+  not allow. There is no per-model if-chain; GLM-5.3's row simply has no
+  `planner` (operator decision 2026-09-25).
+- The captain autopilot's OWN turn seat is `config.CAPTAIN_MODEL`, a
+  roster-validated setting SEPARATE from `PLANNER_MODEL`: it starts on
+  DeepSeek on every fleet profile, including studio, where the planner is
+  Claude-Opus-5.5. A spent DeepSeek window still swaps through
+  `drivers.usage_substitute` — that is the outage path, not immunity to one.
+- DeepSeek-V4.1-Flash-thinking-max is the main orchestrator/planner:
+  `main.py code plan` invokes `plan_tasks`, which runs the planner driver for
+  `config.PLANNER_MODEL` (`ReasonixDriver` on the local profile). Planning a
+  large goal is slow — fine: total budgets are unlimited by default and the
+  planner idle budget is 3000 s. See [runbook.md](runbook.md) § "Planning a
+  large goal".
 
 ## Cross-review matrix
 
@@ -220,7 +233,8 @@ with it, so a stale override for a retired model is simply not read.
 
 Models arrive and leave on dates the provider sets. Every model constant in
 `config` — `IMPLEMENTER_MODELS`, `IMPLEMENT_TIERS`, `MODEL_FAMILY`,
-`MODEL_HARNESS`, `MODEL_ROLES`, `REVIEW_FAMILIES`, `PLANNER_MODEL`, the
+`MODEL_HARNESS`, `MODEL_ROLES`, `REVIEW_FAMILIES`, `PLANNER_MODEL`,
+`CAPTAIN_MODEL`, the
 default `ESCALATION_PATH`, the measured concurrency caps — is derived from the
 rows of `ROSTER` that are live **today**, so a transition is a date in one
 table, not an edit in six places on the morning it happens.
@@ -229,8 +243,8 @@ table, not an edit in six places on the morning it happens.
 |---|---|---|---|---|
 | DeepSeek-V4-Flash | opencode | medium | implement, PR-review | until 2026-09-12 |
 | Kimi-K3 | kimi | hard | all | retired 2026-09-12 (row deleted) |
-| DeepSeek-V4.1-Flash-thinking-max | reasonix (dsh 2026-09-12..13) | medium | implement, review, PR-review | from 2026-09-12 |
-| GLM-5.3 | opencode | hard | all | — |
+| DeepSeek-V4.1-Flash-thinking-max | reasonix (dsh 2026-09-12..13) | hard | all | from 2026-09-12 |
+| GLM-5.3 | opencode | medium | implement, review, PR-review | — |
 
 gpt-oss-120b was retired on 2026-09-11 (operator decision). There is no
 "basic" tier: mechanical work routes to the medium tier.
@@ -251,7 +265,8 @@ for — so it is gone from `config.FAMILIES`, from `MODEL_ROLES`, from
 `harness_runs` rows still price through `MODEL_PRICING`, and `KimiDriver`
 still refuses to construct loudly for old transcripts. A taskfile that still
 names it loads: `code_tasks.RETIRED_MODELS` remaps `Kimi-K3` onto the
-strongest live tier (GLM-5.3), and a taskfile naming a retired reviewer family
+strongest live tier (DeepSeek-V4.1-Flash-thinking-max), and a taskfile naming a retired
+reviewer family
 is remapped by `config.cross_family_reviewer`.
 
 **Preview any date** with `ARC_ROSTER_DATE=YYYY-MM-DD` — the whole test suite

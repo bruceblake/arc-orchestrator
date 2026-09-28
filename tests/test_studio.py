@@ -56,7 +56,11 @@ class TestProfileIsolation(unittest.TestCase):
         self.assertEqual(config.FLEET, "local")
         self.assertFalse(config.STUDIO)
         self.assertEqual(sorted(config.FAMILIES), ["deepseek", "glm"])
-        self.assertEqual(config.PLANNER_MODEL, "GLM-5.3")
+        # Operator decision 2026-09-25: DeepSeek is the stronger model (hard
+        # tier, planner); GLM-5.3 is medium and does not plan. The captain's
+        # own seat is DeepSeek, which on this profile is also the planner.
+        self.assertEqual(config.PLANNER_MODEL, "DeepSeek-V4.1-Flash-thinking-max")
+        self.assertEqual(config.CAPTAIN_MODEL, "DeepSeek-V4.1-Flash-thinking-max")
         self.assertEqual(config.EXTERNAL_MODELS, set())
         self.assertEqual(config.MODEL_HARNESS_ALIAS, {})
 

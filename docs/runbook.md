@@ -98,8 +98,9 @@ cd /home/proxyie/arc-orchestrator
 ## 2. Plan -> run workflow
 
 The code workload is a DAG of coding-agent tasks described in a JSON task
-file. Two entry points build one: GLM-5.3 as the
-planner (CLI) or the dashboard's plan tab.
+file. Two entry points build one: the planner —
+DeepSeek-V4.1-Flash-thinking-max (`config.PLANNER_MODEL`) — via the CLI or the
+dashboard's plan tab.
 
 ### 2.0 Where you talk, and where the project lives
 
@@ -131,7 +132,8 @@ cd /home/proxyie/arc-orchestrator
 .venv/bin/python main.py code plan "<goal>" /path/to/repo
 ```
 
-- `code plan` asks GLM-5.3 (the planner) to break the goal into 2–8 small
+- `code plan` asks DeepSeek-V4.1-Flash-thinking-max (the planner) to break
+  the goal into 2–8 small
   tasks and writes the task file to `~/tasks/<goal-slug>.json`, then prints its
   path plus a `describe(...)` summary of the resolved DAG
   (implement/review pairing, deps, verify gates) and a `project contract:`
@@ -141,7 +143,8 @@ cd /home/proxyie/arc-orchestrator
 
 #### Planning a large goal — no total budget by default
 
-GLM-5.3 planning is **slow on big goals**: one long agentic read of the repo,
+Planning is **slow on big goals** (`config.PLANNER_MODEL`;
+DeepSeek-V4.1-Flash-thinking-max on the local profile): one long agentic read of the repo,
 then a single JSON plan. There is no total wall-clock budget by default —
 `ARC_PLANNER_TIMEOUT` defaults to 0 = unlimited (since 2026-09-14) — so a
 large goal needs no env var. What still applies is the planner **idle**
@@ -416,9 +419,9 @@ downstream taskfile's project block:
 
 Three standalone agents in `gh_ops.py` — outside the governed pipeline (no
 worktree, gate, or publish). gh roles require **planner** permission, which
-today only GLM-5.3 has, so `--model GLM-5.3` is the effective override of
+today only DeepSeek-V4.1-Flash-thinking-max has, so
 `ARC_GH_MODEL` (default `config.GH_MODEL` = `config.PLANNER_MODEL` =
-GLM-5.3).
+DeepSeek-V4.1-Flash-thinking-max) is the effective override.
 Everything **previews by default**: `--apply-labels`, `--create`, and
 `--post` are the only flags that write to GitHub.
 
@@ -552,7 +555,7 @@ new one:
   - A **capability failure** — the row's `error` says the model exhausted its
     fix rounds or escalation path — retries **one tier higher** in
     `config.ESCALATION_PATH` (default
-    `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`) with a fresh fix
+    `GLM-5.3 → DeepSeek-V4.1-Flash-thinking-max`, weakest first) with a fresh fix
     budget, because the old run proved that model insufficient.
   - An **infrastructure failure** — the run process was killed, the graph was
     cancelled, the harness crashed — retries at the **same tier**. Being
@@ -778,7 +781,7 @@ well past that. (The measurements that set this budget were taken on the
 retired three-model fleet: every planner "stall" on 2026-09-11/12 fired after
 exactly 59 bytes — the version handshake — with other drivers live, i.e. a
 healthy process killed for being queued, and the retry ladder then repeated it
-eight more times. GLM-5.3, today's planner, is slower still; on very large
+eight more times. The planner now runs on DeepSeek-V4.1-Flash-thinking-max;
 goals the planner's longer total budget (`ARC_PLANNER_TIMEOUT`, default 5400 s)
 already gives it room — see §2.1.)
 
@@ -1172,7 +1175,8 @@ dashboard.
 ## Cross-references
 
 - [`../AGENTS.md`](../AGENTS.md) — the agent tasking/behaviour contract.
-- [`orchestration-contract.md`](orchestration-contract.md) — how GLM-5.3 plans and the graph runner executes it.
+- [`orchestration-contract.md`](orchestration-contract.md) — how the planner (`config.PLANNER_MODEL`) plans and the graph runner
+  executes it.
 - [`model-tiers.md`](model-tiers.md) — model routing tiers and the cross-review matrix.
 - [`concurrency-limits.md`](concurrency-limits.md) — per-model caps and the driver semaphores.
 - [`taskfile-schema.md`](taskfile-schema.md) — exact task-file schema and validation rules.
@@ -1287,6 +1291,16 @@ systemctl --user enable --now arc-captain`. It ticks every
 Tuning: `ARC_CAPTAIN_MAX_ACTIONS_PER_TICK` (default 5),
 `ARC_CAPTAIN_COOLDOWN_S` (default 1800 — one target is never nagged twice
 in 30 min), `ARC_CAPTAIN_STANDUP_S` (default 3600).
+
+Its judgment turn starts on `config.CAPTAIN_MODEL` — its own
+roster-validated seat, DeepSeek-V4.1-Flash-thinking-max on every fleet
+profile (operator directive 2026-09-25), NOT `config.PLANNER_MODEL`
+(studio's planner is Claude, and a spent Claude weekly window used to
+swap the captain about every 10 minutes while DeepSeek had capacity).
+Override with `ARC_CAPTAIN_MODEL`; a model without the planner role is
+refused and the next planner-capable seat is used. A spent seat still
+swaps through `drivers.usage_substitute` rather than parking the tick —
+that is the outage path, not immunity to a provider outage.
 
 Pause without stopping the service: `touch logs/captain/autopilot.pause`
 (remove the file to resume), or the Pause / Resume button in the dashboard's

@@ -6,7 +6,7 @@ AI agent in its own git worktree, behind a deterministic verify gate and a
 cross-family review. Taskfiles live in `config.TASKS_DIR` (default `~/tasks`,
 override with `ARC_TASKS_DIR`). They are either written by hand or drafted by
 the planner — `main.py code plan "<goal>" <repo>`
-(GLM-5.3) — and executed by
+(DeepSeek-V4.1-Flash-thinking-max, `config.PLANNER_MODEL`) — and executed by
 `main.py code run <taskfile>`.
 
 Every task runs through this pipeline (full contract in
@@ -150,8 +150,8 @@ actually serves, so this table is a snapshot — `main.py code run <file>
 
 | Tier | Model | Use for |
 |---|---|---|
-| medium | `DeepSeek-V4.1-Flash-thinking-max` | Documentation, mechanical edits, one self-contained feature — the fast workhorse that carries the implementation load |
-| hard | `GLM-5.3` | Deep understanding, multi-file reasoning, large refactors — the fleet's strongest model, which also plans and is the last escalation stage |
+| medium | `GLM-5.3` | Documentation, mechanical edits, one self-contained feature — the medium/mechanical tier |
+| hard | `DeepSeek-V4.1-Flash-thinking-max` | Deep understanding, multi-file reasoning, large refactors — the fleet's strongest model (operator decision 2026-09-25), which also plans and is the last escalation stage |
 
 There is no basic tier (gpt-oss-120b was retired 2026-09-11). Kimi-K3 was
 retired from this repo on 2026-09-12, so `medium` and `hard` are the only
@@ -337,9 +337,9 @@ Not checked by the loader (know where these live):
 
 ## 4. Complete example
 
-One hard task first (`notes-schema`, GLM-5.3 implements, deepseek reviews),
-then three tasks fanning out in parallel once it merges — all medium, all
-implemented by DeepSeek-V4.1-Flash-thinking-max and reviewed by glm —
+One hard task first (`notes-schema`, DeepSeek-V4.1-Flash-thinking-max
+implements, glm reviews), then three tasks fanning out in parallel once it
+merges — all medium, all implemented by GLM-5.3 and reviewed by deepseek —
 with disjoint `files_hint` (glm reviews the DeepSeek work; the reverse pairing
 is deepseek reviewing GLM-5.3):
 
@@ -353,8 +353,8 @@ is deepseek reviewing GLM-5.3):
         "id": "notes-schema",
         "title": "Note model and JSON persistence",
         "prompt": "This repo is a small note-taking CLI. Create the package dir src/notes/ (with an empty __init__.py) and src/notes/schema.py defining: a Note dataclass with fields id: str, text: str, created: str (ISO-8601); load_notes(path) -> list[Note] that reads a JSON array of note objects (missing file returns []); save_notes(path, notes) that writes the same shape back. Acceptance: python -m py_compile passes and both functions exist with exactly these names. Do not add a CLI, tests, or touch any other file.",
-        "model": "GLM-5.3",
-        "reviewer": "deepseek",
+        "model": "DeepSeek-V4.1-Flash-thinking-max",
+        "reviewer": "glm",
         "verify_cmd": "python -m py_compile src/notes/schema.py && grep -q 'def load_notes' src/notes/schema.py && grep -q 'def save_notes' src/notes/schema.py",
         "files_hint": ["src/notes/__init__.py", "src/notes/schema.py"],
         "deps": []
@@ -363,8 +363,8 @@ is deepseek reviewing GLM-5.3):
         "id": "notes-cli",
         "title": "add and list CLI commands",
         "prompt": "src/notes/schema.py already exists (merged by a previous task) and provides Note, load_notes(path), save_notes(path, notes) — read it first. Create src/notes/cli.py with an argparse CLI runnable as python -m notes.cli: subcommand add \"<text>\" appends a Note (id=str(uuid4()), created=now ISO-8601) using save_notes to notes.json in the current directory; subcommand list prints one '<created>  <text>' line per note via load_notes. Acceptance: py_compile passes and both subcommands are registered. Do not modify schema.py or any other file.",
-        "model": "DeepSeek-V4.1-Flash-thinking-max",
-        "reviewer": "glm",
+        "model": "GLM-5.3",
+        "reviewer": "deepseek",
         "verify_cmd": "python -m py_compile src/notes/cli.py && grep -q '\"add\"' src/notes/cli.py && grep -q '\"list\"' src/notes/cli.py",
         "files_hint": ["src/notes/cli.py"],
         "deps": ["notes-schema"]
@@ -373,8 +373,8 @@ is deepseek reviewing GLM-5.3):
         "id": "notes-export",
         "title": "Markdown and JSON export module",
         "prompt": "src/notes/schema.py already exists (merged by a previous task) and provides Note and load_notes — read it first. Create src/notes/export.py with export_notes(notes: list[Note], fmt: str) -> str: fmt='md' returns one '- <created> <text>' bullet per note; fmt='json' returns a JSON array of {id, text, created}; any other fmt raises ValueError. Acceptance: py_compile passes, the function exists with that signature, unknown fmt raises. Do not modify schema.py, cli.py, or any other file.",
-        "model": "DeepSeek-V4.1-Flash-thinking-max",
-        "reviewer": "glm",
+        "model": "GLM-5.3",
+        "reviewer": "deepseek",
         "verify_cmd": "python -m py_compile src/notes/export.py && grep -q 'def export_notes' src/notes/export.py",
         "files_hint": ["src/notes/export.py"],
         "deps": ["notes-schema"]
@@ -383,8 +383,8 @@ is deepseek reviewing GLM-5.3):
         "id": "usage-docs",
         "title": "README usage section",
         "prompt": "Add a '## Usage' section to README.md (create the file if missing) documenting two commands, each on its own code-formatted line: python -m notes.cli add \"buy milk\" and python -m notes.cli list. The CLI itself is being built in parallel in src/notes/cli.py — do NOT create, modify, or reference-check any source file; only edit README.md. Acceptance: README.md contains both command lines verbatim.",
-        "model": "DeepSeek-V4.1-Flash-thinking-max",
-        "reviewer": "glm",
+        "model": "GLM-5.3",
+        "reviewer": "deepseek",
         "verify_cmd": "grep -q 'notes.cli add' README.md && grep -q 'notes.cli list' README.md",
         "files_hint": ["README.md"],
         "deps": ["notes-schema"]
@@ -398,18 +398,18 @@ is deepseek reviewing GLM-5.3):
 
 ```
 repo: /home/proxyie/repos/notes
-  notes-schema: implement=GLM-5.3 review=deepseek(cross-family) deps=[] base=main verify=python -m py_compile ...
-  notes-cli: implement=DeepSeek-V4.1-Flash-thinking-max review=glm(cross-family) deps=['notes-schema'] base=main verify=...
-  notes-export: implement=DeepSeek-V4.1-Flash-thinking-max review=glm(cross-family) deps=['notes-schema'] base=main verify=...
-  usage-docs: implement=DeepSeek-V4.1-Flash-thinking-max review=glm(cross-family) deps=['notes-schema'] base=main verify=...
+  notes-schema: implement=DeepSeek-V4.1-Flash-thinking-max review=glm(cross-family) deps=[] base=main verify=python -m py_compile ...
+  notes-cli: implement=GLM-5.3 review=deepseek(cross-family) deps=['notes-schema'] base=main verify=...
+  notes-export: implement=GLM-5.3 review=deepseek(cross-family) deps=['notes-schema'] base=main verify=...
+  usage-docs: implement=GLM-5.3 review=deepseek(cross-family) deps=['notes-schema'] base=main verify=...
 ```
 
 Why it is shaped this way:
 
 - **Fanout**: `notes-schema` starts at t=0; the other three all depend only on
   it and run concurrently once it merges.
-- **Tier routing**: hard → GLM-5.3 (the schema everything depends on, and the
-  fleet's strongest model); medium → DeepSeek-V4.1-Flash-thinking-max for the
+- **Tier routing**: hard → DeepSeek-V4.1-Flash-thinking-max (the schema
+  everything depends on, and the fleet's strongest model); medium → GLM-5.3 for the
   CLI, the export module and the README; both implementers used.
 - **Cross-review**: every reviewer is a different family from its
   implementer — GLM-5.3's work goes to deepseek, DeepSeek's work goes to

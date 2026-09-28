@@ -296,8 +296,10 @@ async def _plan_via_harness(model, phase, repo, goal, project):
 
     A subscription model has no API route at all — it is reached only through
     its CLI — so the planner runs as an ordinary planner-role driver, exactly
-    as `main.py code plan` runs GLM-5.3. That also gives the planning call a
-    transcript and a harness_runs row (Rule 7) and puts it under the harness
+    as `main.py code plan` runs `config.PLANNER_MODEL` (DeepSeek-V4.1-Flash-
+    thinking-max on the local profile, Claude-Opus-5.5 on studio). That also
+    gives the planning call a transcript and a harness_runs row (Rule 7) and
+    puts it under the harness
     cap, which matters here: on Claude Pro the cap is ONE session, shared with
     the operator's own Claude Code.
 

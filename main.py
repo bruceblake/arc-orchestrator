@@ -1221,7 +1221,8 @@ def main():
                       help="submit via gh pr review (default: print only)")
     for gp in (gt_p, gi_p, gp_p):
         # Planner-capable live models only: gh roles need planner permission
-        # (GLM-5.3 today; DeepSeek-V4.1-Flash-thinking-max does not plan), and a
+        # (DeepSeek-V4.1-Flash-thinking-max holds it since the 2026-09-25
+        # correction; GLM-5.3 does not plan, so it is not offered), and a
         # retired name must not be offered at all.
         gp.add_argument("--model", choices=[m for m, roles in config.MODEL_ROLES.items()
                                             if "planner" in roles], default=None,

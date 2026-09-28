@@ -4712,8 +4712,8 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )
-    # The strongest live model that may plan — GLM-5.3 on the two-model
-    # roster pinned 2026-09-12 (Kimi-K3 retired that day).
+    # The strongest live model that may plan — DeepSeek-V4.1-Flash-thinking-max
+    # on the 2026-09-25 roster (GLM-5.3 is medium and holds no planner role).
     #
     # A planner can exit 0 with NO usable JSON: reasoning models burn the
     # whole opencode output budget on thinking and finish reason=length with

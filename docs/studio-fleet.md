@@ -23,7 +23,7 @@ Rules 1–9, byte for byte.
 | Reached via | — | **the operator's own subscriptions** | OpenRouter, per token |
 | Always present | GLM-5.3 + DeepSeek on ARC | same | same |
 | Families | 2 | 4 | 6 |
-| Planner | GLM-5.3 | Claude-Opus-5.5 | Claude-Opus-5.5 |
+| Planner | DeepSeek-V4.1-Flash-thinking-max | Claude-Opus-5.5 | Claude-Opus-5.5 |
 | PR reviewers | 1 (thin, Rule 5) | 2 | 2 |
 | Concurrency | full | **1–2 per CLI** | full |
 | Cost | free | free (plan quota) | metered |
@@ -172,8 +172,8 @@ capability question is answered by the roster at call time.
 | `gpt_6_astra_operator` | GPT-6-Astra | hard | Modelling, retopology, rigging, weight transfer, synchronised animation, editor computer-use |
 | `grok_feature_driver` | Grok-4.7 | medium | Player controllers, HUD and UI data-binding |
 | `gemini_visual_judge` | Gemini-3.8-Flash | — | **Never implements.** Scores renders, audits space |
-| `deepseek_qa_swarm` | DeepSeek-V4.1-Flash-thinking-max | medium | Headless bot swarm, packet fuzzing, desync hunting |
-| `glm_content_swarm` | GLM-5.3 | hard | Spawn tables, dialogue trees, announcements, achievements |
+| `deepseek_qa_swarm` | DeepSeek-V4.1-Flash-thinking-max | hard | Headless bot swarm, packet fuzzing, desync hunting |
+| `glm_content_swarm` | GLM-5.3 | medium | Spawn tables, dialogue trees, announcements, achievements |
 
 ### Review pairing
 

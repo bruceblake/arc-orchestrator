@@ -14,19 +14,24 @@ that enforces it. Everything here is true of the code as it exists today.
 This repo is a **multi-model coding orchestrator**. A fleet of **two models**
 builds software — and this repo itself — as a directed graph of small tasks:
 
-- **GLM-5.3** — the fleet's strongest model, running in **`opencode`**
-  (`drivers.OpencodeDriver`) — is the main orchestrator/planner
-  (`config.PLANNER_MODEL`): it breaks a project goal into 2–6 small tasks,
-  decides the graph fanout (which tasks run in parallel), the dependency
-  order, the model routing (who implements what tier), and the reviewer
-  pairing, via `main.py code plan` (`code_tasks.plan_tasks`).
-- All models implement. **GLM-5.3** takes the hard tier (multi-file reasoning,
-  delicate design, architectural judgment) on top of planning and reviewing;
-  **DeepSeek-V4.1-Flash-thinking-max** (in **`reasonix`**, Reasonix — the
-  DeepSeek-native cache-first agent, `drivers.ReasonixDriver`; replaced `dsh`
-  by operator decision 2026-09-13) takes the medium/mechanical tier. DeepSeek is much
-  faster and carries the implementation load; GLM-5.3 is the planner and the
-  last escalation stage.
+- **DeepSeek-V4.1-Flash-thinking-max** — the fleet's strongest model
+  (operator decision 2026-09-25: it holds 10 seats to GLM's 4), running in
+  **`reasonix`** (Reasonix — the DeepSeek-native cache-first agent,
+  `drivers.ReasonixDriver`; replaced `dsh` by operator decision 2026-09-13)
+  — is the main orchestrator/planner (`config.PLANNER_MODEL`): it breaks a
+  project goal into 2–6 small tasks, decides the graph fanout (which tasks
+  run in parallel), the dependency order, the model routing (who implements
+  what tier), and the reviewer pairing, via `main.py code plan`
+  (`code_tasks.plan_tasks`). It is also the captain autopilot's own turn seat
+  (`config.CAPTAIN_MODEL`, Rule 11) on every fleet profile.
+- All models implement. **DeepSeek-V4.1-Flash-thinking-max** takes the hard
+  tier (multi-file reasoning, delicate design, architectural judgment) on top
+  of planning and reviewing; **GLM-5.3** (in **`opencode`**,
+  `drivers.OpencodeDriver`) takes the medium/mechanical tier and does not
+  plan. GLM's per-account cap is 4 and DeepSeek's is 10, so DeepSeek carries
+  the implementation load and is the other review family; GLM-5.3 is the
+  medium tier a task escalates FROM, and DeepSeek-V4.1-Flash-thinking-max is
+  the last escalation stage (`config.ESCALATION_PATH` is weakest first).
 - **Every implementation is gated and cross-reviewed before merge**: a
   deterministic `verify_cmd` gate runs first, then a reviewer model from a
   *different model family* reviews the full diff, and only then does the
@@ -79,7 +84,7 @@ All workloads share the event log and the dashboard.
 
 ## 2. Model fleet and roles
 
-Routing is decided at plan time (by GLM-5.3 in
+Routing is decided at plan time (by DeepSeek-V4.1-Flash-thinking-max in
 `main.py code plan`, or by whoever writes a taskfile by hand) and is
 **enforced again by the loader**,
 `code_tasks.load_taskfile`. There is no runtime triage. Full reference:
@@ -87,8 +92,8 @@ Routing is decided at plan time (by GLM-5.3 in
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | hard | Implement, Plan, Review, PR-review | 4 | 4 |
-| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | medium | Implement, Review, PR-review | 10 | 10 |
+| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 10 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement, Review, PR-review | 4 | 4 |
 
 Subscription seats (studio profile, operator directive 2026-09-24) are sized
 to the plan, not a flat 32. The plan window is the real limit; local caps
@@ -105,30 +110,34 @@ and hard reviews. Rule 2 stays exact: the implementer's own family is skipped.
 | Antigravity-Gemini (`gemini-3.8-flash-high`, `ARC_AGY_MODEL`) | Google AI Pro (5-hour + weekly) | `agy` | 3 |
 | Claude-Opus-5.5 | Claude Pro (smallest window) | `claude` | 2 |
 
-**GLM-5.3 is the fleet's strongest model** — operator decision 2026-09-12:
-hard tier, the planner, and the last escalation stage. Its cap of 4 is the
+**DeepSeek-V4.1-Flash-thinking-max is the fleet's strongest model** —
+operator decision 2026-09-25 (the 2026-09-12 note had this the other way
+round, and the roster was corrected to match): hard tier, the planner, and
+the last escalation stage. It holds 10 seats to GLM's 4, is much faster than
+GLM-5.3, and carries the implementation load; its cap of 10 is the
+provider-published figure for V4.1 (provider docs updated
+2026-09-12), not a measurement of ours. **GLM-5.3 is the medium tier and
+does NOT plan.** Its cap of 4 is the
 official ARC docs value (docs.arc.vt.edu model table, checked 2026-09-15:
 GLM-5.3 = 128k context, concurrency 4), adopted per operator directive. Live
 rejections twice deviated from the table — "max 3 in flight per user on this
 backend" on 2026-09-14 (the basis of a one-day pin to 3, since reverted) and
 "max 5 in flight" on 2026-09-15 — both recorded as dated observations, since
 other consumers of the key share the account cap; the lease + capacity
-backoff absorb the dips. **DeepSeek-V4.1-Flash-thinking-max
-(DS-max below) is the medium-tier workhorse**: much faster than GLM-5.3, it
-carries the implementation load and reviews, and it **NEVER plans**. Its cap
-of 10 is the provider-published figure for V4.1 (provider docs updated
-2026-09-12), not a measurement of ours.
+backoff absorb the dips.
 
-- **Tiers** (`config.IMPLEMENT_TIERS`): `medium` → DeepSeek-V4.1-Flash-thinking-max
-  (moderate / mechanical work), `hard` → GLM-5.3 (multi-file reasoning,
-  delicate design, architectural judgment — on top of its planning/reviewing
-  duties). There is no `basic` tier: gpt-oss-120b was retired with it.
+- **Tiers** (`config.IMPLEMENT_TIERS`): `medium` → GLM-5.3
+  (moderate / mechanical work), `hard` → DeepSeek-V4.1-Flash-thinking-max
+  (multi-file reasoning, delicate design, architectural judgment — on top of
+  its planning/reviewing duties). There is no `basic` tier: gpt-oss-120b was
+  retired with it.
 - **Role enforcement is roster-driven** (`config.MODEL_ROLES` / `model_may`),
   not a per-model if-chain: both live models may implement, review, and
-  PR-review; only GLM-5.3 may plan, and the driver constructors raise
+  PR-review; only DeepSeek-V4.1-Flash-thinking-max may plan, and the driver
+  constructors raise
   `ValueError` for a model off today's roster or a role outside `MODEL_ROLES`
-  (`DeepseekDriver` refuses the planner role intrinsically; gh_ops roles
-  require planner permission).
+  (gh_ops roles require planner permission, enforced through the same
+  roster check: `Driver.__init__` asks `config.model_may`).
 - **Retired models still load.** gpt-oss-120b left the fleet before this
   change; DeepSeek-V4-Flash was retired 2026-09-12 (the provider removed it
   from the API; the DeepSeek-V4.1 line replaced it); **Kimi-K3 was retired
@@ -137,13 +146,16 @@ of 10 is the provider-published figure for V4.1 (provider docs updated
   `config.FAMILIES` and every live role. A taskfile naming a retired model is
   remapped onto the escalation path by `code_tasks.RETIRED_MODELS`
   (Kimi-K3 → the strongest live tier), so old taskfiles still run.
-- `main.py code plan` uses **GLM-5.3** as the planner
+- `main.py code plan` uses **DeepSeek-V4.1-Flash-thinking-max** as the planner
   (`config.PLANNER_MODEL`). The planner prompt (`code_tasks.plan_tasks`)
   instructs it to spread work across both models so independent tasks run in
   parallel, keep tasks small (<30 min for one agent), add `deps` only when
   one task truly needs another's output, and give every task a meaningful
-  `verify_cmd`. GLM-5.3 planning is slow on big goals — see
-  [docs/runbook.md](docs/runbook.md) § "Planning a large goal".
+  `verify_cmd`. A slow planner on a big goal — see
+  [docs/runbook.md](docs/runbook.md) § "Planning a large goal". The captain
+  autopilot's OWN turn seat is `config.CAPTAIN_MODEL` (Rule 11), a separate
+  roster-validated setting: it starts on DeepSeek on every fleet profile,
+  including studio, where the planner is Claude-Opus-5.5.
 - Thinking variants (`*-thinking-low/high/max`) and the
   `*-legacy-tool-calling` websearch models registered in `config.FAMILIES`
   belong to the research workload; the code workload routes only the
@@ -170,11 +182,11 @@ difficulty tier it was planned for (`config.IMPLEMENT_TIERS`).
   `drivers.DeepseekDriver.__init__` raise `ValueError` if a model is off the
   roster or is given a role outside its `config.MODEL_ROLES` entry
   (`model_may`) — role enforcement is roster-driven, not a per-model
-  if-chain. DeepSeek is refused the planner role by its roster row, which has
-  no `planner`.
+  if-chain. **GLM-5.3 is refused the planner role** by its roster row, which
+  has no `planner` (operator decision 2026-09-25); DeepSeek holds it.
 - The planner prompt (`code_tasks._routing_tiers_prose`, code_tasks.py:1565)
   assigns implementers by tier:
-  DeepSeek-V4.1-Flash-thinking-max for medium/mechanical tasks, GLM-5.3 for
+  GLM-5.3 for medium/mechanical tasks, DeepSeek-V4.1-Flash-thinking-max for
   hard.
 
 Never route a medium-tier task up to the hard tier or a hard task down to the
@@ -354,11 +366,11 @@ for.
   as feedback while `runs <= config.MAX_FIX_ROUNDS` (16, override
   `ARC_MAX_FIX_ROUNDS`). Exhausting the fix rounds does **not** fail the task
   yet: it **escalates one tier up `config.ESCALATION_PATH`** (default
-  `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`, overrides
+  `GLM-5.3 → DeepSeek-V4.1-Flash-thinking-max`, overrides
   `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS`) — an `escalate_<tid>` graph
   node routes back to `implement_<tid>` with a **fresh fix budget**, carrying
   the latest gate/review failure as feedback. There is no `basic` tier, so a
-  medium task's first escalation is the hard tier, GLM-5.3. Cross-review holds on
+  medium task's first escalation is the hard tier, DeepSeek-V4.1-Flash-thinking-max. Cross-review holds on
   escalation (`code_tasks.build_code_graph`): the reviewer token flips to the
   family-paired reviewer of the new implementer (deepseek implementer → glm,
   glm → deepseek). Each escalation emits `task.escalated`
@@ -647,9 +659,11 @@ halving threw away half the slots the account grants — an over-cap burst
 surfaces as 400s the capacity backoff retries.
 GLM's four driver slots are shared across processes through the lease table
 (`driver.cap_wait`), so dips below 4 in the account cap surface as waits and
-retried 400s the backoff absorbs rather than self-inflicted failures; batch
-callers see one slot fewer (3) while `INTERACTIVE_RESERVE` holds one back for
-chat, and `ARC_INTERACTIVE_RESERVE=0` hands batch all four.
+retried 400s the backoff absorbs rather than self-inflicted failures. GLM is
+NOT the reserved seat: the interactive reserve is held on `PLANNER_MODEL`
+alone, which is DeepSeek-V4.1-Flash-thinking-max (cap 10), so batch DeepSeek
+sees 9 while GLM batch keeps all 4 — `ARC_INTERACTIVE_RESERVE=0` hands batch
+that slot too.
 `ARC_DRIVER_LIMIT_GLM=1` re-serialises GLM harnesses if the backend tightens
 persistently.
 gpt-oss and DeepSeek were previously configured at 8 against a real
@@ -1070,9 +1084,15 @@ conflict, the same gate failure 3+ rounds, a model idle while others
 cap-wait, a parked or stopped run, a question unanswered 30+ min,
 overlapping claims, a PR open 2+ h with no review activity, quota/infra
 failures, a blocked chain), `decide` (deterministic playbooks first; the
-model — `config.PLANNER_MODEL` — only for judgment: answering a question or
-a re-plan, and on a plan usage limit the driver swaps to GLM-5.3 through
-`drivers.usage_substitute`, planner role allowed for the captain only), and
+model — `config.CAPTAIN_MODEL` — only for judgment: answering a question or
+a re-plan. That seat is a roster-validated setting SEPARATE from
+`config.PLANNER_MODEL`, and it is DeepSeek-V4.1-Flash-thinking-max on every
+fleet profile including studio, where the planner is Claude: a spent Claude
+weekly window used to swap the captain's seat about every 10 minutes while
+DeepSeek had capacity to spare (operator directive 2026-09-25). On a plan
+usage limit the driver still swaps to another planner-capable seat through
+`drivers.usage_substitute` (planner role allowed for the captain only) rather
+than parking the tick — the outage path, not an immunity claim), and
 `act`.
 
 **What it MAY do — the closed action set:** `board_post` (a message or ping
@@ -1164,14 +1184,15 @@ code pipeline (no worktree, no gate, no publish; Rules 1–8 do not apply):
   `code_tasks._parse_verdict`; see docs/orchestration-contract.md).
 
 Any model **trusted to plan on today's roster** may hold these three roles —
-gh roles require planner permission, and today only **GLM-5.3** has it, so
-`config.GH_MODEL` resolves to GLM-5.3 (DeepSeek-V4.1-Flash-thinking-max has
+gh roles require planner permission, and today only
+**DeepSeek-V4.1-Flash-thinking-max** has it, so
+`config.GH_MODEL` resolves to DeepSeek-V4.1-Flash-thinking-max (GLM-5.3 has
 no `planner` role and is refused);
 `drivers.OpencodeDriver.__init__` / `drivers.DeepseekDriver.__init__` raise
 `ValueError` for a model off the roster or one lacking the permission (same
 roster-driven enforcement as Rule 2). Default model `config.GH_MODEL`
 (`ARC_GH_MODEL` env), falling back to `config.PLANNER_MODEL` =
-GLM-5.3; each `gh` subprocess is bounded by
+DeepSeek-V4.1-Flash-thinking-max; each `gh` subprocess is bounded by
 `config.GH_TIMEOUT` (`ARC_GH_TIMEOUT`, default 120 s). Pipeline pushes and
 `gh pr create` retry NETWORK failures only (`gitstore.is_transient_network_error`)
 with backoff `ARC_NET_RETRY_DELAYS` (default `5,15,45,90,180` s, `git.retry`
@@ -1200,10 +1221,10 @@ Top-level Python modules (one role each):
 | File | Role |
 |---|---|
 | `bench.py` / `bench_data.py` | Single-model micro benchmark (top-level `main.py bench`): 31-task dataset × models × harness solvers (direct/fanout/fixloop/review/opencode/kimi), pass@k scoring — measures models and harnesses in isolation |
-| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the GLM-5.3 planner prompt (`plan_tasks`, model `config.PLANNER_MODEL`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
+| `code_tasks.py` | The multi-harness code workload: taskfile loader/validation, the DeepSeek-V4.1-Flash-thinking-max planner prompt (`plan_tasks`, model `config.PLANNER_MODEL`), per-task chain `alloc → implement → gate → review → publish/fail` with fix-loop and `escalate_<tid>` escalation edges, project-level `after` chain gating (`chain_wait`), resume of re-run taskfiles |
 | `captain.py` | The conversational supervisor (`main.py captain`, the dashboard Captain panel): gathers LIVE fleet state (`fleet_state` — task rows by status, the three concurrency layers via `capacity_snapshot`, recent events), runs one captain turn on `config.PLANNER_MODEL`, and executes a CLOSED action set (`parse_actions` / `execute_actions` — `plan`, `run`, `resume`, `status`, `amend`) as fixed `main.py` argv. `plan_pressure` is the capacity-aware admission gate: a `run`/`resume` whose implementer models have no free driver slot is QUEUED (`logs/captain/queue.jsonl`) instead of launched into capacity refusals. Sessions live under `logs/captain/` (`ARC_CAPTAIN_DIR`), separate from chat. It never edits code or touches git — all governance stays in the pipeline. |
-| `captain_autopilot.py` | The captain as an always-on project manager (`main.py captain --autopilot [--interval N] [--once] [--dry-run]`, `deploy/arc-captain.service`, Rule 11): `observe` → `detect` → `decide` → `act` each tick, posting through the agent board; closed action set, per-tick cap, per-target cooldowns, pause file, `captain.auto.*` events and `logs/captain/autopilot.jsonl` |
-| `config.py` | Single source of truth: model families + caps, tier maps, driver caps, timeouts, paths — every `ARC_*` env override lives here |
+| `captain_autopilot.py` | The captain as an always-on project manager (`main.py captain --autopilot [--interval N] [--once] [--dry-run]`, `deploy/arc-captain.service`, Rule 11): `observe` → `detect` → `decide` → `act` each tick, posting through the agent board; closed action set, per-tick cap, per-target cooldowns, pause file, `captain.auto.*` events and `logs/captain/autopilot.jsonl`. Its judgment turn starts on `config.CAPTAIN_MODEL` — DeepSeek-V4.1-Flash-thinking-max on every profile, at operator directive 2026-09-25, NOT the general `PLANNER_MODEL`; override `ARC_CAPTAIN_MODEL` (roster-validated: a model without the planner role is refused and the next planner-capable seat is used) |
+| `config.py` | Single source of truth: model families + caps, tier maps, driver caps, `PLANNER_MODEL` / `CAPTAIN_MODEL`, timeouts, paths — every `ARC_*` env override lives here |
 | `graph_shapes.py` | The graph BETWEEN tasks (§1 "Two graphs"): the pattern catalogue as data (`PATTERNS`, with a drawable sketch each), `normalize_pattern` (label aliases → catalogue id, used by the loader), `classify` (the shape a taskfile's `deps` actually form: single/chain/fanout/fanin/diamond/hierarchical/mixed, width, depth, declared-vs-detected mismatch), `planner_prose` (the GRAPH DESIGN block of the planner prompt, from the catalogue and today's caps), `describe` (→ `GET /api/graph-shapes`: patterns, every taskfile classified, what the engine can and cannot express) |
 | `dashboard.py` | Dashboard server (`main.py serve`, default port 8787): static UI + JSON APIs over `orchestrator.db`, `logs/events.jsonl` and live harness transcripts — **not read-only**: `do_POST` (dashboard.py:999) serves `/api/projects/create`, which spawns `main.py code plan` (goal mode) or writes taskfiles into `~/tasks` directly (dashboard.py:840-842), and `/api/projects/run`, which launches `main.py code run` (optionally `--dry-run`) subprocesses via `subprocess.Popen` (dashboard.py:768-770). It also serves the orchestrator-chat routes: `GET /api/repos` (repo allowlist scanned from the repos root, default `~/repos`), `POST /api/repos/create` (local `git init` + one commit, then best-effort gh remote creation), `POST /api/repos/remote` (gh remote for an existing allowlisted checkout), `POST /api/chat/start` (appends the user turn to the session jsonl, spawns `main.py chat`, rejects any repo not on the `/api/repos` allowlist), and `GET /api/chat/poll` (turns from an index + running flag + newest taskfile) |
 | `drivers.py` | Headless CLI harness drivers: `OpencodeDriver` (`opencode`, GLM-5.3 — since 2026-09-16 the ONLY path is the persistent `opencode serve` server reached through `ocserve.py`: one server per orchestrator, one session per run over `x-opencode-directory`, prompts on the async route, results over SSE, dispose on exit; the one-shot `opencode run` spawn is retired) and `ReasonixDriver` (`reasonix`, DeepSeek-V4.1-Flash-thinking-max since 2026-09-13 — `reasonix run --output-format stream-json`: every tool call, text delta and token receipt on stdout, final `{"type":"result"}` object carries the answer and session id; a private `REASONIX_HOME` generated by `reasonix_fleet_home`); `DeepseekDriver` (`dsh`, 2026-09-12..13, historical — streams reasoning on stderr, prints only the final message on stdout, pumps both pipes for the stall clock, no session resume, 0 tokens reported); `KimiDriver` still exists for historical transcripts only (no live model runs the kimi harness); per-model semaphores, retries, timeouts, live transcript streaming to `logs/harness/` |
@@ -1270,7 +1291,7 @@ see the product's layout unless the plan step reads the product repo.
 The loop:
 
 1. **Plan** — `.venv/bin/python main.py code plan "<goal>" /path/to/repo`
-   (GLM-5.3 drafts a taskfile into
+   (DeepSeek-V4.1-Flash-thinking-max drafts a taskfile into
    `~/tasks/<slug>.json` and prints the
    resolved DAG). Total budgets are unlimited by default, so a large goal
    needs no timeout env var (the planner idle budget is 3000 s;

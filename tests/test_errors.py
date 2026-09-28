@@ -1569,9 +1569,13 @@ class SeatUtilization(unittest.TestCase):
         return hit[0]["action"]
 
     def test_an_idle_lower_tier_is_never_told_to_take_the_starved_tier(self):
-        """Rule 1: DeepSeek (medium) idle while GLM-5.3 (hard) starves must
-        not be answered with "route more tiers to it" — that is a hard task
-        routed down a tier. The audit said exactly that on 2026-09-25."""
+        """Rule 1: an idle MEDIUM seat must not be told to take HARD work.
+
+        The audit said exactly that on 2026-09-25. Which model that is
+        comes from IMPLEMENT_TIERS below, so the roster flip (GLM-5.3 is
+        medium and DeepSeek hard since 2026-09-25) does not need this
+        docstring rewritten.
+        """
         medium = config.IMPLEMENT_TIERS["medium"][0]
         hard = config.IMPLEMENT_TIERS["hard"][0]
         action = self._idle_action(medium, hard)

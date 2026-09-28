@@ -588,9 +588,9 @@ def family_limit(name):
 
 # --- multi-harness code workload -------------------------------------------
 # Implementation is tiered by task difficulty (see ROSTER below):
-# DeepSeek-V4.1-Flash-thinking-max takes the medium and mechanical tasks and
-# reviews (the fast workhorse), GLM-5.3 takes the hard tier on top of its
-# planning and reviewing duties (the fleet's strongest model). Review comes
+# DeepSeek-V4.1-Flash-thinking-max takes the hard tier on top of its planning
+# and reviewing duties (the fleet's strongest model, operator decision
+# 2026-09-25); GLM-5.3 takes the medium and mechanical tasks. Review comes
 # from a family other than the implementer's own.
 # ARC rejects over-limit requests per model, so driver caps reserve headroom
 # for interactive use of the account.
@@ -889,13 +889,15 @@ OPENCODE_SERVE_STARTUP_TIMEOUT = float(
 # --- GitHub operations agents (gh_ops.py) ------------------------------------
 # Standalone gh-CLI agents (issue triage, issue drafting, PR review) — NOT the
 # governed code pipeline: no worktree, no gate, no publish. A model trusted
-# to plan on today's roster may hold the gh roles (GLM-5.3 only today — the
-# only roster model with planner permission; driver validation enforces it), and
-# every command previews by default — --apply-labels/--create/--post are the only writes.
+# to plan on today's roster may hold the gh roles —
+# DeepSeek-V4.1-Flash-thinking-max today, the only roster model with planner
+# permission since the 2026-09-25 correction (GLM-5.3 is refused); driver
+# validation enforces it. Every command previews by default —
+# --apply-labels/--create/--post are the only writes.
 # Default None: gh_ops falls back to PLANNER_MODEL, which follows the roster
-# (GLM-5.3 since 2026-09-12). A hardcoded default here would name a
-# withdrawn model the morning after it left. GH_MODEL itself is resolved
-# below, once PLANNER_MODEL exists.
+# (DeepSeek-V4.1-Flash-thinking-max on the local profile). A hardcoded default
+# here would name a withdrawn model the morning after it left.
+# GH_MODEL itself is resolved below, once PLANNER_MODEL exists.
 GH_TIMEOUT = float(os.getenv("ARC_GH_TIMEOUT", "120"))
 # Backoff (seconds) for pushes and `gh pr create` that fail on network
 # weather (gitstore._TRANSIENT_NET). A real refusal (lease, auth, no commits)
@@ -957,9 +959,11 @@ import datetime as _dt
 # `from` inclusive, `until` exclusive; None = open-ended.
 #
 # roles: which of implementer / reviewer / pr_reviewer / planner the model may
-# hold. The two-model fleet of 2026-09-12: GLM-5.3 is strongest, hard tier,
-# the planner, and holds every role; DeepSeek-V4.1-Flash-thinking-max is the
-# medium-tier workhorse — it implements and reviews/PR-reviews, NEVER plans.
+# hold. Operator decision 2026-09-25 (roster corrected): DeepSeek-V4.1-Flash-
+# thinking-max is the stronger model and holds 10 seats to GLM's 4, so it is
+# the hard tier, a planner, and holds every role; GLM-5.3 is the other family,
+# on the medium tier, and does NOT plan. (The 2026-09-12 note below had this
+# reversed.) The captain's own seat follows from this — see CAPTAIN_MODEL.
 ALL_ROLES = ("implementer", "reviewer", "pr_reviewer", "planner")
 ROSTER = [
     # Union-Alpha's row was DELETED here on 2026-09-17 by operator decision.
@@ -982,24 +986,27 @@ ROSTER = [
     # still constructs-fails loudly for old transcripts.
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
-    # Operator decision (2026-09-12): GLM-5.3 is the fleet's strongest model —
-    # hard tier, the planner, the last escalation stage. Its cap is 4, the
-    # official ARC docs value (docs.arc.vt.edu, checked 2026-09-15), adopted
-    # per operator directive. Two live deviations from the table have been
-    # observed and are recorded as dated events rather than stated values:
-    # "max 3 in flight per user on this backend" on 2026-09-14 (basis of
-    # PR #59's pin to 3, since reverted) and "max 5 in flight" on 2026-09-15
-    # — other consumers of the key share the account cap. The derived driver
-    # cap is pinned at 4; dips below 4 are absorbed by the lease + capacity
-    # backoff. ARC_DRIVER_LIMIT_GLM=1
+    # Operator decision (2026-09-12, tier roles corrected 2026-09-25): GLM-5.3
+    # is the OTHER family — medium tier, implementer/reviewer/pr_reviewer, and
+    # it does NOT plan (the captain's own seat is DeepSeek; see CAPTAIN_MODEL).
+    # Its cap is 4, the official ARC docs value (docs.arc.vt.edu, checked
+    # 2026-09-15), adopted per operator directive. Two live deviations from the
+    # table have been observed and are recorded as dated events rather than
+    # stated values: "max 3 in flight per user on this backend" on 2026-09-14
+    # (basis of PR #59's pin to 3, since reverted) and "max 5 in flight" on
+    # 2026-09-15 — other consumers of the key share the account cap. The
+    # derived driver cap is pinned at 4; dips below 4 are absorbed by the
+    # lease + capacity backoff. ARC_DRIVER_LIMIT_GLM=1
     # re-serialises GLM harnesses if the backend tightens persistently.
-    ("GLM-5.3",             "glm",      "opencode", "hard",   4,
-     ALL_ROLES,                                            None,         None),
-    # Operator decision (2026-09-12): DeepSeek-V4.1-Flash-thinking-max is the
-    # medium-tier workhorse — it implements and reviews/PR-reviews, never
-    # plans. It is far faster than GLM-5.3, so it carries the implementation
-    # load. The 10 is the provider-published per-account concurrency on the
-    # refreshed ARC docs page (docs.arc.vt.edu, 2026-09-12), per the operator —
+    ("GLM-5.3",             "glm",      "opencode", "medium", 4,
+     ("implementer", "reviewer", "pr_reviewer"),           None,         None),
+    # Operator decision (2026-09-25): DeepSeek-V4.1-Flash-thinking-max is the
+    # stronger model and holds 10 seats to GLM's 4, so it is the HARD tier, a
+    # planner, and holds every role — which is also what lets the captain
+    # autopilot start its turns here. It is far faster than GLM-5.3, so it
+    # carries the implementation load. The 10 is the provider-published
+    # per-account concurrency on the refreshed ARC docs page (docs.arc.vt.edu,
+    # 2026-09-12), per the operator —
     # not the carried-over measured 5. Reasonix is counted as one session per
     # process (operator directive 2026-09-24), so the driver cap is 10 // 1 = 10.
     # Harness: "reasonix" — Reasonix (github.com/esengine/DeepSeek-Reasonix,
@@ -1009,8 +1016,8 @@ ROSTER = [
     # and stall clock work unmodified; dsh needed a session-log probe to see
     # progress at all. Measured on the first run: 6720 of 6881 prompt tokens
     # were prefix-cache hits. DeepseekDriver (dsh) stays for old transcripts.
-    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "reasonix", "medium", 10,
-     ("implementer", "reviewer", "pr_reviewer"),           "2026-09-12", None),
+    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "reasonix", "hard", 10,
+     ALL_ROLES,                                            "2026-09-12", None),
 ]
 # --- studio fleet roster -----------------------------------------------------
 # TWO rosters, one per studio profile, because they are genuinely different
@@ -1294,6 +1301,18 @@ for _m, _fam, _h, _t, _c, _roles in _STRONGEST_FIRST:
         REVIEW_FAMILIES[_fam] = _m
 PLANNER_MODEL = next((m for m, _f, _h, _t, _c, roles in _STRONGEST_FIRST
                       if "planner" in roles), None)
+# The captain autopilot's own seat (Rule 11: its per-tick LLM turn). SEPARATE
+# from PLANNER_MODEL on purpose, set by operator directive 2026-09-25: on the
+# studio profile PLANNER_MODEL is Claude-Opus-5.5 (the plan-backed architect,
+# deliberately last in the roster), so a spent Claude weekly window made the
+# always-on captain fire driver.usage_swap about every 10 minutes while
+# DeepSeek had capacity to spare. The captain now starts on DeepSeek on EVERY
+# profile. It is a REQUEST here and a roster-validated decision below, once
+# model_may exists. This does NOT promise immunity to a provider outage: if
+# DeepSeek's own window is spent, the driver's governed swap/park path still
+# applies, exactly as for any other attempt.
+CAPTAIN_MODEL_WANTED = os.getenv("ARC_CAPTAIN_MODEL",
+                                 "DeepSeek-V4.1-Flash-thinking-max")
 # gh_ops default model: the planner model, which never names a retired model.
 GH_MODEL = os.getenv("ARC_GH_MODEL") or PLANNER_MODEL
 # Families that may review an OPEN PR. A superset of REVIEW_FAMILIES: DeepSeek
@@ -1312,8 +1331,9 @@ PR_REVIEWERS = max(1, min(PR_REVIEWERS_WANTED, len(PR_REVIEW_FAMILIES) - 1))
 
 
 # Emergency capacity hatch, re-added 2026-09-15 (it first ran 2026-09-12..14,
-# same trigger, and was removed when GLM-5.3 stabilised): when the strongest
-# review family is hard-down SERVER-side — 2026-09-15: GLM-5.3's backend
+# same trigger, removed when GLM-5.3's backend stabilised; on that earlier
+# roster GLM-5.3 was also the strongest model): when a review family is
+# hard-down SERVER-side — 2026-09-15: GLM-5.3's backend
 # counted 5 in-flight sessions for 3.5+ hours while no local process held
 # one, verified with a bare max_tokens=4 probe — same-family review beats no
 # review. Off by default; load_taskfile, _reviewer_for and
@@ -1326,6 +1346,94 @@ ALLOW_SAME_FAMILY_REVIEW = os.getenv("ARC_ALLOW_SAME_FAMILY_REVIEW", "") == "1"
 def model_may(model, role):
     """May this model hold this role today? Unknown model -> False."""
     return role in MODEL_ROLES.get(model, set())
+
+
+def _resolve_captain_model():
+    """The captain's turn model: the requested seat, validated on the roster.
+
+    ``CAPTAIN_MODEL_WANTED`` is honoured only when today's roster carries the
+    model AND grants it the planner role — the same rule the driver
+    constructors enforce, so a wrong setting is rejected here instead of
+    failing inside a tick. It is deliberately NOT ``PLANNER_MODEL``: on the
+    studio profile that is Claude, and its spent weekly window is exactly what
+    made the always-on captain swap seats about every 10 minutes while
+    DeepSeek had capacity (operator directive 2026-09-25).
+
+    Fallbacks, in order: another planner-capable model from
+    ``_STRONGEST_FIRST`` (which is empty on the local profile only if the
+    roster moved the planner role away from DeepSeek), then ``PLANNER_MODEL``.
+    A captain whose seat cannot be built is a captain that cannot think, so
+    this never returns None when any planner-capable row exists.
+    """
+    wanted = (CAPTAIN_MODEL_WANTED or "").strip()
+    if wanted and model_may(wanted, "planner"):
+        return wanted
+    for model, _f, _h, _t, _c, roles in _STRONGEST_FIRST:
+        if "planner" in roles:
+            return model
+    return PLANNER_MODEL
+
+
+# The model the captain autopilot starts each LLM turn on, on every profile.
+# It keeps the ability to move off a spent seat (a turn is advisory, not a
+# plan; see drivers.usage_substitute ``allow_planner`` and
+# captain_autopilot._llm_call). Nothing here claims the captain is immune to a
+# provider outage — only that it does not start on Claude's plan window.
+CAPTAIN_MODEL = _resolve_captain_model()
+
+
+def tier_sentence():
+    """One roster-derived sentence naming each tier's implementer(s).
+
+    Prompts that describe the fleet (``captain.CAPTAIN_PERSONA``,
+    ``orchchat.PLANNER_PERSONA``) used to hardcode the model names, so the
+    2026-09-25 roster correction left them routing hard work to GLM-5.3 and
+    medium work to DeepSeek — ``code plan`` writes from
+    ``code_tasks._routing_tiers_prose`` and was correct, but a chat taskfile
+    is only checked for "is an implementer" by ``code_tasks.load_taskfile``.
+    Derive it from ``IMPLEMENT_TIERS`` instead, in TIER_ORDER (weakest
+    first), so a roster move is one edit in ROSTER.
+    """
+    parts = []
+    for tier in TIER_ORDER:
+        models = list(IMPLEMENT_TIERS.get(tier) or [])
+        if models:
+            parts.append(f"{' or '.join(models)} is the {tier} tier")
+    if not parts:
+        return "no implementers are live"
+    sentence = ", ".join(parts[:-1]) + (", and " if len(parts) > 1 else "") + parts[-1]
+    planners = sorted(m for m in IMPLEMENTER_MODELS if model_may(m, "planner"))
+    if planners:
+        verb = "may plan — and they are the only ones who may" if len(planners) > 1 \
+            else "may plan, and is the only one who may"
+        sentence += f"; {' and '.join(planners)} {verb}"
+    return sentence
+
+
+def scarcest_seat():
+    """The live implementer whose driver cap is smallest — the scarce slot.
+
+    ``driver_limit`` reads the live cap, so this follows the roster: after
+    2026-09-25 that is GLM-5.3 (4), not the planner. Ties go to the weaker
+    tier: a smaller model with the same cap is the one to spare. Returns
+    ``(model, cap)``; ``(None, 0)`` on an empty roster.
+    """
+    best = None
+    for model, _fam, _harness, tier, _cap, _roles, _start, _end in ROSTER:
+        if model not in IMPLEMENTER_MODELS:
+            continue
+        try:
+            cap = int(driver_limit(model, interactive=True))
+        except Exception:
+            continue
+        # TIER_ORDER is weakest first, so the SMALLER rank is the weaker
+        # tier and wins a cap tie. (A negative rank would invert it and
+        # hand the tie to the hard tier — the opposite of the docstring.)
+        rank = TIER_ORDER.index(tier) if tier in TIER_ORDER else 0
+        key = (cap, rank, model)
+        if best is None or key < best[0]:
+            best = (key, model, cap)
+    return (best[1], best[2]) if best else (None, 0)
 
 
 # Who reviews, when several families may. Unlimited ARC seats first, then
@@ -1708,11 +1816,13 @@ def harness_limit(harness):
 # Reserved ONLY on the planner model, and only while that leaves batch at least
 # two slots. Applying it to every model is wrong: it once took GLM and DeepSeek
 # from 2 to 1 — halving fleet throughput to protect a path batch work never
-# uses. With GLM's cap pinned at 4 (`_DRIVER_CAP_PIN`, operator directive
-# 2026-09-15), batch callers see 4 - 1 = 3 and interactive callers the full 4;
-# the MIN_BATCH_SLOTS guard only makes the reserve inert again if the cap ever
+# uses. PLANNER_MODEL is DeepSeek-V4.1-Flash-thinking-max (cap 10), so batch
+# callers see 10 - 1 = 9 and interactive callers the full 10; GLM-5.3 keeps
+# its whole pinned 4 (`_DRIVER_CAP_PIN`, operator directive 2026-09-15)
+# because the reserve never touches a non-planner. The
+# MIN_BATCH_SLOTS guard only makes the reserve inert again if the cap ever
 # falls to 2 (2 - 1 < 2 leaves batch too little). ARC_INTERACTIVE_RESERVE=0
-# hands batch the fourth slot too when nobody is chatting. The cost of a
+# hands batch that slot too when nobody is chatting. The cost of a
 # reserve should fall on the one model chat actually uses, and only when it
 # can afford to give.
 INTERACTIVE_RESERVE = int(os.getenv("ARC_INTERACTIVE_RESERVE", "1"))
