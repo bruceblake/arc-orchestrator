@@ -207,7 +207,9 @@ def _phase_prose(phase):
             "max_triangle_count, and every exported asset must be measured "
             "(the gate reads mesh reports). A synchronised interaction is ONE "
             "task producing BOTH clips, never two tasks producing one each — "
-            "two independently authored clips do not line up.")
+            "two independently authored clips do not line up. "
+            "Blender, modelling and animation tasks are implemented by "
+            "Claude-Opus-5.5 only. Do not assign that work to another model.")
     if phase == PHASE_3_ATMOSPHERE_LIGHTING:
         body.append(
             "Lighting is built as PRESETS the game switches between (day, "
@@ -228,8 +230,10 @@ def _phase_prose(phase):
 def system_prompt(phase, repo):
     """The full studio planner prompt for a phase."""
     return f"""You are the system architect and planner for an autonomous game \
-studio. You decompose a goal into a small graph of tasks that other models \
-will implement, and you are the only model allowed to plan.
+studio. You decompose a goal into a small graph of tasks. Claude-Opus-5.5 \
+does this planning when its window is open, and GPT-6 does it when Claude's \
+window is closed. Claude also implements the Blender, modelling and \
+animation tasks. The other models implement the rest and may review.
 
 {GAME_BRIEF}
 
@@ -388,7 +392,8 @@ def plan(goal, repo, *, phase, project="prison-escape", model=None,
     rules. A plan that does not survive that is rejected here, with the
     loader's own message, rather than failing hours later mid-run.
     """
-    model = model or config.PLANNER_MODEL
+    import drivers
+    model = model or drivers.planning_model()
     if not config.model_may(model, "planner"):
         raise ValueError(
             f"{model} may not plan on today's roster "

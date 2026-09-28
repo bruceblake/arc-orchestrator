@@ -230,8 +230,8 @@ except ValueError:
     print("refused")
 """
 
-    def test_drivers_refuse_a_role_the_roster_withholds(self):
-        self.assertEqual(in_studio(self.ROLE_PROBE), "refused")
+    def test_gpt_may_plan_when_claude_is_the_default(self):
+        self.assertEqual(in_studio(self.ROLE_PROBE), "NO ERROR")
 
     def test_judge_never_becomes_an_implementer(self):
         """The role filter on IMPLEMENT_TIERS and the escalation path."""

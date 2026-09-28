@@ -133,18 +133,18 @@ plan, which is the opposite of why the harness exists.
 ### Roster order is load-bearing
 
 `config.ROSTER` is written weakest → strongest, and `_STRONGEST_FIRST`
-reverses within a tier. The **last hard-tier row wins** the planner role and
-the head of `REVIEW_FAMILIES`. `Claude-Opus-5.5` is last on purpose: it is
-the planner, and it is not a routine implementer. On `studio` the hardest
-hard tasks prefer the hard-tier ARC seat (GLM-5.3 on this roster).
-DeepSeek-V4.1-Flash-thinking-max is the medium implementer here; the
-planner prefers it for the hardest work only when the roster puts it on
-the hard tier, because a hard task assigned to a medium model is rejected.
-Other independent hard tasks spread across Cursor-Grok-4.7 and
-Antigravity-Gemini when those plan windows are open. GPT-6-Sol and Claude
-are not assigned while their usage windows are closed, and they are left
-out of the enforced implementer list. Escalation skips a model whose plan
-window is closed.
+reverses within a tier. The **last hard-tier row wins** the default planner
+role. `Claude-Opus-5.5` is last on purpose, so it stays that default.
+GPT-6-Sol also holds the planner role. Initial planning uses Claude, then
+GPT-6 when Claude's window is closed, then DeepSeek. The captain stays on
+DeepSeek so supervisor ticks do not spend Claude. Ordinary implementation
+is GLM-5.3 (medium) plus DeepSeek, Cursor-Grok-4.7 and Antigravity-Gemini
+(hard), spread across whichever of those windows are open. Claude
+implements only 3D asset design: Blender, modelling and animation. GPT-6
+is not a routine implementer. Pre-merge and pull-request review prefer
+Claude, then GPT-6; the other seats review when those two are full or
+closed. Escalation of ordinary code skips Claude and GPT-6, and skips any
+seat whose plan window is closed.
 
 ### One fix this required
 

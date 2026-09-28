@@ -118,9 +118,12 @@ design, or architectural judgment.
 
 ## Planning and review
 
-- **Both live models may review; on the local profile only
-  DeepSeek-V4.1-Flash-thinking-max may plan** (the studio profile adds
-  Claude-Opus-5.5). In the task file
+- **Both live models may review. On the local profile only
+  DeepSeek-V4.1-Flash-thinking-max may plan.** On the studio profile
+  Claude-Opus-5.5 plans first and GPT-6-Sol plans when Claude's window is
+  closed; those two are also preferred for review. Ordinary implementation
+  is GLM-5.3, DeepSeek, Cursor-Grok-4.7 and Antigravity-Gemini. Claude
+  implements only Blender, modelling and animation. In the task file
   schema the
   reviewer field names a review *family* — `glm`, or `deepseek`
   (`config.REVIEW_FAMILIES`, which maps each token to the live model that
@@ -140,9 +143,9 @@ design, or architectural judgment.
   DeepSeek on every fleet profile, including studio, where the planner is
   Claude-Opus-5.5. A spent DeepSeek window still swaps through
   `drivers.usage_substitute` — that is the outage path, not immunity to one.
-- DeepSeek-V4.1-Flash-thinking-max is the main orchestrator/planner:
-  `main.py code plan` invokes `plan_tasks`, which runs the planner driver for
-  `config.PLANNER_MODEL` (`ReasonixDriver` on the local profile). Planning a
+- `main.py code plan` invokes `plan_tasks`, which runs
+  `drivers.planning_model()`: DeepSeek on the local profile, Claude then
+  GPT-6 on studio. Planning a
   large goal is slow — fine: total budgets are unlimited by default and the
   planner idle budget is 3000 s. See [runbook.md](runbook.md) § "Planning a
   large goal".

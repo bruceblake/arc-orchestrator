@@ -1047,9 +1047,11 @@ _STUDIO_SUB_ROSTER = [
     # Codex on the ChatGPT plan, running the GPT-6 tier STUDIO_OPENAI_MODEL
     # names (`codex exec -m gpt-6-astra` etc.). Verified 2026-09-22: the plan
     # serves gpt-6-astra (its default), gpt-6-sol and gpt-6-luna. This is the
-    # spec's 3D/asset operator, on the subscription.
+    # Planning and review, second to Claude. Not a routine implementer:
+    # code and mechanical work stay on GLM, DeepSeek, Grok and Gemini.
+    # 3D asset design (Blender, modelling, animation) is Claude's.
     (STUDIO_OPENAI_MODEL, "openai",   "codex",  "hard",   _SEAT_CAP["openai"],
-     ("implementer", "reviewer", "pr_reviewer"),           None, None),
+     ("implementer", "planner", "reviewer", "pr_reviewer"), None, None),
     # Cursor Agent CLI (`agent --print`) on the Cursor subscription, running
     # Grok 4.7 (`grok-4.7-high`, `agent --list-models`). A distinct roster
     # name from OpenRouter's Grok-4.7 so the two prices and families stay
@@ -1077,7 +1079,7 @@ _STUDIO_API_ROSTER = [
     ("Grok-4.7",          "xai",       "opencode", "medium", 4,
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
     (STUDIO_OPENAI_MODEL, "openai",    "opencode", "hard",   _STUDIO_API_FRONTIER_CAP,
-     ("implementer", "reviewer", "pr_reviewer"),           None, None),
+     ("implementer", "planner", "reviewer", "pr_reviewer"), None, None),
     ("Claude-Opus-5.5",   "anthropic", "opencode", "hard",   _STUDIO_API_FRONTIER_CAP,
      ALL_ROLES,                                            None, None),
 ]

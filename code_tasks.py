@@ -725,14 +725,14 @@ def _plan_window_pairs(blocked):
 
 
 def _reviewer_rank(model, usage):
-    """Lower sorts first: DeepSeek, GLM, other seats, then Claude.
+    """Lower sorts first: Claude, GPT-6, then the other seats.
 
     A full or usage-blocked seat sorts after every free seat.
     Among subscription seats the least contended (most headroom) wins.
     """
     fam = config.MODEL_FAMILY.get(model)
     pressure = _reviewer_pressure(model, usage)
-    order = {"deepseek": 0, "glm": 1, "anthropic": 3}.get(fam, 2)
+    order = {"anthropic": 0, "openai": 1, "deepseek": 2, "glm": 3}.get(fam, 4)
     return (
         1 if _seat_blocked(model, usage) or pressure >= 1.0 else 0,
         order,
@@ -972,6 +972,10 @@ def _next_tier_m(model):
     idx = _tier_index_m(model)
     start = 0 if idx is None else idx + 1
     for cand in config.ESCALATION_PATH[start:]:
+        # Claude and GPT-6 plan and review. Escalating ordinary code onto
+        # them spends the windows reserved for that work.
+        if config.MODEL_FAMILY.get(cand) in ("anthropic", "openai"):
+            continue
         if _harness_of(cand) not in blocked:
             return cand
     return None
@@ -1806,6 +1810,39 @@ def _subscription_handoff(planned, impl_model, pol, usage, pressure, blocked):
     return None
 
 
+def _frontier_reviewer(impl_model, pol, usage, blocked):
+    """Claude, then GPT-6, when that seat can review this diff.
+
+    None on a bench policy, or when neither seat is free and a different
+    family from the implementer. The other seats then follow the planned
+    reviewer.
+    """
+    if pol:
+        return None
+    impl_fam = config.MODEL_FAMILY.get(impl_model)
+    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")
+    for m in ("Claude-Opus-5.5", gpt):
+        if m not in config.MODEL_ROLES or not config.model_may(m, "reviewer"):
+            continue
+        if config.MODEL_FAMILY.get(m) == impl_fam:
+            continue
+        if _harness_of(m) in blocked or _seat_blocked(m, usage):
+            continue
+        if _reviewer_pressure(m, usage) >= 1.0:
+            continue
+        try:
+            if config.driver_limit(m) <= 0:
+                continue
+        except (KeyError, ValueError):
+            continue
+        try:
+            _driver(m, "reviewer", None)
+        except ValueError:
+            continue
+        return m
+    return None
+
+
 def _select_reviewer(planned_tok, impl_model, pol, usage):
     """(model, reason) for the pre-merge review — capacity-aware, never weaker.
 
@@ -1828,6 +1865,9 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
     planned = config.REVIEW_FAMILIES.get(planned_tok, planned_tok)
     pressure = _reviewer_pressure(planned, usage)
     blocked = _blocked_harnesses()
+    frontier = _frontier_reviewer(impl_model, pol, usage, blocked)
+    if frontier:
+        return frontier, "frontier_review"
     planned_blocked = (_seat_blocked(planned, usage)
                        or _harness_of(planned) in blocked)
     # Pressure 0 stays on the planned ARC reviewer. A blocked planned seat
@@ -1872,8 +1912,7 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
         fit.append(m)
     if not fit:
         return planned, "planned_full_no_alternative"
-    # Free ARC seats, then the subscription seat with the most headroom.
-    # Claude sorts last so the smallest plan is not spent on routine review.
+    # Claude, then GPT-6, then the other free seats.
     fit.sort(key=lambda m: _reviewer_rank(m, usage))
     return fit[0], "planned_full_fallback"
 
@@ -3690,8 +3729,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             impl_fam = config.MODEL_FAMILY.get(
                 wrote_the_code(ctx, tid, cur_model(ctx), store))
             pool = _eligible_pr_reviewers(impl_fam, pol)
-            # Free DeepSeek, then GLM, then the subscription seat with the
-            # most headroom; full or usage-blocked seats sort last.
+            # Free Claude, then GPT-6, then the other seats. Full or
+            # usage-blocked seats sort last, so a thin review still starts
+            # with the two planning models when their windows are open.
             try:
                 usage = store.lease_usage()
             except Exception:
@@ -4349,17 +4389,18 @@ def _routing_tiers_prose():
     blocked = _blocked_harnesses()
     claude = "Claude-Opus-5.5"
 
-    def _assignable(names):
-        """Models the planner may name: not Claude, not a closed window.
+    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")
 
-        Claude stays the studio planner at a cap of 2, so it is never a
-        routine implementer. A spent plan is named later as closed rather
-        than offered in the enforced list — a taskfile that assigns it
-        would sit on a window that cannot run.
+    def _assignable(names):
+        """Models that implement ordinary code: not Claude, not GPT-6.
+
+        Those two plan and review. Claude also implements 3D asset work,
+        which the lines below name separately. A spent plan is named later
+        as closed rather than offered in the enforced list.
         """
         out = []
         for name in names:
-            if name == claude:
+            if name in (claude, gpt):
                 continue
             harness = config.MODEL_HARNESS.get(name)
             if harness and harness in blocked:
@@ -4389,35 +4430,19 @@ def _routing_tiers_prose():
         lines.append(f"- {' or '.join(hard)}: hard tasks that need deep "
                      "understanding, multi-file reasoning, delicate architecture, or "
                      "subtle debugging.\n")
-    # Prefer DeepSeek only when the roster actually puts it on the hard
-    # tier. On this commit it is the medium implementer and GLM-5.3 is the
-    # hard ARC seat; telling the planner to send hard work to DeepSeek
-    # produces a taskfile the loader rejects.
-    ds = "DeepSeek-V4.1-Flash-thinking-max"
-    arc_hard = [m for m in hard if config.MODEL_FAMILY.get(m) in ("deepseek", "glm")]
-    if ds in hard:
-        prefer = ds
-    elif arc_hard:
-        prefer = arc_hard[-1]
-    else:
-        prefer = hard[0] if hard else None
-    if prefer:
-        lines.append(f"- The hardest tasks prefer {prefer}.\n")
-    spread = [name for name in ("Cursor-Grok-4.7", "Antigravity-Gemini")
-              if name in hard and name != prefer]
-    if spread:
-        clause = (f"- Spread OTHER independent hard tasks across "
-                  f"{' and '.join(spread)} so they run in parallel and do not "
-                  "sit idle.")
-        if prefer:
-            clause += f" Do not send every hard task to {prefer}."
-        lines.append(clause + "\n")
+    if len(hard) > 1:
+        lines.append(f"- Spread hard implementation across {' and '.join(hard)} "
+                     "so independent tasks run in parallel. Do not send every "
+                     "hard task to the same model.\n")
     if claude in config.MODEL_ROLES:
         lines.append(
-            f"- {claude} is not a routine implementer even when its window is "
-            "open (it is the studio planner, local cap 2). Do not assign it "
-            "as an implementer.\n")
-    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")
+            f"- {claude} implements ONLY 3D asset design: Blender, modelling "
+            "and animation. Do not assign it ordinary code.\n")
+        lines.append(
+            f"- Initial planning is {claude}, then {gpt} when {claude}'s "
+            "plan window is closed. Pre-merge review and pull-request review "
+            f"prefer {claude}, then {gpt}. The other seats review when those "
+            "two are full or their windows are closed.\n")
     for model, default_harness in ((gpt, "codex"), (claude, "claude")):
         harness = config.MODEL_HARNESS.get(model, default_harness)
         if harness in blocked:
@@ -4428,14 +4453,9 @@ def _routing_tiers_prose():
         r = config.cross_family_reviewer(m)
         if r:
             pairs.append(f"work by {m} is reviewed by {r}")
-    note = ""
-    if any(config.MODEL_HARNESS.get(m) in ("cursor", "agy")
-           and config.model_may(m, "reviewer") for m in config.MODEL_ROLES):
-        note = (" A busy ARC reviewer (deepseek or glm) can be handed to "
-                "cursor or google at runtime.")
     lines.append(f"- reviewer is one of {' or '.join(fams)}. Cross-review rule: "
-                 + "; ".join(pairs) + ". Spread reviews across the review-capable "
-                 "families so none idles or saturates." + note + "\n\n")
+                 + "; ".join(pairs) + ". A reviewer must be a different model "
+                 "from the one that wrote the code.\n\n")
     closed = _plan_window_pairs(blocked)
     lines.append("Plan windows closed right now: "
                  + (", ".join(closed) if closed else "none") + "\n")
@@ -4724,7 +4744,7 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
     raw = None
     res = None
     for attempt in (1, 2):
-        res = await _driver(config.PLANNER_MODEL, "planner", None).run(
+        res = await _driver(drivers.planning_model(), "planner", None).run(
             prompt, Path(repo), task_id="plan" if attempt == 1 else "plan-r2")
         raw = _plan_json_from_run(res)
         if raw is not None:

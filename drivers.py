@@ -469,6 +469,33 @@ def refresh_usage_blocks(now=None):
         return []
 
 
+def planning_model():
+    """Who writes the task breakdown.
+
+    Claude-Opus-5.5 first, then GPT-6, then whoever else may plan (DeepSeek
+    on the local fleet). A closed plan window is skipped. The captain does
+    not use this; supervisor ticks stay on CAPTAIN_MODEL.
+    """
+    refresh_usage_blocks()
+    now = time.time()
+    blocked = {h for h, until in _usage_blocked_until.items() if until > now}
+    names = []
+    for name in ("Claude-Opus-5.5",
+                 getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")):
+        if name not in names and config.model_may(name, "planner"):
+            names.append(name)
+    planner = config.PLANNER_MODEL
+    if planner and planner not in names and config.model_may(planner, "planner"):
+        names.append(planner)
+    for name in config.MODEL_ROLES:
+        if name not in names and config.model_may(name, "planner"):
+            names.append(name)
+    for name in names:
+        if config.MODEL_HARNESS.get(name) not in blocked:
+            return name
+    return planner
+
+
 # Failover order when a plan window is spent. Cursor is its own subscription,
 # so it is tried before Claude: a Codex refusal should not spend the planner's
 # Claude plan while `agent` still has quota. Same-harness models are never
@@ -561,6 +588,10 @@ def _swap_candidates(model, harness, role, exclude=(), avoid_families=(),
     The rules both swaps share: the candidate holds `role` on the roster,
     sits at the same tier or above (Rule 1), is in none of `avoid_families`
     (Rule 2), and its plan window is not known to be spent."""
+    if role == "implementer" and harness == "claude":
+        # 3D asset work stays on Claude. A closed window waits; it is not
+        # redrawn by Grok, Gemini, DeepSeek or GLM.
+        return []
     now = time.time()
     skip = set(exclude)
     skip.add(model)
@@ -580,8 +611,18 @@ def _swap_candidates(model, harness, role, exclude=(), avoid_families=(),
             continue
         if _usage_blocked_until.get(cand_harness, 0) > now:
             continue
+        if role in ("implementer", "planner") and cand_harness in ("claude", "codex"):
+            # Ordinary implementation does not spill onto Claude or GPT.
+            # Planner swaps do not either: the captain stays on DeepSeek,
+            # and a closed Claude window moves a plan through planning_model
+            # (Claude, then GPT-6) rather than this substitute list.
+            continue
         if candidate.startswith("Zen-"):
             rank = _ZEN_SWAP_RANK
+        elif role in ("reviewer", "pr_reviewer") and cand_harness == "claude":
+            rank = -2
+        elif role in ("reviewer", "pr_reviewer") and cand_harness == "codex":
+            rank = -1
         else:
             rank = _SWAP_PREFERENCE.get(cand_harness, 6)
         ranked.append((rank, candidate))

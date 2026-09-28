@@ -337,7 +337,8 @@ class SwapsOffASpentPlan(unittest.TestCase):
         # GLM-5.3 on ARC has no plan window: it is spent before Claude's
         # small plan (operator directive 2026-09-24).
         self.assertEqual(self._sub("Sol", "codex"), "GLM-5.3")
-        self.assertEqual(self._sub("Sol", "codex", avoid_families={"glm"}), "Opus")
+        # Claude and GPT stay off ordinary implementation, so nothing is left.
+        self.assertIsNone(self._sub("Sol", "codex", avoid_families={"glm"}))
         drivers._usage_blocked_until["claude"] = NOW + 1000
         # Another model on the spent harness is the same plan; Zen is medium.
         self.assertIsNone(self._sub("Sol", "codex", avoid_families={"glm"}))
@@ -345,9 +346,12 @@ class SwapsOffASpentPlan(unittest.TestCase):
     def test_reviews_swap_but_not_onto_the_implementer_family(self):
         """A spent review seat moves, and never into the family that wrote the code."""
         drivers._usage_blocked_until["claude"] = NOW + 1000
+        # A review moves to GPT-6 before the implementation seats.
         self.assertEqual(
             self._sub("Opus", "claude", "reviewer", avoid_families={"cursor"}),
-            "Antigravity-Gemini")
+            "Sol")
+        # Sol has no pr_reviewer role in this roster, so that swap stays
+        # on the next implementation seat.
         self.assertEqual(
             self._sub("Opus", "claude", "pr_reviewer", avoid_families={"cursor"}),
             "Antigravity-Gemini")
@@ -357,6 +361,9 @@ class SwapsOffASpentPlan(unittest.TestCase):
 
     def test_a_planner_is_not_swapped(self):
         self.assertIsNone(self._sub("Opus", "claude", "planner"))
+
+    def test_claude_implementation_waits_instead_of_moving(self):
+        self.assertIsNone(self._sub("Opus", "claude", "implementer"))
 
     def test_the_reviewers_family_is_never_the_substitute(self):
         """Codex implements, Cursor reviews: the swap must not pick Cursor."""
@@ -368,9 +375,11 @@ class SwapsOffASpentPlan(unittest.TestCase):
         for h in ("cursor", "agy", "claude"):
             drivers._usage_blocked_until[h] = NOW + 1000
         self.assertEqual(self._sub("Sol", "codex", avoid_families={"glm"}), None)
-        # Upward is fine: a medium task may move to a hard seat.
-        self.assertIn(self._sub("Zen-Big-Pickle", "fake", avoid_families={"glm"}),
-                      ("Sol", "Luna"))
+        # Upward is fine once Cursor is open. GPT is not that seat.
+        del drivers._usage_blocked_until["cursor"]
+        self.assertEqual(
+            self._sub("Zen-Big-Pickle", "fake", avoid_families={"glm"}),
+            "Cursor-Grok-4.7")
 
     def test_a_refusal_reruns_on_the_substitute_without_waiting(self):
         clock = [NOW]

@@ -98,10 +98,13 @@ Routing is decided at plan time (by DeepSeek-V4.1-Flash-thinking-max in
 Subscription seats (studio profile, operator directive 2026-09-24) are sized
 to the plan, not a flat 32. The plan window is the real limit; local caps
 (`config._SEAT_CAP`, override `ARC_DRIVER_LIMIT_<FAMILY>`) keep a burst from
-spending it. Routine review prefers the unlimited ARC seats (deepseek, then
-glm) and then the subscription seat with the most headroom and no recent
-`driver.usage_limit`. Claude is last, kept for planning, final escalation
-and hard reviews. Rule 2 stays exact: the implementer's own family is skipped.
+spending it. On the studio profile, initial planning and review prefer
+Claude-Opus-5.5, then GPT-6-Sol. GLM-5.3, DeepSeek, Cursor-Grok-4.7 and
+Antigravity-Gemini do the implementation and may review when those two are
+full or their windows are closed. Claude-Opus-5.5 is also the only
+implementer for 3D asset design (Blender, modelling, animation). The
+captain stays on DeepSeek. Rule 2 stays exact: the implementer's own
+family is skipped.
 
 | Seat | Plan | Harness | Local cap |
 |---|---|---|---|
@@ -146,16 +149,17 @@ backoff absorb the dips.
   `config.FAMILIES` and every live role. A taskfile naming a retired model is
   remapped onto the escalation path by `code_tasks.RETIRED_MODELS`
   (Kimi-K3 → the strongest live tier), so old taskfiles still run.
-- `main.py code plan` uses **DeepSeek-V4.1-Flash-thinking-max** as the planner
-  (`config.PLANNER_MODEL`). The planner prompt (`code_tasks.plan_tasks`)
-  instructs it to spread work across both models so independent tasks run in
-  parallel, keep tasks small (<30 min for one agent), add `deps` only when
-  one task truly needs another's output, and give every task a meaningful
-  `verify_cmd`. A slow planner on a big goal — see
+- `main.py code plan` asks `drivers.planning_model()`. On the local profile
+  that is **DeepSeek-V4.1-Flash-thinking-max** (`config.PLANNER_MODEL`). On
+  the studio profile it is Claude-Opus-5.5, then GPT-6-Sol when Claude's
+  window is closed, then DeepSeek. The planner prompt (`code_tasks.plan_tasks`)
+  instructs it to spread ordinary implementation across the open
+  implementers, keep tasks small (<30 min for one agent), add `deps` only when
+  one task truly needs another's output, give 3D asset work to Claude, and
+  give every task a meaningful `verify_cmd`. A slow planner on a big goal — see
   [docs/runbook.md](docs/runbook.md) § "Planning a large goal". The captain
   autopilot's OWN turn seat is `config.CAPTAIN_MODEL` (Rule 11), a separate
-  roster-validated setting: it starts on DeepSeek on every fleet profile,
-  including studio, where the planner is Claude-Opus-5.5.
+  roster-validated setting: it starts on DeepSeek on every fleet profile.
 - Thinking variants (`*-thinking-low/high/max`) and the
   `*-legacy-tool-calling` websearch models registered in `config.FAMILIES`
   belong to the research workload; the code workload routes only the
