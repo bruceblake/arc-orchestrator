@@ -334,9 +334,8 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
     This runs after alloc, which has already reset the branch to base, so the
     patch applies against the merge base it was taken from. `--3way` is what
     lets a partially overlapping patch recover its non-conflicting parts; a
-    genuinely conflicting file is then REPORTED and the whole apply rolled back
-    rather than left half-applied — a conflicted tree would otherwise be
-    published as if it were the attempt's own work.
+    genuinely conflicting file is reported. Clean files are then applied from
+    the same patch while the conflicting file stays at the new base version.
     """
     wt = Path(wt)
     meta = {}
@@ -357,8 +356,27 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
         return {"restored": False, "path": str(path), "files": [],
                 "conflicts": [], "meta": meta,
                 "reason": f"checkpoint not found: {path}"}
-    rc, _, _ = await _git(["apply", "--3way", "--whitespace=nowarn",
-                           str(Path(path).resolve())], cwd=wt, check=False)
+    patch_path = str(Path(path).resolve())
+    excluded = set()
+    # A patch may contain many independent files. Retry without paths that
+    # genuinely conflict with today's base, so an unrelated test scene does
+    # not discard an implementer's scripts, tests, and assets as well.
+    for _ in range(max(2, len(meta.get("files") or []) + 1)):
+        rc, _, _ = await _git(
+            ["apply", "--3way", "--whitespace=nowarn",
+             *(f"--exclude={p}" for p in sorted(excluded)), patch_path],
+            cwd=wt, check=False)
+        _, unmerged_raw, _ = await _git_bytes(
+            ["ls-files", "-u", "-z"], cwd=wt, check=False)
+        found = {f.split("\t")[-1] for f in _null_split(unmerged_raw) if f}
+        if rc == 0 and not found:
+            break
+        # Every failed apply is discarded before another attempt. A conflict
+        # marker or a staged partial patch must never reach an implementer.
+        await _git(["reset", "-q", "--hard", "HEAD"], cwd=wt, check=False)
+        if not found or found <= excluded:
+            break
+        excluded.update(found)
     # A conflicting `--3way` apply leaves conflict markers in the files AND
     # unmerged entries in the index (exit 1, "Applied patch ... with
     # conflicts"). Neither the exit code alone nor the message may be the test:
@@ -366,19 +384,15 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
     # stage — its `--name-only` is silently ignored.
     # -z here too: the conflict list is what an operator reads and what the
     # event records, and a C-quoted `"caf\303\251.txt"` names nothing.
-    _, unmerged_raw, _ = await _git_bytes(["ls-files", "-u", "-z"], cwd=wt,
-                                          check=False)
-    conflicts = sorted({f.split("\t")[-1]
-                        for f in _null_split(unmerged_raw) if f})
+    conflicts = sorted(excluded)
     _, applied_raw, _ = await _git_bytes(
         ["diff", "--name-only", "-z", config.BASE_BRANCH, "--", "."],
         cwd=wt, check=False)
+    checkpoint_files_set = set(meta.get("files") or [])
     files = sorted({p for p in _null_split(applied_raw)
-                    if p and p not in conflicts})
-    if conflicts or rc != 0:
-        # Leave nothing half-applied: a tree carrying conflict markers, or one
-        # where only part of the patch landed, would be published as though it
-        # were the attempt's own work. Worse than not restoring at all.
+                    if p and p not in conflicts
+                    and (not checkpoint_files_set or p in checkpoint_files_set)})
+    if rc != 0:
         await _git(["reset", "-q", "--hard", "HEAD"], cwd=wt, check=False)
         events.emit("task.checkpoint_conflict", task=str(task_id),
                     path=str(path), conflicts=conflicts, exit=rc)
@@ -386,16 +400,30 @@ async def restore_checkpoint(repo, task_id, wt, path=None):
                 "conflicts": conflicts,
                 "reason": (f"{len(conflicts)} conflicting file(s)" if conflicts
                            else "git apply refused the patch")}
+    if not files:
+        # The retry excluded every changed path. Report the conflict, but do
+        # not claim that an interrupted attempt's work was restored.
+        events.emit("task.checkpoint_conflict", task=str(task_id),
+                    path=str(path), conflicts=conflicts, exit=0)
+        return {"restored": False, "path": str(path), "files": [],
+                "meta": meta, "conflicts": conflicts,
+                "reason": f"{len(conflicts)} conflicting file(s)"}
     # Unstage. `--3way` implies `--index`, so a clean apply stages everything it
     # wrote, and an implementer that starts work on a tree with a pre-staged
     # index publishes a diff it did not choose (publish's `git add -A` would
     # have masked this, but a reviewer reading `git diff` would not). The work
     # belongs in the FILES, exactly as the checkpoint recorded it.
     await _git(["reset", "-q", "--mixed", "HEAD"], cwd=wt, check=False)
+    if conflicts:
+        events.emit("task.checkpoint_conflict", task=str(task_id),
+                    path=str(path), conflicts=conflicts, exit=0,
+                    restored_files=len(files))
     events.emit("task.checkpoint_restored", task=str(task_id), path=str(path),
-                files=len(files), conflicts=0)
+                files=len(files), conflicts=len(conflicts))
     return {"restored": True, "path": str(path), "files": files,
-            "conflicts": [], "meta": meta, "reason": ""}
+            "conflicts": conflicts, "meta": meta,
+            "reason": (f"{len(conflicts)} conflicting file(s) skipped"
+                       if conflicts else "")}
 
 
 async def _git(args, cwd, check=True):
