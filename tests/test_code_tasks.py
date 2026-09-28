@@ -1949,6 +1949,324 @@ class ResumeKeepsAnOpenPullRequest(unittest.TestCase):
             [t for t, _ in ev.seen if t == "task.branch_reset"], [])
 
 
+class ResumingAfterAFailedPublication(unittest.TestCase):
+    """A failed PUSH must not cost the task its reviewed branch.
+
+    The production shape this pins: a task passed the verify gate and the
+    cross-family pre-merge review, publish committed its work to task/<id>,
+    and then `gitstore.push_task_branch` failed on a stale
+    --force-with-lease tracking ref. The row became `failed` with
+    "push failed: …" and NO pull request existed. On resume the open-PR probe
+    found no PR, so the start fell through to alloc — which RESETS task/<id>
+    to base. The branch was already committed and already reviewed, so the
+    checkpoint restored the FILES but the task still had to re-implement and
+    re-review work nobody had rejected.
+
+    A destroyed branch is the expensive half: the commits are what review
+    approved, and alloc throws them away.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        base = Path(self.dir)
+        self.repo = base / "proj"
+        self.repo.mkdir()
+        for a in (["init", "-q", "-b", "main"], ["config", "user.email", "t@t"],
+                  ["config", "user.name", "t"]):
+            subprocess.run(["git", "-C", str(self.repo), *a], check=True,
+                           capture_output=True)
+        (self.repo / "f.txt").write_text("x\n")
+        subprocess.run(["git", "-C", str(self.repo), "add", "-A"], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "-C", str(self.repo), "commit", "-qm", "init"],
+                       check=True, capture_output=True)
+        self._orig = config.WORKTREE_ROOT
+        config.WORKTREE_ROOT = str(base / "wts")
+        self.addCleanup(setattr, config, "WORKTREE_ROOT", self._orig)
+
+    def _reviewed_branch(self):
+        """task/t1 with one reviewed commit, and no PR (the push failed)."""
+        wt = asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        (wt / "kept.txt").write_text("reviewed\n")
+        subprocess.run(["git", "add", "-A"], cwd=wt, check=True,
+                       capture_output=True)
+        subprocess.run(["git", "commit", "-qm", "task(t1): reviewed work"],
+                       cwd=wt, check=True, capture_output=True)
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    def _failed_row(self, error):
+        return [{"id": "t1", "status": "failed",
+                 "model": config.ESCALATION_PATH[0], "error": error}]
+
+    def _graph(self, prior, find_pr=None):
+        async def no_pr(repo, task_id, state="open", *, wait_quota=True):
+            return None, None, None
+
+        ts = code_tasks.load_taskfile(taskfile([BASIC], repo=str(self.repo)))
+        with mock.patch.object(gitstore, "find_pr", find_pr or no_pr), \
+                capture_events() as ev:
+            g = code_tasks.build_code_graph(FakeStore(prior), ts,
+                                            taskfile="tf.json")
+        return g, ev
+
+    def _tip(self):
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "task/t1"],
+            check=True, capture_output=True, text=True).stdout.strip()
+
+    def test_a_push_failure_resumes_at_publish_without_resetting_the_branch(self):
+        tip = self._reviewed_branch()
+        g, ev = self._graph(self._failed_row("push failed: stale info"))
+
+        self.assertIn("publish_t1", g.starts)
+        self.assertNotIn("alloc_t1", g.starts,
+                         "alloc would reset the branch review already approved")
+        self.assertEqual(self._tip(), tip)
+        self.assertEqual([t for t, _ in ev.seen if t == "task.branch_reset"], [])
+        self.assertEqual(ev.first("run.resume")["reattached_open_pr"], ["t1"])
+
+    def test_a_could_not_open_pr_failure_resumes_the_same_way(self):
+        tip = self._reviewed_branch()
+        g, _ev = self._graph(self._failed_row("could not open PR: gh down"))
+
+        self.assertIn("publish_t1", g.starts)
+        self.assertEqual(self._tip(), tip)
+
+    def test_dirty_edits_from_the_failed_publish_still_face_gate_and_review(self):
+        """Unfinished local edits must not be published on the strength of the
+        review that approved the COMMIT — they have never been read."""
+        tip = self._reviewed_branch()
+        wt = gitstore.worktree_for(self.repo, "t1")
+        (wt / "kept.txt").write_text("reviewed, then edited after review\n")
+
+        g, _ev = self._graph(self._failed_row("push failed: stale info"))
+
+        self.assertEqual(g.starts, ["gate_t1"])
+        self.assertTrue(any(e.src == "gate_t1" and e.dst == "review_t1"
+                            for e in g.edges))
+        self.assertTrue(any(e.src == "review_t1" and e.dst == "publish_t1"
+                            for e in g.edges))
+        self.assertEqual(self._tip(), tip)
+
+    def test_a_push_failure_with_no_commits_still_reallocs(self):
+        """The branch-state half of the test: nothing ahead of base means there
+        is no reviewed commit to preserve, and alloc is still right."""
+        asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        g, _ev = self._graph(self._failed_row("push failed: stale info"))
+
+        self.assertIn("alloc_t1", g.starts)
+
+    def test_a_capability_failure_still_starts_clean(self):
+        """A gate/review rejection is NOT a publication failure: its work was
+        refused, so resume must still reset the branch and start over."""
+        self._reviewed_branch()
+        g, _ev = self._graph(self._failed_row(
+            "verify gate still failing after 16 round(s)"))
+
+        self.assertIn("alloc_t1", g.starts)
+        self.assertNotIn("publish_t1", g.starts)
+
+    def test_an_unrecognised_failure_still_starts_clean(self):
+        self._reviewed_branch()
+        g, _ev = self._graph(self._failed_row("something new went wrong"))
+
+        self.assertIn("alloc_t1", g.starts)
+
+    def test_a_gh_outage_during_the_resume_probe_still_starts_clean(self):
+        """Never open a PR-shaped hole in the resume path: if gh cannot be
+        asked, this is not evidence the branch was reviewed."""
+        self._reviewed_branch()
+
+        async def boom(repo, task_id, state="open", *, wait_quota=True):
+            raise RuntimeError("gh down")
+
+        g, _ev = self._graph(self._failed_row("push failed: stale info"), boom)
+
+        self.assertIn("alloc_t1", g.starts)
+
+    def test_the_comments_classification_is_a_pure_string_test(self):
+        # The classifier runs before any git call, so a run must be able to
+        # classify rows with the repository unavailable.
+        self.assertTrue(code_tasks._is_publication_failure("push failed: x"))
+        self.assertTrue(code_tasks._is_publication_failure("could not open PR: x"))
+        self.assertFalse(code_tasks._is_publication_failure("exhausted fix rounds"))
+        self.assertFalse(code_tasks._is_publication_failure(None))
+
+    def test_a_push_failure_on_a_publish_resume_does_not_reset_the_branch(self):
+        """The node-level half: publish's own push failure must not invite the
+        alloc fallthrough, which would reset the commits it just made."""
+        ts = code_tasks.load_taskfile(taskfile([BASIC], repo=str(self.repo)))
+        st = FakeStore(self._failed_row("push failed: stale info"))
+        with mock.patch.object(gitstore, "find_pr",
+                               mock.AsyncMock(return_value=(None, None, None))), \
+                capture_events():
+            g = code_tasks.build_code_graph(st, ts, taskfile="tf.json")
+        edge = [e for e in g.edges
+                if e.src == "publish_t1" and e.dst == "alloc_t1"][0]
+        self.assertTrue(edge.when({"published": False, "reason": "push failed: x"},
+                                  {"results": {}}))
+        self.assertFalse(edge.when({"published": False, "reason": "x",
+                                    "keep_branch": True}, {"results": {}}))
+
+    def _resume_publish(self, push, open_pr):
+        """Drive the real publish node on a publish resume: alloc never ran."""
+        ts = code_tasks.load_taskfile(taskfile([BASIC], repo=str(self.repo)))
+        st = FakeStore(self._failed_row("push failed: stale info"))
+        with mock.patch.object(gitstore, "find_pr",
+                               mock.AsyncMock(return_value=(None, None, None))), \
+                mock.patch.object(gitstore, "push_task_branch", push), \
+                mock.patch.object(gitstore, "open_pr", open_pr), \
+                capture_events() as ev:
+            g = code_tasks.build_code_graph(st, ts, taskfile="tf.json")
+            ctx = {"results": {}, "runs": {}}
+            out = asyncio.run(g.nodes["publish_t1"].fn(ctx))
+        return out, st, ev
+
+    def test_the_resume_republishes_the_existing_branch(self):
+        """The point of the whole fix: the retry PUSHES the commits it kept and
+        opens the PR on them, instead of re-implementing from scratch.
+
+        A push is not optional here. The row failed because the branch never
+        reached origin, and `gh pr create` on a branch origin does not have
+        fails with "No commits between …" — so a reattach without a push fails
+        the task again with the work still stranded.
+        """
+        tip = self._reviewed_branch()
+        calls = []
+
+        async def push(repo, tid):
+            calls.append(("push", tid))
+            return True, "pushed"
+
+        async def open_pr(repo, tid, title, body, base=None):
+            calls.append(("open_pr", tid))
+            return 9, "https://example/9", "opened"
+
+        out, st, ev = self._resume_publish(push, open_pr)
+
+        self.assertTrue(out.get("published"), out)
+        self.assertEqual(out["pr"], 9)
+        self.assertIn(("push", "t1"), calls)
+        self.assertIn(("open_pr", "t1"), calls)
+        self.assertEqual(self._tip(), tip, "the reviewed commit is still there")
+        self.assertEqual([u["status"] for u in st.upserts], ["in_review"])
+        self.assertIsNotNone(ev.first("task.pr_reattached"))
+        # Nothing ever took the branch away from the commits it holds.
+        self.assertFalse(any(t == "task.branch_reset" for t, _ in ev.seen))
+
+    def test_a_second_push_failure_keeps_the_branch_for_the_next_resume(self):
+        tip = self._reviewed_branch()
+
+        async def push(repo, tid):
+            return False, "stale info; cannot lock ref"
+
+        async def open_pr(repo, tid, title, body, base=None):
+            raise AssertionError("no PR on an unpublished branch")
+
+        out, st, ev = self._resume_publish(push, open_pr)
+
+        self.assertFalse(out.get("published"))
+        self.assertTrue(out.get("keep_branch"), out)
+        self.assertEqual(self._tip(), tip)
+        self.assertEqual([u["status"] for u in st.upserts], ["failed"])
+        self.assertIn("push failed:", st.upserts[0]["error"])
+        self.assertTrue(st.upserts[0]["finished"])
+
+    def test_a_missing_worktree_is_recreated_on_the_branch_not_from_base(self):
+        """A pruned/lost checkout must not turn the resume into a reset.
+
+        `alloc` recreates a worktree from BASE. That is right for a task whose
+        work was rejected and wrong for one whose reviewed commit is the only
+        copy on task/<id> — so publish recreates the checkout on the branch.
+        """
+        tip = self._reviewed_branch()
+        asyncio.run(gitstore._drop_worktree_dir(
+            self.repo, gitstore.worktree_for(self.repo, "t1")))
+        self.assertIsNone(asyncio.run(
+            gitstore.existing_worktree(self.repo, "t1")))
+
+        ts = code_tasks.load_taskfile(taskfile([BASIC], repo=str(self.repo)))
+        st = FakeStore(self._failed_row("push failed: stale info"))
+
+        async def push(repo, tid):
+            return True, "pushed"
+
+        async def open_pr(repo, tid, title, body, base=None):
+            return 11, "https://example/11", "opened"
+
+        with mock.patch.object(gitstore, "find_pr",
+                               mock.AsyncMock(return_value=(None, None, None))), \
+                mock.patch.object(gitstore, "push_task_branch", push), \
+                mock.patch.object(gitstore, "open_pr", open_pr), \
+                capture_events() as ev:
+            g = code_tasks.build_code_graph(st, ts, taskfile="tf.json")
+            out = asyncio.run(g.nodes["publish_t1"].fn({"results": {}, "runs": {}}))
+
+        self.assertTrue(out.get("published"), out)
+        self.assertIsNotNone(ev.first("task.branch_reattached"))
+        self.assertEqual(self._tip(), tip,
+                         "the checkout was rebuilt on the branch, not on base")
+
+    def test_a_missing_worktree_with_no_commits_falls_through_to_alloc(self):
+        asyncio.run(gitstore.alloc(self.repo, "t1", base="main"))
+        asyncio.run(gitstore._drop_worktree_dir(
+            self.repo, gitstore.worktree_for(self.repo, "t1")))
+        asyncio.run(gitstore._git(["worktree", "prune"], cwd=self.repo,
+                                  check=False))
+
+        ts = code_tasks.load_taskfile(taskfile([BASIC], repo=str(self.repo)))
+        st = FakeStore(self._failed_row("push failed: stale info"))
+        with mock.patch.object(gitstore, "find_pr",
+                               mock.AsyncMock(return_value=(None, None, None))), \
+                capture_events() as ev:
+            g = code_tasks.build_code_graph(st, ts, taskfile="tf.json")
+            out = asyncio.run(g.nodes["publish_t1"].fn({"results": {}, "runs": {}}))
+
+        self.assertFalse(out.get("published"))
+        # NO keep_branch: this row is a publication failure but its branch has
+        # nothing ahead of base, so there is no reviewed work to lose and the
+        # alloc fallthrough is the correct recovery (it recreates the checkout;
+        # with a PR open it REUSES task/<id> rather than resetting it).
+        self.assertNotIn("keep_branch", out, out)
+        self.assertEqual(out.get("reason"), "no worktree", out)
+        self.assertIsNone(ev.first("task.branch_reattached"))
+
+    def test_a_failed_open_pr_keeps_the_branch_and_still_classifies(self):
+        """The orchestrator failing to open the PR must not reset the branch.
+
+        On a publication-failure resume the commit already exists, so
+        `fresh_head` is None and `open_pr` is called directly. A None number
+        used to fall into the pre-existing "implementer produced no changes"
+        handler: no keep_branch, so alloc RESET the reviewed branch, and the
+        stored error did not classify as a publication failure — so the next
+        resume would not reattach either. The failure compounded itself.
+        """
+        tip = self._reviewed_branch()
+
+        async def push(repo, tid):
+            return True, "pushed"
+
+        async def open_pr(repo, tid, title, body, base=None):
+            return None, None, "gh not authenticated"
+
+        out, st, ev = self._resume_publish(push, open_pr)
+
+        self.assertFalse(out.get("published"))
+        self.assertTrue(out.get("keep_branch"), out)
+        self.assertNotEqual(out.get("reason"), "no changes", out)
+        self.assertEqual(self._tip(), tip, "the branch survives the failure")
+        self.assertEqual([u["status"] for u in st.upserts], ["failed"])
+        self.assertIn("could not open PR:", st.upserts[0]["error"])
+        # The stored error must STILL classify as a publication failure, or the
+        # next resume cannot reattach to the branch this test just preserved.
+        self.assertTrue(code_tasks._is_publication_failure(
+            st.upserts[0]["error"]), st.upserts[0]["error"])
+        self.assertTrue(st.upserts[0]["finished"])
+
+
 class ReviewersSendingAPullRequestBack(unittest.TestCase):
     """The rework implementer must actually be told why the PR was rejected.
 
@@ -2561,7 +2879,7 @@ class ResumingAConflictedTask(unittest.TestCase):
         src = pathlib.Path(code_tasks.__file__).read_text()
         pub = src[src.index("async def publish(ctx):\n            \"\"\"Commit"):]
         pub = pub[:pub.index("async def pr_review")]
-        push = pub.index("push_task_branch(repo, tid)\n                number")
+        push = pub.index("await gitstore.push_task_branch(repo, tid)")
         attach = pub.index("await gitstore.open_pr(repo, tid,\n"
                            "                                           f\"task({tid})")
         self.assertLess(push, attach,
@@ -2627,8 +2945,19 @@ class ResolvingARealMergeConflict(unittest.TestCase):
         self.assertFalse(self._fires("alloc_t1", self.RESOLVE))
 
     def test_an_ordinary_failed_publish_still_falls_through_to_alloc(self):
+        # This dict is what publish_t1 ACTUALLY returns for a missing worktree
+        # with nothing ahead of base — the no-ahead case deliberately omits
+        # keep_branch so this edge runs. The node-level proof that it returns
+        # THIS dict and not the keep_branch one is
+        # ResumingAfterAFailedPublication.
+        #   test_a_missing_worktree_with_no_commits_falls_through_to_alloc
         self.assertTrue(self._fires("alloc_t1", {"published": False,
                                                  "reason": "no worktree"}))
+        # ...and the flag, when publish DOES set it (a branch ahead of base
+        # whose reattach failed), suppresses that edge.
+        self.assertFalse(self._fires("alloc_t1", {"published": False,
+                                                  "reason": "no worktree",
+                                                  "keep_branch": True}))
 
     def test_the_implementer_is_told_which_files_conflict(self):
         fb = code_tasks._rework_feedback("t1", {"publish_t1": self.RESOLVE})

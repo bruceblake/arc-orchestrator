@@ -289,7 +289,22 @@ their existing worktree and PR (`gitstore.existing_worktree`): the branch
 is synced with the current base (`gitstore.sync_with_base`), a clean sync
 goes straight back to `pr_review`, and a genuine overlap is left in the
 worktree with its markers for the implementer to resolve; only when no
-worktree is left to re-attach to does the task fall through to alloc. Stale `running` rows are marked `failed` at
+worktree is left to re-attach to does the task fall through to alloc. A task
+whose row failed on a **publication** error (`push failed: …` / `could not
+open PR: …`, `code_tasks._is_publication_failure`) is the same shape with no
+PR to find: when its branch is still ahead of base
+(`gitstore.branch_ahead`), the resume re-attaches to that branch — which
+holds the gate-approved, cross-family-reviewed commit — and retries
+publication, pushing before it opens the PR. A clean worktree resumes at
+`publish`; unfinished local edits run through the verify gate and a fresh
+cross-family review first, so nothing is published that no reviewer read.
+Such a failure does not cost the task its branch: while the commits are
+still ahead of base, `publish` returns `keep_branch`, which suppresses the
+alloc fallthrough so the next resume reattaches and retries publication
+instead of resetting the reviewed work. A publication error with **nothing**
+ahead of base has no reviewed commit to preserve and still reallocs — as does
+a resume whose checkout is gone and whose branch cannot be re-attached
+without those commits. Stale `running` rows are marked `failed` at
 startup, scoped to that taskfile. Startup prints a resume plan (skipped /
 retried / escalated) and emits `run.resume`
 `{skipped_merged, retried, escalated_on_resume}`, where `escalated_on_resume`
