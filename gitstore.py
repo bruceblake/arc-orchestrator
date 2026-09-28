@@ -1193,17 +1193,69 @@ async def _retry_transient(label, attempt_fn):
     return ok, note
 
 
+async def _remote_has_branch(repo, branch):
+    """Does `origin` currently have refs/heads/<branch>? True / False / None.
+
+    `git ls-remote` asks the REMOTE, which is the whole point: the local
+    `refs/remotes/origin/<branch>` can be a stale leftover of a branch GitHub
+    has already deleted, and no local ref can tell the two apart.
+
+    None means the lookup itself did not answer (network, auth, timeout) and
+    the caller must keep today's lease: guessing "absent" from a failed lookup
+    would turn one network blip into a spurious push refusal.
+
+    The `GitError` catch is required, not decorative: `_git` raises it on
+    GIT_TIMEOUT even with `check=False` (gitstore.py:408-411), so a hung
+    `ls-remote` would otherwise escape `push_task_branch`'s `except GitError`
+    and fail the publish node, instead of falling back to the plain lease like
+    every other git failure in that function.
+    """
+    try:
+        rc, out, _ = await _git(["ls-remote", "origin", f"refs/heads/{branch}"],
+                                cwd=repo, check=False)
+    except GitError:
+        return None
+    if rc != 0:
+        return None
+    want = f"refs/heads/{branch}"
+    return any(len(parts) == 2 and parts[1] == want
+               for parts in (line.split() for line in out.splitlines()))
+
+
 async def push_task_branch(repo, task_id):
-    """Push task/<id> to origin. Returns (ok, note)."""
+    """Push task/<id> to origin. Returns (ok, note).
+
+    Plain `--force-with-lease` leases against the LOCAL tracking ref, so a
+    task whose remote branch was deleted after merge (GitHub removes it on
+    merge; `git fetch --prune` is what clears the leftover) is refused with
+    "stale info" even though there is no remote ref left to protect. The
+    branch is then un-pushable and the task dies on its FIRST publication.
+
+    So when the remote says it has NO such branch, the push carries the
+    "must not exist" lease `--force-with-lease=task/<id>:`. A concurrent
+    creation of that branch is still refused ("reference already exists" —
+    measured), so the stale ref is refreshed without weakening the lease.
+
+    Every other case keeps plain `--force-with-lease` byte-for-byte: a branch
+    the remote still has, and a lookup that did not answer, are both leased
+    against the local tracking ref exactly as before. The lease is never
+    rebased onto a sha we did not fetch — adopting a branch another actor
+    moved to would overwrite the very update the lease exists to protect.
+    """
     repo = Path(repo).resolve()
     rc, remotes, _ = await _git(["remote"], cwd=repo, check=False)
     if not remotes.strip():
         return False, "no git remote configured"
+    branch = f"task/{task_id}"
 
     async def once():
+        on_remote = await _remote_has_branch(repo, branch)
+        # None (lookup failed) and True both mean "lease as usual"; only a
+        # confirmed absence switches to the must-not-exist lease.
+        lease = ("--force-with-lease" if on_remote is not False
+                 else f"--force-with-lease={branch}:")
         try:
-            await _git(["push", "-u", "--force-with-lease", "origin",
-                        f"task/{task_id}"], cwd=repo)
+            await _git(["push", "-u", lease, "origin", branch], cwd=repo)
         except GitError as exc:
             return False, f"push failed: {exc}"[:400]
         return True, "pushed"
