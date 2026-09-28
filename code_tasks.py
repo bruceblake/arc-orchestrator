@@ -1834,6 +1834,63 @@ def _was_interrupted(error):
     return any(m in low for m in _INTERRUPTION_REASONS)
 
 
+# publish()'s two ORCHESTRATOR-side failures, both written after the work has
+# already passed the verify gate and the cross-family pre-merge review: the
+# commit exists on task/<id>, only getting it to GitHub failed. They are not
+# capability signals (the model did its job) and not interruptions (the run
+# finished, loudly), so they fell through BOTH resume paths: alloc reset the
+# reviewed branch to base, and a fresh implement/review cycle re-derived work
+# no gate and no reviewer had ever refused. Measured on an arc-orchestrator
+# task, where a stale --force-with-lease tracking ref cost it its branch.
+_PUBLICATION_FAILURES = (
+    "push failed:",            # "push failed: <git error>"
+    "could not open pr:",      # the push landed, gh pr create did not
+)
+
+
+def _is_publication_failure(error):
+    """True when the row says the ORCHESTRATOR failed to publish, not the model.
+
+    A pure string test, so the resume plan can classify a row without touching
+    git; `_publication_failed_ahead` adds the branch-state half.
+    """
+    low = (error or "").lower()
+    return any(m in low for m in _PUBLICATION_FAILURES)
+
+
+async def _publication_failed_ahead(repo, tid, error):
+    """True when a failed publication left approved commits on the branch.
+
+    The branch-state half of `_is_publication_failure`: reattaching is only
+    right when there really is committed work to reattach TO. A branch with
+    nothing ahead of base has nothing to preserve, and alloc is then the
+    correct (and unchanged) move.
+    """
+    if not _is_publication_failure(error):
+        return False
+    try:
+        return await gitstore.branch_ahead(repo, tid)
+    except Exception:
+        return False
+
+
+async def _reattach_branch_worktree(repo, tid):
+    """Recreate a task's checkout AT ITS EXISTING BRANCH, or None on failure.
+
+    A branch can outlive its worktree — pruned, or lost with a reboot — and the
+    commits on it are what the reviewer approved. `alloc` recreates a worktree
+    from BASE, which is the reset this path exists to avoid, so the checkout is
+    recreated on the branch itself.
+    """
+    try:
+        async with gitstore._RepoLock(repo):
+            return await gitstore._reuse_branch_worktree(
+                repo, gitstore.worktree_for(repo, tid), f"task/{tid}")
+    except Exception as exc:
+        errors.capture(exc, task=tid, node=f"reattach_{tid}")
+        return None
+
+
 async def _run_probe(cmd, wt):
     """Run a task's probe_cmd in its worktree; (verdict, None) on success —
     the LAST JSON object in stdout — or (None, reason) on any failure."""
@@ -1997,8 +2054,14 @@ async def open_task_issues(store, taskset, taskfile):
         return {}
 
 
-def _resume_pr_start(repo, tid, *, known_open=False):
+def _resume_pr_start(repo, tid, *, known_open=False, prior_error=""):
     """Choose the safe resume node for an open PR: gate if edits are pending.
+
+    A task whose last row says the ORCHESTRATOR failed to publish is the same
+    shape WITHOUT a PR to find: the commit is on task/<id>, the gate and the
+    cross-family review that produced it already passed, and only getting it
+    to GitHub failed — so it is reattached on the same terms (publish when the
+    worktree is clean, gate + a fresh review when it is not).
 
     Any gh failure returns None: resume then follows today's alloc path.
     Called from build_code_graph, which production invokes inside a running
@@ -2009,7 +2072,8 @@ def _resume_pr_start(repo, tid, *, known_open=False):
             number, _url, state = await gitstore.find_pr(
                 repo, tid, state="open", wait_quota=False)
             if not number or (state or "").upper() != "OPEN":
-                return None
+                if not await _publication_failed_ahead(repo, tid, prior_error):
+                    return None
         try:
             wt = await gitstore.existing_worktree(repo, tid)
         except Exception:
@@ -2504,11 +2568,16 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                   if (m := start_model(tid)) != _baseline(tid)}
         # A reboot leaves the row 'running' (then stale-reset writes 'failed')
         # while the PR is still open. Re-attach, but verify unfinished local
-        # edits before publish can commit them.
+        # edits before publish can commit them. A row whose failure was the
+        # ORCHESTRATOR's (publish could not push or could not open the PR) is
+        # the same shape with no PR to find: the reviewed commits are on the
+        # branch, so `prior_error` lets the probe reattach those too — without
+        # it the resume fell to alloc, which reset the branch to base.
         for tid in retried:
             known_open = prior[tid].get("status") in ("in_review", "conflict")
             try:
-                start = _resume_pr_start(repo, tid, known_open=known_open)
+                start = _resume_pr_start(repo, tid, known_open=known_open,
+                                         prior_error=prior[tid].get("error") or "")
                 if start:
                     resume_start[tid] = start
             except Exception:
@@ -3400,7 +3469,36 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                             return {"published": False, "merged": True,
                                     "empty": True, "head": None,
                                     "pr": number, "url": url}
-                    return {"published": False, "reason": "no worktree"}
+                    # No worktree at all: recreate the checkout ON THE BRANCH
+                    # when it holds commits, because falling through to alloc
+                    # would reset exactly those commits (`alloc` builds from
+                    # the base). A failed publication is the case this
+                    # protects: its branch is the only copy of reviewed,
+                    # gate-approved work. With nothing ahead of base there is
+                    # nothing to lose, and alloc stays the right move.
+                    ahead = await _publication_failed_ahead(
+                        repo, tid, (prior.get(tid) or {}).get("error"))
+                    if ahead:
+                        wt = await _reattach_branch_worktree(repo, tid)
+                        if wt is not None:
+                            events.emit("task.branch_reattached", task=tid,
+                                        worktree=str(wt),
+                                        reason="no worktree on a resume")
+                    if wt is None:
+                        # `keep_branch` ONLY when there is reviewed work to
+                        # lose: a publication failure whose branch holds the
+                        # commits and whose reattach just failed. Setting it
+                        # unconditionally ended the graph here — publish has no
+                        # other edge out of this result — so an open-PR resume
+                        # whose checkout was pruned stayed `in_review` with the
+                        # worktree still gone. Without the flag alloc recovers
+                        # it: with a PR open `gitstore.alloc` REUSES task/<id>
+                        # (task.branch_kept) instead of resetting it.
+                        if ahead:
+                            return {"published": False,
+                                    "reason": "no worktree",
+                                    "keep_branch": True}
+                        return {"published": False, "reason": "no worktree"}
                 events.emit("task.resumed", task=tid, worktree=str(wt),
                             prior_status=prior_status)
             # Belt-and-suspenders harvest: implement/review collect proposals
@@ -3468,10 +3566,32 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     await gitstore.cleanup(repo, tid)
                     return {"published": False, "merged": True, "empty": True,
                             "head": None}
-                if resynced:
-                    # The merge commit only exists locally until this runs, and
-                    # the re-attach path below does no pushing of its own.
-                    await gitstore.push_task_branch(repo, tid)
+                # A row that failed to PUBLISH is why this node is running at
+                # all: its reviewed commits are on task/<id> and NOWHERE ELSE,
+                # so they must be pushed before a PR can be opened on them —
+                # otherwise gh refuses with "No commits between …" and the
+                # task fails all over again. A resynced branch has a fresh
+                # merge commit that only exists locally too. An ordinary
+                # open-PR resume needs no push (its branch is already there)
+                # and keeps today's behaviour untouched.
+                needs_push = resynced or _is_publication_failure(
+                    (prior.get(tid) or {}).get("error"))
+                if needs_push:
+                    pushed, pnote = await gitstore.push_task_branch(repo, tid)
+                    if not pushed:
+                        store.upsert_code_task(taskfile, tid, t["title"], model,
+                                               rev, "failed",
+                                               error=f"push failed: {pnote}",
+                                               finished=True)
+                        release_files(tid)
+                        events.emit("task.failed", task=tid,
+                                    reason=f"push failed: {pnote}")
+                        # `keep_branch` keeps this out of the alloc
+                        # fallthrough: the commits this return is protecting
+                        # are exactly the ones alloc RESETS. The next resume
+                        # reattaches and retries publication instead.
+                        return {"published": False, "reason": pnote,
+                                "keep_branch": True}
                 number, url, note = (None, None, None) if reworked else \
                     await gitstore.open_pr(repo, tid,
                                            f"task({tid}): {t['title']}", "", base)
@@ -3483,6 +3603,24 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                     dossier_call(tid, dossier_mod.set_pr, number, url)
                     return {"published": True, "pr": number, "url": url,
                             "head": None, "reattached": True}
+                if not reworked:
+                    # `open_pr` WAS called and returned no number. On a
+                    # publication-failure resume the commit already exists
+                    # (`fresh_head` is None), so this is the orchestrator
+                    # failing to publish an already-reviewed branch — NOT
+                    # "the implementer produced no changes". Recording it as
+                    # the latter sent the next resume down the alloc path,
+                    # which RESETS the branch, and the stored error did not
+                    # classify as a publication failure so it would not even
+                    # reattach. Mirror the fresh-commit path below.
+                    store.upsert_code_task(taskfile, tid, t["title"], model, rev,
+                                           "failed",
+                                           error=f"could not open PR: {note}",
+                                           finished=True)
+                    release_files(tid)
+                    events.emit("task.failed", task=tid, reason=f"pr: {note}")
+                    return {"published": False, "reason": note,
+                            "keep_branch": True}
                 store.upsert_code_task(
                     taskfile, tid, t["title"], model, rev, "failed",
                     error=("rework after PR rejection produced no changes"
@@ -3501,7 +3639,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                        finished=True)
                 release_files(tid)
                 events.emit("task.failed", task=tid, reason=f"push failed: {note}")
-                return {"published": False, "reason": note}
+                # keep_branch: on a publish RESUME (alloc never ran in this
+                # graph) the alloc fallthrough would otherwise reset the very
+                # branch this push just committed to. The work is reviewed and
+                # gate-approved; only the push failed. Retry publication.
+                return {"published": False, "reason": note, "keep_branch": True}
             body = (f"Task `{tid}` from `{Path(taskfile).name if taskfile else '?'}`\n\n"
                     f"{t['prompt'][:1500]}\n\n---\n"
                     f"Implemented by **{model}**, pre-review by **{rev_model or rev}**.\n"
@@ -3516,7 +3658,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                        finished=True)
                 release_files(tid)
                 events.emit("task.failed", task=tid, reason=f"pr: {note}")
-                return {"published": False, "reason": note}
+                # Same as the push failure above: "could not open PR" is the
+                # orchestrator's failure, and the branch the alloc fallthrough
+                # would reset holds reviewed, gate-approved commits.
+                return {"published": False, "reason": note, "keep_branch": True}
             store.upsert_code_task(taskfile, tid, t["title"], model, rev,
                                    "in_review", branch=f"task/{tid}")
             events.emit("task.pr_opened", task=tid, url=url, number=number,
@@ -4106,6 +4251,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                when=lambda r, c, i=tid: not r.get("published")
                and not r.get("resolve")
                and not r.get("merged")
+               # A publication failure is NOT a reason to start over: the
+               # commit publish just made is on task/<id>, gate-approved and
+               # cross-family reviewed. alloc RESETS that branch, so falling
+               # through discarded reviewed work and re-derived it — the bug
+               # this edge's `keep_branch` exists to stop. The task stays
+               # failed and the next resume reattaches and retries publication.
+               and not r.get("keep_branch")
                and f"alloc_{i}" not in c.get("results", {}))
         g.edge(f"publish_{tid}", f"pr_merge_{tid}",
                when=lambda r, c: bool(r.get("empty")), on_drain=True)

@@ -27,6 +27,22 @@ if str(ROOT) not in sys.path:
 # reads os.environ directly to honour the hatch.
 os.environ.pop("ARC_ESCALATION_PATH", None)
 
+# ARC_FLEET is the same leak, one profile deep, and it is what the fleet
+# machine actually exports: deploy/arc-dashboard.service and start.sh both set
+# ARC_FLEET=studio for EVERY process they start, so an orchestrator-launched
+# task's verify gate inherits it. config derives FLEET/STUDIO and the whole
+# studio roster at IMPORT time, so `unittest discover` then runs a suite that
+# asserts a two-model local fleet against studio's rows: three failures
+# (test_local_is_the_two_model_fleet, the studio-routing pair) on a tree with
+# NO work applied. check.sh has always unset it (`env -u ARC_FLEET`) for
+# exactly this reason, but a taskfile's verify_cmd is its OWN command — it does
+# not go through check.sh — so every `unittest tests.test_code_tasks` gate on
+# this box failed no matter what the agent wrote. Same remedy, same place as
+# the env above. Tests that MEAN studio pass ARC_FLEET explicitly to a
+# subprocess (tests/test_studio.py `in_studio`, tests/test_config.py), which
+# builds its own env from os.environ, so they are unaffected.
+os.environ.pop("ARC_FLEET", None)
+
 import config  # noqa: E402
 import events  # noqa: E402
 
