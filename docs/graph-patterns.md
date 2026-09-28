@@ -49,13 +49,15 @@ Two facts from the literature shape everything below:
 ### Model tiers and driver caps (fan-out arithmetic)
 
 The roster is dated and API-validated (`config.ROSTER`); this is the
-2026-09-12 snapshot — the live numbers are `config.harness_limit()` /
+2026-09-12 snapshot, with the 2026-09-25 role correction folded in (DeepSeek
+is the hard tier and the planner; GLM-5.3 is medium and does not plan) — the
+live numbers are `config.harness_limit()` /
 `config.driver_limit()` (`config._HARNESS_CAP`, `config._MODEL_DRIVER_CAP`).
 
 | Model | Harness | Tier | Roles | Account cap | Driver slots |
 |---|---|---|---|---|---|
-| DeepSeek-V4.1-Flash-thinking-max | `reasonix` | medium | implement/review/PR-review (never plans) | 10 | 10 |
-| GLM-5.3 | `opencode` | hard | implement/plan/review/PR-review; the planner | 4 | 4 |
+| DeepSeek-V4.1-Flash-thinking-max | `reasonix` | hard | implement/plan/review/PR-review; the planner | 10 | 10 |
+| GLM-5.3 | `opencode` | medium | implement/review/PR-review (never plans) | 4 | 4 |
 
 - Reviewer is always cross-family: `reviewer` names a family in
   `config.REVIEW_FAMILIES` (`glm`, `deepseek`) other than the
@@ -198,7 +200,8 @@ coin-flip into a decision.
    "deps": ["side-a", "side-b"]}]}}
 ```
 
-- **Width:** 2 branches is the norm; 3 maximum (GLM cap 3, and each rival
+- **Width:** 2 branches is the norm; 3 maximum (GLM-5.3's batch driver cap is
+  4, and each rival
   past 2 mostly costs API budget, not information).
 - **Pitfalls:** two tasks implementing the *same* files will merge-conflict —
   rivals must write to separate paths (or use debate/vote, §7). V is not a
@@ -209,8 +212,8 @@ coin-flip into a decision.
 ## 4. Router
 
 ```
-classify --+--(medium)---> DeepSeek task
-           +--(hard)-----> GLM-5.3 task
+classify --+--(medium)---> GLM-5.3 task
+           +--(hard)-----> DeepSeek-V4.1 task
 ```
 
 Classify the work, send it down exactly one branch. Two ways to route here:
@@ -267,7 +270,7 @@ Exactly one of `fix-frontend` / `fix-backend` runs; the other is recorded
 ## 5. Orchestrator-workers (supervisor)
 
 ```
-            planner (GLM-5.3, code plan)
+            planner (DeepSeek-V4.1, code plan)
                  |  taskfile
         +--------+--------+
         v        v        v
@@ -374,7 +377,7 @@ exactly ONE cross-family reviewer in the two-family fleet, recorded as
 ## 8. Hierarchical (planner → sub-planners → workers)
 
 ```
-planner(GLM-5.3)
+planner(DeepSeek-V4.1)
   |-- sub-plan A (taskfile A: 2-8 tasks) --> code run A
   |-- sub-plan B (taskfile B: 2-8 tasks) --> code run B
   +-- sub-plan C ...
@@ -406,21 +409,21 @@ separate projects; with a two-branch flow, `ARC_BASE_BRANCH=development`,
 implement → gate ─fail→ implement (fix round, ≤ MAX_FIX_ROUNDS=8)
                 └─budget out→ escalate tier up (fresh fix budget,
                     ≤ MAX_ESCALATIONS=1 per run)
-                    path (config.ESCALATION_PATH): DeepSeek-V4.1 → GLM-5.3 → fail
+                    path (config.ESCALATION_PATH): GLM-5.3 → DeepSeek-V4.1 → fail
                     a retired model's task hops in at its remap (RETIRED_MODELS)
 ```
 
 The saga/circuit-breaker analog, already wired by `code_tasks.build_code_graph`
 (Rule 4): bounded local retry, then escalate along `config.ESCALATION_PATH`
-(default DeepSeek-V4.1-Flash-thinking-max → GLM-5.3) with the failure as
+(default GLM-5.3 → DeepSeek-V4.1-Flash-thinking-max, weakest first) with the failure as
 feedback, the reviewer re-chosen as the implementer's family changes;
 compensation = reallocating the worktree **resets the task branch to base**,
 so a rejected attempt never leaks into a retry. A taskfile that still names a
 retired model (gpt-oss-120b, DeepSeek-V4-Flash, Kimi-K3) is remapped onto the path by
 `code_tasks.RETIRED_MODELS` rather than rejected. With `MAX_ESCALATIONS` = 1
 (one less than the two-model path's length, `config.py:556-557`) a
-medium-tier DeepSeek task can reach the top tier
-(GLM-5.3) within a single run; a task planned at the top tier tops out sooner, and continues
+medium-tier GLM-5.3 task can reach the top tier
+(DeepSeek-V4.1-Flash-thinking-max) within a single run; a task planned at the top tier tops out sooner, and continues
 only via the resume path
 (re-running a capability-failed row resumes one tier up). Resume escalates
 only on capability failures — an interrupted run restarts at the same
@@ -430,8 +433,10 @@ tier.
   estimating latency: worst case per task is fix_rounds × tiers.
 - **Pitfalls:** escalation is predicated on the failure being *the model's
   fault*. A task whose prompt is unknowable ("make it better") will climb
-  all the way to GLM-5.3 and fail there burning the scarcest capacity — write
-  verifiable tasks instead. Gate output is truncated to 2000 chars, so make
+  all the way to DeepSeek-V4.1-Flash-thinking-max — the terminal tier — and
+  fail there, after burning a fix budget at every lower tier; GLM-5.3’s cap of
+  4 is the scarce seat, not where the climb ends. Write verifiable tasks
+  instead. Gate output is truncated to 2000 chars, so make
   `verify_cmd` print the diagnosis early (or tail-filter it), or every fix
   round starts from a useless feedback blob.
 

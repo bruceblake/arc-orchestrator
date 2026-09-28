@@ -669,6 +669,61 @@ def _seat_blocked(model, usage):
     return drivers._usage_blocked_until.get(harness, 0) > time.time()
 
 
+def _blocked_harnesses():
+    """Harness names whose plan window is still closed. Never raises.
+
+    Tests mock this. When ``drivers.refresh_usage_blocks`` exists it is the
+    source of truth (``_usage_blocked_until``). Otherwise the event log is
+    streamed into ``drivers.active_plan_windows``: a harness in that result
+    is blocked.
+    """
+    try:
+        refresh = getattr(drivers, "refresh_usage_blocks", None)
+        if callable(refresh):
+            refresh()
+            now = time.time()
+            return {h for h, until in drivers._usage_blocked_until.items()
+                    if until > now}
+        path = config.EVENTS_LOG
+
+        def _lines():
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                for line in fh:
+                    if ("driver.usage_limit" in line
+                            or "driver.usage_swap" in line
+                            or "driver.done" in line):
+                        yield line
+
+        return {row["harness"] for row in drivers.active_plan_windows(_lines())
+                if row.get("harness")}
+    except Exception:
+        return set()
+
+
+def _plan_window_pairs(blocked):
+    """``harness/model`` labels for the planner's closed-window line."""
+    grouped = {}
+    for model, harness in config.MODEL_HARNESS.items():
+        if harness in blocked:
+            grouped.setdefault(harness, set()).add(model)
+    known = {
+        "codex": getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol"),
+        "claude": "Claude-Opus-5.5",
+        "cursor": "Cursor-Grok-4.7",
+        "agy": "Antigravity-Gemini",
+    }
+    pairs = []
+    for harness in sorted(blocked):
+        models = sorted(grouped.get(harness) or ())
+        if not models and harness in known:
+            models = [known[harness]]
+        if models:
+            pairs.extend(f"{harness}/{model}" for model in models)
+        else:
+            pairs.append(str(harness))
+    return pairs
+
+
 def _reviewer_rank(model, usage):
     """Lower sorts first: DeepSeek, GLM, other seats, then Claude.
 
@@ -907,12 +962,18 @@ def _next_tier_m(model):
     explicitly to gpt-oss-120b for mechanical work) counts as below the
     entry tier, so it escalates INTO the path rather than being stuck
     unable to escalate at all.
+
+    A harness in ``_blocked_harnesses()`` is skipped. When every remaining
+    seat is on a spent plan, return None instead of escalating onto it.
+    With nothing blocked this matches the path walk above, including None
+    at the top.
     """
+    blocked = _blocked_harnesses()
     idx = _tier_index_m(model)
-    if idx is None:
-        return config.ESCALATION_PATH[0] if config.ESCALATION_PATH else None
-    if idx + 1 < len(config.ESCALATION_PATH):
-        return config.ESCALATION_PATH[idx + 1]
+    start = 0 if idx is None else idx + 1
+    for cand in config.ESCALATION_PATH[start:]:
+        if _harness_of(cand) not in blocked:
+            return cand
     return None
 
 
@@ -1693,6 +1754,58 @@ def _tier_rank(model):
     return config.TIER_ORDER.index(tier) if tier in config.TIER_ORDER else -1
 
 
+# A planned deepseek/glm reviewer at or above this contention, but still
+# under a full seat, yields to an idle cursor harness and then agy.
+# Pressure 0 stays on the planned ARC reviewer. At 1.0 the full-seat
+# fallback (planned_full_*) applies instead.
+REVIEW_HANDOFF_PRESSURE = 0.5
+_SUBSCRIPTION_HANDOFF = ("cursor", "agy")
+_SUBSCRIPTION_IDLE_PRESSURE = 0.25
+
+
+def _subscription_handoff(planned, impl_model, pol, usage, pressure, blocked):
+    """An idle cursor, else agy, reviewer, or None to keep the plan.
+
+    The planned seat must be an unblocked deepseek or glm reviewer in the
+    band [REVIEW_HANDOFF_PRESSURE, 1). The substitute must be allowed to
+    review, at least the planned tier, under ``_SUBSCRIPTION_IDLE_PRESSURE``,
+    not the implementer's family, and constructable. A usage-blocked
+    harness is skipped. ``blocked`` is the set from ``_blocked_harnesses``.
+    """
+    if pressure < REVIEW_HANDOFF_PRESSURE:
+        return None
+    if config.MODEL_FAMILY.get(planned) not in ("deepseek", "glm"):
+        return None
+    if _seat_blocked(planned, usage) or _harness_of(planned) in blocked:
+        return None
+    impl_fam = config.MODEL_FAMILY.get(impl_model)
+    floor = _tier_rank(planned)
+    for harness in _SUBSCRIPTION_HANDOFF:
+        if harness in blocked:
+            continue
+        for m in config.MODEL_ROLES:
+            if config.MODEL_HARNESS.get(m) != harness:
+                continue
+            if m == planned or config.MODEL_FAMILY.get(m) == impl_fam:
+                continue
+            if not config.model_may(m, "reviewer") or _tier_rank(m) < floor:
+                continue
+            try:
+                if config.driver_limit(m) <= 0:
+                    continue
+            except (KeyError, ValueError):
+                continue
+            if (_reviewer_pressure(m, usage) >= _SUBSCRIPTION_IDLE_PRESSURE
+                    or _seat_blocked(m, usage)):
+                continue
+            try:
+                _driver(m, "reviewer", pol)
+            except ValueError:
+                continue
+            return m
+    return None
+
+
 def _select_reviewer(planned_tok, impl_model, pol, usage):
     """(model, reason) for the pre-merge review — capacity-aware, never weaker.
 
@@ -1705,9 +1818,29 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
     and the review waits for it — a review is never skipped. Under the
     ARC_ALLOW_SAME_FAMILY_REVIEW hatch the cross-family backend is the thing
     that is down, so no fallback is attempted.
+
+    Short of a full seat, a deepseek or glm reviewer at
+    ``REVIEW_HANDOFF_PRESSURE`` or above yields to an idle cursor then agy
+    seat (reason ``planned_pressure_subscription``) when that seat is not
+    usage-blocked. A bench policy keeps the named reviewer. A blocked
+    planned seat does not take that handoff.
     """
     planned = config.REVIEW_FAMILIES.get(planned_tok, planned_tok)
-    if _reviewer_pressure(planned, usage) < 1.0:
+    pressure = _reviewer_pressure(planned, usage)
+    blocked = _blocked_harnesses()
+    planned_blocked = (_seat_blocked(planned, usage)
+                       or _harness_of(planned) in blocked)
+    # Pressure 0 stays on the planned ARC reviewer. A blocked planned seat
+    # at or above the handoff threshold uses the full-seat fallback below
+    # (planned_full_fallback / planned_full_no_alternative / bench / hatch),
+    # the same path as pressure >= 1. The handoff only runs for an open
+    # deepseek or glm seat in the band underneath a full ceiling.
+    if pressure < 1.0 and not (planned_blocked and pressure >= REVIEW_HANDOFF_PRESSURE):
+        if not pol and not planned_blocked:
+            alt = _subscription_handoff(
+                planned, impl_model, pol, usage, pressure, blocked)
+            if alt:
+                return alt, "planned_pressure_subscription"
         return planned, "planned"
     if config.ALLOW_SAME_FAMILY_REVIEW:
         return planned, "planned_full_hatch"
@@ -2818,8 +2951,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             if not res.get("restored"):
                 return
             files = res.get("files") or []
+            conflicts = res.get("conflicts") or []
             events.emit("task.checkpoint_restored", task=tid,
                         path=res.get("path"), files=len(files),
+                        conflicts=conflicts,
                         previous_failure=row.get("error"),
                         attempt=(res.get("meta") or {}).get("attempt"))
             board.post(wt, task=tid, role="orchestrator", model="",
@@ -2828,7 +2963,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                              f"{Path(str(res.get('path') or '')).name}: the "
                              f"previous attempt was interrupted, not rejected — "
                              f"continue it instead of starting over: "
-                             f"{', '.join(files[:12])}"))
+                             f"{', '.join(files[:12])}. "
+                             + (f"Could not restore {', '.join(conflicts)}; "
+                                "merge those files from the saved patch "
+                                f"{res.get('path')}."
+                                if conflicts else "")))
 
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
@@ -4359,8 +4498,29 @@ def _routing_tiers_prose():
     """The planner's routing instructions, written from today's roster."""
     tiers = config.IMPLEMENT_TIERS
     lines = ["ROUTING TIERS (enforced — a task file that violates these is rejected):\n"]
+    blocked = _blocked_harnesses()
+    claude = "Claude-Opus-5.5"
+
+    def _assignable(names):
+        """Models the planner may name: not Claude, not a closed window.
+
+        Claude stays the studio planner at a cap of 2, so it is never a
+        routine implementer. A spent plan is named later as closed rather
+        than offered in the enforced list — a taskfile that assigns it
+        would sit on a window that cannot run.
+        """
+        out = []
+        for name in names:
+            if name == claude:
+                continue
+            harness = config.MODEL_HARNESS.get(name)
+            if harness and harness in blocked:
+                continue
+            out.append(name)
+        return out
+
     if tiers.get("medium"):
-        medium = tiers["medium"]
+        medium = _assignable(tiers["medium"]) or list(tiers["medium"])
         lines.append(f"- {' or '.join(medium)}: medium tasks (a self-contained "
                      "feature, a new endpoint, moderate refactor of one file) AND the "
                      "mechanical ones (rename, small HTML/CSS, wiring, config) — there is "
@@ -4376,21 +4536,61 @@ def _routing_tiers_prose():
                          "give independent tasks DIFFERENT models so they run in "
                          "parallel and neither sits idle; do NOT send every medium "
                          "task to the same one.\n")
-    if tiers.get("hard"):
-        lines.append(f"- {' or '.join(tiers['hard'])}: hard tasks that need deep "
+    hard = _assignable(tiers.get("hard") or [])
+    if hard:
+        lines.append(f"- {' or '.join(hard)}: hard tasks that need deep "
                      "understanding, multi-file reasoning, delicate architecture, or "
                      "subtle debugging.\n")
-    lines.append(f"- {config.ESCALATION_PATH[-1]} is the fleet's strongest model "
-                 "(the last escalation stage) — prefer it for the hardest tasks.\n")
+    # Prefer DeepSeek only when the roster actually puts it on the hard
+    # tier. On this commit it is the medium implementer and GLM-5.3 is the
+    # hard ARC seat; telling the planner to send hard work to DeepSeek
+    # produces a taskfile the loader rejects.
+    ds = "DeepSeek-V4.1-Flash-thinking-max"
+    arc_hard = [m for m in hard if config.MODEL_FAMILY.get(m) in ("deepseek", "glm")]
+    if ds in hard:
+        prefer = ds
+    elif arc_hard:
+        prefer = arc_hard[-1]
+    else:
+        prefer = hard[0] if hard else None
+    if prefer:
+        lines.append(f"- The hardest tasks prefer {prefer}.\n")
+    spread = [name for name in ("Cursor-Grok-4.7", "Antigravity-Gemini")
+              if name in hard and name != prefer]
+    if spread:
+        clause = (f"- Spread OTHER independent hard tasks across "
+                  f"{' and '.join(spread)} so they run in parallel and do not "
+                  "sit idle.")
+        if prefer:
+            clause += f" Do not send every hard task to {prefer}."
+        lines.append(clause + "\n")
+    if claude in config.MODEL_ROLES:
+        lines.append(
+            f"- {claude} is not a routine implementer even when its window is "
+            "open (it is the studio planner, local cap 2). Do not assign it "
+            "as an implementer.\n")
+    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")
+    for model, default_harness in ((gpt, "codex"), (claude, "claude")):
+        harness = config.MODEL_HARNESS.get(model, default_harness)
+        if harness in blocked:
+            lines.append(f"- {model} has a spent plan window. Do not assign it.\n")
     fams = list(config.REVIEW_FAMILIES)
     pairs = []
     for m in config.ESCALATION_PATH:
         r = config.cross_family_reviewer(m)
         if r:
             pairs.append(f"work by {m} is reviewed by {r}")
+    note = ""
+    if any(config.MODEL_HARNESS.get(m) in ("cursor", "agy")
+           and config.model_may(m, "reviewer") for m in config.MODEL_ROLES):
+        note = (" A busy ARC reviewer (deepseek or glm) can be handed to "
+                "cursor or google at runtime.")
     lines.append(f"- reviewer is one of {' or '.join(fams)}. Cross-review rule: "
                  + "; ".join(pairs) + ". Spread reviews across the review-capable "
-                 "families so none idles or saturates.\n\n")
+                 "families so none idles or saturates." + note + "\n\n")
+    closed = _plan_window_pairs(blocked)
+    lines.append("Plan windows closed right now: "
+                 + (", ".join(closed) if closed else "none") + "\n")
     return "".join(lines)
 
 
@@ -4664,8 +4864,8 @@ async def plan_tasks(goal, repo, out_path=None, store=None):
         "Reply with STRICT JSON only, matching exactly this shape:\n"
         + PLAN_SCHEMA_HINT
     )
-    # The strongest live model that may plan — GLM-5.3 on the two-model
-    # roster pinned 2026-09-12 (Kimi-K3 retired that day).
+    # The strongest live model that may plan — DeepSeek-V4.1-Flash-thinking-max
+    # on the 2026-09-25 roster (GLM-5.3 is medium and holds no planner role).
     #
     # A planner can exit 0 with NO usable JSON: reasoning models burn the
     # whole opencode output budget on thinking and finish reason=length with

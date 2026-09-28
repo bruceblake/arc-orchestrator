@@ -48,11 +48,8 @@ PLANNER_PERSONA = (
     "Taskfile rules: {\"project\": {\"repo\": <stated path>, \"title\": str, "
     "\"tasks\": [...]}}; 2-6 tasks, each <30 min for one agent; per-task "
     "model is exactly one of "
-    f"{' or '.join(sorted(config.IMPLEMENTER_MODELS))} — today's two-model "
-    "fleet is GLM-5.3 (hard tier, the fleet's strongest, and the planner) and "
-    "DeepSeek-V4.1-Flash-thinking-max (medium tier, the fast workhorse that "
-    "implements and reviews but NEVER plans); "
-    f"reviewer is exactly one of "
+    f"{' or '.join(sorted(config.IMPLEMENTER_MODELS))} — {config.tier_sentence()}"
+    "; reviewer is exactly one of "
     f"{', '.join(chr(34) + f + chr(34) for f in sorted(config.REVIEW_FAMILIES))} "
     "and MUST NOT share a family with the implementer (never self-review); "
     "every task gets an honest verify_cmd — when code changes make "
@@ -213,8 +210,10 @@ def _history(turns, limit=HISTORY_CHARS):
 def _planner_driver():
     """The planner for CHAT, which is interactive and therefore different.
 
-    Roster-aware through drivers.driver_for: GLM-5.3 (opencode) on the
-    two-model roster pinned 2026-09-12. Hardcoding a driver class here would
+    Roster-aware through drivers.driver_for: whatever `config.PLANNER_MODEL`
+    is today — DeepSeek-V4.1-Flash-thinking-max (reasonix) on the local
+    profile, Claude-Opus-5.5 on studio (operator decision 2026-09-25).
+    Hardcoding a driver class here would
     fail the morning the roster's harness for the planner moves — this call
     site was missed once already when the governed pipeline's was fixed.
 

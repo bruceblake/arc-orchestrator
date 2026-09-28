@@ -23,7 +23,7 @@ Rules 1–9, byte for byte.
 | Reached via | — | **the operator's own subscriptions** | OpenRouter, per token |
 | Always present | GLM-5.3 + DeepSeek on ARC | same | same |
 | Families | 2 | 4 | 6 |
-| Planner | GLM-5.3 | Claude-Opus-5.5 | Claude-Opus-5.5 |
+| Planner | DeepSeek-V4.1-Flash-thinking-max | Claude-Opus-5.5 | Claude-Opus-5.5 |
 | PR reviewers | 1 (thin, Rule 5) | 2 | 2 |
 | Concurrency | full | **1–2 per CLI** | full |
 | Cost | free | free (plan quota) | metered |
@@ -133,9 +133,18 @@ plan, which is the opposite of why the harness exists.
 ### Roster order is load-bearing
 
 `config.ROSTER` is written weakest → strongest, and `_STRONGEST_FIRST`
-reverses within a tier. The **last hard-tier row wins** the planner role, the
-head of `REVIEW_FAMILIES`, and the final escalation stage. `Claude-Opus-5.5`
-is last on purpose.
+reverses within a tier. The **last hard-tier row wins** the planner role and
+the head of `REVIEW_FAMILIES`. `Claude-Opus-5.5` is last on purpose: it is
+the planner, and it is not a routine implementer. On `studio` the hardest
+hard tasks prefer the hard-tier ARC seat (GLM-5.3 on this roster).
+DeepSeek-V4.1-Flash-thinking-max is the medium implementer here; the
+planner prefers it for the hardest work only when the roster puts it on
+the hard tier, because a hard task assigned to a medium model is rejected.
+Other independent hard tasks spread across Cursor-Grok-4.7 and
+Antigravity-Gemini when those plan windows are open. GPT-6-Sol and Claude
+are not assigned while their usage windows are closed, and they are left
+out of the enforced implementer list. Escalation skips a model whose plan
+window is closed.
 
 ### One fix this required
 
@@ -163,8 +172,8 @@ capability question is answered by the roster at call time.
 | `gpt_6_astra_operator` | GPT-6-Astra | hard | Modelling, retopology, rigging, weight transfer, synchronised animation, editor computer-use |
 | `grok_feature_driver` | Grok-4.7 | medium | Player controllers, HUD and UI data-binding |
 | `gemini_visual_judge` | Gemini-3.8-Flash | — | **Never implements.** Scores renders, audits space |
-| `deepseek_qa_swarm` | DeepSeek-V4.1-Flash-thinking-max | medium | Headless bot swarm, packet fuzzing, desync hunting |
-| `glm_content_swarm` | GLM-5.3 | hard | Spawn tables, dialogue trees, announcements, achievements |
+| `deepseek_qa_swarm` | DeepSeek-V4.1-Flash-thinking-max | hard | Headless bot swarm, packet fuzzing, desync hunting |
+| `glm_content_swarm` | GLM-5.3 | medium | Spawn tables, dialogue trees, announcements, achievements |
 
 ### Review pairing
 
@@ -650,7 +659,7 @@ Every route acts only on values the server listed: projects, builds, sessions, f
 | `ARC_AGY_BIN` | agy | pin the Antigravity CLI (`agy`) |
 | `ARC_AGY_MODEL` | `gemini-3.8-flash-high` | model slug passed to `agy --model` (Gemini 3.8 Flash) |
 | `ARC_USAGE_SWAP` | 1 | on a spent plan window, rerun an implementation or review on the next free harness (Cursor Grok 4.7, then Antigravity, then Claude, then Codex, then OpenCode Zen free models, then billed API models); a review never lands in the implementer's family; a planner is not swapped; `0` waits out the reset on the same model |
-| `ARC_CAP_SWAP_AFTER` | 600 | seconds an attempt may wait for a slot at a full concurrency cap before it moves to a seat with a FREE slot (`drivers.cap_substitute`): same tier or above (Rule 1), never into the avoided family (Rule 2), never the planner; `driver.cap_swap` event; `0` turns it off |
+| `ARC_CAP_SWAP_AFTER` | 600 | a positive value is not a wait in seconds: the attempt moves on the first failed lease acquire (still checked every third poll; the first poll is `waits == 0`). Preference is Cursor, then Antigravity, then the ARC harnesses (`drivers.cap_substitute`): same tier or above (Rule 1), never into the avoided family (Rule 2), never the planner; `driver.cap_swap` event; `<= 0` turns it off |
 | `ARC_ZEN_FREE` | 0 | admit every live OpenCode Zen free slug as its own roster family (`Zen-*`, `opencode/<slug>`); `0` drops them |
 | `ARC_ZEN_MODEL_CAP` | 2 | per-slug driver/account cap — each partner pool is independent, so run different slugs in parallel and wait for daily resets per model |
 | `ARC_DRIVER_LIMIT_<FAMILY>` | seat cap | per-seat driver cap: openai 4, cursor 3, google 3, anthropic 2 |

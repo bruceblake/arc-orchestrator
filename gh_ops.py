@@ -1,9 +1,9 @@
 """GitHub operations agents over the gh CLI: issue triage, issue drafting, PR review.
 
 Three dedicated roles — 'issue-triager', 'issue-maker', 'pr-reviewer' — held
-only by a model the roster trusts to PLAN (GLM-5.3 on the two-model fleet
-pinned 2026-09-12; DeepSeek-V4.1-Flash-thinking-max implements and reviews but
-never plans, so it is refused — drivers.py role validation enforces it). These
+only by a model the roster trusts to PLAN (DeepSeek-V4.1-Flash-thinking-max on
+the 2026-09-25 roster; GLM-5.3 is the medium tier and holds no planner role, so
+it is refused — drivers.py role validation enforces it). These
 are standalone tools, NOT the governed code pipeline: no worktree, no gate, no
 publish. Every command previews by default; --apply-labels / --create /
 --post are the ONLY paths that write to GitHub. Every gh-touching command
@@ -69,8 +69,9 @@ def _driver(model, role):
     """A gh role needs a model the roster trusts to PLAN; the driver enforces it.
 
     Eligibility is constructed from the ROSTER, never from hardcoded names:
-    whichever live model holds the `planner` role may hold the gh roles (GLM-5.3
-    today; DeepSeek-V4.1-Flash-thinking-max does not, so it is refused), and
+    whichever live model holds the `planner` role may hold the gh roles
+    (DeepSeek-V4.1-Flash-thinking-max today; GLM-5.3 has no planner role, so it
+    is refused), and
     the harness comes from that model's roster row via drivers.driver_for.
     """
     model = model or config.GH_MODEL or config.PLANNER_MODEL

@@ -1,14 +1,15 @@
-# Orchestration Contract (GLM-5.3 is the orchestrator)
+# Orchestration Contract (DeepSeek-V4.1-Flash-thinking-max is the orchestrator)
 
-GLM-5.3 is the **brain** of the code fleet: it holds the planner role and is
-`config.PLANNER_MODEL`. When a goal arrives — via
-`main.py code plan "<goal>" <repo>` or the dashboard's plan tab — GLM-5.3
-(the `planner` driver, `code_tasks.py:1824`) designs the entire execution
-plan. The graph runner (`code_tasks.build_code_graph` + `graph.py`) executes
-it **verbatim**. There is no runtime triage: every routing decision below is
-made by the GLM-5.3 plan (or by whoever writes a task file by hand, under the
-same rules, enforced by `code_tasks.load_taskfile`).
-DeepSeek-V4.1-Flash-thinking-max's roles are
+DeepSeek-V4.1-Flash-thinking-max is the **brain** of the code fleet: it holds
+the planner role and is `config.PLANNER_MODEL` on the local profile. When a
+goal arrives — via `main.py code plan "<goal>" <repo>` or the dashboard's
+plan tab — that planner (the `planner` driver, `code_tasks.py:1824`) designs
+the entire execution plan. The graph runner (`code_tasks.build_code_graph` +
+`graph.py`) executes it **verbatim**. There is no runtime triage: every
+routing decision below is made by the plan (or by whoever writes a
+task file by hand, under the same rules, enforced by
+`code_tasks.load_taskfile`).
+GLM-5.3's roles are
 (implementer, reviewer, pr_reviewer) — it **never plans**.
 
 ## What the orchestrator decides
@@ -35,7 +36,7 @@ DeepSeek-V4.1-Flash-thinking-max's roles are
    *before* review; failure loops the task back to the implementer
    (max `config.MAX_FIX_ROUNDS` = 8 rounds per tier, then the task
    **escalates** to the next model in `config.ESCALATION_PATH` — default
-   `DeepSeek-V4.1-Flash-thinking-max → GLM-5.3`, env
+   `GLM-5.3 → DeepSeek-V4.1-Flash-thinking-max` (weakest first), env
    `ARC_ESCALATION_PATH` / `ARC_MAX_ESCALATIONS` — with a fresh fix budget,
    instead of failing). There is no basic tier below medium, so a medium
    task's first escalation is the top of the fleet.
@@ -102,7 +103,8 @@ alloc → implement → gate ──pass──▶ review ──pass──▶ publ
          │   fix rounds exhausted
          ▼
       escalate_<tid>  ── next model in config.ESCALATION_PATH
-         │                 (DeepSeek-V4.1-Flash-thinking-max → GLM-5.3),
+         │                 (GLM-5.3 → DeepSeek-V4.1-Flash-thinking-max,
+         │                 weakest first),
          │                 fresh fix budget, latest failure carried as feedback;
          │                 the reviewer is re-chosen so it never shares the new
          │                 implementer's family (config.cross_family_reviewer)

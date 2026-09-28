@@ -410,8 +410,8 @@ worktree.
 
 | Model | Harness CLI | Tier, allowed roles |
 |---|---|---|
-| `DeepSeek-V4.1-Flash-thinking-max` | `reasonix` | medium — implement, review, PR-review; never plans. Much faster than GLM-5.3, so it carries the implementation load |
-| `GLM-5.3` | `opencode` | hard — implement, plan, review, PR-review; the fleet's strongest model, the `code plan` planner, and the last escalation stage |
+| `DeepSeek-V4.1-Flash-thinking-max` | `reasonix` | hard — implement, plan, review, PR-review; the fleet's strongest model (operator decision 2026-09-25), the `code plan` planner, and the last escalation stage. Also the captain autopilot's own turn seat (`config.CAPTAIN_MODEL`) on every fleet profile |
+| `GLM-5.3` | `opencode` | medium — implement, review, PR-review; never plans. The other review family |
 
 Every implementation must pass a deterministic verify gate (a shell command
 run inside the worktree) and then a review by the *other* model family — a
@@ -552,7 +552,7 @@ the fleet's number from `task.budget` tokens before and after.
 
 - `code run --dry-run` prints the resolved DAG (implement/review pairing,
   deps, verify gates) with no model calls and no git mutations.
-- `code plan` asks GLM-5.3 (the planner) to break a goal into 2–6 task JSON
+- `code plan` asks DeepSeek-V4.1-Flash-thinking-max (the planner) to break a goal into 2–6 task JSON
   entries and writes the file to `~/tasks/`, ready for `code run`. Big goals
   need a longer driver timeout:
   `ARC_DRIVER_TIMEOUT=5400 .venv/bin/python main.py code plan ...` — see
