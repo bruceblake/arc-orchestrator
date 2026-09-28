@@ -513,7 +513,7 @@ class CheckpointingWorktreeWork(RepoFixture):
         self.assertEqual((wt2 / "blob.bin").read_bytes(), blob)
         self.assertEqual((wt2 / "latin.txt").read_bytes(), latin)
 
-    def test_a_conflicting_restore_is_reported_not_half_applied(self):
+    def test_a_conflicting_restore_keeps_clean_files_and_skips_conflict(self):
         wt = self.alloc("t1")
         self.work(wt)
         p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
@@ -526,15 +526,31 @@ class CheckpointingWorktreeWork(RepoFixture):
         with capture_events() as ev:
             res = asyncio.run(
                 gitstore.restore_checkpoint(self.repo, "t1", wt, str(p)))
-        self.assertFalse(res["restored"])
+        self.assertTrue(res["restored"], res)
         self.assertEqual(res["conflicts"], ["calc.py"])
-        # Nothing half-applied: no conflict markers, no partial new file, and
-        # the tree is exactly what HEAD says it is.
+        self.assertEqual(res["files"], ["committed.txt", "untracked.txt"])
+        self.assertEqual((wt / "untracked.txt").read_text(), "new file\n")
+        # The conflicting file stays at the new base with no conflict markers;
+        # the clean addition survives for the interrupted implementer.
         self.assertNotIn("<<<<<<<", (wt / "calc.py").read_text())
-        self.assertEqual(git(wt, "status", "--porcelain").strip(), "")
+        self.assertIn("return a - b", (wt / "calc.py").read_text())
+        self.assertEqual(git(wt, "status", "--porcelain").strip(),
+                         "?? committed.txt\n?? untracked.txt")
         self.assertEqual([f for t, f in ev.seen
                           if t == "task.checkpoint_conflict"][0]["conflicts"],
                          ["calc.py"])
+
+    def test_only_conflicting_file_reports_no_restored_work(self):
+        wt = self.alloc("t1")
+        (wt / "calc.py").write_text("def add(a, b):\n    return a + b + 1\n")
+        p = asyncio.run(gitstore.checkpoint(self.repo, "t1", wt, "x1"))
+        git(wt, "reset", "-q", "--hard", "HEAD~1")
+        (wt / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+        git(wt, "commit", "-qam", "someone else changed it")
+        res = asyncio.run(gitstore.restore_checkpoint(self.repo, "t1", wt, str(p)))
+        self.assertFalse(res["restored"], res)
+        self.assertEqual(res["conflicts"], ["calc.py"])
+        self.assertEqual(git(wt, "status", "--porcelain").strip(), "")
 
     def test_retention_keeps_only_the_newest_per_task(self):
         orig = config.CHECKPOINT_KEEP

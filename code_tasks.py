@@ -2749,8 +2749,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             if not res.get("restored"):
                 return
             files = res.get("files") or []
+            conflicts = res.get("conflicts") or []
             events.emit("task.checkpoint_restored", task=tid,
                         path=res.get("path"), files=len(files),
+                        conflicts=conflicts,
                         previous_failure=row.get("error"),
                         attempt=(res.get("meta") or {}).get("attempt"))
             board.post(wt, task=tid, role="orchestrator", model="",
@@ -2759,7 +2761,11 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                              f"{Path(str(res.get('path') or '')).name}: the "
                              f"previous attempt was interrupted, not rejected — "
                              f"continue it instead of starting over: "
-                             f"{', '.join(files[:12])}"))
+                             f"{', '.join(files[:12])}. "
+                             + (f"Could not restore {', '.join(conflicts)}; "
+                                "merge those files from the saved patch "
+                                f"{res.get('path')}."
+                                if conflicts else "")))
 
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
