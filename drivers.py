@@ -1,9 +1,11 @@
 """Headless CLI drivers for the coding harnesses (opencode, reasonix; dsh bench-only, kimi retired).
 
-Role map (hard rule): the fleet is TWO models since 2026-09-12 —
-DeepSeek-V4.1-Flash-thinking-max (the `reasonix` harness) implements and
-reviews/PR-reviews the medium tier, and GLM-5.3 (opencode) plans, implements
-the hard tier, and reviews. A task is always reviewed by a *different model
+Role map (hard rule): the fleet is TWO models. Operator decision 2026-09-25
+(the 2026-09-12 note had the tiers reversed):
+DeepSeek-V4.1-Flash-thinking-max (the `reasonix` harness) plans, implements
+the hard tier, and reviews/PR-reviews; GLM-5.3 (opencode) implements and
+reviews the medium tier and does NOT plan.
+A task is always reviewed by a *different model
 family* than the one that implemented it (Rule 2). ARC rejects over-limit
 requests per model, so per-model semaphores cap concurrent harness instances
 below the account limits (config.driver_limit).
@@ -378,7 +380,8 @@ _usage_blocked_until = {}
 # usage, operator directive 2026-09-24: spend free seats before the smallest
 # plan), then Claude and Codex, then OpenCode Zen free implementers
 # (preference 5), then billed API models (6). The tier floor still applies,
-# so DeepSeek (medium) only substitutes for medium work.
+# so a medium GLM-5.3 task may move up to DeepSeek (hard), but a hard task
+# never drops to GLM.
 _SWAP_PREFERENCE = {"cursor": 0, "agy": 1, "reasonix": 2, "opencode": 2,
                     "claude": 3, "codex": 4}
 _ZEN_SWAP_RANK = 5
@@ -441,7 +444,9 @@ def usage_substitute(model, harness, role="implementer", exclude=(),
 
     ``allow_planner`` is the captain autopilot's opt-in (a driver with
     ``planner_swap`` set): its turns are advisory, not a plan, so a spent
-    PLANNER_MODEL window moves to another planner-capable seat (GLM-5.3).
+    window may move to another planner-capable seat when the roster has one
+    (studio: Claude <-> DeepSeek). On the local profile DeepSeek is the only
+    planner, so there is nothing to move to and the turn simply waits.
     """
     roles = ("implementer", "reviewer", "pr_reviewer") + (
         ("planner",) if allow_planner else ())
@@ -508,8 +513,9 @@ def cap_substitute(model, harness, role="implementer", exclude=(),
     (Cursor-Grok-4.7, Antigravity-Gemini) sat free for ~30 seat-hours each.
     The rules are the usage swap's, so routing stays governed:
 
-    * Rule 1 -- same tier or above. A hard GLM task never moves to DeepSeek
-      (medium) no matter how idle DeepSeek is; a medium task may move up.
+    * Rule 1 -- same tier or above. A hard DeepSeek task never moves to
+      GLM-5.3 (medium) no matter how idle GLM is; a medium GLM task may
+      move up to the hard tier.
     * Rule 2 -- never into `avoid_families`: an implementer's caller passes
       the planned reviewer's family, a reviewer's caller the implementer's.
       The review node re-derives the reviewer from the model that ACTUALLY

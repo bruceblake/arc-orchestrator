@@ -582,9 +582,13 @@ class Wiring(Base):
     def test_implement_start_and_usage_swap(self):
         n = self.opened()["t1"]
         _, g = self.graph()
+        # A usage swap is a CHANGE of model: the taskfile plans the entry tier
+        # (GLM-5.3 since 2026-09-25) and the attempt actually ran on DeepSeek.
+        swapped = "DeepSeek-V4.1-Flash-thinking-max"
+        self.assertNotEqual(swapped, MODEL)
         res = types.SimpleNamespace(exit_code=0, transcript_path="", seconds=0.0,
-                                    session_id=None, text="done", model="GLM-5.3",
-                                    harness="opencode")
+                                    session_id=None, text="done", model=swapped,
+                                    harness="reasonix")
         drv = types.SimpleNamespace(harness="fake",
                                     run=mock.AsyncMock(return_value=res))
         with mock.patch.object(code_tasks, "_driver", return_value=drv), \
@@ -600,7 +604,7 @@ class Wiring(Base):
         self.assertIn("arc:implementing", self.gh.issues[n]["labels"])
         # The swap moved the work: the model label follows it.
         self.assertEqual([l for l in self.gh.issues[n]["labels"]
-                          if l.startswith("model:")], ["model:GLM-5.3"])
+                          if l.startswith("model:")], [f"model:{swapped}"])
 
     def test_publish_pr_body_closes_the_issue(self):
         ids = self.opened()
@@ -749,10 +753,14 @@ class Wiring(Base):
 
     def test_run_start_uses_the_recorded_implementer(self):
         ts = code_tasks.load_taskfile(self.tf)
-        store = FakeStore(prior=[{"id": "t2", "status": "in_review", "model": "GLM-5.3"}])
+        # The resumed row records the model that ACTUALLY ran (an escalation
+        # moved it up to the hard tier), which is not the taskfile's model.
+        ran = "DeepSeek-V4.1-Flash-thinking-max"
+        self.assertNotEqual(ran, MODEL)
+        store = FakeStore(prior=[{"id": "t2", "status": "in_review", "model": ran}])
         out = self.run_(code_tasks.open_task_issues(store, ts, str(self.tf)))
         labels = self.gh.issues[out["t2"]]["labels"]
-        self.assertIn("model:GLM-5.3", labels)
+        self.assertIn(f"model:{ran}", labels)
         self.assertNotIn(f"model:{MODEL}", labels)
 
     def test_a_label_failure_still_adds_the_closing_keyword(self):

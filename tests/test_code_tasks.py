@@ -2211,15 +2211,20 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
 
     def test_a_saturated_planned_reviewer_yields_to_an_idle_stronger_one(self):
         self._stand_in()
-        planned = config.REVIEW_FAMILIES["deepseek"]
-        impl = "GLM-5.3"
+        # The planned reviewer is the WEAKER live family, so room exists above
+        # it: the operator directive of 2026-09-25 made DeepSeek hard and
+        # GLM-5.3 medium, so "stronger than the plan" only exists above a
+        # medium plan. With the roles the other way round the planned reviewer
+        # IS the top tier and there is nothing stronger to yield to.
+        planned = config.REVIEW_FAMILIES["glm"]
+        impl = "DeepSeek-V4.1-Flash-thinking-max"
         usage = self._full(planned)
-        model, reason = code_tasks._select_reviewer("deepseek", impl, None, usage)
+        model, reason = code_tasks._select_reviewer("glm", impl, None, usage)
         self.assertEqual(reason, "planned_full_fallback")
         self.assertGreater(code_tasks._tier_rank(model),
                            code_tasks._tier_rank(planned))
         self.assertNotEqual(config.MODEL_FAMILY[model], config.MODEL_FAMILY[impl])
-        self.assertNotEqual(config.MODEL_FAMILY[model], "deepseek")
+        self.assertNotEqual(config.MODEL_FAMILY[model], "glm")
         self.assertLess(code_tasks._reviewer_pressure(model, usage), 1.0)
 
     def test_a_full_harness_counts_as_no_headroom(self):
@@ -2253,11 +2258,14 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         self.assertEqual(reason, "planned_full_no_alternative")
 
     def test_an_idle_weaker_reviewer_is_not_chosen(self):
-        planned = config.REVIEW_FAMILIES["glm"]
-        weaker = config.REVIEW_FAMILIES["deepseek"]
+        # 2026-09-25: the planned reviewer is the TOP tier (deepseek, hard) and
+        # the idle family is the weaker one (glm, medium). A weaker reviewer
+        # never takes over however idle it is.
+        planned = config.REVIEW_FAMILIES["deepseek"]
+        weaker = config.REVIEW_FAMILIES["glm"]
         busy = [m for m in config.REVIEW_FAMILIES.values() if m != weaker]
         model, reason = code_tasks._select_reviewer(
-            "glm", "Claude-Opus-5.5", None, self._full(*busy))
+            "deepseek", "Claude-Opus-5.5", None, self._full(*busy))
         self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
         self.assertLess(code_tasks._tier_rank(weaker), code_tasks._tier_rank(planned))
 
@@ -2323,8 +2331,11 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         self.assertNotEqual(model, "Claude-X")
 
     def test_a_crashed_fallback_reviewer_is_recorded_and_is_not_a_rejection(self):
+        # The plan is the MEDIUM family's reviewer (glm, since 2026-09-25), so
+        # a stronger cross-family seat exists to fall back to; the implementer
+        # is DeepSeek, whose family the fallback must stay out of.
         self._stand_in(patch_driver=False)
-        planned = config.REVIEW_FAMILIES["deepseek"]
+        planned = config.REVIEW_FAMILIES["glm"]
         store = FakeStore()
         store.lease_usage = lambda: self._full(planned)
         seen = {}
@@ -2340,7 +2351,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
 
         ts = code_tasks.load_taskfile(taskfile([{
             "id": "t1", "title": "T1", "prompt": "do it", "verify_cmd": "true",
-            "model": "GLM-5.3", "reviewer": "deepseek"}]))
+            "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm"}]))
         orig = code_tasks._driver
         code_tasks._driver = lambda model, role, pol: _Boom(model)
         wt = tempfile.mkdtemp(prefix="arc-rev-fallback-")
@@ -2360,7 +2371,8 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
                 try:
                     out = asyncio.run(g.nodes["review_t1"].fn(
                         {"results": {"alloc_t1": {"worktree": wt},
-                                     "implement_t1": {"model": "GLM-5.3"}},
+                                     "implement_t1": {"model":
+                                         "DeepSeek-V4.1-Flash-thinking-max"}},
                          "runs": {}}))
                 finally:
                     code_tasks.gitstore.diff_full, code_tasks.graft.blast = g_diff, g_blast
@@ -2371,14 +2383,14 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         self.assertNotEqual(out["reviewer_model"], planned)
         self.assertGreater(code_tasks._tier_rank(out["reviewer_model"]),
                            code_tasks._tier_rank(planned))
-        self.assertNotEqual(config.MODEL_FAMILY[out["reviewer_model"]], "glm")
+        self.assertNotEqual(config.MODEL_FAMILY[out["reviewer_model"]], "deepseek")
         self.assertEqual(seen["model"], out["reviewer_model"])
         self.assertEqual(store.harness_runs[0][0][2], out["reviewer_model"])
-        self.assertEqual(seen["avoid"], {"glm"})
+        self.assertEqual(seen["avoid"], {"deepseek"})
         selected = ev.first("task.reviewer_selected")
         self.assertEqual(selected["reason"], "planned_full_fallback")
         self.assertEqual(selected["model"], out["reviewer_model"])
-        self.assertEqual(selected["planned_token"], "deepseek")
+        self.assertEqual(selected["planned_token"], "glm")
 
 
 class AReviewerThatCrashedDidNotReview(unittest.TestCase):

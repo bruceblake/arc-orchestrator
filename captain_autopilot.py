@@ -13,7 +13,7 @@ docs/agent-board.md). One tick is four stages:
    ``captain``, open questions, claim conflicts; chain gates.
 2. ``detect(snapshot)`` — deterministic rules -> findings with a severity.
 3. ``decide(findings, snapshot)`` — playbooks first; the model
-   (``config.PLANNER_MODEL``) is called only when a finding needs judgment
+   (``config.CAPTAIN_MODEL``) is called only when a finding needs judgment
    (answering a question, a re-plan after a repeated gate failure).
 4. ``act(actions)`` — a CLOSED action set: board_post, standup,
    propose_plan_change, resume, escalate_to_operator, plus captain's own
@@ -831,15 +831,24 @@ LLM_PROMPT = (
 
 
 def _llm_call(prompt):
-    """One PLANNER_MODEL turn -> reply text. On a plan usage limit the driver
-    swaps to GLM-5.3 (drivers.usage_substitute, planner role allowed for the
-    captain via ``planner_swap``). Runs in an empty scratch dir: the model has
-    nothing to edit."""
+    """One ``config.CAPTAIN_MODEL`` turn -> reply text.
+
+    The captain's seat is its own roster-validated setting, NOT
+    ``PLANNER_MODEL``: on the studio profile the latter is Claude, and a spent
+    Claude weekly window used to swap the captain's seat about every 10
+    minutes while DeepSeek had capacity (operator directive 2026-09-25). The
+    seat is DeepSeek on every profile that has it.
+
+    ``planner_swap`` stays on: a captain turn is advisory, not a plan, so a
+    spent window moves to another planner-capable seat (drivers.
+    usage_substitute ``allow_planner``) instead of parking the tick. That is
+    the outage path, not a promise of immunity to one. Runs in an empty
+    scratch dir: the model has nothing to edit."""
     import shutil
 
     import drivers
     import orchchat
-    drv = drivers.driver_for(config.PLANNER_MODEL, "planner")
+    drv = drivers.driver_for(config.CAPTAIN_MODEL, "planner")
     drv.planner_swap = True
     work = Path(tempfile.mkdtemp(prefix="captain-auto-"))
     try:
@@ -859,16 +868,22 @@ def _snapshot_brief(snap):
 
 
 def ask_llm(findings, snap):
-    """Model-proposed actions for judgment findings, validated; [] on failure."""
-    if not findings or config.PLANNER_MODEL is None:
+    """Model-proposed actions for judgment findings, validated; [] on failure.
+
+    The availability guard follows the SEAT the turn starts on
+    (``config.CAPTAIN_MODEL``), not ``PLANNER_MODEL``: on the studio profile
+    the planner is Claude, so testing that would keep trying a seat the
+    captain no longer uses (operator directive 2026-09-25)."""
+    if not findings or config.CAPTAIN_MODEL is None:
         return []
     prompt = (LLM_PROMPT + "FINDINGS:\n" + json.dumps(findings, default=str)[:8000]
               + "\n\nSNAPSHOT:\n" + _snapshot_brief(snap))
     try:
         text = _llm_call(prompt)
     except Exception as exc:
-        fp = errors.capture(exc, model=config.PLANNER_MODEL, node="captain.auto.llm")
-        events.emit("captain.auto.llm_error", error=str(exc)[:300], fingerprint=fp)
+        fp = errors.capture(exc, model=config.CAPTAIN_MODEL, node="captain.auto.llm")
+        events.emit("captain.auto.llm_error", model=config.CAPTAIN_MODEL or "",
+                    error=str(exc)[:300], fingerprint=fp)
         return []
     blocks = re.findall(r"```captain[^\n]*\n(.*?)```", text or "", re.DOTALL)
     try:
@@ -968,7 +983,7 @@ def _exec(a, store, db_path):
         if b is not None:
             b.post(a["project"], author=AGENT, channel="operator", kind="blocker",
                    body="@operator " + a["body"], mentions=["operator"],
-                   author_model=config.PLANNER_MODEL or "", author_role=AGENT)
+                   author_model=config.CAPTAIN_MODEL or "", author_role=AGENT)
         return {"ok": True, "escalation": esc["id"]}
     if kind == "propose_plan_change":
         # Apply before any board post: a validator rejection must not leave
@@ -983,14 +998,14 @@ def _exec(a, store, db_path):
         import code_tasks
         import plan_amend
         counts = plan_amend.apply(store, tf, [amend], proposer=AGENT, role="planner",
-                                  model=config.PLANNER_MODEL or "",
+                                  model=config.CAPTAIN_MODEL or "",
                                   validate=code_tasks._amendment_validator(tf, None))
         ok = counts.get("applied", 0) + counts.get("noted", 0) > 0
         mid = None
         if ok and b is not None:
             mid = b.post(a["project"], author=AGENT, channel="project", kind="proposal",
                          body=a["body"], refs={"plan_amend": amend},
-                         author_model=config.PLANNER_MODEL or "", author_role=AGENT)
+                         author_model=config.CAPTAIN_MODEL or "", author_role=AGENT)
         elif ok and b is None:
             return {"ok": False, "error": "agentboard is not available", **counts}
         return {"ok": ok, "post": mid, **counts}
@@ -1000,11 +1015,11 @@ def _exec(a, store, db_path):
         mid = b.post(a["project"], author=AGENT, channel=a["channel"],
                      kind=a["msg_kind"], body=a["body"], mentions=a["mentions"],
                      reply_to=a.get("reply_to"),
-                     author_model=config.PLANNER_MODEL or "", author_role=AGENT)
+                     author_model=config.CAPTAIN_MODEL or "", author_role=AGENT)
         return {"ok": True, "post": mid}
     if kind == "standup":
         mid = b.post(a["project"], author=AGENT, channel="project", kind="status",
-                     body=a["body"], author_model=config.PLANNER_MODEL or "",
+                     body=a["body"], author_model=config.CAPTAIN_MODEL or "",
                      author_role=AGENT)
         return {"ok": True, "post": mid}
     return {"ok": False, "error": f"unknown action {kind}"}
@@ -1041,7 +1056,7 @@ def act(actions, skipped=(), store=None, db_path=None, dry_run=False, tick_id=""
                        body=(f"[{a['severity']}] {a.get('finding')}: "
                              f"{a.get('reason', '')[:300]} -> {a['kind']} "
                              f"{a['target']} ({'ok' if rec['result'].get('ok') else 'failed'})"),
-                       author_model=config.PLANNER_MODEL or "", author_role=AGENT)
+                       author_model=config.CAPTAIN_MODEL or "", author_role=AGENT)
         events.emit("captain.auto.dry_run" if dry_run else "captain.auto.action",
                     tick=tick_id, finding=a.get("finding"), action=_brief(a),
                     reason=a.get("reason", "")[:300],

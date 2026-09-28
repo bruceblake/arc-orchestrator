@@ -13,11 +13,12 @@
 const SHORT = {"Claude-Opus-5.5":"Opus 5.5","GPT-6-Sol":"GPT-6 Sol","GPT-6-Astra":"GPT-6 Astra","GPT-6-Luna":"GPT-6 Luna","Grok-4.7":"Grok 4.7","Gemini-3.8-Flash":"Gemini 3.8 Flash","GLM-5.3":"GLM 5.3","DeepSeek-V4.1-Flash-thinking-max":"DeepSeek V4.1 Flash max","DeepSeek-V4.1-Flash":"DeepSeek V4.1 Flash","Kimi-K3":"Kimi K3 (retired)","gpt-oss-120b":"gpt-oss 120B (retired)","DeepSeek-V4-Flash":"DeepSeek V4 Flash (retired)"};
 const short = m => SHORT[m] || m || "—";
 
-// The fleet plans with config.PLANNER_MODEL (GLM-5.3 on the 2026-09-12
-// two-model roster). Pages say its name in prompts and thinking states; keep
-// that ONE constant here so a roster move is one edit, and so nothing spells
-// out a retired model (Kimi-K3) as if it were live.
-const PLANNER_SHORT = "GLM 5.3";
+// The fleet plans with config.PLANNER_MODEL (DeepSeek-V4.1-Flash-thinking-max
+// on the 2026-09-25 roster, where it is the hard tier and holds the planner
+// role). Pages say its name in prompts and thinking states; keep that ONE
+// constant here so a roster move is one edit, and so nothing spells out a
+// retired model (Kimi-K3) as if it were live.
+const PLANNER_SHORT = "DeepSeek V4.1 Flash max";
 
 // Seconds → "45s" / "12m" / "1.4h". index.html's, verbatim.
 const tick = s => { s = Math.round(s||0); if (s < 60) return s+"s"; if (s < 3600) return Math.floor(s/60)+"m"; return (s/3600).toFixed(1)+"h"; };

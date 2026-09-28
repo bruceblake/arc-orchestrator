@@ -290,16 +290,187 @@ class LlmActions(unittest.TestCase):
         llm.assert_not_called()
 
     def test_captain_may_swap_planner_seat_on_usage_limit(self):
+        """A spent CAPTAIN_MODEL window may still move to another planner seat.
+
+        `planner_swap` is the captain's opt-in: a turn is advisory, not a
+        plan, so it moves rather than parking the tick. This is the outage
+        path — it is not a promise that the captain never waits.
+        """
         import drivers
         self.assertIsNone(drivers.usage_substitute(
-            config.PLANNER_MODEL, config.MODEL_HARNESS[config.PLANNER_MODEL],
+            config.CAPTAIN_MODEL, config.MODEL_HARNESS[config.CAPTAIN_MODEL],
             "planner"))
         sub = drivers.usage_substitute(
-            config.PLANNER_MODEL, config.MODEL_HARNESS[config.PLANNER_MODEL],
+            config.CAPTAIN_MODEL, config.MODEL_HARNESS[config.CAPTAIN_MODEL],
             "planner", allow_planner=True)
         if sub is not None:
             self.assertTrue(config.model_may(sub, "planner"))
-            self.assertNotEqual(sub, config.PLANNER_MODEL)
+            self.assertNotEqual(sub, config.CAPTAIN_MODEL)
+
+    def test_a_spent_claude_plan_does_not_swap_the_captain(self):
+        """The bug this directive exists for, in the profile that had it.
+
+        On the studio profile PLANNER_MODEL is Claude-Opus-5.5, and the
+        always-on captain swapping off Claude's spent weekly window every ~10
+        minutes (while DeepSeek had capacity) is what the operator directive
+        fixed. Runs in a subprocess under ARC_FLEET=studio, because the studio
+        roster is not what this test process imported.
+        """
+        import subprocess
+        import sys
+        # The REAL call path is exercised (`usage_substitute`, then the seat the
+        # autopilot asks for), so reverting _llm_call to PLANNER_MODEL fails
+        # here: on studio that model is Claude and IS blocked.
+        snippet = (
+            "import json, time, config, drivers\n"
+            "drivers._usage_blocked_until.clear()\n"
+            "drivers._usage_blocked_until['claude'] = time.time() + 3600\n"
+            "sub = drivers.usage_substitute(\n"
+            "    config.CAPTAIN_MODEL, config.MODEL_HARNESS[config.CAPTAIN_MODEL],\n"
+            "    'planner', allow_planner=True)\n"
+            "planner_sub = drivers.usage_substitute(\n"
+            "    config.PLANNER_MODEL, config.MODEL_HARNESS[config.PLANNER_MODEL],\n"
+            "    'planner', allow_planner=True)\n"
+            "print(json.dumps({'captain': config.CAPTAIN_MODEL,\n"
+            "  'planner': config.PLANNER_MODEL,\n"
+            "  'captain_family': config.MODEL_FAMILY.get(config.CAPTAIN_MODEL),\n"
+            "  'captain_sub': sub,\n"
+            "  'sub_family': config.MODEL_FAMILY.get(sub) if sub else None,\n"
+            "  'planner_sub': planner_sub}))\n"
+        )
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ, ARC_FLEET="studio", PYTHONPATH=str(root))
+        env.pop("ARC_CAPTAIN_MODEL", None)
+        p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
+                           text=True, env=env, cwd=str(root), timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        d = json.loads(p.stdout)
+        self.assertEqual(d["planner"], "Claude-Opus-5.5",
+                         "the studio planner is Claude — the seat the captain left")
+        self.assertEqual(d["captain"], "DeepSeek-V4.1-Flash-thinking-max")
+        self.assertEqual(d["captain_family"], "deepseek")
+        # THE binding assertion: a spent Claude window must not move the
+        # captain AT ALL — no swap, because its own seat is not blocked.
+        self.assertIsNone(d["captain_sub"],
+                          "the captain swapped off a spent Claude plan it no "
+                          "longer uses — the bug this directive fixed")
+        self.assertNotEqual(d["sub_family"], "anthropic")
+        # ...and the contrast that gives the assertion teeth: the PLANNER (still
+        # Claude on studio) is exactly what would have been swapped.
+        self.assertIsNotNone(d["planner_sub"],
+                             "the studio planner should need a substitute here, "
+                             "or this test cannot detect the regression")
+
+    def test_the_captain_turn_asks_for_its_own_seat(self):
+        """_llm_call must name CAPTAIN_MODEL — in the profile where that differs.
+
+        This process is the local profile, where CAPTAIN_MODEL == PLANNER_MODEL,
+        so asserting `asked["model"] == config.CAPTAIN_MODEL` here passes even if
+        _llm_call were reverted to PLANNER_MODEL. So this test runs under
+        ARC_FLEET=studio inside a subprocess, where PLANNER_MODEL is
+        Claude-Opus-5.5 and the two differ: the driver must be asked for
+        DeepSeek. No model call is made (`drivers.driver_for` is stubbed).
+        """
+        import subprocess
+        import sys
+        snippet = (
+            "import config, drivers\n"
+            "asked = {}\n"
+            "class FakeDriver:\n"
+            "    planner_swap = False\n"
+            "    async def run(self, prompt, work, task_id=None):\n"
+            "        return _R('', '')\n"
+            "class _R:\n"
+            "    def __init__(self, text, transcript_path):\n"
+            "        self.text, self.transcript_path = text, transcript_path\n"
+            "def fake_driver_for(model, role, **kw):\n"
+            "    asked['model'], asked['role'] = model, role\n"
+            "    return FakeDriver()\n"
+            "drivers.driver_for = fake_driver_for\n"
+            "import captain_autopilot as ap\n"
+            "ap._llm_call('prompt')\n"
+            "import json; print(json.dumps({'asked': asked,\n"
+            "  'captain': config.CAPTAIN_MODEL, 'planner': config.PLANNER_MODEL}))\n"
+        )
+        root = Path(__file__).resolve().parent.parent
+        env = dict(os.environ, ARC_FLEET="studio", PYTHONPATH=str(root))
+        env.pop("ARC_CAPTAIN_MODEL", None)
+        p = subprocess.run([sys.executable, "-c", snippet], capture_output=True,
+                           text=True, env=env, cwd=str(root), timeout=60)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        d = json.loads(p.stdout)
+        self.assertNotEqual(d["captain"], d["planner"],
+                            "this test is only meaningful where the seats differ")
+        self.assertEqual(d["asked"]["model"], d["captain"],
+                         "_llm_call must ask for the captain's own seat")
+        self.assertEqual(d["asked"]["role"], "planner")
+
+    def test_the_guard_and_the_authors_follow_the_captain_seat(self):
+        """`ask_llm` tests, and the board credits, the seat that did the turn.
+
+        The old code used PLANNER_MODEL for both, so on the studio profile the
+        availability guard checked a model the captain did not use and the
+        board credited Claude for DeepSeek's words.
+        """
+        finding = [{"target": "t", "rule": "r", "severity": "info"}]
+        with mock.patch.object(ap, "_llm_call", return_value="```captain\n"
+                              '{"actions": []}\n```'):
+            self.assertEqual(ap.ask_llm(finding, snap()), [])
+        with mock.patch.object(config, "CAPTAIN_MODEL", None):
+            with mock.patch.object(ap, "_llm_call") as llm:
+                self.assertEqual(ap.ask_llm(finding, snap()), [])
+            llm.assert_not_called()      # no seat -> no call at all
+        # ...and the attribution a board post carries is the same seat. The
+        # assertion reads the post: patching PLANNER_MODEL must NOT change it.
+        ap._BOARD = FakeBoard()
+        with mock.patch.object(config, "PLANNER_MODEL", "Some-Other-Model"):
+            ap._exec({"kind": "board_post", "project": "p", "channel": "project",
+                      "msg_kind": "note", "body": "hi", "mentions": [],
+                      "target": "t", "severity": "info"}, None, None)
+        self.assertEqual(len(ap._BOARD.posts), 1)
+        self.assertEqual(ap._BOARD.posts[-1]["author_model"],
+                         config.CAPTAIN_MODEL,
+                         "the board must credit the captain's own seat")
+        self.assertNotEqual(ap._BOARD.posts[-1]["author_model"],
+                            "Some-Other-Model")
+    def test_the_captain_persona_describes_today_s_roster(self):
+        """CAPTAIN_PERSONA must agree with IMPLEMENT_TIERS, not a dated note.
+
+        Pre-merge review 2026-09: the persona hardcoded "GLM-5.3, hard tier
+        and the planner; DeepSeek-V4.1-Flash-thinking-max, the fast medium-tier
+        workhorse", so after the 2026-09-25 flip it described the fleet
+        backwards — and it named PLANNER_MODEL as the scarcest seat when GLM's
+        driver cap (4) is now the smallest, not DeepSeek's (10).
+        """
+        text = captain.CAPTAIN_PERSONA
+        for tier, models in config.IMPLEMENT_TIERS.items():
+            for model in models:
+                self.assertIn(model, text, f"{model} ({tier}) missing from persona")
+        scarce, cap = config.scarcest_seat()
+        self.assertIsNotNone(scarce)
+        self.assertIn(f"{scarce}'s per-account", text,
+                      "the persona must name the model whose cap is smallest")
+        self.assertIn(f"{cap} at once", text)
+        # The dated, now-wrong sentence is gone.
+        self.assertNotIn("medium-tier workhorse", text)
+        self.assertNotIn("two-model fleet (GLM-5.3", text)
+
+    def test_the_captain_persona_calls_the_planner_the_hard_tier(self):
+        """Locally the planner IS the hard tier; the studio planner is not.
+
+        Stated as the rule (who may plan, derived from model_may) so a roster
+        move does not need this test rewritten.
+        """
+        planners = [m for m in sorted(config.IMPLEMENTER_MODELS)
+                    if config.model_may(m, "planner")]
+        self.assertTrue(planners, "no planner-capable implementer on the roster")
+        for model in planners:
+            self.assertIn(model, captain.CAPTAIN_PERSONA)
+        for model in sorted(config.IMPLEMENTER_MODELS):
+            if config.model_may(model, "planner"):
+                continue
+            # A model that may NOT plan must not be claimed as one that does.
+            self.assertNotIn(f"{model} may plan", captain.CAPTAIN_PERSONA)
 
 
 class PlanChanges(Tmp):

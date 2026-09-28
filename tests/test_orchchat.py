@@ -211,6 +211,48 @@ class TestOrchChatHappy(TestOrchChat):
                         len(orchchat.PLANNER_PERSONA) + 31000)
 
 
+class TestPlannerPersonaFollowsTheRoster(unittest.TestCase):
+    """The chat planner's routing sentence must match today's roster.
+
+    Pre-merge review 2026-09: PLANNER_PERSONA hardcoded "GLM-5.3 (hard tier,
+    the fleet's strongest, and the planner) and DeepSeek-V4.1-Flash-thinking-max
+    (medium tier, ... NEVER plans)". `code plan` generates its routing prose
+    from the roster (`code_tasks._routing_tiers_prose`), but this string is not
+    generated, and `code_tasks.load_taskfile` only checks that a task's model is
+    an implementer — so the stale sentence would have routed hard work to GLM
+    and medium work to DeepSeek from a chat-written taskfile.
+    """
+
+    def test_every_implementer_is_named_with_its_real_tier(self):
+        text = orchchat.PLANNER_PERSONA
+        for tier, models in config.IMPLEMENT_TIERS.items():
+            # A tier may hold several models; the persona joins them with
+            # " or ", so assert the derived phrase.
+            self.assertIn(f"{' or '.join(models)} is the {tier} tier", text,
+                          f"persona states the wrong {tier} tier")
+
+    def test_only_a_roster_planner_is_called_a_planner(self):
+        text = orchchat.PLANNER_PERSONA
+        planners = [m for m in sorted(config.IMPLEMENTER_MODELS)
+                    if config.model_may(m, "planner")]
+        self.assertTrue(planners)
+        for model in planners:
+            self.assertIn(model, text)
+        # The blocked model must not be advertised as planning, and the
+        # retired claim must be gone in both directions.
+        self.assertNotIn("NEVER plans", text)
+        self.assertNotIn("GLM-5.3 (hard tier", text)
+        for model in sorted(config.IMPLEMENTER_MODELS):
+            if model in planners:
+                continue
+            self.assertNotIn(f"{model} may plan", text)
+
+    def test_the_persona_still_names_the_seat_it_runs_on(self):
+        # config.PLANNER_MODEL is the model the chat turn actually uses.
+        self.assertIn(f"running on {config.PLANNER_MODEL}",
+                      orchchat.PLANNER_PERSONA)
+
+
 class TestOrchChatRejections(TestOrchChat):
     def test_same_harness_review_pairing_rejected(self):
         repo = self._make_repo()
