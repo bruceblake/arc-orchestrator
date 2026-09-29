@@ -15,7 +15,9 @@ This builds the handler directly over a fixture world instead:
 
 - every path config derives from the tree (DB, events, logs/*) is rewritten
   under the fixture dir, HOME points into it (so ~/tasks, ~/repos and friends
-  are the fixture's), and gh tokens are dropped from the environment;
+  are the fixture's), and gh tokens plus ARC_STUDIO_DIR are dropped from
+  the environment (a live studio tree would open the index page on the
+  Studio tab and miss the Overview goldens);
 - `/proc`-derived "live runs" are reported empty — a real fleet run on this
   machine must not show up in a golden image;
 - time.time() starts at fixture.FROZEN_NOW, so server-side "N minutes ago"
@@ -47,7 +49,8 @@ def _isolate_env(fx):
         "ARC_DASHBOARD_BIND": "127.0.0.1",
     })
     for k in ("GH_TOKEN", "GITHUB_TOKEN", "ARC_DASHBOARD_TOKEN",
-              "ARC_ESCALATION_PATH", "ARC_ALLOW_SAME_FAMILY_REVIEW"):
+              "ARC_ESCALATION_PATH", "ARC_ALLOW_SAME_FAMILY_REVIEW",
+              "ARC_STUDIO_DIR"):
         os.environ.pop(k, None)
     try:
         time.tzset()

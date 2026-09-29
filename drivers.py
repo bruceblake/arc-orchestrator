@@ -1687,6 +1687,25 @@ def transcript_tokens(raw):
     return tokens, prompt, completion
 
 
+# A resume id the harness does not have. Codex: "no rollout found". Claude
+# and Cursor: the conversation is missing. opencode serve: HTTP 404 on
+# prompt_async for an unknown session. Same fact — drop the id and start
+# fresh, without a retry-ladder step.
+_SESSION_RESUME_REFUSALS = (
+    "no rollout found",
+    "session not found",
+    "unknown conversation",
+    "no conversation found",
+    "conversation not found",
+    "prompt_async failed: http 404",
+)
+
+
+def _session_resume_refused(text):
+    low = (text or "").lower()
+    return any(p in low for p in _SESSION_RESUME_REFUSALS)
+
+
 class Driver:
     harness = "?"
     model = "?"
@@ -1929,12 +1948,16 @@ class Driver:
                     await wait_for_arc(task_id)
                     attempt -= 1
                     continue
-                if sid and "no rollout found" in str(exc).lower():
+                if sid and _session_resume_refused(str(exc)):
                     # The id belonged to another harness, or the rollout was
                     # deleted. Retrying resume repeats the same instant exit
-                    # until MAX_RETRIES. Drop the id and continue from the
-                    # worktree and the shared board.
-                    events.emit("driver.resume_missing", harness=self.harness,
+                    # until MAX_RETRIES. Drop the id, mark the stored row
+                    # invalid, and continue from the worktree in THIS attempt.
+                    try:
+                        _lease_db().invalidate_task_session(sid, self.harness)
+                    except Exception:                          # noqa: BLE001
+                        log.warning("could not invalidate session %s", sid)
+                    events.emit("driver.resume_invalid", harness=self.harness,
                                 model=self.model, task=task_id, attempt=attempt,
                                 session_id=sid)
                     import board
@@ -2386,8 +2409,15 @@ class OpencodeDriver(Driver):
         if cfg:
             server_env["OPENCODE_CONFIG"] = cfg
         handle = ocserve.get_shared_server(env=server_env)
-        client = await ocserve.OcserveClient.create(
-            handle, worktree=worktree, model=self.model_arg())
+        # A stored session id is reused on this server; a fresh attempt
+        # creates one. An unknown id fails prompt_async with HTTP 404, which
+        # Driver.run treats as a resume refusal and retries without the id.
+        if session_id:
+            client = ocserve.OcserveClient(
+                handle, worktree, session_id=session_id)
+        else:
+            client = await ocserve.OcserveClient.create(
+                handle, worktree=worktree, model=self.model_arg())
         # The transcript gets the SAME {type: text|tool_use|step_finish, ...}
         # line dicts the one-shot stream writes, so parse_transcript,
         # transcript_tokens and the dashboard tails keep working unchanged.

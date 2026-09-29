@@ -203,6 +203,26 @@ CREATE TABLE IF NOT EXISTS task_issues(
   created_at TEXT NOT NULL,
   PRIMARY KEY (repo, taskfile, task)
 );
+-- Harness session ids that survive a run-process restart. valid=0 means the
+-- harness refused the id (or it was otherwise retired); resume reads the
+-- newest valid row for one (taskfile, task, role, model, harness).
+CREATE TABLE IF NOT EXISTS task_sessions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project TEXT,
+  taskfile TEXT NOT NULL,
+  task TEXT NOT NULL,
+  role TEXT NOT NULL,
+  model TEXT NOT NULL,
+  harness TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  worktree TEXT,
+  head_sha TEXT,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  valid INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_task_sessions_lookup
+  ON task_sessions(taskfile, task, role, model, harness, valid);
 """
 
 
@@ -391,6 +411,65 @@ class Store:
                  transcript, seconds, verdict, _now()),
             )
             self.conn.commit()
+
+    def save_task_session(self, project, taskfile, task, role, model, harness,
+                          session_id, worktree, head_sha):
+        """Record one successful harness session. A later run of the same
+        task inserts another row; resume reads the newest valid one."""
+        if not session_id:
+            return None
+        now = _now()
+        with self.lock:
+            cur = self.conn.execute(
+                "INSERT INTO task_sessions(project, taskfile, task, role, model, "
+                "harness, session_id, worktree, head_sha, created_at, "
+                "last_used_at, valid) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+                (project, taskfile, task, role, model, harness, session_id,
+                 worktree, head_sha, now, now),
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def latest_task_session(self, taskfile, task, role, model, harness):
+        """The newest still-valid session for this exact harness seat, or None."""
+        with self.lock:
+            row = self.conn.execute(
+                "SELECT id, project, taskfile, task, role, model, harness, "
+                "session_id, worktree, head_sha, created_at, last_used_at, valid "
+                "FROM task_sessions WHERE taskfile=? AND task=? AND role=? "
+                "AND model=? AND harness=? AND valid=1 "
+                "ORDER BY id DESC LIMIT 1",
+                (taskfile, task, role, model, harness),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def touch_task_session(self, row_id):
+        with self.lock:
+            self.conn.execute(
+                "UPDATE task_sessions SET last_used_at=? WHERE id=?",
+                (_now(), row_id),
+            )
+            self.conn.commit()
+
+    def invalidate_task_session(self, session_id, harness=None):
+        """The harness refused this id. Later resumes must not try it again."""
+        if not session_id:
+            return 0
+        with self.lock:
+            if harness:
+                cur = self.conn.execute(
+                    "UPDATE task_sessions SET valid=0 "
+                    "WHERE session_id=? AND harness=? AND valid=1",
+                    (session_id, harness),
+                )
+            else:
+                cur = self.conn.execute(
+                    "UPDATE task_sessions SET valid=0 "
+                    "WHERE session_id=? AND valid=1",
+                    (session_id,),
+                )
+            self.conn.commit()
+            return cur.rowcount
 
     def upsert_code_task(self, taskfile, tid, title, model, reviewer, status,
                          branch=None, worktree=None, error=None, finished=False):
