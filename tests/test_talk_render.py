@@ -68,13 +68,23 @@ class TalkDialogRender(unittest.TestCase):
         page.wait_for_function(
             "() => (document.querySelector('#c-log')||{}).innerText"
             " && document.querySelector('#c-log').innerText.includes('Send a message')")
+        self._assert_empty_centered(page, "#c-log")
         inside = page.evaluate("""() => {
           if (CHAT_POLL) { clearInterval(CHAT_POLL); CHAT_POLL = null; }
           chatRender = () => {};
-          document.querySelector('#c-log').innerHTML = chatTurnHTML(
-            {role:'assistant', text:'hello', model:'Sub Seat'});
-          const b = document.querySelector('#c-log .chat-bubble');
-          return !!(b && b.querySelector('.chat-model-name'));
+          document.querySelector('#c-log').innerHTML =
+            chatTurnHTML({role:'user', text:'Add a settings menu with volume sliders for the game.'})
+            + chatTurnHTML({role:'assistant', text:'I will add a settings menu and a verify gate of ./check.sh. The implementer is the medium tier.', model:'Sub Seat'});
+          const b = document.querySelector('#c-log .chat-turn.assistant .chat-bubble');
+          const log = document.querySelector('#c-log').getBoundingClientRect();
+          const user = document.querySelector('#c-log .chat-turn.user').getBoundingClientRect();
+          const asst = document.querySelector('#c-log .chat-turn.assistant').getBoundingClientRect();
+          return {
+            model: !!(b && b.querySelector('.chat-model-name')),
+            userFromRight: log.right - user.right,
+            asstFromLeft: asst.left - log.left,
+            userLeft: user.left, asstLeft: asst.left,
+          };
         }""")
         box = page.locator("#chatmodal .chat-dialog").bounding_box()
         self.assertIsNotNone(box)
@@ -85,7 +95,16 @@ class TalkDialogRender(unittest.TestCase):
         self.assertEqual(page.locator("#c-send").inner_text(), "Send")
         self.assertGreater(page.locator("#c-model option").count(), 0)
         self._assert_select_label_visible(page, "#c-sessions", "plan-")
-        self.assertTrue(inside, "model name must be inside the chat bubble")
+        self.assertTrue(inside["model"], "model name must be inside the chat bubble")
+        # Previous CSS used one 12px radius on every corner. The person bubble
+        # now has a flat bottom-right corner; that value is 12px without it.
+        self.assertEqual(
+            page.locator("#c-log .chat-turn.user .chat-bubble").evaluate(
+                "el => getComputedStyle(el).borderBottomRightRadius"),
+            "4px")
+        self.assertLess(inside["userFromRight"], 30, inside)
+        self.assertLess(inside["asstFromLeft"], 30, inside)
+        self.assertGreater(inside["userLeft"], inside["asstLeft"], inside)
         page.screenshot(path=str(SHOTS / "chat-dialog.png"))
         page.click("#c-close")
 
@@ -94,23 +113,62 @@ class TalkDialogRender(unittest.TestCase):
         page.wait_for_function(
             "() => (document.querySelector('#k-log')||{}).innerText"
             " && document.querySelector('#k-log').innerText.includes('Send a message')")
+        self._assert_empty_centered(page, "#k-log")
         inside = page.evaluate("""() => {
           if (CAP_POLL) { clearInterval(CAP_POLL); CAP_POLL = null; }
           capRender = () => {};
-          document.querySelector('#k-log').innerHTML = capTurnHTML(
-            {role:'assistant', text:'hello', model:'Sub Seat'});
-          const b = document.querySelector('#k-log .chat-bubble');
-          return !!(b && b.querySelector('.chat-model-name'));
+          document.querySelector('#k-log').innerHTML =
+            capTurnHTML({role:'user', text:'What is stuck in the fleet right now?'})
+            + capTurnHTML({role:'assistant', text:'Two tasks are failed and one chain is waiting. I would resume the failed task once a slot is free.', model:'Sub Seat'});
+          const b = document.querySelector('#k-log .chat-turn.assistant .chat-bubble');
+          const log = document.querySelector('#k-log').getBoundingClientRect();
+          const user = document.querySelector('#k-log .chat-turn.user').getBoundingClientRect();
+          const asst = document.querySelector('#k-log .chat-turn.assistant').getBoundingClientRect();
+          return {
+            model: !!(b && b.querySelector('.chat-model-name')),
+            userFromRight: log.right - user.right,
+            asstFromLeft: asst.left - log.left,
+            userLeft: user.left, asstLeft: asst.left,
+          };
         }""")
         open_fleet = page.locator("#capmodal details").evaluate("el => el.open")
         self.assertFalse(open_fleet)
-        self.assertTrue(inside, "model name must be inside the captain bubble")
+        self.assertTrue(inside["model"], "model name must be inside the captain bubble")
+        self.assertEqual(
+            page.locator("#k-log .chat-turn.user .chat-bubble").evaluate(
+                "el => getComputedStyle(el).borderBottomRightRadius"),
+            "4px")
+        self.assertLess(inside["userFromRight"], 30, inside)
+        self.assertLess(inside["asstFromLeft"], 30, inside)
+        self.assertGreater(inside["userLeft"], inside["asstLeft"], inside)
         self.assertEqual(page.locator("#k-send").inner_text(), "Send")
         self._assert_select_label_visible(page, "#k-sessions", "captain-")
         cbox = page.locator("#capmodal .chat-dialog").bounding_box()
         self.assertLess(cbox["y"] + cbox["height"], 901)
         page.screenshot(path=str(SHOTS / "captain-dialog.png"))
         page.close()
+
+    def _assert_empty_centered(self, page, log_sel):
+        # The old rule pinned "Send a message to start." to the top of the
+        # log (no margin, text-align start). margin:auto + text-align:center
+        # puts that one sentence in the middle. Side alignment of bubbles
+        # already held before this CSS, so it does not catch the change.
+        pos = page.locator(log_sel).evaluate("""log => {
+          const empty = log.querySelector('.chat-empty');
+          const lr = log.getBoundingClientRect();
+          const er = empty.getBoundingClientRect();
+          const cs = getComputedStyle(empty);
+          return {
+            text: (empty.textContent || '').trim(),
+            textAlign: cs.textAlign,
+            delta: Math.abs((er.top + er.height / 2) - (lr.top + lr.height / 2)),
+            logH: lr.height,
+          };
+        }""")
+        self.assertEqual(pos["text"], "Send a message to start.")
+        self.assertEqual(pos["textAlign"], "center", pos)
+        self.assertGreater(pos["logH"], 200, pos)
+        self.assertLess(pos["delta"], pos["logH"] * 0.2, pos)
 
     def _assert_select_label_visible(self, page, selector, needle):
         # Option text existing is not enough: a flex <select> can shrink to
