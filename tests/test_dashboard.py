@@ -7,6 +7,7 @@ import json
 import os
 import pathlib
 import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -376,10 +377,25 @@ class ProjectCreateRefusesAnUnreviewableImplementer(unittest.TestCase):
         self._tasks = config.TASKS_DIR
         config.TASKS_DIR = self.dir
         self.addCleanup(setattr, config, "TASKS_DIR", self._tasks)
+        # A GitHub checkout of the PR ref has no local main, so using this
+        # repo makes _repo_problem refuse before the reviewer check runs.
+        parent = tempfile.mkdtemp(dir=config.REPO_ROOT)
+        self.addCleanup(shutil.rmtree, parent, True)
+        self.repo = Path(parent) / "probe"
+        self.repo.mkdir()
+        def git(*args):
+            subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                           capture_output=True, text=True)
+        git("init", "-q", "-b", "main")
+        git("config", "user.email", "t@t")
+        git("config", "user.name", "t")
+        (self.repo / "f.txt").write_text("hi\n")
+        git("add", "-A")
+        git("commit", "-qm", "init")
 
     def _create(self, model):
         return dashboard._create_project({
-            "repo": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "repo": str(self.repo),
             "title": f"probe-{abs(hash(model)) % 10**6}",
             "tasks": [{"id": "t1", "title": "T", "prompt": "p", "model": model}]})
 
