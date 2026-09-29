@@ -71,8 +71,10 @@ const mod = new Function(externals + "\n" + js
   + " });"
   + "\nreturn {chatSend, chatPoll, chatRender, chatTurnHTML, chatTaskcardHTML,"
   + " chatEmptyState, chatSupportsSpeech, chatUpdateMic, chatMic, chatStopMic,"
-  + " chatLoadRepos, chatNewRepo, chatStartSession, chatOpen,"
-  + " chatLoadSessions, chatSelectSession, chatNewSession, chatFreshSession};");
+  + " chatLoadRepos, chatNewRepo, chatStartSession, chatOpen, chatSetSend,"
+  + " capSetSend,"
+  + " chatLoadSessions, chatSelectSession, chatNewSession, chatFreshSession,"
+  + " capTurnHTML};");
 const c = mod();
 
 let n = 0;
@@ -92,12 +94,19 @@ ok(typeof c.chatEmptyState === "function", "chatEmptyState defined");
 
 // ---- empty-state text (exact spec string) -----------------------------------
 const empty = c.chatEmptyState();
-// The planner is named by the page constant, not a retired model: assert the
-// RULE (the live planner is named, plus the spec wording), not a model id.
-ok(/\S+ will turn it into a governed project/.test(empty)
-   && empty.includes("and hand it back ready to run")
+// One sentence, no retired model: talking is the whole instruction now.
+ok(/Send a message to start\./.test(empty)
    && !empty.includes("Kimi"),
-   "empty state names a live planner and keeps the spec wording");
+   "empty state is one sentence and names no retired model");
+
+// Opening a dialog calls chatSetSend(false) / capSetSend(false). The idle
+// label is the spec word "Send", not the old lowercase "send".
+c.chatSetSend(false);
+ok(document.querySelector("#c-send").textContent === "Send",
+   "chat idle button label is Send");
+c.capSetSend(false);
+ok(document.querySelector("#k-send").textContent === "Send",
+   "captain idle button label is Send");
 
 // ---- mic renders iff SpeechRecognition exists ------------------------------
 window.SpeechRecognition = function(){};
@@ -164,6 +173,19 @@ ok(c.chatTurnHTML({ role: "user", text: EVIL, ts: null }).includes("&lt;img"),
    "escaping: hostile text rendered escaped, not dropped");
 ok(clean(c.chatTurnHTML({ role: "assistant", text: "hi", error: EVIL, taskfile: null })),
    "escaping: turn error escaped");
+
+// The model name sits inside the assistant bubble, not as a sibling above it.
+function nameInsideBubble(html) {
+  const open = html.indexOf('class="chat-bubble"');
+  const name = html.indexOf("chat-model-name");
+  const close = html.indexOf("</div>", open);
+  return open >= 0 && name > open && name < close;
+}
+const named = c.chatTurnHTML({ role: "assistant", text: "hi", model: "Sub Seat" });
+ok(nameInsideBubble(named), "chat: model name is inside the assistant bubble");
+ok(named.includes("Sub Seat"), "chat: model name text is rendered");
+const capNamed = c.capTurnHTML({ role: "assistant", text: "hi", model: "Sub Seat" });
+ok(nameInsideBubble(capNamed), "captain: model name is inside the assistant bubble");
 
 // ---- taskcard: both buttons only when a taskfile is present -----------------
 ok(c.chatTaskcardHTML(null) === "", "taskcard: no card when no taskfile");

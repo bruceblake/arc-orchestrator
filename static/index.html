@@ -112,26 +112,35 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .dialog textarea { resize: vertical; }
 .tabs { display: flex; gap: 6px; margin-bottom: 10px; }
 /* ---- plan-with-the-planner chat ---- */
-.chat-dialog { display: flex; flex-direction: column; max-height: 86vh; }
+/* A conversation, not a form: one header row (title · model · session · new ·
+   close), one compact repo row, a transcript that fills the rest, and a
+   composer pinned under it. */
+.modal.open:has(.chat-dialog) { align-items: center; padding-top: 0; }
+.chat-dialog { display: flex; flex-direction: column; height: 90vh; max-height: 90vh; }
 .chat-dialog h3 { margin-bottom: 6px; }
+.chat-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.chat-head h3 { margin: 0; flex: 1; min-width: 0; }
+.chat-head select { width: auto; margin: 0; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font: inherit; font-size: 11px; max-width: 190px; }
 .chat-repo { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 8px; }
 .chat-sessionbar { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
 .chat-sessionbar .hint { flex: none; }
 .chat-sessionbar select { flex: 1; min-width: 0; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 5px 7px; font: inherit; font-size: 12px; }
-.chat-log { flex: 1; overflow-y: auto; max-height: 60vh; min-height: 160px; display: flex; flex-direction: column; gap: 8px; padding: 6px; border: 1px solid var(--border); border-radius: 8px; background: #0d1117; }
-.chat-turn { display: flex; flex-direction: column; gap: 4px; max-width: 86%; }
+.chat-log { flex: 1; overflow-y: auto; min-height: 120px; display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; background: #0d1117; }
+.chat-turn { display: flex; flex-direction: column; gap: 4px; max-width: 80%; }
 .chat-turn.user { align-self: flex-end; align-items: flex-end; }
 .chat-turn.assistant { align-self: flex-start; align-items: flex-start; }
-.chat-bubble { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 8px; padding: 6px 9px; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.chat-bubble { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 9px 12px; font-size: 15px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 .chat-turn.user .chat-bubble { background: var(--accent); color: #0d1117; border-color: var(--accent); }
 .chat-bubble.dim { color: var(--dim); font-style: italic; }
+.chat-model-name { display: block; font-size: 10px; color: var(--dim); margin-bottom: 2px; }
 .chat-ts { font-size: 10px; color: var(--dim); }
 .chat-err { font-size: 11px; color: var(--err); }
 .chat-empty { font-size: 12px; color: var(--dim); padding: 4px 2px; }
 .chat-taskcard { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; border: 1px solid var(--border); border-radius: 8px; padding: 6px 8px; background: var(--panel); }
 .chat-taskcard .ctc { font-size: 12px; color: var(--text); }
-.chat-input { display: flex; gap: 6px; align-items: center; margin-top: 8px; }
-.chat-input input { flex: 1; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
+.chat-input { display: flex; gap: 6px; align-items: flex-end; margin-top: 8px; }
+.chat-input input, .chat-input textarea { flex: 1; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; }
+.chat-input textarea { width: auto; margin: 0; resize: vertical; min-height: 42px; max-height: 30vh; line-height: 1.4; }
 #c-mic.listening { border-color: var(--accent); color: var(--accent); animation: pulse 1.4s infinite; }
 .chat-thinking { display: inline-flex; align-items: center; gap: 6px; font-style: italic; }
 .chat-thinking:has(.cap-think-blocks), .chat-thinking:has(.cap-think-pending) { display: flex; flex-direction: column; align-items: flex-start; }
@@ -784,44 +793,45 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
 
 <div class="modal" id="chatmodal">
   <div class="dialog chat-dialog">
-    <h3>Plan with the planner <span class="pill hint" id="c-session" aria-live="polite"></span></h3>
-    <label class="hint" for="c-repo">repo</label>
-    <select id="c-repo" aria-label="repo"></select>
-    <div class="chat-sessionbar">
-      <label class="hint" for="c-sessions">session</label>
+    <div class="chat-head">
+      <h3>Chat <span class="pill hint" id="c-session" aria-live="polite"></span></h3>
+      <select id="c-model" aria-label="Model"></select>
       <select id="c-sessions" aria-label="chat session"></select>
-      <button class="act" id="c-new" aria-label="Start a new chat in a fresh session">＋ new chat</button>
+      <button class="act" id="c-new" aria-label="Start a new chat in a fresh session">＋ new</button>
+      <button class="act" id="c-close" aria-label="Close chat">✕</button>
     </div>
+    <select class="chat-repo" id="c-repo" aria-label="repo"></select>
     <div class="chat-log" id="c-log"></div>
     <div class="chat-input">
       <button class="act" id="c-mic" title="speak" style="display:none" aria-label="Use speech input">🎤</button>
-      <input id="c-text" placeholder="Describe what you want built…" aria-label="message">
-      <button class="act primary" id="c-send">send</button>
+      <textarea id="c-text" rows="2" placeholder="Message…" aria-label="message"></textarea>
+      <button class="act primary" id="c-send">Send</button>
     </div>
     <div id="c-interim" class="chat-interim" style="display:none"></div>
     <div id="c-msg"></div>
-    <div style="margin-top:8px;text-align:right"><button class="act" id="c-close">close ✕</button></div>
   </div>
 </div>
 
 <div class="modal" id="capmodal">
   <div class="dialog chat-dialog cap-dialog">
-    <h3>Captain <span class="pill hint" id="k-session" aria-live="polite"></span></h3>
-    <label class="hint" for="k-repo">repo</label>
-    <select id="k-repo" aria-label="repo"></select>
-    <div id="k-state" class="cap-state" aria-live="polite">loading fleet state…</div>
-    <div class="chat-sessionbar">
-      <label class="hint" for="k-sessions">session</label>
+    <div class="chat-head">
+      <h3>Captain <span class="pill hint" id="k-session" aria-live="polite"></span></h3>
+      <select id="k-model" aria-label="Model"></select>
       <select id="k-sessions" aria-label="captain session"></select>
       <button class="act" id="k-new" aria-label="Start a new captain session in a fresh session">＋ new</button>
+      <button class="act" id="k-close" aria-label="Close captain">✕</button>
     </div>
+    <select class="chat-repo" id="k-repo" aria-label="repo"></select>
+    <details class="cap-fleet">
+      <summary>Fleet</summary>
+      <div id="k-state" class="cap-state" aria-live="polite">loading fleet state…</div>
+    </details>
     <div class="chat-log" id="k-log"></div>
     <div class="chat-input">
-      <input id="k-text" placeholder="Ask the captain what the fleet is doing, or what to build next…" aria-label="message">
-      <button class="act primary" id="k-send">send</button>
+      <textarea id="k-text" rows="2" placeholder="Message…" aria-label="message"></textarea>
+      <button class="act primary" id="k-send">Send</button>
     </div>
     <div id="k-msg"></div>
-    <div style="margin-top:8px;text-align:right"><button class="act" id="k-close">close ✕</button></div>
   </div>
 </div>
 

@@ -760,6 +760,19 @@ processes and move git refs on the same terms.
   the same for an existing checkout and accepts a `repo` only
   byte-identical to a `/api/repos` entry. The only body values that reach
   `gh` are the repo name and a private flag — the argv stays fixed.
+  **One field joins the argv on the two start routes:** `/api/chat/start` and
+  `/api/captain/start` accept an OPTIONAL `model`, appended as
+  `["--model", <name>]` to the same fixed argv. It is accepted only when it is
+  exactly one of `config.planner_models()` — a planner-capable roster name,
+  the same list `GET /api/chat/models` serves the picker. It is not a command
+  and not a path: anything else is refused with
+  `400 {"error": "model is not a planner on today's roster"}` BEFORE the user
+  turn is appended and before any process is spawned, so a rejection writes
+  nothing and starts nothing. Omitted, `null` or `""` spawns exactly the argv
+  it always did, and no `--model` flag appears; the CLI then uses
+  `config.PLANNER_MODEL`. `main.py chat --model` and `main.py captain --model`
+  (the conversational turn; the autopilot flags are unchanged) enforce the
+  same allowlist and exit non-zero without constructing a driver.
 - If the trust assumption ever stops holding, the two mechanisms already
   designed for it are: bind the loopback address instead of `0.0.0.0` (which
   would need a new bind-address setting in `main.py serve`), and require a

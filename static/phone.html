@@ -153,15 +153,36 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .interim { color: var(--dim); font-size: 11px; min-height: 14px; }
 .plan-tx {
   display: flex; flex-direction: column; gap: 8px;
-  max-height: 220px; overflow-y: auto; overflow-wrap: anywhere;
+  flex: 1; min-height: 200px; overflow-y: auto; overflow-wrap: anywhere;
   background: var(--panel); border: 1px solid var(--border);
   border-radius: 12px; padding: 8px; margin: 0 0 8px;
 }
+/* A bounded column above the bottom nav. The transcript scrolls inside
+   #plan-body. The task card and the composer sit under that scroller and
+   do not shrink, so a short viewport can collapse the transcript without
+   hiding Run. If those two themselves exceed the view, the view scrolls. */
+#view-plan.on {
+  display: flex; flex-direction: column; overflow-x: hidden; overflow-y: auto;
+  height: calc(100dvh - 128px - env(safe-area-inset-bottom, 0px));
+  max-height: calc(100dvh - 128px - env(safe-area-inset-bottom, 0px));
+}
+#view-plan.on #plan-body {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column;
+}
+#view-plan.on #plan-body > * { flex: 0 0 auto; }
+#view-plan.on #plan-transcript {
+  flex: 1 1 auto; min-height: 0; overflow-y: auto;
+}
+#view-plan.on #plan-taskcard,
+#view-plan.on #plan-dock { flex: 0 0 auto; }
 .composer { display: flex; flex-direction: column; gap: 8px; margin-top: 8px; }
-.composer input {
+.composer input, .composer textarea {
   width: 100%; min-height: 44px; border-radius: 12px; border: 1px solid var(--border);
   background: var(--panel); color: var(--text); font: inherit; font-size: 16px; padding: 8px 12px;
 }
+.composer textarea { resize: vertical; box-sizing: border-box; }
+.composer select.fsel { margin-bottom: 0; }
 .composer-actions { display: flex; gap: 8px; }
 .composer-actions .act { flex: 1; }
 .plan-turn {
@@ -228,23 +249,28 @@ button.act.rvok { border-color: var(--ok); color: var(--ok); font-weight: 700; }
 </section>
 
 <section id="view-plan" class="view" aria-label="Plan">
-  <h1>Plan</h1>
-  <p class="sub" id="plan-sub">Select a repo to start planning</p>
-  <select class="fsel" id="plan-repo" aria-label="Repository"></select>
-  <div class="composer" style="margin-top:8px;">
-    <select class="fsel" id="plan-sessions" aria-label="Chat session"></select>
-    <button class="act" id="plan-new" type="button">New chat</button>
-  </div>
-  <div id="plan-transcript" class="empty">no chat yet</div>
-  <div class="composer">
-    <input type="text" id="plan-input" placeholder="Ask the planner" aria-label="Chat message" />
-    <div class="composer-actions">
-      <button class="act primary" id="plan-send" type="button">Send</button>
-      <button class="act" id="plan-mic" type="button" style="display:none;" aria-label="Dictate">🎤</button>
+  <div id="plan-body">
+    <h1>Plan</h1>
+    <p class="sub" id="plan-sub">Select a repo to start planning</p>
+    <select class="fsel" id="plan-repo" aria-label="Repository"></select>
+    <div class="composer" style="margin-top:8px;">
+      <select class="fsel" id="plan-sessions" aria-label="Chat session"></select>
+      <button class="act" id="plan-new" type="button">New chat</button>
     </div>
+    <div id="plan-transcript" class="empty">no chat yet</div>
   </div>
-  <div id="plan-interim" class="interim"></div>
   <div id="plan-taskcard"></div>
+  <div id="plan-dock">
+    <div class="composer">
+      <select class="fsel" id="plan-model" aria-label="Model"></select>
+      <textarea id="plan-input" rows="2" placeholder="Message…" aria-label="Chat message"></textarea>
+      <div class="composer-actions">
+        <button class="act primary" id="plan-send" type="button">Send</button>
+        <button class="act" id="plan-mic" type="button" style="display:none;" aria-label="Dictate">🎤</button>
+      </div>
+    </div>
+    <div id="plan-interim" class="interim"></div>
+  </div>
 </section>
 
 </main>
@@ -850,6 +876,7 @@ function showView(v) {
     btn.className = "tap" + on;
   }
   if (v === "plan") {
+    loadPlanModels();
     loadPlanRepos();
   }
 }
@@ -919,7 +946,15 @@ function init() {
   // Defer loading repos to avoid premature fetch in test environments
   $("#plan-send").onclick = sendPlanMessage;
   $("#plan-new").onclick = newPlanSession;
-  $("#plan-input").onkeydown = function(e){ if(e.key==='Enter'){ e.preventDefault(); sendPlanMessage(); } };
+  // Enter sends; Shift+Enter inserts a newline.
+  $("#plan-input").onkeydown = function(e){
+    if(e.key==='Enter' && !e.shiftKey){ e.preventDefault(); sendPlanMessage(); }
+  };
+  const modelSel = $("#plan-model");
+  if (modelSel) modelSel.onchange = function(){
+    planModel = modelSel.value;   // applies to the next turn sent
+    try { if (planModel) localStorage.setItem(TALK_MODEL_KEY, planModel); } catch (e) {}
+  };
     // Speech recognition setup
     const mic = $("#plan-mic");
     if (window.SpeechRecognition || window.webkitSpeechRecognition) {
@@ -1025,6 +1060,35 @@ let planSessions = [];
 let planTurns = [];
 let planPollTimer = null;
 let planRepoPath = "";
+let planModel = "";   // planner picked for the next turn
+
+// The literal key is the contract shared with static/panels/chat.js and
+// static/panels/captain.js: one saved model choice across the whole dashboard.
+const TALK_MODEL_KEY = "arc-talk-model";
+
+function talkSavedModel() {
+  try { return localStorage.getItem(TALK_MODEL_KEY) || ""; } catch (e) { return ""; }
+}
+
+// Fill #plan-model from GET /api/chat/models (never 500s): the saved model
+// when the roster still offers it, else the API default.
+async function loadPlanModels() {
+  let data = null;
+  // This page's own fetch helper is j(); jget() exists only in index.html.
+  try { data = await j("/api/chat/models"); } catch (e) { data = null; }
+  const sel = $("#plan-model");
+  if (!sel) return;
+  const models = (data && data.models) || [];
+  const def = (data && data.default) || "";
+  sel.innerHTML = models.map(m => '<option value="' + attr(m) + '">' + esc(m) + '</option>').join("");
+  const saved = talkSavedModel();
+  let pick = "";
+  if (saved && models.indexOf(saved) >= 0) pick = saved;
+  else if (def && models.indexOf(def) >= 0) pick = def;
+  else pick = models.length ? models[0] : "";
+  if (pick) sel.value = pick;
+  planModel = pick;
+}
 
 function kebabSlug(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -1152,7 +1216,8 @@ function sendPlanMessage() {
   planTurns = [];
   if (input) input.value = "";
   setPlanBusy(true);
-  jpost("/api/chat/start", { session: planSession, repo: repo, message: msg }).then(res => {
+  jpost("/api/chat/start", { session: planSession, repo: repo, message: msg,
+                             model: planModel || undefined }).then(res => {
     if (res && res.code === 200) {
       startPlanPoll();
       pollPlan();
@@ -1203,7 +1268,8 @@ function renderPlanTranscript() {
     let time = "";
     if (t.ts) { try { time = new Date(t.ts * 1000).toLocaleTimeString(); } catch (e) {} }
     return '<div class="plan-turn ' + cls + '">' +
-      (time ? "<small>" + esc(time) + "</small>" : "") +
+      (time || t.model ? "<small>" + esc(time) +
+        (t.role === "assistant" && t.model ? " " + esc(t.model) : "") + "</small>" : "") +
       "<div>" + esc(t.text || "") + "</div>" +
       (t.error ? "<div>" + esc(t.error) + "</div>" : "") + "</div>";
   }).join("");

@@ -52,12 +52,49 @@ let CHAT_POLL = null;      // setInterval for live polling
 let CHAT_RECOG = null;     // live SpeechRecognition instance
 let CHAT_LISTENING = false;
 let CHAT_SPEECH_FINAL = ""; // accumulated final speech transcripts
+let CHAT_MODEL = "";       // planner the operator picked for the next turn
+
+// One saved choice, shared by both desktop panels and the phone page. The
+// literal key is the contract between the three files.
+const TALK_MODEL_KEY = "arc-talk-model";
+
+function talkSavedModel() {
+  try { return localStorage.getItem(TALK_MODEL_KEY) || ""; } catch (e) { return ""; }
+}
+
+function talkSaveModel(name) {
+  try { if (name) localStorage.setItem(TALK_MODEL_KEY, name); } catch (e) {}
+}
+
+// Point `sel` at the saved model when the roster still offers it, else at the
+// API default, else the first entry. Returns the name now selected.
+function talkFillModels(select, data) {
+  if (!select) return "";
+  const models = (data && data.models) || [];
+  const def = (data && data.default) || "";
+  const saved = talkSavedModel();
+  select.innerHTML = models.map(m => `<option value="${attr(m)}">${esc(m)}</option>`).join("");
+  let pick = "";
+  if (saved && models.indexOf(saved) >= 0) pick = saved;
+  else if (def && models.indexOf(def) >= 0) pick = def;
+  else pick = models.length ? models[0] : "";
+  if (pick) select.value = pick;
+  return pick;
+}
+
+// GET /api/chat/models never 500s; a failure here just leaves the select empty
+// and the turn falls back to the backend default.
+async function chatLoadModels() {
+  let data = null;
+  try { data = await jget("/api/chat/models"); } catch (e) { data = null; }
+  CHAT_MODEL = talkFillModels($("#c-model"), data);
+}
 
 function chatSetSend(busy) {
   const s = $("#c-send");
   if (!s) return;
   s.disabled = !!busy;
-  s.textContent = busy ? "…" : "send";
+  s.textContent = busy ? "…" : "Send";
 }
 
 function chatSetSession(id) {
@@ -121,7 +158,12 @@ function chatTaskcardHTML(file) {
 function chatTurnHTML(turn) {
   const who = turn.role === "user" ? "user" : "assistant";
   const parts = [];
-  if (turn.text) parts.push(`<div class="chat-bubble">${esc(turn.text)}</div>`);
+  // The model that actually answered, in small type on the assistant bubble.
+  const name = (who === "assistant" && turn.model)
+    ? `<span class="chat-model-name">${esc(turn.model)}</span>` : "";
+  if (turn.text || name) {
+    parts.push(`<div class="chat-bubble">${name}${turn.text ? esc(turn.text) : ""}</div>`);
+  }
   if (turn.error) parts.push(`<div class="chat-err">${esc(turn.error)}</div>`);
   const card = chatTaskcardHTML(turn.taskfile);
   if (card) parts.push(card);
@@ -143,7 +185,7 @@ function chatRender() {
 }
 
 function chatEmptyState() {
-  return `<div class="chat-empty">Describe what you want built. ${esc(PLANNER_SHORT)} will turn it into a governed project — tasks, model routing, verify gates, cross-review — and hand it back ready to run.</div>`;
+  return `<div class="chat-empty">Send a message to start.</div>`;
 }
 
 // ---- network ----
@@ -244,6 +286,7 @@ async function chatSend() {
   const text = input.value;
   if (!text.trim() || CHAT_RUNNING) return;
   const body = { session: CHAT_SESSION, repo: CHAT_REPO, message: text };
+  if (CHAT_MODEL) body.model = CHAT_MODEL;
   const { code, body: resp } = await jpost("/api/chat/start", body);
   if (code === 200) {
     input.value = "";
@@ -353,6 +396,7 @@ async function chatOpen() {
   if (modal) modal.classList.add("open");
   const msg = $("#c-msg");
   if (msg) { msg.className = ""; msg.textContent = ""; }
+  await chatLoadModels();
   await chatLoadRepos();
   await chatLoadSessions();
   chatStartSession();
@@ -376,6 +420,16 @@ function chatClose() {
   if (close) close.onclick = chatClose;
   const send = $("#c-send");
   if (send) send.onclick = chatSend;
+  const model = $("#c-model");
+  if (model) model.onchange = () => {
+    CHAT_MODEL = model.value;
+    talkSaveModel(CHAT_MODEL);
+  };
+  const text = $("#c-text");
+  if (text) text.onkeydown = ev => {
+    // Enter sends; Shift+Enter inserts a newline.
+    if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); chatSend(); }
+  };
   const mic = $("#c-mic");
   if (mic) mic.onclick = chatMic;
   const repo = $("#c-repo");

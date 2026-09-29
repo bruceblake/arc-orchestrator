@@ -380,6 +380,47 @@ class TestChatApi(_ChatCase):
         rec = dashboard._launch_registry["chat:s1"]
         self.assertEqual(rec["pid"], os.getpid())
 
+    # ---- the optional `model` field (Rule 6b boundary) ---------------------
+    def test_models_route_lists_the_planners(self):
+        # GET /api/chat/models drives the picker in both panels and the phone.
+        status, resp = self._get("/api/chat/models")
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["default"], config.PLANNER_MODEL)
+        self.assertEqual(resp["models"], config.planner_models())
+        for name in resp["models"]:
+            self.assertIn("planner", config.MODEL_ROLES.get(name, set()))
+
+    def test_start_without_model_spawns_no_model_flag(self):
+        repo = str(config.ROOT)
+        status, _ = self._post_json("/api/chat/start", {
+            "session": "s1", "repo": repo, "message": "hi"})
+        self.assertEqual(status, 200)
+        argv, _log = self.spawn_calls[0]
+        self.assertNotIn("--model", argv)
+        self.assertEqual(argv[1:], ["main.py", "chat", "--session", "s1",
+                                    "--repo", repo])
+
+    def test_start_with_the_planner_model_appends_the_flag(self):
+        repo = str(config.ROOT)
+        status, _ = self._post_json("/api/chat/start", {
+            "session": "s1", "repo": repo, "message": "hi",
+            "model": config.PLANNER_MODEL})
+        self.assertEqual(status, 200)
+        argv, _log = self.spawn_calls[0]
+        self.assertEqual(argv[-2:], ["--model", config.PLANNER_MODEL])
+
+    def test_start_rejects_a_model_that_is_not_a_planner(self):
+        repo = str(config.ROOT)
+        status, resp = self._post_json("/api/chat/start", {
+            "session": "s1", "repo": repo, "message": "hi",
+            "model": "not-a-model"})
+        self.assertEqual(status, 400)
+        self.assertEqual(resp["error"],
+                         "model is not a planner on today's roster")
+        self.assertEqual(self.spawn_calls, [])          # nothing spawned
+        self.assertFalse((self.chat_dir / "s1.jsonl").exists(),
+                         "a rejected model must leave the session untouched")
+
     def test_agents_splits_chats_out_of_runs(self):
         # Regression: chat entries must not inflate /api/agents `runs` (the
         # dashboard counts that list as "harness runs today").

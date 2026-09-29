@@ -35,8 +35,11 @@ REPO = HERE.parent.parent
 VIEWPORTS = {"desktop": (1440, 900), "phone": (390, 844)}
 SCHEMES = ("light", "dark")
 # (name, path, tab to click first or None)
+# index clicks Overview. A first visit that has a studio project lands on
+# Studio (initTabs); these goldens are the Overview page. The click stores
+# arc.tab, which initTabs keeps. Do not re-bless index onto Studio.
 PAGES = (
-    ("index", "/", None),
+    ("index", "/", "overview"),
     ("projects", "/", "projects"),
     ("usage", "/usage.html", None),
     ("phone", "/phone.html", None),

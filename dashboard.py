@@ -4168,6 +4168,12 @@ def _chat_start(body):
         return {"error": "repo is not one of the /api/repos entries"}, 400
     if _chat_running(session):
         return {"error": "a chat turn is already running for this session"}, 409
+    # The optional model is the Rule 6b boundary: validated BEFORE the user
+    # turn is appended and BEFORE anything is spawned, so a rejected name
+    # leaves the session file untouched and starts no process.
+    model, bad = _turn_model(body.get("model"))
+    if bad:
+        return {"error": bad}, 400
     path = _chat_dir() / f"{session}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
@@ -4175,6 +4181,8 @@ def _chat_start(body):
                             "text": message}) + "\n")
     argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py",
             "chat", "--session", session, "--repo", repo]
+    if model:
+        argv += ["--model", model]   # a roster name, never a shell string
     proc, log_name = _spawn_logged(argv, f"chat-{session}.log")
     _launch_registry[_chat_key(session)] = {
         "pid": proc.pid, "log": log_name, "started": time.time(), "kind": "chat"}
@@ -4210,6 +4218,40 @@ def _chat_sessions():
         return {"sessions": orchchat.list_sessions()}
     except Exception:                # a listing must never break the picker
         return {"sessions": []}
+
+
+def _chat_models():
+    """GET /api/chat/models — the models the operator may pick for a chat or
+    captain turn (strongest first), plus the default a bare turn uses.
+
+    Read-only and parameterless, so it cannot widen the unauthenticated
+    surface Rule 6b describes. It never 500s: a roster with no planner yields
+    {"models": [], "default": None} rather than an error, because both
+    panels and the phone call it whenever they open.
+    """
+    try:
+        return {"models": config.planner_models(),
+                "default": config.PLANNER_MODEL}
+    except Exception:
+        return {"models": [], "default": None}
+
+
+def _turn_model(raw):
+    """(model, problem) for the optional `model` field on a start route.
+
+    This is the Rule 6b boundary: these routes spawn a process and the
+    dashboard is unauthenticated. Missing, null or "" keeps today's argv
+    exactly (no --model flag; the CLI then uses config.PLANNER_MODEL). Any
+    other value must be byte-identical to one of config.planner_models(), so
+    what reaches argv is a roster name and never a path, a command, or a
+    model the driver constructors would refuse for the planner role. The
+    caller checks this BEFORE appending the user turn and BEFORE spawning.
+    """
+    if raw is None or raw == "":
+        return None, None
+    if not isinstance(raw, str) or raw not in config.planner_models():
+        return None, "model is not a planner on today's roster"
+    return raw, None
 
 
 def _captain_dir():
@@ -4305,7 +4347,8 @@ def _captain_start(body):
     """POST /api/captain/start — append the operator turn and spawn one
     captain turn. Same allowlist discipline as /api/chat/start (Rule 6b):
     the repo must be a byte-identical member of /api/repos and the spawned
-    argv is fixed."""
+    argv is fixed apart from an optional `model`, which must be exactly one
+    of config.planner_models()."""
     if not isinstance(body, dict):
         return {"error": "JSON body required"}, 400
     session = body.get("session")
@@ -4320,6 +4363,11 @@ def _captain_start(body):
         return {"error": "repo is not one of the /api/repos entries"}, 400
     if _captain_running(session):
         return {"error": "a captain turn is already running for this session"}, 409
+    # Same Rule 6b boundary as /api/chat/start: reject an off-roster model
+    # BEFORE the append and BEFORE the spawn.
+    model, bad = _turn_model(body.get("model"))
+    if bad:
+        return {"error": bad}, 400
     path = _captain_dir() / f"{session}.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
@@ -4327,6 +4375,8 @@ def _captain_start(body):
                             "text": message}) + "\n")
     argv = [str(Path(config.ROOT) / ".venv" / "bin" / "python"), "main.py",
             "captain", "--session", session, "--repo", repo]
+    if model:
+        argv += ["--model", model]   # a roster name, never a shell string
     proc, log_name = _spawn_logged(argv, f"captain-{session}.log")
     _launch_registry[_captain_key(session)] = {
         "pid": proc.pid, "log": log_name, "started": time.time(),
@@ -5426,6 +5476,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(_chat_poll(session, since))
             if u.path == "/api/chat/sessions":
                 return self._json(_chat_sessions())
+            if u.path == "/api/chat/models":
+                return self._json(_chat_models())
             if u.path == "/api/captain/state":
                 return self._json(_captain_state())
             if u.path == "/api/captain/sessions":
