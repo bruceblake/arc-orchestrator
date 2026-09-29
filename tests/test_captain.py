@@ -812,6 +812,61 @@ class CaptainAnsweredModel(unittest.TestCase):
         self.assertEqual(last["model"], "substitute-seat")
         self.assertIn("empty reply", last["error"])
 
+    def test_nondefault_model_is_named_in_the_prompt(self):
+        # Selecting GPT-6-Sol must not leave "running on <CAPTAIN_MODEL>"
+        # (DeepSeek) or the studio planner (Claude) in the identity line.
+        import asyncio
+        import shutil
+        from drivers import DriverResult
+
+        repo = Path(tempfile.mkdtemp(prefix="arc-cap-repo-", dir=str(config.REPO_ROOT)))
+        (repo / ".git").mkdir()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        capdir = Path(tempfile.mkdtemp(prefix="arc-capdir-"))
+        self.addCleanup(shutil.rmtree, capdir, ignore_errors=True)
+        old = os.environ.get("ARC_CAPTAIN_DIR")
+        os.environ["ARC_CAPTAIN_DIR"] = str(capdir)
+
+        def _restore():
+            if old is None:
+                os.environ.pop("ARC_CAPTAIN_DIR", None)
+            else:
+                os.environ["ARC_CAPTAIN_DIR"] = old
+        self.addCleanup(_restore)
+        (capdir / "captain-pick.jsonl").write_text(
+            json.dumps({"role": "user", "ts": 1, "text": "hi"}) + "\n",
+            encoding="utf-8")
+        picked = "GPT-6-Sol"
+        self.assertNotEqual(picked, config.CAPTAIN_MODEL)
+        self.assertNotEqual(picked, config.PLANNER_MODEL)
+        asked = {}
+
+        class _Stub:
+            def __init__(self, role, bench=False, interactive=False):
+                assert role == "planner" and interactive
+
+            async def run(self, prompt, *args, **kwargs):
+                asked["prompt"] = prompt
+                return DriverResult(harness="reasonix", model=picked,
+                                    role="planner", exit_code=0, text="ok")
+
+        def factory(model=None):
+            asked["model"] = model
+            return _Stub("planner", interactive=True)
+
+        with mock.patch.object(captain, "_captain_driver", factory), \
+                mock.patch.object(captain, "fleet_state", return_value={
+                    "planner_model": config.PLANNER_MODEL, "capacity": {},
+                    "task_status_counts": {}, "needs_attention": [],
+                    "recent_events": []}):
+            code = asyncio.run(captain.run_turn(
+                "captain-pick", str(repo), picked))
+        self.assertEqual(code, 0)
+        self.assertEqual(asked["model"], picked)
+        self.assertIn(f"running on {picked}", asked["prompt"])
+        self.assertNotIn(f"running on {config.CAPTAIN_MODEL}", asked["prompt"])
+        self.assertNotIn(f"running on {config.PLANNER_MODEL}", asked["prompt"])
+
 
 if __name__ == "__main__":
     unittest.main()

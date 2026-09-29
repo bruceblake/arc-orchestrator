@@ -337,8 +337,12 @@ def _state_block(state):
     return "\n".join(lines)
 
 
-def build_prompt(repo, state, turns):
-    return (CAPTAIN_PERSONA
+def build_prompt(repo, state, turns, model=None):
+    # The conversational turn runs on the operator's pick, or PLANNER_MODEL.
+    # CAPTAIN_PERSONA names CAPTAIN_MODEL; those differ on the studio roster.
+    seat = model or config.PLANNER_MODEL
+    persona = orchchat.persona_for_seat(CAPTAIN_PERSONA, config.CAPTAIN_MODEL, seat)
+    return (persona
             + f"\n\nTARGET REPO: {repo}\n\n"
             + project_contract.captain_block(repo)
             + "\n"
@@ -753,8 +757,9 @@ async def run_turn(session, repo, model=None):
 
     task_id = f"captain-{session}"
     try:
-        res = await _captain_driver(model).run(build_prompt(repo, state, turns),
-                                               Path(repo), task_id=task_id)
+        res = await _captain_driver(model).run(
+            build_prompt(repo, state, turns, model),
+            Path(repo), task_id=task_id)
     except Exception as exc:
         fp = errors.capture(exc, task=task_id, model=used,
                             node="captain")

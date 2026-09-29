@@ -119,8 +119,14 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .chat-dialog { display: flex; flex-direction: column; height: 90vh; max-height: 90vh; }
 .chat-dialog h3 { margin-bottom: 6px; }
 .chat-head { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.chat-head h3 { margin: 0; flex: 1; min-width: 0; }
-.chat-head select { width: auto; margin: 0; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font: inherit; font-size: 11px; max-width: 190px; }
+.chat-head h3 { margin: 0; flex: 0 0 auto; }
+.chat-head h3 .pill { display: none; }
+.chat-head select { width: auto; margin: 0; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 6px; font: inherit; font-size: 11px; }
+#c-model, #k-model { flex: 0 1 190px; width: 190px; max-width: 190px; min-width: 140px; }
+/* Session names must stay readable. A flex select's min-content is the
+   arrow alone, so these do not shrink and have an explicit width. */
+#c-sessions, #k-sessions { flex: 1 0 16em; width: 16em; min-width: 16em; max-width: 24em; }
+.chat-head button { flex: 0 0 auto; }
 .chat-repo { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 8px; }
 .chat-sessionbar { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
 .chat-sessionbar .hint { flex: none; }

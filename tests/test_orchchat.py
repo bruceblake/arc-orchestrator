@@ -110,8 +110,10 @@ class TestOrchChat(unittest.TestCase):
         # orchchat._planner_driver() chooses the driver from the roster (GLM on
         # the 2026-09-12 two-model fleet), so patch the FACTORY — patching a
         # driver class alone stopped covering the path the day the roster moved.
-        with mock.patch.object(orchchat, "_planner_driver",
-                               lambda model=None: cls("planner", interactive=True)):
+        def factory(model=None):
+            state["driver_model"] = model
+            return cls("planner", interactive=True)
+        with mock.patch.object(orchchat, "_planner_driver", factory):
             code = asyncio.run(orchchat.run_turn(session, str(repo), model))
         return code, state, self.chat_dir / f"{session}.jsonl"
 
@@ -318,6 +320,18 @@ class TestOrchChatFailures(TestOrchChat):
         last = self._read_turns(spath)[-1]
         self.assertEqual(last["model"], "substitute-seat")
         self.assertEqual(last["text"].strip(), "hello")
+
+    def test_nondefault_model_is_named_in_the_prompt(self):
+        # Studio chat can send GPT-6-Sol. The prompt must identify as that
+        # seat, not as config.PLANNER_MODEL.
+        repo = self._make_repo()
+        picked = "GPT-6-Sol"
+        self.assertNotEqual(picked, config.PLANNER_MODEL)
+        code, state, _spath = self._run(reply="hello", repo=repo, model=picked)
+        self.assertEqual(code, 0)
+        self.assertEqual(state["driver_model"], picked)
+        self.assertIn(f"running on {picked}", state["prompt"])
+        self.assertNotIn(f"running on {config.PLANNER_MODEL}", state["prompt"])
 
     def test_empty_reply_records_substituted_model(self):
         repo = self._make_repo()

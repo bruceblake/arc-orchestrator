@@ -35,9 +35,10 @@ REPO = HERE.parent.parent
 VIEWPORTS = {"desktop": (1440, 900), "phone": (390, 844)}
 SCHEMES = ("light", "dark")
 # (name, path, tab to click first or None)
-# index clicks Overview. A first visit that has a studio project lands on
-# Studio (initTabs); these goldens are the Overview page. The click stores
-# arc.tab, which initTabs keeps. Do not re-bless index onto Studio.
+# index clicks Overview. The goldens are that tab. A first visit with a
+# Studio project lands on Studio (initTabs), so leaving the tab unset makes
+# the shot depend on whether a studio project exists and diverges from the
+# Overview goldens. The click stores arc.tab, which initTabs keeps.
 PAGES = (
     ("index", "/", "overview"),
     ("projects", "/", "projects"),

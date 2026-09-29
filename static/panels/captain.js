@@ -53,7 +53,12 @@ function capSetSession(id) {
   const head = $("#k-session");
   if (head) head.textContent = CAP_SESSION;
   const sel = $("#k-sessions");
-  if (sel && CAP_SESSION) sel.value = CAP_SESSION;
+  if (sel && CAP_SESSION) {
+    if (!Array.from(sel.options || []).some(o => o.value === CAP_SESSION)) {
+      sel.innerHTML = `<option value="${attr(CAP_SESSION)}">${esc(CAP_SESSION)} (${CAP_TURNS.length})</option>` + (sel.innerHTML || "");
+    }
+    sel.value = CAP_SESSION;
+  }
 }
 
 async function capStartSession(id) {
@@ -305,9 +310,11 @@ async function capSend() {
   if (!input) return;
   const text = input.value;
   if (!text.trim() || CAP_RUNNING) return;
+  const modelSel = $("#k-model");
+  const m = (modelSel && modelSel.value) || CAP_MODEL;
   const { code, body: resp } = await jpost("/api/captain/start",
     { session: CAP_SESSION, repo: CAP_REPO, message: text,
-      model: CAP_MODEL || undefined });
+      model: m || undefined });
   if (code === 200) {
     input.value = "";
     CAP_RUNNING = true;
@@ -359,8 +366,9 @@ async function capOpen() {
     sel.innerHTML = CHAT_REPOS.map(r => `<option value="${attr(r.path)}">${esc(r.name)}</option>`).join("");
     sel.value = CAP_REPO;
   }
+  capSetSession(capSessionFor(CAP_REPO));
   await capLoadState();
-  await capStartSession(capSessionFor(CAP_REPO));
+  await capStartSession(CAP_SESSION);
   startCapPoll();
 }
 

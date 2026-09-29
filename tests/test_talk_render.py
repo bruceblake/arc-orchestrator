@@ -84,6 +84,7 @@ class TalkDialogRender(unittest.TestCase):
                          "TEXTAREA")
         self.assertEqual(page.locator("#c-send").inner_text(), "Send")
         self.assertGreater(page.locator("#c-model option").count(), 0)
+        self._assert_select_label_visible(page, "#c-sessions", "plan-")
         self.assertTrue(inside, "model name must be inside the chat bubble")
         page.screenshot(path=str(SHOTS / "chat-dialog.png"))
         page.click("#c-close")
@@ -105,10 +106,32 @@ class TalkDialogRender(unittest.TestCase):
         self.assertFalse(open_fleet)
         self.assertTrue(inside, "model name must be inside the captain bubble")
         self.assertEqual(page.locator("#k-send").inner_text(), "Send")
+        self._assert_select_label_visible(page, "#k-sessions", "captain-")
         cbox = page.locator("#capmodal .chat-dialog").bounding_box()
         self.assertLess(cbox["y"] + cbox["height"], 901)
         page.screenshot(path=str(SHOTS / "captain-dialog.png"))
         page.close()
+
+    def _assert_select_label_visible(self, page, selector, needle):
+        # Option text existing is not enough: a flex <select> can shrink to
+        # the dropdown arrow while the option string is still in the DOM.
+        fit = page.locator(selector).evaluate("""el => {
+          const opt = el.selectedOptions && el.selectedOptions[0];
+          const text = (opt && opt.text) || "";
+          const cs = getComputedStyle(el);
+          const probe = document.createElement("span");
+          probe.style.cssText = "position:absolute;left:-9999px;top:0;white-space:nowrap;font:" + cs.font;
+          probe.textContent = text;
+          document.body.appendChild(probe);
+          const need = probe.getBoundingClientRect().width;
+          probe.remove();
+          return {text: text, need: need, width: el.getBoundingClientRect().width};
+        }""")
+        self.assertIn(needle, fit["text"], fit)
+        # ~22px is the closed-arrow chrome beside the label.
+        self.assertGreaterEqual(
+            fit["width"], fit["need"] + 22,
+            f"{selector} session name is clipped {fit}")
 
     def _phone(self, browser, base):
         page = browser.new_page(viewport={"width": 390, "height": 844})

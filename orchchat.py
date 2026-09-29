@@ -64,6 +64,20 @@ PLANNER_PERSONA = (
 )
 
 
+def persona_for_seat(persona, fixed, seat):
+    """Fleet persona with the 'running on <fixed>' claim set to this turn's model.
+
+    The module constant names the default seat. A dashboard turn can pick
+    another planner; the prompt must identify as that model, not the default.
+    """
+    if not seat or not fixed or seat == fixed:
+        return persona
+    needle = f"running on {fixed}"
+    if needle not in persona:
+        return persona
+    return persona.replace(needle, f"running on {seat}", 1)
+
+
 def chat_dir():
     """Sessions live in $ARC_CHAT_DIR, default <cwd>/logs/chat.
 
@@ -229,8 +243,9 @@ def _planner_driver(model=None):
     return drivers.driver_for(model, "planner", interactive=True)
 
 
-def build_prompt(repo, turns):
-    return (PLANNER_PERSONA
+def build_prompt(repo, turns, model=None):
+    seat = model or config.PLANNER_MODEL
+    return (persona_for_seat(PLANNER_PERSONA, config.PLANNER_MODEL, seat)
             + f"\n\nTARGET REPO: {repo}\n\n"
             + project_contract.planner_block(repo)
             + "CONVERSATION WITH THE OPERATOR (oldest first). Reply as the "
@@ -374,7 +389,7 @@ async def run_turn(session, repo, model=None):
     task_id = f"chat-{session}"
     try:
         res = await _planner_driver(model).run(
-            build_prompt(repo, turns), Path(repo), task_id=task_id)
+            build_prompt(repo, turns, model), Path(repo), task_id=task_id)
     except Exception as exc:
         # A crashed planner did not answer. Same containment as the
         # governed pipeline: capture a fingerprint for triage, keep the

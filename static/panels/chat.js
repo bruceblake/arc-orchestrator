@@ -102,7 +102,12 @@ function chatSetSession(id) {
   const sess = $("#c-session");
   if (sess) sess.textContent = CHAT_SESSION;
   const sel = $("#c-sessions");
-  if (sel && CHAT_SESSION) sel.value = CHAT_SESSION;
+  if (sel && CHAT_SESSION) {
+    if (!Array.from(sel.options || []).some(o => o.value === CHAT_SESSION)) {
+      sel.innerHTML = `<option value="${attr(CHAT_SESSION)}">${esc(CHAT_SESSION)} (${CHAT_TURNS.length})</option>` + (sel.innerHTML || "");
+    }
+    sel.value = CHAT_SESSION;
+  }
 }
 
 // Reset the panel onto `id` (the repo's session unless a picker choice won),
@@ -286,7 +291,9 @@ async function chatSend() {
   const text = input.value;
   if (!text.trim() || CHAT_RUNNING) return;
   const body = { session: CHAT_SESSION, repo: CHAT_REPO, message: text };
-  if (CHAT_MODEL) body.model = CHAT_MODEL;
+  const modelSel = $("#c-model");
+  const m = (modelSel && modelSel.value) || CHAT_MODEL;
+  if (m) body.model = m;
   const { code, body: resp } = await jpost("/api/chat/start", body);
   if (code === 200) {
     input.value = "";
@@ -398,8 +405,9 @@ async function chatOpen() {
   if (msg) { msg.className = ""; msg.textContent = ""; }
   await chatLoadModels();
   await chatLoadRepos();
+  chatSetSession(chatSessionFor(CHAT_REPO));
   await chatLoadSessions();
-  chatStartSession();
+  chatStartSession(CHAT_SESSION);
   chatUpdateMic();
   startChatPoll();
 }

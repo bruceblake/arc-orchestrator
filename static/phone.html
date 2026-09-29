@@ -1216,8 +1216,10 @@ function sendPlanMessage() {
   planTurns = [];
   if (input) input.value = "";
   setPlanBusy(true);
+  const modelSel = $("#plan-model");
+  const m = (modelSel && modelSel.value) || planModel;
   jpost("/api/chat/start", { session: planSession, repo: repo, message: msg,
-                             model: planModel || undefined }).then(res => {
+                             model: m || undefined }).then(res => {
     if (res && res.code === 200) {
       startPlanPoll();
       pollPlan();
