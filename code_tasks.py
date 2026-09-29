@@ -2197,6 +2197,14 @@ async def open_task_issues(store, taskset, taskfile):
                 if n is None:
                     continue
                 out[tid] = n
+                # ensure_task_issue returns as soon as the row exists, so a
+                # resume would otherwise leave a stale arc:* label. Reflect
+                # the recorded status before the graph starts; a failure is
+                # reported and the rest of the tasks still open.
+                if had is not None and row.get("status"):
+                    await one("reflect", tid, gh_issues.reflect_status(
+                        repo, taskfile, tid, row["status"],
+                        model=recorded, error=row.get("error")))
                 if had and recorded:
                     await one("model", tid, gh_issues.set_model(repo, n, recorded))
                 # A resume that re-attaches to an already-open PR may never

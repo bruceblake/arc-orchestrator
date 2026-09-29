@@ -38,7 +38,8 @@ replaced by a source older than it.
 
 Status: logs/watchdog/status.json, log: logs/watchdog/watchdog.log,
 events: watchdog.resume / watchdog.parked / watchdog.done /
-watchdog.taskfile_kept / watchdog.taskfile_restored / watchdog.tmp_taskfile.
+watchdog.taskfile_kept / watchdog.taskfile_restored / watchdog.tmp_taskfile /
+watchdog.issues_reflected.
 
     .venv/bin/python fleetwatch.py            # loop forever (the service)
     .venv/bin/python fleetwatch.py --once     # one tick
@@ -46,6 +47,7 @@ watchdog.taskfile_kept / watchdog.taskfile_restored / watchdog.tmp_taskfile.
     .venv/bin/python fleetwatch.py --ignore <taskfile>  # stop watching one
 """
 import argparse
+import asyncio
 import hashlib
 import json
 import os
@@ -417,6 +419,27 @@ def tick(store):
         status["live"][tf] = pid
     _save("runs.json", runs)
     _save("status.json", status)
+    # Resume decisions above are unchanged. This is the path that corrects an
+    # issue whose run was SIGKILLed or whose taskfile is not being re-run:
+    # push each recorded code_tasks status onto the issue that already exists.
+    # The whole batch is bounded by GH_ISSUES_TIMEOUT, the same bound as every
+    # other issue hook, so a slow GitHub call cannot hold the next tick.
+    # A GitHub failure is an event, never a failed tick.
+    try:
+        import gh_issues
+        prev_db = gh_issues._DB
+        try:
+            counts = asyncio.run(asyncio.wait_for(
+                gh_issues.reflect_db(store.path), config.GH_ISSUES_TIMEOUT))
+        finally:
+            gh_issues._DB = prev_db
+        log("issues reflected: "
+            f"updated={counts['updated']} unchanged={counts['unchanged']} "
+            f"missing={counts['missing']} errors={counts['errors']}")
+        events.emit("watchdog.issues_reflected", **counts)
+    except Exception as exc:                                   # noqa: BLE001
+        import errors
+        errors.capture(exc, node="watchdog_reflect")
     return status
 
 

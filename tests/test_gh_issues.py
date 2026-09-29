@@ -372,6 +372,274 @@ class Issues(Base):
         self.assertIn("#9", linked[0])
         self.assertIn("model:GLM-5.3", self.gh.issues[out["t1"]]["labels"])
 
+    def test_reflect_failed_comments_once(self):
+        n = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task()))
+        self.gh.issues[n]["labels"] = ["arc-task", "arc:implementing", "model:GLM-5.3"]
+        err = "interrupted: run process exited before the task finished"
+        result = self.run_(gh_issues.reflect_status(
+            self.repo, self.tf, "t1", "failed", model="GLM-5.3", error=err))
+        self.assertEqual(result, "updated")
+        labels = self.gh.issues[n]["labels"]
+        self.assertEqual([l for l in labels if l.startswith("arc:")], ["arc:failed"])
+        self.assertIn("model:GLM-5.3", labels)
+        self.assertEqual(len(self.gh.comments(n)), 1)
+        self.assertTrue(self.gh.comments(n)[0].startswith("**task failed**"))
+        self.assertIn(err, self.gh.comments(n)[0])
+        again = self.run_(gh_issues.reflect_status(
+            self.repo, self.tf, "t1", "failed", model="GLM-5.3", error=err))
+        self.assertEqual(again, "unchanged")
+        self.assertEqual(len(self.gh.comments(n)), 1)
+
+    def test_concurrent_reflect_posts_one_failed_comment(self):
+        """Two reflects that both read arc:implementing post one failure comment.
+
+        The labels GET yields until a second read arrives, which is the race
+        main.py's cleanup and fleetwatch.tick hit. The per-task lock keeps
+        the second read from starting until the first comment is done, so
+        the wait times out and only one comment lands.
+        """
+        n = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task()))
+        self.gh.issues[n]["labels"] = ["arc-task", "arc:implementing", "model:GLM-5.3"]
+        err = "interrupted: run process exited before the task finished"
+        real = FakeGH.__call__
+
+        async def both():
+            reads = {"n": 0}
+            both_read = asyncio.Event()
+
+            async def yield_on_label_get(args, cwd, timeout=180, wait_quota=True):
+                is_get = (len(args) > 3 and args[2] == "GET"
+                          and str(args[3]).endswith(f"issues/{n}/labels"))
+                result = await real(self.gh, args, cwd, timeout=timeout,
+                                    wait_quota=wait_quota)
+                if is_get:
+                    reads["n"] += 1
+                    if reads["n"] >= 2:
+                        both_read.set()
+                    else:
+                        try:
+                            await asyncio.wait_for(both_read.wait(), 0.3)
+                        except asyncio.TimeoutError:
+                            pass
+                return result
+
+            with mock.patch.object(gitstore, "_gh", yield_on_label_get):
+                return await asyncio.gather(
+                    gh_issues.reflect_status(
+                        self.repo, self.tf, "t1", "failed",
+                        model="GLM-5.3", error=err),
+                    gh_issues.reflect_status(
+                        self.repo, self.tf, "t1", "failed",
+                        model="GLM-5.3", error=err))
+
+        results = self.run_(both())
+        self.assertCountEqual(results, ["updated", "unchanged"])
+        failed = [c for c in self.gh.comments(n) if c.startswith("**task failed**")]
+        self.assertEqual(len(failed), 1)
+        self.assertIn(err, failed[0])
+        self.assertEqual(
+            [l for l in self.gh.issues[n]["labels"] if l.startswith("arc:")],
+            ["arc:failed"])
+
+    def test_reflect_running_relabels_without_a_comment(self):
+        n = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task()))
+        self.assertIn("arc:pending", self.gh.issues[n]["labels"])
+        result = self.run_(gh_issues.reflect_status(
+            self.repo, self.tf, "t1", "running"))
+        self.assertEqual(result, "updated")
+        self.assertIn("arc:implementing", self.gh.issues[n]["labels"])
+        self.assertEqual(self.gh.comments(n), [])
+
+    def test_reflect_missing_creates_nothing(self):
+        before = len(self.gh.issues)
+        result = self.run_(gh_issues.reflect_status(
+            self.repo, self.tf, "no-such", "failed", error="gone"))
+        self.assertEqual(result, "missing")
+        self.assertEqual(len(self.gh.issues), before)
+        self.assertEqual(self.gh.calls, [])
+
+    def test_reflect_db_updates_both_and_isolates_a_get_error(self):
+        n1 = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task(0)))
+        n2 = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task(1)))
+        self.gh.issues[n1]["labels"] = ["arc-task", "arc:implementing", "model:GLM-5.3"]
+        self.gh.issues[n2]["labels"] = ["arc-task", "arc:pending", "model:GLM-5.3"]
+        tf = str(self.tf.resolve())
+        with closing(sqlite3.connect(config.DB_PATH, isolation_level=None)) as c:
+            c.execute("CREATE TABLE code_tasks("
+                      "id TEXT, taskfile TEXT, status TEXT, model TEXT, error TEXT)")
+            c.execute("INSERT INTO code_tasks VALUES ('t1', ?, 'failed', ?, ?)",
+                      (tf, "GLM-5.3", "boom"))
+            c.execute("INSERT INTO code_tasks VALUES ('t2', ?, 'running', ?, NULL)",
+                      (tf, "GLM-5.3"))
+        counts = self.run_(gh_issues.reflect_db())
+        self.assertEqual(counts, {"updated": 2, "unchanged": 0, "missing": 0, "errors": 0})
+        self.assertIn("arc:failed", self.gh.issues[n1]["labels"])
+        self.assertIn("arc:implementing", self.gh.issues[n2]["labels"])
+        self.gh.issues[n1]["labels"] = ["arc-task", "arc:implementing", "model:GLM-5.3"]
+        self.gh.issues[n2]["labels"] = ["arc-task", "arc:pending", "model:GLM-5.3"]
+        real = FakeGH.__call__
+
+        async def fail_one_get(args, cwd, timeout=180, wait_quota=True):
+            if (len(args) > 3 and args[2] == "GET"
+                    and args[3].endswith(f"issues/{n1}/labels")):
+                return 1, "", "HTTP 502: bad gateway"
+            return await real(self.gh, args, cwd, timeout=timeout,
+                              wait_quota=wait_quota)
+
+        with mock.patch.object(gitstore, "_gh", fail_one_get), capture_events() as ev:
+            counts = self.run_(gh_issues.reflect_db())
+        self.assertEqual(counts["errors"], 1)
+        self.assertGreaterEqual(counts["updated"], 1)
+        self.assertIn("arc:implementing", self.gh.issues[n2]["labels"])
+        self.assertEqual([l for l in self.gh.issues[n1]["labels"] if l.startswith("arc:")],
+                         ["arc:implementing"])
+        errs = ev.of("gh.issue_error")
+        self.assertEqual(len(errs), 1)
+        self.assertEqual(errs[0].get("op"), "reflect")
+        self.assertEqual(errs[0].get("task"), "t1")
+        self.assertIn("taskfile", errs[0])
+
+    def test_resume_reflects_a_stale_status_label(self):
+        """open_task_issues must push the recorded status. Removing that call
+        leaves the issue on arc:implementing and this fails."""
+        n = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task()))
+        self.gh.issues[n]["labels"] = ["arc-task", "arc:implementing", "model:GLM-5.3"]
+        err = "gate failed: boom"
+        store = FakeStore(prior=[{"id": "t1", "status": "failed", "model": "GLM-5.3",
+                                  "error": err}])
+        ts = code_tasks.load_taskfile(self.tf)
+        self.run_(code_tasks.open_task_issues(store, ts, str(self.tf)))
+        self.assertEqual(
+            [l for l in self.gh.issues[n]["labels"] if l.startswith("arc:")],
+            ["arc:failed"])
+        self.assertIn("model:GLM-5.3", self.gh.issues[n]["labels"])
+        failed = [c for c in self.gh.comments(n) if c.startswith("**task failed**")]
+        self.assertEqual(failed, [c for c in self.gh.comments(n)])
+        self.assertEqual(len(failed), 1)
+        self.assertIn(err, failed[0])
+        self.run_(code_tasks.open_task_issues(store, ts, str(self.tf)))
+        self.assertEqual(len(self.gh.comments(n)), 1)
+
+    def test_run_cleanup_pushes_failed_onto_the_existing_issue(self):
+        """The code-run finally must reflect leaked rows. Removing that call
+        leaves the issue on arc:implementing after the row is marked failed."""
+        import argparse
+        import main
+        import reconcile
+        from store import Store
+
+        n = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task()))
+        self.gh.issues[n]["labels"] = [
+            "arc-task", "arc:implementing", f"model:{MODEL}"]
+
+        def fake_build(store, taskset, taskfile=None):
+            class _Graph:
+                async def run(self, ctx):
+                    store.upsert_code_task(
+                        taskfile, "t1", "First", MODEL, REVIEWER, "running")
+                    return {"results": {}}
+            return _Graph()
+
+        args = argparse.Namespace(
+            code_cmd="run", taskfile=str(self.tf), repo=str(self.repo),
+            dry_run=False, force=True, no_wait=False, db=config.DB_PATH)
+        prev_db = gh_issues._DB
+        self.addCleanup(setattr, gh_issues, "_DB", prev_db)
+        with mock.patch("reconcile.live_runs", return_value=[]), \
+                mock.patch.object(gitstore, "ensure_base_branch", mock.AsyncMock()), \
+                mock.patch.object(gitstore, "fast_forward_base",
+                                  mock.AsyncMock(return_value=(True, ""))), \
+                mock.patch.object(gitstore, "github_status",
+                                  mock.AsyncMock(return_value={"ready": True})), \
+                mock.patch.object(gitstore, "checkpoint_stopping",
+                                  mock.AsyncMock(return_value=0)), \
+                mock.patch.object(code_tasks, "build_code_graph", fake_build), \
+                capture_events() as ev:
+            main.cmd_code(args)
+        self.assertTrue(ev.of("run.interrupted"))
+        row = {r["id"]: r for r in Store(config.DB_PATH).code_tasks_for(
+            str(self.tf.resolve()))}["t1"]
+        self.assertEqual(row["status"], "failed")
+        self.assertEqual(row["error"], reconcile.INTERRUPTED_REASON)
+        self.assertEqual(
+            [l for l in self.gh.issues[n]["labels"] if l.startswith("arc:")],
+            ["arc:failed"])
+        self.assertIn(f"model:{MODEL}", self.gh.issues[n]["labels"])
+        failed = [c for c in self.gh.comments(n) if c.startswith("**task failed**")]
+        self.assertEqual(len(failed), 1)
+        self.assertIn(reconcile.INTERRUPTED_REASON, failed[0])
+
+    def _watchdog_store(self, status, error):
+        import fleetwatch
+        from store import Store
+        prev_db = gh_issues._DB
+        gh_issues._DB = None
+        self.addCleanup(setattr, gh_issues, "_DB", prev_db)
+        n = self.run_(gh_issues.ensure_task_issue(
+            self.repo, "proj", self.tf, self.task()))
+        self.gh.issues[n]["labels"] = ["arc-task", "arc:implementing", "model:GLM-5.3"]
+        store = Store(config.DB_PATH)
+        store.upsert_code_task(
+            str(self.tf.resolve()), "t1", "First", "GLM-5.3", "deepseek",
+            status, error=error, finished=True)
+        state = self.tmp / "watchdog"
+        old = fleetwatch.STATE_DIR
+        fleetwatch.STATE_DIR = state
+        self.addCleanup(setattr, fleetwatch, "STATE_DIR", old)
+        self.addCleanup(store.conn.close)
+        return n, store, state, fleetwatch
+
+    def test_watchdog_tick_pushes_code_task_status(self):
+        """fleetwatch.tick must call reflect_db. Removing that call leaves
+        arc:implementing and emits no watchdog.issues_reflected."""
+        n, store, state, fleetwatch = self._watchdog_store("failed", "boom")
+        with mock.patch.object(fleetwatch.reconcile, "live_runs", lambda: []), \
+                capture_events() as ev:
+            fleetwatch.tick(store)
+        self.assertEqual(
+            [l for l in self.gh.issues[n]["labels"] if l.startswith("arc:")],
+            ["arc:failed"])
+        self.assertEqual(len(self.gh.comments(n)), 1)
+        self.assertTrue(self.gh.comments(n)[0].startswith("**task failed**"))
+        self.assertIn("boom", self.gh.comments(n)[0])
+        reflected = ev.of("watchdog.issues_reflected")
+        self.assertEqual(len(reflected), 1)
+        self.assertGreaterEqual(reflected[0].get("updated"), 1)
+        self.assertTrue((state / "status.json").is_file())
+        with mock.patch.object(fleetwatch.reconcile, "live_runs", lambda: []), \
+                capture_events():
+            fleetwatch.tick(store)
+        self.assertEqual(len(self.gh.comments(n)), 1)
+
+    def test_watchdog_reflect_is_bounded_by_gh_issues_timeout(self):
+        """A hung GitHub call must not hold the tick for longer than
+        GH_ISSUES_TIMEOUT. Removing wait_for makes this sleep out the hang."""
+        import time
+        _n, store, state, fleetwatch = self._watchdog_store("failed", "boom")
+        hit = {"n": 0}
+
+        async def hang(args, cwd, timeout=180, wait_quota=True):
+            hit["n"] += 1
+            await asyncio.sleep(3)
+            return 0, "[]", ""
+
+        started = time.monotonic()
+        with mock.patch.object(config, "GH_ISSUES_TIMEOUT", 0.2), \
+                mock.patch.object(gitstore, "_gh", hang), \
+                mock.patch.object(fleetwatch.reconcile, "live_runs", lambda: []):
+            st = fleetwatch.tick(store)
+        self.assertGreaterEqual(hit["n"], 1)
+        self.assertLess(time.monotonic() - started, 1.5)
+        self.assertIn("ts", st)
+        self.assertTrue((state / "status.json").is_file())
+
 
 class Wiring(Base):
     def graph(self, store=None):

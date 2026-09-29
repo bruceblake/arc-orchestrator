@@ -593,8 +593,12 @@ taskfile gets a tracking issue `[arc] <project>` (the DAG as a checklist) and
 every unmerged task an issue `[<project>] <title>`; each state transition
 (implement, usage swap, escalation, gate, review, evidence, publish, PR
 round, merge, conflict, skip, fail) posts at most ONE comment and swaps the
-`arc:<status>` label. The PR body carries `Closes #<issue>`, so the merge
-closes it (an empty diff merged without a PR is closed explicitly); a failed task is labelled `arc:failed` and left OPEN for a human.
+`arc:<status>` label. A dead run and the watchdog tick also push the
+`code_tasks` status onto the existing issue (`gh_issues.reflect_status` /
+`reflect_db`); pushing the same status again does not add a comment. The PR
+body carries `Closes #<issue>`, so the merge closes it (an empty diff merged
+without a PR is closed explicitly); a failed task is labelled `arc:failed`
+and left OPEN for a human.
 Every call is best-effort — a gh failure is a `gh.issue_error` event with a
 fingerprint, never a failed task. Comments are capped and redacted to
 repo-relative paths. `ARC_GH_ISSUES=off` disables it (default `auto`: on when

@@ -15,7 +15,9 @@ a gh failure; the pipeline wiring (code_tasks) is what makes them
 best-effort. Mapping (repo, taskfile, task) -> issue lives in `task_issues`
 in config.DB_PATH (or the run's --db, use_db); task '' is the epic.
 """
+import asyncio
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -567,6 +569,153 @@ async def close_merged(repo, issue, reason=None):
         await comment(repo, issue, "merged without a pull request", reason)
         await _api(repo, "PATCH", f"repos/{{owner}}/{{repo}}/issues/{issue}",
                    [("state", "closed"), ("state_reason", "completed")])
+
+
+def _reflect_lock_path(repo, taskfile, tid):
+    """One lock file per task on this database, shared by every process."""
+    repo_k, tf_k = _key(repo, taskfile)
+    db = str(Path(_db()).resolve())
+    digest = hashlib.sha256(
+        f"{db}\0{repo_k}\0{tf_k}\0{tid}".encode()).hexdigest()
+    return Path.home() / ".cache" / "arc-gh-reflect-locks" / digest
+
+
+class _ReflectLock:
+    """Serialize reflect_status for one task across coroutines and processes.
+
+    The code-run finally and fleetwatch.tick are different processes. Both
+    must hold this from the label read through the failure comment, or each
+    can observe arc:implementing and post its own "task failed" comment.
+    LOCK_NB plus a short sleep: a blocking flock from a second coroutine in
+    this thread waits on itself forever.
+    """
+
+    def __init__(self, repo, taskfile, tid):
+        self.path = _reflect_lock_path(repo, taskfile, tid)
+        self._fh = None
+
+    async def __aenter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+")
+        try:
+            while True:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    await asyncio.sleep(0.05)
+        except BaseException:
+            self._fh.close()
+            self._fh = None
+            raise
+
+    async def __aexit__(self, *_exc):
+        try:
+            if self._fh is not None:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+
+
+async def reflect_status(repo, taskfile, tid, status, *, model=None, error=None):
+    """Push one code_tasks status onto the issue that already exists for it.
+
+    Does not create an issue and does not close one. Returns 'missing' when
+    no task_issues row exists, 'unchanged' when the arc: label (and the model
+    label, when `model` was passed) already match, and 'updated' after
+    swap_labels. A transition into arc:failed with a non-empty `error`
+    comments once; reflecting that same failed status again does not.
+    The read, the swap, and that comment hold `_ReflectLock`, so a cleanup
+    and a watchdog tick that both see the old label post at most one.
+    GitHub errors propagate — this function emits no events."""
+    n = issue_for(repo, taskfile, tid)
+    if n is None:
+        return "missing"
+    async with _ReflectLock(repo, taskfile, tid):
+        wanted_arc = f"arc:{label_status(status)}"
+        wanted_model = f"model:{model}" if isinstance(model, str) and model else None
+        have = await _api(repo, "GET",
+                          f"repos/{{owner}}/{{repo}}/issues/{n}/labels") or []
+        names = [l.get("name") for l in have if isinstance(l, dict) and l.get("name")]
+        current_arc = next((x for x in names if x.startswith("arc:")), None)
+        current_model = next((x for x in names if x.startswith("model:")), None)
+        if current_arc == wanted_arc and (wanted_model is None or current_model == wanted_model):
+            return "unchanged"
+        await swap_labels(repo, n, status=status,
+                          model=model if wanted_model else None)
+        if (wanted_arc == "arc:failed" and isinstance(error, str) and error
+                and current_arc != "arc:failed"):
+            await comment(repo, n, "task failed", error)
+        return "updated"
+
+
+def _code_task_index():
+    """{(taskfile, id): {status, model, error}} from this database.
+
+    code_tasks has no repo column; the task_issues row supplies the repo.
+    Both the stored taskfile and its resolved path are indexed so a row
+    written before resolve still matches."""
+    try:
+        with closing(_connect()) as conn:
+            got = conn.execute(
+                "SELECT taskfile, id, status, model, error FROM code_tasks"
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        return {}
+    out = {}
+    for taskfile, tid, status, model, error in got:
+        rec = {"status": status, "model": model, "error": error}
+        out[(taskfile, tid)] = rec
+        if taskfile:
+            out.setdefault((str(Path(taskfile).resolve()), tid), rec)
+    return out
+
+
+async def reflect_db(db_path=None):
+    """Push every recorded issue's code_tasks status onto GitHub.
+
+    `db_path` None keeps today's default database. Skips a repo where
+    enabled() is false, skips an issue with no matching code_tasks row, and
+    never creates an issue. One task's exception is a gh.issue_error
+    (op='reflect') and the next task still runs. Returns
+    {updated, unchanged, missing, errors}."""
+    import errors
+    import events
+    use_db(db_path)
+    counts = {"updated": 0, "unchanged": 0, "missing": 0, "errors": 0}
+    with closing(_connect()) as conn:
+        issues = conn.execute(
+            "SELECT repo, taskfile, task FROM task_issues WHERE task != '' "
+            "ORDER BY taskfile, task").fetchall()
+    rows = _code_task_index()
+    enabled_repo = {}
+    for repo, taskfile, task in issues:
+        row = rows.get((taskfile, task))
+        if row is None and taskfile:
+            row = rows.get((str(Path(taskfile).resolve()), task))
+        if row is None:
+            continue
+        if repo not in enabled_repo:
+            enabled_repo[repo] = enabled(repo)
+        if not enabled_repo[repo]:
+            continue
+        try:
+            result = await reflect_status(
+                repo, taskfile, task, row.get("status"),
+                model=row.get("model"), error=row.get("error"))
+        except Exception as exc:                               # noqa: BLE001
+            counts["errors"] += 1
+            fp = errors.capture(exc, task=task, node="gh_reflect",
+                                taskfile=taskfile, op="reflect")
+            events.emit("gh.issue_error", task=task, taskfile=taskfile,
+                        op="reflect", error=str(exc)[:200], fingerprint=fp)
+            continue
+        counts[result] += 1
+    return counts
 
 
 # --- backfill -----------------------------------------------------------------
