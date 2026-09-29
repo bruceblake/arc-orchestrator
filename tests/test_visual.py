@@ -223,6 +223,20 @@ class FixtureIsolation(unittest.TestCase):
         self.assertEqual(cfg.TASKS_DIR, "/home/op/tasks")   # env handles this one
         self.assertEqual(cfg.PORT, 8787)
 
+    def test_live_studio_dir_does_not_reach_the_fixture(self):
+        """ARC_STUDIO_DIR is outside the tree, so redirect cannot hide it.
+
+        index.html opens the Studio tab when /api/studio lists a project.
+        A live directory therefore replaces the Overview golden with whatever
+        game happens to be on this machine."""
+        serve = _load("serve")
+        fx = {"home": "/fx/home", "db": "/fx/db", "events": "/fx/ev",
+              "tasks": "/fx/tasks", "worktrees": "/fx/wt", "repos": "/fx/repos",
+              "studio": "/fx/root/logs/studio"}
+        with mock.patch.dict(os.environ, {"ARC_STUDIO_DIR": "/live/logs/studio"}):
+            serve._isolate_env(fx)
+            self.assertEqual(os.environ["ARC_STUDIO_DIR"], "/fx/root/logs/studio")
+
     def test_fixture_builds_a_store_with_every_status(self):
         fixture = _load("fixture")
         d = _tmp(self)

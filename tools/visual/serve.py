@@ -45,6 +45,11 @@ def _isolate_env(fx):
         "ARC_REPO_ROOT": fx["home"],
         "ARC_REPOS_DIR": fx["repos"],
         "ARC_DASHBOARD_BIND": "127.0.0.1",
+        # config.STUDIO_DIR is read from this env at import, and it is not under
+        # the tree, so _redirect_config cannot move it. A live value lists the
+        # operator's games on /api/studio; index.html then opens the Studio tab
+        # and the Overview goldens miss by the whole page.
+        "ARC_STUDIO_DIR": fx["studio"],
     })
     for k in ("GH_TOKEN", "GITHUB_TOKEN", "ARC_DASHBOARD_TOKEN",
               "ARC_ESCALATION_PATH", "ARC_ALLOW_SAME_FAMILY_REVIEW"):
@@ -104,9 +109,12 @@ def main(argv=None):
     link = root / "static"
     if not link.exists():
         link.symlink_to(tree / "static", target_is_directory=True)
+    studio = root / "logs" / "studio"
+    studio.mkdir(parents=True, exist_ok=True)
     fx = {"db": str(root / "orchestrator.db"), "events": str(root / "logs" / "events.jsonl"),
           "tasks": str(fxdir / "tasks"), "home": str(fxdir / "home"),
-          "repos": str(fxdir / "repos"), "worktrees": str(fxdir / "worktrees")}
+          "repos": str(fxdir / "repos"), "worktrees": str(fxdir / "worktrees"),
+          "studio": str(studio)}
     _isolate_env(fx)
     _freeze_clock(fixture.FROZEN_NOW)
     import config
