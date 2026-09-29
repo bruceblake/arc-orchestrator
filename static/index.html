@@ -26,7 +26,15 @@ a.pill:hover, .pill.on { border-color: var(--accent); color: var(--accent); }
 .fsel { background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 12px; padding: 2px 4px; font: inherit; font-size: 11px; max-width: 220px; }
 .fsel:hover { border-color: var(--accent); }
 .achip { display: inline-block; padding: 0 7px; border: 1px solid var(--accent); color: var(--accent); border-radius: 10px; font-size: 10px; margin-right: 3px; }
-main { padding: 14px 16px; max-width: 1400px; margin: 0 auto; }
+main { padding: 14px 16px; max-width: 1680px; margin: 0 auto; }
+.app { display: grid; grid-template-columns: minmax(0, 1fr) 400px; gap: 14px; align-items: start; }
+#talk-side { position: sticky; top: 8px; }
+.talk-switch { display: flex; gap: 6px; margin-bottom: 8px; }
+.talk-switch .act[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+@media (max-width: 980px) {
+  .app { grid-template-columns: 1fr; }
+  #talk-side { display: none; }
+}
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
 .panel h2 { font-size: 12px; margin: 0 0 8px; color: var(--dim); text-transform: uppercase; letter-spacing: .4px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .grid { display: grid; gap: 10px; }
@@ -106,6 +114,17 @@ button.act.danger { border-color: var(--err); color: var(--err); }
 .chip.skipped { color: var(--dim); border-color: var(--dim); border-style: dashed; }
 .modal { position: fixed; inset: 0; background: rgba(1,4,9,.7); z-index: 60; display: none; align-items: flex-start; justify-content: center; padding-top: 8vh; }
 .modal.open { display: flex; }
+/* The talk column is on the page, not behind a click. .live is the column;
+   .open is the same column when Chat or Captain was chosen. A narrow window
+   hides the column (the phone page has its own Plan view). */
+#talk-side .modal.live, #talk-side .modal.open {
+  position: static; display: flex; background: transparent; padding: 0; inset: auto;
+  align-items: stretch; height: auto;
+}
+#talk-side .dialog, #talk-side .chat-dialog {
+  width: 100%; height: calc(100vh - 170px); max-height: calc(100vh - 170px);
+  border: 1px solid var(--border); background: var(--panel); padding: 10px;
+}
 .dialog { width: min(720px, 94vw); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
 .dialog h3 { margin: 0 0 10px; font-size: 14px; color: var(--accent); }
 .dialog input, .dialog textarea, .dialog select { width: 100%; background: #0d1117; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font: inherit; font-size: 12px; margin: 4px 0 10px; }
@@ -597,6 +616,8 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
     <span id="stale-banner-msg"></span>
     <button class="act" id="btn-restart-dashboard" type="button" style="margin-left:8px">Restart dashboard</button>
   </div>
+  <div class="app">
+  <div class="app-main">
   <div id="view-list">
     <div class="tabs" role="tablist" aria-label="dashboard sections">
       <button class="tab" role="tab" data-tab="overview" aria-selected="true">Overview</button>
@@ -756,6 +777,56 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       </table>
     </div>
   </div>
+  </div>
+  <aside id="talk-side" aria-label="Talk to the fleet">
+    <div class="talk-switch" role="tablist" aria-label="Who you are writing to">
+      <button type="button" class="act" id="talk-captain" aria-pressed="true">Captain</button>
+      <button type="button" class="act" id="talk-chat" aria-pressed="false">Chat</button>
+    </div>
+    <div class="modal" id="chatmodal">
+      <div class="dialog chat-dialog">
+        <div class="chat-head">
+          <h3>Chat <span class="pill hint" id="c-session" aria-live="polite"></span></h3>
+          <select id="c-model" aria-label="Model"></select>
+          <select id="c-sessions" aria-label="chat session"></select>
+          <button class="act" id="c-new" aria-label="Start a new chat in a fresh session">＋ new</button>
+          <button class="act" id="c-close" aria-label="Close chat">✕</button>
+        </div>
+        <select class="chat-repo" id="c-repo" aria-label="repo"></select>
+        <div class="chat-log" id="c-log"></div>
+        <div class="chat-input">
+          <button class="act" id="c-mic" title="speak" style="display:none" aria-label="Use speech input">🎤</button>
+          <textarea id="c-text" rows="2" placeholder="Message…" aria-label="message"></textarea>
+          <button class="act primary" id="c-send">Send</button>
+        </div>
+        <div id="c-interim" class="chat-interim" style="display:none"></div>
+        <div id="c-msg"></div>
+      </div>
+    </div>
+    <div class="modal live" id="capmodal">
+      <div class="dialog chat-dialog cap-dialog">
+        <div class="chat-head">
+          <h3>Captain <span class="pill hint" id="k-session" aria-live="polite"></span></h3>
+          <select id="k-model" aria-label="Model"></select>
+          <select id="k-sessions" aria-label="captain session"></select>
+          <button class="act" id="k-new" aria-label="Start a new captain session in a fresh session">＋ new</button>
+          <button class="act" id="k-close" aria-label="Close captain">✕</button>
+        </div>
+        <select class="chat-repo" id="k-repo" aria-label="repo"></select>
+        <details class="cap-fleet">
+          <summary>Fleet</summary>
+          <div id="k-state" class="cap-state" aria-live="polite">loading fleet state…</div>
+        </details>
+        <div class="chat-log" id="k-log"></div>
+        <div class="chat-input">
+          <textarea id="k-text" rows="2" placeholder="Message…" aria-label="message"></textarea>
+          <button class="act primary" id="k-send">Send</button>
+        </div>
+        <div id="k-msg"></div>
+      </div>
+    </div>
+  </aside>
+  </div>
 </main>
 
 <div class="modal" id="modal">
@@ -794,50 +865,6 @@ svg g.node rect.run { animation: boxpulse 1.2s infinite; }
       <div id="j-msg"></div>
     </div>
     <div style="margin-top:10px;text-align:right"><button class="act" id="modal-close">cancel</button></div>
-  </div>
-</div>
-
-<div class="modal" id="chatmodal">
-  <div class="dialog chat-dialog">
-    <div class="chat-head">
-      <h3>Chat <span class="pill hint" id="c-session" aria-live="polite"></span></h3>
-      <select id="c-model" aria-label="Model"></select>
-      <select id="c-sessions" aria-label="chat session"></select>
-      <button class="act" id="c-new" aria-label="Start a new chat in a fresh session">＋ new</button>
-      <button class="act" id="c-close" aria-label="Close chat">✕</button>
-    </div>
-    <select class="chat-repo" id="c-repo" aria-label="repo"></select>
-    <div class="chat-log" id="c-log"></div>
-    <div class="chat-input">
-      <button class="act" id="c-mic" title="speak" style="display:none" aria-label="Use speech input">🎤</button>
-      <textarea id="c-text" rows="2" placeholder="Message…" aria-label="message"></textarea>
-      <button class="act primary" id="c-send">Send</button>
-    </div>
-    <div id="c-interim" class="chat-interim" style="display:none"></div>
-    <div id="c-msg"></div>
-  </div>
-</div>
-
-<div class="modal" id="capmodal">
-  <div class="dialog chat-dialog cap-dialog">
-    <div class="chat-head">
-      <h3>Captain <span class="pill hint" id="k-session" aria-live="polite"></span></h3>
-      <select id="k-model" aria-label="Model"></select>
-      <select id="k-sessions" aria-label="captain session"></select>
-      <button class="act" id="k-new" aria-label="Start a new captain session in a fresh session">＋ new</button>
-      <button class="act" id="k-close" aria-label="Close captain">✕</button>
-    </div>
-    <select class="chat-repo" id="k-repo" aria-label="repo"></select>
-    <details class="cap-fleet">
-      <summary>Fleet</summary>
-      <div id="k-state" class="cap-state" aria-live="polite">loading fleet state…</div>
-    </details>
-    <div class="chat-log" id="k-log"></div>
-    <div class="chat-input">
-      <textarea id="k-text" rows="2" placeholder="Message…" aria-label="message"></textarea>
-      <button class="act primary" id="k-send">Send</button>
-    </div>
-    <div id="k-msg"></div>
   </div>
 </div>
 

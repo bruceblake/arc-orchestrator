@@ -37,8 +37,11 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 
 ## Talking to the fleet: chat and captain
 
-Both conversations are dialogs in `static/index.html` (`#chatmodal`, `#capmodal`)
-and the Plan view of `static/phone.html`. Each has a model `<select>`
+Both conversations sit in the right-hand column of `static/index.html`
+(`#talk-side`, `#chatmodal`, `#capmodal`). Captain is on screen when the
+page opens. Chat replaces it from the column switch or from the Projects
+buttons. The Plan view of `static/phone.html` is the same composer on a
+small screen, where the column is hidden. Each has a model `<select>`
 (`#c-model`, `#k-model`, `#plan-model`) filled from `/api/chat/models` when it
 opens; the choice is kept in one shared `localStorage` key, `arc-talk-model`,
 so desktop and phone agree.

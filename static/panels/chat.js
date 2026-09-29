@@ -397,10 +397,24 @@ function stopChatPoll() {
   if (CHAT_POLL) { clearInterval(CHAT_POLL); CHAT_POLL = null; }
 }
 
+// Which conversation the side column shows. Both stay in the page; only one
+// is marked open. Captain is the one on screen until Chat is chosen.
+function talkShow(which) {
+  const chat = $("#chatmodal");
+  const cap = $("#capmodal");
+  const show = which === "chat" ? chat : cap;
+  const hide = which === "chat" ? cap : chat;
+  if (hide) { hide.classList.remove("open"); hide.classList.remove("live"); }
+  if (show) { show.classList.add("open"); show.classList.add("live"); }
+  const cBtn = $("#talk-captain");
+  const hBtn = $("#talk-chat");
+  if (cBtn && cBtn.setAttribute) cBtn.setAttribute("aria-pressed", which === "captain" ? "true" : "false");
+  if (hBtn && hBtn.setAttribute) hBtn.setAttribute("aria-pressed", which === "chat" ? "true" : "false");
+}
+
 // ---- open / close ----
 async function chatOpen() {
-  const modal = $("#chatmodal");
-  if (modal) modal.classList.add("open");
+  talkShow("chat");
   const msg = $("#c-msg");
   if (msg) { msg.className = ""; msg.textContent = ""; }
   await chatLoadModels();
@@ -414,9 +428,10 @@ async function chatOpen() {
 
 function chatClose() {
   const modal = $("#chatmodal");
-  if (modal) modal.classList.remove("open");
+  if (modal) { modal.classList.remove("open"); modal.classList.remove("live"); }
   stopChatPoll();
   chatStopMic();
+  if (typeof capOpen === "function") capOpen();
 }
 
 // ---- wire up ----
@@ -424,6 +439,8 @@ function chatClose() {
   const modal = $("#chatmodal");
   const btn = $("#btn-chat");
   if (btn) btn.onclick = chatOpen;
+  const side = $("#talk-chat");
+  if (side) side.onclick = chatOpen;
   const close = $("#c-close");
   if (close) close.onclick = chatClose;
   const send = $("#c-send");

@@ -354,8 +354,8 @@ function stopCapPoll() { if (CAP_POLL) { clearInterval(CAP_POLL); CAP_POLL = nul
 
 // ---- open / close ----
 async function capOpen() {
-  const modal = $("#capmodal");
-  if (modal) modal.classList.add("open");
+  if (typeof talkShow === "function") talkShow("captain");
+  else { const modal = $("#capmodal"); if (modal) modal.classList.add("open"); }
   const msg = $("#k-msg");
   if (msg) { msg.className = ""; msg.textContent = ""; }
   await capLoadModels();
@@ -374,8 +374,7 @@ async function capOpen() {
 
 function capClose() {
   const modal = $("#capmodal");
-  if (modal) modal.classList.remove("open");
-  stopCapPoll();
+  if (modal) { modal.classList.remove("open"); modal.classList.add("live"); }
 }
 
 // ---- wire up ----
@@ -383,6 +382,9 @@ function capClose() {
   const modal = $("#capmodal");
   const btn = $("#btn-captain");
   if (btn) btn.onclick = capOpen;
+  const side = $("#talk-captain");
+  if (side) side.onclick = capOpen;
+  if (modal && modal.classList.contains("live")) capOpen();
   const close = $("#k-close");
   if (close) close.onclick = capClose;
   const send = $("#k-send");
