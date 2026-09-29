@@ -367,6 +367,42 @@ def cmd_code(args):
                             len(leaked), ", ".join(r["id"] for r in leaked))
                 events.emit("run.interrupted", taskfile=tf,
                             tasks=[r["id"] for r in leaked])
+                # The rows are failed now; the issues still wear whatever
+                # label the last live node set. Push arc:failed onto each
+                # existing issue. Best-effort and bounded for the whole
+                # batch: a GitHub failure is an event, and it must not skip
+                # the lease release or the checkpoint below.
+                try:
+                    import gh_issues
+                    repo = taskset["repo"]
+                    if gh_issues.enabled(repo):
+                        gh_issues.use_db(getattr(store, "path", None))
+
+                        async def push_interrupted():
+                            for r in leaked:
+                                try:
+                                    await gh_issues.reflect_status(
+                                        repo, tf, r["id"], "failed",
+                                        model=r.get("model"),
+                                        error=_rec.INTERRUPTED_REASON)
+                                except Exception as exc:       # noqa: BLE001
+                                    import errors as _errors
+                                    fp = _errors.capture(
+                                        exc, task=r["id"], node="gh_reflect",
+                                        taskfile=tf, op="reflect")
+                                    events.emit(
+                                        "gh.issue_error", task=r["id"],
+                                        taskfile=tf, op="reflect",
+                                        error=str(exc)[:200], fingerprint=fp)
+
+                        await asyncio.wait_for(
+                            push_interrupted(), config.GH_ISSUES_TIMEOUT)
+                except Exception as exc:                       # noqa: BLE001
+                    import errors as _errors
+                    fp = _errors.capture(exc, node="gh_reflect", taskfile=tf,
+                                         op="reflect")
+                    events.emit("gh.issue_error", taskfile=tf, op="reflect",
+                                error=str(exc)[:200], fingerprint=fp)
             freed = store.release_leases_for_pid(os.getpid())
             if freed:
                 log.info("released %d driver lease(s)", freed)

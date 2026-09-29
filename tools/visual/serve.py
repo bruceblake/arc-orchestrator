@@ -139,7 +139,7 @@ def main(argv=None):
     # The fixture repo path is displayed and never opened, so github_slug
     # cannot read an origin. Without a slug the #N anchors do not render
     # and a golden would still pass if the link markup were removed.
-    _slug = getattr(gh_issues, "github_slug", None)
+    _slug = gh_issues.github_slug
 
     def _fixture_slug(repo):
         try:
@@ -147,14 +147,10 @@ def main(argv=None):
                 return "operator/demo-app"
         except (TypeError, OSError):
             pass
-        if _slug is None:
-            return ""
         return _slug(repo)
 
     gh_issues.github_slug = _fixture_slug
-    _cache = getattr(gh_issues, "_slug_cache", None)
-    if hasattr(_cache, "clear"):
-        _cache.clear()
+    gh_issues._slug_cache.clear()
     from http.server import ThreadingHTTPServer
     from store import Store
     dashboard.Handler.store = Store(fx["db"])

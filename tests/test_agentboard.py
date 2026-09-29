@@ -991,3 +991,372 @@ class BoardHealth(BoardCase):
         self.assertIsNone(h["median_answer_s"])
         self.assertEqual(h["unanswered"], [])
         self.assertEqual(h["deaf"], [])
+
+
+class IssueMirror(BoardCase):
+    """decision, blocker, and questions to @operator become one issue comment.
+    Operator posts and repeats of a message id do not."""
+
+    def setUp(self):
+        super().setUp()
+        import gh_issues
+        import gitstore
+        from tests.test_gh_issues import FakeGH
+        from unittest import mock
+        self.gh_issues = gh_issues
+        root = Path(self.tmp.name)
+        gh_issues.use_db(str(root / "issues.db"))
+        self.addCleanup(gh_issues.use_db, None)
+        self._gh_mode = config.GH_ISSUES
+        config.GH_ISSUES = "on"
+        self.addCleanup(setattr, config, "GH_ISSUES", self._gh_mode)
+        gh_issues._labels_done.clear()
+        self.repo = root / "prison"
+        self.repo.mkdir()
+        self.tf = root / "prison.json"
+        self.tf.write_text("{}", encoding="utf-8")
+        gh_issues._record(self.repo, self.tf, "doors", 7, 1)
+        self.gh = FakeGH()
+        self.gh.issues[7] = {"title": "doors", "body": "", "labels": ["arc-task"],
+                             "state": "open", "comments": []}
+        self._patch = mock.patch.object(gitstore, "_gh", self.gh)
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+
+    def _post(self, **kw):
+        kw.setdefault("channel", "task:doors")
+        kw.setdefault("author", "doors/implementer")
+        return agentboard.post(P, **kw)
+
+    def test_filter_and_one_comment_per_message_id(self):
+        self._post(kind="note", body="working")
+        self._post(kind="question", body="what is the door api?")
+        self.assertEqual(self.gh.comments(7), [])
+        self._post(kind="question", body="@operator which hinge?")
+        self._post(kind="decision", body="use the side door", msg_id="same")
+        self._post(kind="decision", body="use the side door again", msg_id="same")
+        self._post(kind="blocker", body="the lock is jammed")
+        self._post(kind="decision", body="operator override", author="operator",
+                   author_role="operator")
+        comments = self.gh.comments(7)
+        self.assertEqual(len(comments), 3)
+        self.assertIn("**question** (doors/implementer)", comments[0])
+        self.assertIn("@operator which hinge?", comments[0])
+        self.assertIn("**decision** (doors/implementer)", comments[1])
+        self.assertIn("use the side door", comments[1])
+        self.assertNotIn("again", comments[1])
+        self.assertIn("**blocker** (doors/implementer)", comments[2])
+
+    def test_two_taskfiles_sharing_a_task_id_are_not_both_commented(self):
+        """The last matching row is not this post's issue. A taskfile on
+        the post pins one row; without it, an ambiguous pair is skipped."""
+        root = Path(self.tmp.name)
+        other = root / "other.json"
+        other.write_text("{}", encoding="utf-8")
+        repo2 = root / "also" / "prison"
+        repo2.mkdir(parents=True)
+        self.gh_issues._record(repo2, other, "doors", 8, 2)
+        self.gh.issues[8] = {"title": "other doors", "body": "", "labels": [],
+                             "state": "open", "comments": []}
+        self._post(kind="decision", body="which doors?", msg_id="ambig")
+        self.assertEqual(self.gh.comments(7), [])
+        self.assertEqual(self.gh.comments(8), [])
+        self._post(kind="decision", body="this taskfile",
+                   refs={"taskfile": str(self.tf)}, msg_id="picked")
+        self.assertEqual(len(self.gh.comments(7)), 1)
+        self.assertIn("this taskfile", self.gh.comments(7)[0])
+        self.assertEqual(self.gh.comments(8), [])
+
+    def test_a_taskfile_from_another_project_is_not_used(self):
+        """refs.taskfile is untrusted. Naming project B's file from a post
+        in project A must not comment on B, even when the task id matches
+        and B is the only row."""
+        root = Path(self.tmp.name)
+        beta_repo = root / "beta"
+        beta_repo.mkdir()
+        beta_tf = root / "beta.json"
+        beta_tf.write_text("{}", encoding="utf-8")
+        self.gh_issues._record(beta_repo, beta_tf, "doors", 8, 2)
+        self.gh_issues._record(beta_repo, beta_tf, "windows", 3, 2)
+        self.gh.issues[8] = {"title": "beta doors", "body": "", "labels": [],
+                             "state": "open", "comments": []}
+        self.gh.issues[3] = {"title": "beta windows", "body": "", "labels": [],
+                             "state": "open", "comments": []}
+        self._post(kind="decision", body="steal beta",
+                   refs={"taskfile": str(beta_tf)}, msg_id="steal")
+        agentboard.post(P, channel="task:windows", author="doors/implementer",
+                        kind="decision", body="only beta has this id",
+                        refs={"taskfile": str(beta_tf)}, msg_id="only")
+        self.assertEqual(self.gh.comments(7), [])
+        self.assertEqual(self.gh.comments(8), [])
+        self.assertEqual(self.gh.comments(3), [])
+        agentboard.post("beta", channel="task:doors", author="doors/implementer",
+                        kind="decision", body="beta decision",
+                        refs={"taskfile": str(beta_tf)}, msg_id="beta")
+        self.assertEqual(self.gh.comments(7), [])
+        self.assertEqual(len(self.gh.comments(8)), 1)
+        self.assertIn("beta decision", self.gh.comments(8)[0])
+        self.assertEqual(self.gh.comments(3), [])
+
+    def test_sole_row_in_another_project_is_not_used_without_a_taskfile(self):
+        """A decision in this project with no refs.taskfile must not comment
+        the only issue row for that task id when it belongs to another project."""
+        root = Path(self.tmp.name)
+        beta_repo = root / "beta"
+        beta_repo.mkdir()
+        beta_tf = root / "beta.json"
+        beta_tf.write_text("{}", encoding="utf-8")
+        self.gh_issues._record(beta_repo, beta_tf, "windows", 3, 2)
+        self.gh.issues[3] = {"title": "beta windows", "body": "", "labels": [],
+                             "state": "open", "comments": []}
+        agentboard.post(P, channel="task:windows", author="doors/implementer",
+                        kind="decision", body="only beta has this id",
+                        msg_id="only-windows")
+        agentboard.post(P, channel="task:windows", author="doors/implementer",
+                        kind="blocker", body="windows blocked",
+                        msg_id="block-windows")
+        self.assertEqual(self.gh.comments(3), [])
+        self.assertEqual(self.gh.comments(7), [])
+        agentboard.post("beta", channel="task:windows", author="windows/implementer",
+                        kind="decision", body="beta windows decision",
+                        msg_id="beta-windows")
+        self.assertEqual(len(self.gh.comments(3)), 1)
+        self.assertIn("beta windows decision", self.gh.comments(3)[0])
+        self.assertEqual(self.gh.comments(7), [])
+
+
+class CaptainIssueMirror(unittest.TestCase):
+    """Standup comments the epic at most once an hour. Escalation comments
+    the task issue and adds arc:needs-human."""
+
+    def setUp(self):
+        import os
+        import captain_autopilot as ap
+        import gh_issues
+        import gitstore
+        from tests.test_gh_issues import FakeGH
+        from unittest import mock
+        self.ap = ap
+        self.gh_issues = gh_issues
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self._env = os.environ.get("ARC_CAPTAIN_DIR")
+        os.environ["ARC_CAPTAIN_DIR"] = str(root / "captain")
+        gh_issues.use_db(str(root / "issues.db"))
+        self._gh_mode = config.GH_ISSUES
+        config.GH_ISSUES = "on"
+        gh_issues._labels_done.clear()
+        ap._epic_comment_at.clear()
+        self.repo = root / "widgets"
+        self.repo.mkdir()
+        self.tf = root / "widgets.json"
+        self.tf.write_text("{}", encoding="utf-8")
+        gh_issues._record(self.repo, self.tf, "", 9, None)
+        gh_issues._record(self.repo, self.tf, "doors", 5, 9)
+        self.gh = FakeGH()
+        self.gh.issues[9] = {"title": "epic", "body": "", "labels": [],
+                             "state": "open", "comments": []}
+        self.gh.issues[5] = {"title": "doors", "body": "", "labels": ["arc:conflict"],
+                             "state": "open", "comments": []}
+        self._patch = mock.patch.object(gitstore, "_gh", self.gh)
+        self._patch.start()
+        self.board = type("B", (), {"post": lambda *a, **k: "m1"})()
+        ap._BOARD = self.board
+
+    def tearDown(self):
+        import os
+        self.ap._BOARD = None
+        self.ap._epic_comment_at.clear()
+        self._patch.stop()
+        self.gh_issues.use_db(None)
+        config.GH_ISSUES = self._gh_mode
+        if self._env is None:
+            os.environ.pop("ARC_CAPTAIN_DIR", None)
+        else:
+            os.environ["ARC_CAPTAIN_DIR"] = self._env
+
+    def _standup(self, *taskfiles):
+        return {"kind": "standup", "project": "widgets",
+                "body": "Standup — widgets\ndone: —",
+                "taskfiles": [str(tf) for tf in taskfiles]}
+
+    def test_standup_comment_is_once_per_hour(self):
+        action = self._standup(self.tf)
+        self.ap._exec(action, None, None)
+        self.ap._exec(action, None, None)
+        self.assertEqual(len(self.gh.comments(9)), 1)
+        self.assertIn("**standup** (captain)", self.gh.comments(9)[0])
+        self.assertIn("Standup — widgets", self.gh.comments(9)[0])
+        past = time.time() - self.ap.EPIC_COMMENT_S - 5
+        key = f"{self.repo.resolve()}:9"
+        self.ap._epic_comment_at[key] = past
+        st = self.ap.load_state()
+        st.setdefault("last_epic_comment", {})[key] = past
+        self.ap.save_state(st)
+        self.ap._exec(action, None, None)
+        self.assertEqual(len(self.gh.comments(9)), 2)
+
+    def test_standup_comments_each_active_epic_only(self):
+        """An inactive epic that shares the repo name is not the standup.
+        Each active epic has its own hour."""
+        root = self.tf.parent
+        idle = root / "widgets-old.json"
+        idle.write_text("{}", encoding="utf-8")
+        self.gh_issues._record(self.repo, idle, "", 99, None)
+        self.gh.issues[99] = {"title": "old epic", "body": "", "labels": [],
+                              "state": "open", "comments": []}
+        repo2 = root / "pkg" / "widgets"
+        repo2.mkdir(parents=True)
+        tf2 = root / "widgets-b.json"
+        tf2.write_text("{}", encoding="utf-8")
+        self.gh_issues._record(repo2, tf2, "", 11, None)
+        self.gh.issues[11] = {"title": "second epic", "body": "", "labels": [],
+                              "state": "open", "comments": []}
+        action = self._standup(self.tf, tf2)
+        self.ap._exec(action, None, None)
+        self.assertEqual(len(self.gh.comments(9)), 1)
+        self.assertEqual(len(self.gh.comments(11)), 1)
+        self.assertEqual(self.gh.comments(99), [])
+        self.ap._exec(action, None, None)
+        self.assertEqual(len(self.gh.comments(9)), 1)
+        self.assertEqual(len(self.gh.comments(11)), 1)
+        past = time.time() - self.ap.EPIC_COMMENT_S - 5
+        key = f"{repo2.resolve()}:11"
+        self.ap._epic_comment_at[key] = past
+        st = self.ap.load_state()
+        st.setdefault("last_epic_comment", {})[key] = past
+        self.ap.save_state(st)
+        self.ap._exec(action, None, None)
+        self.assertEqual(len(self.gh.comments(9)), 1)
+        self.assertEqual(len(self.gh.comments(11)), 2)
+
+    def test_escalation_comments_and_labels_needs_human(self):
+        self.ap._exec({
+            "kind": "escalate_to_operator", "project": "widgets",
+            "body": "doors is in conflict", "target": "task:widgets.json:doors",
+            "task": "doors", "taskfile": str(self.tf),
+            "severity": "critical", "finding": "conflict",
+        }, None, None)
+        self.assertEqual(len(self.gh.comments(5)), 1)
+        self.assertIn("**escalate** (captain)", self.gh.comments(5)[0])
+        self.assertIn("doors is in conflict", self.gh.comments(5)[0])
+        self.assertIn("arc:needs-human", self.gh.issues[5]["labels"])
+        self.assertIn("arc:conflict", self.gh.issues[5]["labels"])
+
+    def test_status_swap_keeps_needs_human(self):
+        self.ap._exec({
+            "kind": "escalate_to_operator", "project": "widgets",
+            "body": "doors is in conflict", "target": "task:widgets.json:doors",
+            "task": "doors", "taskfile": str(self.tf),
+            "severity": "critical", "finding": "conflict",
+        }, None, None)
+        import asyncio
+        asyncio.run(self.gh_issues.set_status(self.repo, 5, "in_review"))
+        labels = self.gh.issues[5]["labels"]
+        self.assertIn("arc:needs-human", labels)
+        self.assertIn("arc:in-review", labels)
+        self.assertNotIn("arc:conflict", labels)
+
+    def test_unanswered_question_in_a_task_channel_comments_and_labels(self):
+        """target is question:<id> and the action has no task field. The
+        channel task:<id> is what selects the issue."""
+        finding = {
+            "rule": "unanswered_question", "severity": "warn",
+            "target": "question:q1", "project": "widgets",
+            "summary": "doors/implementer asked 40 min ago: which hinge?",
+            "channel": "task:doors", "question": "q1",
+            "author": "doors/implementer", "body": "which hinge?",
+        }
+        snap = {"projects": {"widgets": {}}, "tasks": [], "ts": time.time()}
+        decided = self.ap.decide([finding], snap, state={}, llm=False)
+        actions = decided["actions"]
+        self.assertEqual(len(actions), 1)
+        self.assertEqual(actions[0]["target"], "question:q1")
+        self.assertEqual(actions[0].get("channel"), "task:doors")
+        self.assertFalse(actions[0].get("task"))
+        self.ap._exec(actions[0], None, None)
+        self.assertEqual(len(self.gh.comments(5)), 1)
+        self.assertIn("**escalate** (captain)", self.gh.comments(5)[0])
+        self.assertIn("which hinge", self.gh.comments(5)[0])
+        self.assertIn("arc:needs-human", self.gh.issues[5]["labels"])
+        self.assertIn("arc:conflict", self.gh.issues[5]["labels"])
+
+    def test_unanswered_question_on_the_project_channel_is_not_mirrored(self):
+        finding = {
+            "rule": "unanswered_question", "severity": "warn",
+            "target": "question:q2", "project": "widgets",
+            "summary": "asked on the project channel",
+            "channel": "project",
+        }
+        snap = {"projects": {"widgets": {}}, "tasks": [], "ts": time.time()}
+        decided = self.ap.decide([finding], snap, state={}, llm=False)
+        self.ap._exec(decided["actions"][0], None, None)
+        self.assertEqual(self.gh.comments(5), [])
+        self.assertNotIn("arc:needs-human", self.gh.issues[5]["labels"])
+
+    def test_taskfile_mismatch_is_not_the_other_projects_issue(self):
+        """An explicit taskfile with no row is no match. The sole issue for
+        that task id, recorded under another project, is not commented or
+        labeled, and link_for_task does not point there either."""
+        root = self.tf.parent
+        other_repo = root / "other-app"
+        other_repo.mkdir()
+        other_tf = root / "other.json"
+        other_tf.write_text("{}", encoding="utf-8")
+        self.gh_issues._record(other_repo, other_tf, "hinge", 44, 2)
+        self.gh.issues[44] = {"title": "hinge", "body": "", "labels": [],
+                              "state": "open", "comments": []}
+        self.assertIsNone(self.gh_issues.row_for_task("doors", str(other_tf)))
+        self.assertEqual(
+            self.gh_issues.link_for_task("doors", str(other_tf)), (None, ""))
+        self.assertIsNone(self.gh_issues.row_for_task("hinge", str(self.tf)))
+        self.assertEqual(
+            self.gh_issues.link_for_task("hinge", str(self.tf)), (None, ""))
+        self.assertEqual(self.gh_issues.row_for_task("hinge")["issue"], 44)
+        self.ap._exec({
+            "kind": "escalate_to_operator", "project": "widgets",
+            "body": "hinge needs a human", "target": "task:widgets.json:hinge",
+            "task": "hinge", "taskfile": str(self.tf),
+            "severity": "critical", "finding": "conflict",
+        }, None, None)
+        self.assertEqual(self.gh.comments(44), [])
+        self.assertEqual(self.gh.comments(5), [])
+        self.assertNotIn("arc:needs-human", self.gh.issues[44]["labels"])
+        self.assertNotIn("arc:needs-human", self.gh.issues[5]["labels"])
+
+
+class RunSyncBound(unittest.TestCase):
+    """A quota sleep must not outlive GH_ISSUES_TIMEOUT, including when a
+    loop is already running (the executor used to join the worker anyway)."""
+
+    def test_run_sync_cancels_the_coroutine(self):
+        import asyncio
+        import gh_issues
+        old = config.GH_ISSUES_TIMEOUT
+        config.GH_ISSUES_TIMEOUT = 0.2
+        self.addCleanup(setattr, config, "GH_ISSUES_TIMEOUT", old)
+
+        async def hang():
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                hang.cancelled = True
+                raise
+
+        hang.cancelled = False
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            gh_issues.run_sync(hang())
+        self.assertLess(time.monotonic() - started, 2)
+        self.assertTrue(hang.cancelled)
+
+        async def nested():
+            hang.cancelled = False
+            t0 = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                gh_issues.run_sync(hang())
+            self.assertLess(time.monotonic() - t0, 2)
+            self.assertTrue(hang.cancelled)
+
+        asyncio.run(nested())

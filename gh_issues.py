@@ -15,7 +15,9 @@ a gh failure; the pipeline wiring (code_tasks) is what makes them
 best-effort. Mapping (repo, taskfile, task) -> issue lives in `task_issues`
 in config.DB_PATH (or the run's --db, use_db); task '' is the epic.
 """
+import asyncio
 import datetime
+import fcntl
 import hashlib
 import json
 import os
@@ -48,6 +50,7 @@ _enabled_cache = {}
 _PER_PAGE = 100
 _MAX_PAGES = 100              # 10k open issues: past that, fail loudly
 _DB = None                    # the run's selected database (use_db)
+_slug_cache = {}
 
 
 class GhIssueError(RuntimeError):
@@ -104,6 +107,135 @@ def rows_for_task(task):
                            (task,))
         cols = [c[0] for c in cur.description]
         return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def recorded(taskfile):
+    """{task id: {issue, epic, repo}} for one taskfile. ``''`` is the epic."""
+    if not taskfile:
+        return {}
+    path = str(Path(taskfile).resolve())
+    try:
+        with closing(_connect()) as conn:
+            rows = conn.execute(
+                "SELECT task, issue, epic, repo FROM task_issues WHERE taskfile=?",
+                (path,)).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {task: {"issue": issue, "epic": epic, "repo": repo}
+            for task, issue, epic, repo in rows}
+
+
+def row_for_task(task, taskfile=None):
+    """The task_issues row for one task, or None when it is ambiguous.
+
+    An explicit taskfile that matches no row is no match. It does not
+    fall through to the sole row for that task id, which may belong to
+    another project. With no taskfile, a single row is returned.
+    """
+    if not task:
+        return None
+    rows = rows_for_task(task)
+    if taskfile:
+        want = str(Path(taskfile).resolve())
+        match = [r for r in rows if r["taskfile"] == want]
+        return match[-1] if match else None
+    return rows[-1] if len(rows) == 1 else None
+
+
+def link_for_task(task, taskfile=None):
+    """(issue number, url) for one task, or (None, '')."""
+    if taskfile:
+        rec = recorded(taskfile).get(task)
+        if rec:
+            return rec["issue"], issue_url(rec.get("repo"), rec["issue"])
+    row = row_for_task(task, taskfile)
+    if not row:
+        return None, ""
+    return row["issue"], issue_url(row.get("repo"), row["issue"])
+
+
+def epic_for_name(name):
+    """The epic whose repo directory or taskfile stem is ``name``, or None.
+
+    The last match wins, including an inactive taskfile that only shares the
+    repo name. Standup comments use ``epics_for_taskfiles`` instead."""
+    if not name:
+        return None
+    try:
+        with closing(_connect()) as conn:
+            rows = conn.execute(
+                "SELECT repo, taskfile, issue FROM task_issues WHERE task='' "
+                "ORDER BY created_at").fetchall()
+    except sqlite3.Error:
+        return None
+    hit = None
+    for repo, tf, issue in rows:
+        if Path(repo).name == name or Path(tf).stem == name:
+            hit = {"repo": repo, "taskfile": tf, "issue": issue}
+    return hit
+
+
+def epics_for_taskfiles(taskfiles):
+    """Epic rows for these taskfiles, one per taskfile that has one.
+
+    A project can hold several taskfiles in one repo. Callers pass the
+    active taskfiles and get only those epics."""
+    out, seen = [], set()
+    for tf in taskfiles or []:
+        if not isinstance(tf, str) or not tf.strip():
+            continue
+        rec = recorded(tf).get("")
+        if not rec or not rec.get("issue"):
+            continue
+        key = (str(rec.get("repo") or ""), int(rec["issue"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"repo": rec.get("repo") or "",
+                    "taskfile": str(Path(tf).resolve()),
+                    "issue": int(rec["issue"])})
+    return out
+
+
+def _slug_from_remote(url):
+    url = (url or "").strip()
+    if url.endswith(".git"):
+        url = url[:-4]
+    m = re.search(r"github\.com[:/]([^/\s]+/[^/\s]+)$", url)
+    return m.group(1) if m else ""
+
+
+def github_slug(repo):
+    """``owner/name`` from the repo's origin, or '' . Cached, including misses."""
+    if not repo:
+        return ""
+    try:
+        key = str(Path(repo).resolve())
+    except OSError:
+        return ""
+    if key in _slug_cache:
+        return _slug_cache[key]
+    slug = ""
+    try:
+        cp = subprocess.run(
+            ["git", "-C", key, "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5, env=config.child_env())
+        if cp.returncode == 0:
+            slug = _slug_from_remote(cp.stdout)
+    except (OSError, subprocess.SubprocessError):
+        slug = ""
+    _slug_cache[key] = slug
+    return slug
+
+
+def issue_url(repo, number):
+    """https://github.com/<owner>/<name>/issues/<n>, or '' when unknown."""
+    if number in (None, ""):
+        return ""
+    slug = github_slug(repo)
+    if not slug:
+        return ""
+    return f"https://github.com/{slug}/issues/{int(number)}"
 
 
 def _task_rows(taskfile):
@@ -263,6 +395,11 @@ def label_status(status):
     """code_tasks status -> the arc:* label suffix."""
     return {"running": "implementing", "in_review": "in-review"}.get(
         status or "pending", (status or "pending").replace("_", "-"))
+
+
+# Human attention, not a pipeline status. ``swap_labels`` replaces every
+# other ``arc:*`` label; this one stays until a person clears it.
+HUMAN_LABEL = "arc:needs-human"
 
 
 def _project(taskfile, project=None):
@@ -485,10 +622,58 @@ def comment_text(kind, body="", *, attempt=None, model=None, repo=None):
 
 async def comment(repo, issue, kind, body="", *, attempt=None, model=None):
     """One structured comment: an emoji-free bold header, then the body
-    (capped, paths redacted to repo-relative)."""
+    (capped, paths redacted to repo-relative). ``model`` is the header
+    identity — a board mirror passes the author there."""
     text = comment_text(kind, body, attempt=attempt, model=model, repo=repo)
     await _api(repo, "POST", f"repos/{{owner}}/{{repo}}/issues/{issue}/comments",
                [("body", text)])
+
+
+def run_sync(coro):
+    """Drive one gh_issues coroutine from the board or the captain.
+
+    Bounded by ``GH_ISSUES_TIMEOUT``. ``asyncio.wait_for`` cancels the
+    coroutine, so a quota sleep inside ``gitstore._gh`` cannot outlive the
+    budget. A running loop cannot nest ``asyncio.run``; that path uses a
+    daemon thread and does not join it after the timeout. Waiting on a
+    ``ThreadPoolExecutor`` worker after ``Future.result`` expires blocked
+    the caller for the rest of the quota wait."""
+    import asyncio
+    timeout = config.GH_ISSUES_TIMEOUT
+
+    async def bounded():
+        return await asyncio.wait_for(coro, timeout)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(bounded())
+
+    import threading
+    box, done = {}, threading.Event()
+
+    def worker():
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            box["result"] = loop.run_until_complete(bounded())
+        except BaseException as exc:  # noqa: BLE001 — re-raised in the caller
+            box["error"] = exc
+        finally:
+            try:
+                loop.close()
+            except Exception:  # noqa: BLE001
+                pass
+            done.set()
+
+    threading.Thread(target=worker, daemon=True).start()
+    # One second past the budget so wait_for can cancel and the thread can
+    # record the error. A stuck non-cancellable call does not hold the caller.
+    if not done.wait(timeout + 1):
+        raise TimeoutError(f"gh_issues exceeded {timeout}s")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result")
 
 
 async def swap_labels(repo, issue, status=None, model=None):
@@ -504,11 +689,27 @@ async def swap_labels(repo, issue, status=None, model=None):
     await ensure_labels(repo, list(wanted.values()))
     have = await _api(repo, "GET", f"repos/{{owner}}/{{repo}}/issues/{issue}/labels")
     names = [l.get("name") for l in have or [] if l.get("name")]
-    keep = [n for n in names if not n.startswith(tuple(wanted))] + list(wanted.values())
+    prefixes = tuple(wanted)
+    # arc:needs-human starts with "arc:" but it is not the status label.
+    keep = [n for n in names if n == HUMAN_LABEL or not n.startswith(prefixes)]
+    for n in wanted.values():
+        if n not in keep:
+            keep.append(n)
     if sorted(keep) == sorted(names):
         return
     await _api(repo, "PUT", f"repos/{{owner}}/{{repo}}/issues/{issue}/labels",
                [("labels[]", n) for n in keep])
+
+
+async def add_label(repo, issue, name):
+    """Add one label, keeping every label the issue already carries."""
+    await ensure_labels(repo, [name])
+    have = await _api(repo, "GET", f"repos/{{owner}}/{{repo}}/issues/{issue}/labels")
+    names = [l.get("name") for l in have or [] if l.get("name")]
+    if name in names:
+        return
+    await _api(repo, "PUT", f"repos/{{owner}}/{{repo}}/issues/{issue}/labels",
+               [("labels[]", n) for n in names + [name]])
 
 
 async def set_status(repo, issue, status):
@@ -567,6 +768,153 @@ async def close_merged(repo, issue, reason=None):
         await comment(repo, issue, "merged without a pull request", reason)
         await _api(repo, "PATCH", f"repos/{{owner}}/{{repo}}/issues/{issue}",
                    [("state", "closed"), ("state_reason", "completed")])
+
+
+def _reflect_lock_path(repo, taskfile, tid):
+    """One lock file per task on this database, shared by every process."""
+    repo_k, tf_k = _key(repo, taskfile)
+    db = str(Path(_db()).resolve())
+    digest = hashlib.sha256(
+        f"{db}\0{repo_k}\0{tf_k}\0{tid}".encode()).hexdigest()
+    return Path.home() / ".cache" / "arc-gh-reflect-locks" / digest
+
+
+class _ReflectLock:
+    """Serialize reflect_status for one task across coroutines and processes.
+
+    The code-run finally and fleetwatch.tick are different processes. Both
+    must hold this from the label read through the failure comment, or each
+    can observe arc:implementing and post its own "task failed" comment.
+    LOCK_NB plus a short sleep: a blocking flock from a second coroutine in
+    this thread waits on itself forever.
+    """
+
+    def __init__(self, repo, taskfile, tid):
+        self.path = _reflect_lock_path(repo, taskfile, tid)
+        self._fh = None
+
+    async def __aenter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._fh = open(self.path, "a+")
+        try:
+            while True:
+                try:
+                    fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    return self
+                except BlockingIOError:
+                    await asyncio.sleep(0.05)
+        except BaseException:
+            self._fh.close()
+            self._fh = None
+            raise
+
+    async def __aexit__(self, *_exc):
+        try:
+            if self._fh is not None:
+                fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
+        finally:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+
+
+async def reflect_status(repo, taskfile, tid, status, *, model=None, error=None):
+    """Push one code_tasks status onto the issue that already exists for it.
+
+    Does not create an issue and does not close one. Returns 'missing' when
+    no task_issues row exists, 'unchanged' when the arc: label (and the model
+    label, when `model` was passed) already match, and 'updated' after
+    swap_labels. A transition into arc:failed with a non-empty `error`
+    comments once; reflecting that same failed status again does not.
+    The read, the swap, and that comment hold `_ReflectLock`, so a cleanup
+    and a watchdog tick that both see the old label post at most one.
+    GitHub errors propagate — this function emits no events."""
+    n = issue_for(repo, taskfile, tid)
+    if n is None:
+        return "missing"
+    async with _ReflectLock(repo, taskfile, tid):
+        wanted_arc = f"arc:{label_status(status)}"
+        wanted_model = f"model:{model}" if isinstance(model, str) and model else None
+        have = await _api(repo, "GET",
+                          f"repos/{{owner}}/{{repo}}/issues/{n}/labels") or []
+        names = [l.get("name") for l in have if isinstance(l, dict) and l.get("name")]
+        current_arc = next((x for x in names if x.startswith("arc:")), None)
+        current_model = next((x for x in names if x.startswith("model:")), None)
+        if current_arc == wanted_arc and (wanted_model is None or current_model == wanted_model):
+            return "unchanged"
+        await swap_labels(repo, n, status=status,
+                          model=model if wanted_model else None)
+        if (wanted_arc == "arc:failed" and isinstance(error, str) and error
+                and current_arc != "arc:failed"):
+            await comment(repo, n, "task failed", error)
+        return "updated"
+
+
+def _code_task_index():
+    """{(taskfile, id): {status, model, error}} from this database.
+
+    code_tasks has no repo column; the task_issues row supplies the repo.
+    Both the stored taskfile and its resolved path are indexed so a row
+    written before resolve still matches."""
+    try:
+        with closing(_connect()) as conn:
+            got = conn.execute(
+                "SELECT taskfile, id, status, model, error FROM code_tasks"
+            ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            raise
+        return {}
+    out = {}
+    for taskfile, tid, status, model, error in got:
+        rec = {"status": status, "model": model, "error": error}
+        out[(taskfile, tid)] = rec
+        if taskfile:
+            out.setdefault((str(Path(taskfile).resolve()), tid), rec)
+    return out
+
+
+async def reflect_db(db_path=None):
+    """Push every recorded issue's code_tasks status onto GitHub.
+
+    `db_path` None keeps today's default database. Skips a repo where
+    enabled() is false, skips an issue with no matching code_tasks row, and
+    never creates an issue. One task's exception is a gh.issue_error
+    (op='reflect') and the next task still runs. Returns
+    {updated, unchanged, missing, errors}."""
+    import errors
+    import events
+    use_db(db_path)
+    counts = {"updated": 0, "unchanged": 0, "missing": 0, "errors": 0}
+    with closing(_connect()) as conn:
+        issues = conn.execute(
+            "SELECT repo, taskfile, task FROM task_issues WHERE task != '' "
+            "ORDER BY taskfile, task").fetchall()
+    rows = _code_task_index()
+    enabled_repo = {}
+    for repo, taskfile, task in issues:
+        row = rows.get((taskfile, task))
+        if row is None and taskfile:
+            row = rows.get((str(Path(taskfile).resolve()), task))
+        if row is None:
+            continue
+        if repo not in enabled_repo:
+            enabled_repo[repo] = enabled(repo)
+        if not enabled_repo[repo]:
+            continue
+        try:
+            result = await reflect_status(
+                repo, taskfile, task, row.get("status"),
+                model=row.get("model"), error=row.get("error"))
+        except Exception as exc:                               # noqa: BLE001
+            counts["errors"] += 1
+            fp = errors.capture(exc, task=task, node="gh_reflect",
+                                taskfile=taskfile, op="reflect")
+            events.emit("gh.issue_error", task=task, taskfile=taskfile,
+                        op="reflect", error=str(exc)[:200], fingerprint=fp)
+            continue
+        counts[result] += 1
+    return counts
 
 
 # --- backfill -----------------------------------------------------------------

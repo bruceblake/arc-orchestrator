@@ -23,6 +23,7 @@ import code_tasks
 import config
 import drivers
 import gitstore
+from store import Store
 
 
 def taskfile(tasks, repo="/tmp", title="t", after=None, pattern=None):
@@ -1116,6 +1117,100 @@ class AFixRoundContinuesTheHarnessSession(unittest.TestCase):
     def test_first_attempt_and_missing_results_start_fresh(self):
         self.assertIsNone(code_tasks._resume_session({}, "t1", "GLM-5.3"))
         self.assertIsNone(code_tasks._resume_session(None, "t1", "GLM-5.3"))
+
+
+class ARestartResumesFromTheSessionTable(unittest.TestCase):
+    """A dead run process forgets graph results. The session table is the
+    fallback, and only while this worktree's HEAD is still the recorded
+    commit or sits atop orchestrator publish commits."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="arc-sess-"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.wt = self.tmp / "wt"
+        self.wt.mkdir()
+        self.env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+                    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        subprocess.run(["git", "init", "-q"], cwd=self.wt, check=True, env=self.env)
+        (self.wt / "f").write_text("a\n")
+        subprocess.run(["git", "add", "f"], cwd=self.wt, check=True, env=self.env)
+        subprocess.run(["git", "commit", "-qm", "init"], cwd=self.wt,
+                       check=True, env=self.env)
+        self.sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.wt,
+            capture_output=True, text=True, check=True, env=self.env).stdout.strip()
+        self.store = Store(self.tmp / "t.db")
+        self.tf = str(self.tmp / "tasks.json")
+        self.store.save_task_session(
+            "p", self.tf, "t1", "implementer", "GLM-5.3", "opencode",
+            "s-db", str(self.wt.resolve()), self.sha)
+
+    def _commit(self, text, message):
+        (self.wt / "f").write_text(text)
+        subprocess.run(["git", "add", "f"], cwd=self.wt, check=True, env=self.env)
+        subprocess.run(["git", "commit", "-qm", message], cwd=self.wt,
+                       check=True, env=self.env)
+
+    def test_graph_points_invalidation_at_the_run_db(self):
+        """build_code_graph hands drivers the Store that recorded the row."""
+        self.addCleanup(drivers.use_db, None)
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        code_tasks.build_code_graph(self.store, ts, taskfile=self.tf)
+        self.assertEqual(drivers._session_db, self.store.path)
+        self.assertNotEqual(self.store.path, str(config.DB_PATH))
+
+    def _resume(self, results=None, **kw):
+        args = dict(store=self.store, taskfile=self.tf, worktree=self.wt)
+        args.update(kw)
+        return code_tasks._resume_session(
+            {} if results is None else results, "t1", "GLM-5.3", "opencode",
+            **args)
+
+    def test_empty_results_fall_back_to_the_db(self):
+        self.assertEqual(self._resume({}), "s-db")
+        self.assertEqual(self._resume(None), "s-db")
+        again = Store(self.store.path)
+        row = again.latest_task_session(
+            self.tf, "t1", "implementer", "GLM-5.3", "opencode")
+        self.assertEqual(row["session_id"], "s-db")
+        self.assertEqual(row["valid"], 1)
+
+    def test_head_sha_mismatch_refuses(self):
+        self._commit("b\n", "agent edit")
+        self.assertIsNone(self._resume({}))
+
+    def test_publish_commits_still_resume(self):
+        self._commit("b\n", "task(t1): land the work")
+        self.assertEqual(self._resume({}), "s-db")
+
+    def test_a_different_worktree_refuses(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        self.assertIsNone(self._resume(worktree=other))
+
+    def test_graph_session_wins_and_a_crash_does_not_fall_back(self):
+        self.assertEqual(self._resume(
+            {"implement_t1": {"session_id": "s-mem", "model": "GLM-5.3",
+                              "harness": "opencode"}}), "s-mem")
+        self.assertIsNone(self._resume(
+            {"implement_t1": {"crashed": True, "harness": "opencode"}}))
+
+    def test_missing_harness_and_other_seat_do_not_resume(self):
+        self.assertIsNone(code_tasks._resume_session(
+            {}, "t1", "GLM-5.3", store=self.store, taskfile=self.tf,
+            worktree=self.wt))
+        self.assertIsNone(code_tasks._resume_session(
+            {}, "t1", "GLM-5.3", "codex", store=self.store, taskfile=self.tf,
+            worktree=self.wt))
+
+    def test_restart_resume_prefixes_the_implement_prompt(self):
+        src = pathlib.Path(code_tasks.__file__).read_text()
+        body = src[src.index("async def implement(ctx):"):]
+        body = body[:body.index("async def gate(ctx):")]
+        self.assertIn("RESTART_RESUME_PREFIX", body)
+        self.assertIn("resuming after restart:", code_tasks.RESTART_RESUME_PREFIX)
+        self.assertIn("re-check git status before editing",
+                      code_tasks.RESTART_RESUME_PREFIX)
 
 
 class ReviewsAvoidTheModelThatWroteTheDiff(unittest.TestCase):

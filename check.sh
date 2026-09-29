@@ -213,6 +213,11 @@ PYEOF
     if ! node tests/work_status_ui.test.mjs; then
         echo "FAIL: live task map misbehaves"; rc=1
     fi
+    # Issue links: the DAG tooltip and anchor, the timeline drawer, and the
+    # Messages task channel. API fields alone do not prove the markup.
+    if ! node tests/issue_links_ui.test.mjs; then
+        echo "FAIL: issue #N links do not render"; rc=1
+    fi
     # The fleet activity feed: newest first, the type badges, relative
     # timestamps and the click-through to a project. Same explicit list — a
     # suite that is not named here does not run.

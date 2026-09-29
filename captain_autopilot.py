@@ -662,9 +662,18 @@ def _post(finding, project, channel, body, kind="ping", mentions=(), reply_to=No
 
 
 def _escalate(finding, body, project=None):
-    return {"kind": "escalate_to_operator", "project": project or finding.get("project")
-            or "fleet", "body": body, "target": finding["target"],
-            "finding": finding["rule"], "severity": finding["severity"]}
+    out = {"kind": "escalate_to_operator", "project": project or finding.get("project")
+           or "fleet", "body": body, "target": finding["target"],
+           "finding": finding["rule"], "severity": finding["severity"]}
+    if finding.get("task"):
+        out["task"] = finding["task"]
+    if finding.get("taskfile"):
+        out["taskfile"] = finding["taskfile"]
+    # An unanswered question's target is question:<id>. The task id lives
+    # on the channel (task:<id>), and validate_action keeps that channel.
+    if finding.get("channel"):
+        out["channel"] = finding["channel"]
+    return out
 
 
 def playbook(f, snap):
@@ -744,7 +753,12 @@ def _standups(snap, state, now):
                 f"blocked: {', '.join(blocked) or '—'}\n"
                 f"next up: {', '.join(nxt) or '—'}\n"
                 f"seats: {seats or '—'}")
+        # Active taskfiles only. A later epic that merely shares the repo
+        # name is not this standup.
+        files = sorted({t["taskfile"] for t in ts
+                        if t.get("taskfile") and t["status"] not in _DONE})
         out.append({"kind": "standup", "project": proj, "body": body,
+                    "taskfiles": files,
                     "target": f"standup:{proj}", "finding": "standup",
                     "severity": "info", "reason": "periodic standup"})
     return out
@@ -777,6 +791,16 @@ def validate_action(a, snap):
         if proj not in projects:
             return None
         out["project"] = proj
+    if kind == "escalate_to_operator":
+        if a.get("task"):
+            out["task"] = str(a["task"])[:120]
+        tf = a.get("taskfile")
+        if isinstance(tf, str) and tf.strip():
+            out["taskfile"] = tf.strip()[:500]
+        ch = a.get("channel")
+        if isinstance(ch, str) and re.fullmatch(
+                r"project|captain|operator|(task|dm):[\w.\-/]{1,80}", ch):
+            out["channel"] = ch
     if kind == "board_post":
         ch = a.get("channel") or "project"
         if not isinstance(ch, str) or not re.fullmatch(
@@ -959,6 +983,99 @@ def _mutation_target(amend):
     return amend.get("task")
 
 
+EPIC_COMMENT_S = 3600
+_epic_comment_at = {}
+
+
+def _epic_key(hit):
+    """Rate-limit key for one epic. A project can have several."""
+    return f"{hit.get('repo')}:{hit.get('issue')}"
+
+
+def _epic_due(key, now):
+    last = float(_epic_comment_at.get(key) or 0)
+    try:
+        persisted = float((load_state().get("last_epic_comment") or {}).get(key) or 0)
+    except (TypeError, ValueError):
+        persisted = 0.0
+    return now - max(last, persisted) >= EPIC_COMMENT_S
+
+
+def _mark_epic(key, now):
+    _epic_comment_at[key] = now
+    st = load_state()
+    st.setdefault("last_epic_comment", {})[key] = now
+    save_state(st)
+
+
+def _mirror_standup(a, now=None):
+    """One comment per active taskfile's epic, at most once an hour each.
+
+    The board standup can be more frequent (``STANDUP_S``); the GitHub
+    comment is not. Best-effort: a gh failure leaves the board post.
+    Inactive epics that only share the repo name are not commented."""
+    now = time.time() if now is None else now
+    proj = a.get("project") or ""
+    files = [tf for tf in (a.get("taskfiles") or []) if isinstance(tf, str) and tf]
+    if not proj or proj == "fleet" or not files:
+        return
+    try:
+        import gh_issues
+        hits = gh_issues.epics_for_taskfiles(files)
+    except Exception as exc:  # noqa: BLE001
+        errors.capture(exc, node="captain.standup_issue")
+        return
+    for hit in hits:
+        key = _epic_key(hit)
+        if not _epic_due(key, now) or not gh_issues.enabled(hit["repo"]):
+            continue
+        try:
+            gh_issues.run_sync(gh_issues.comment(
+                hit["repo"], hit["issue"], "standup", a.get("body") or "",
+                model=AGENT))
+            _mark_epic(key, now)
+        except Exception as exc:  # noqa: BLE001
+            errors.capture(exc, node="captain.standup_issue")
+
+
+def _escalation_task(a):
+    """Task id for an escalation, including a question in a task channel.
+
+    Playbook escalations for an unanswered question use target
+    ``question:<message id>`` and carry no ``task`` field. The task id is
+    the channel (``task:<id>``). A project or operator channel is not a task.
+    """
+    tid = str(a.get("task") or "")
+    if tid:
+        return tid
+    target = str(a.get("target") or "")
+    if target.startswith("task:"):
+        return target.rsplit(":", 1)[-1]
+    ch = str(a.get("channel") or "")
+    if ch.startswith("task:") and ch[5:]:
+        return ch[5:]
+    return ""
+
+
+def _mirror_escalation(a):
+    """Comment on the task issue and add ``arc:needs-human``. Best-effort."""
+    tid = _escalation_task(a)
+    if not tid:
+        return
+    try:
+        import gh_issues
+        row = gh_issues.row_for_task(tid, a.get("taskfile"))
+        if not row or not gh_issues.enabled(row["repo"]):
+            return
+        body = a.get("body") or ""
+        gh_issues.run_sync(gh_issues.comment(
+            row["repo"], row["issue"], "escalate", body, model=AGENT))
+        gh_issues.run_sync(gh_issues.add_label(
+            row["repo"], row["issue"], gh_issues.HUMAN_LABEL))
+    except Exception as exc:  # noqa: BLE001
+        errors.capture(exc, task=tid, node="captain.escalate_issue")
+
+
 def _exec(a, store, db_path):
     """Run one validated action; returns a result dict. Never git, never a
     kill, never a code edit — only the board, the captain queue, plan_amend."""
@@ -984,6 +1101,7 @@ def _exec(a, store, db_path):
             b.post(a["project"], author=AGENT, channel="operator", kind="blocker",
                    body="@operator " + a["body"], mentions=["operator"],
                    author_model=config.CAPTAIN_MODEL or "", author_role=AGENT)
+        _mirror_escalation(a)
         return {"ok": True, "escalation": esc["id"]}
     if kind == "propose_plan_change":
         # Apply before any board post: a validator rejection must not leave
@@ -1021,6 +1139,7 @@ def _exec(a, store, db_path):
         mid = b.post(a["project"], author=AGENT, channel="project", kind="status",
                      body=a["body"], author_model=config.CAPTAIN_MODEL or "",
                      author_role=AGENT)
+        _mirror_standup(a)
         return {"ok": True, "post": mid}
     return {"ok": False, "error": f"unknown action {kind}"}
 
@@ -1105,6 +1224,8 @@ def tick(dry_run=False, llm=True, db_path=None, now=None, events_path=None,
             cool[a["target"]] = now
             if a["kind"] == "standup":
                 state.setdefault("last_standup", {})[a["project"]] = now
+        if _epic_comment_at:
+            state.setdefault("last_epic_comment", {}).update(_epic_comment_at)
         state["cooldowns"] = cool
         seen = state.setdefault("board_seen", {})
         for proj, bv in snap.get("board", {}).items():
