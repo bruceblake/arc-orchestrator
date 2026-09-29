@@ -337,8 +337,12 @@ def _state_block(state):
     return "\n".join(lines)
 
 
-def build_prompt(repo, state, turns):
-    return (CAPTAIN_PERSONA
+def build_prompt(repo, state, turns, model=None):
+    # The conversational turn runs on the operator's pick, or PLANNER_MODEL.
+    # CAPTAIN_PERSONA names CAPTAIN_MODEL; those differ on the studio roster.
+    seat = model or config.PLANNER_MODEL
+    persona = orchchat.persona_for_seat(CAPTAIN_PERSONA, config.CAPTAIN_MODEL, seat)
+    return (persona
             + f"\n\nTARGET REPO: {repo}\n\n"
             + project_contract.captain_block(repo)
             + "\n"
@@ -348,10 +352,14 @@ def build_prompt(repo, state, turns):
             + orchchat._history(turns))
 
 
-def _captain_driver():
+def _captain_driver(model=None):
     """The planner/captain model, interactive so a human never queues behind
-    three implementers (drivers.Driver.run; orchchat._planner_driver)."""
-    model = config.PLANNER_MODEL
+    three implementers (drivers.Driver.run; orchchat._planner_driver).
+
+    `model` is the operator's pick from --model (already validated against the
+    roster by main.py); None means config.PLANNER_MODEL.
+    """
+    model = model or config.PLANNER_MODEL
     if model is None:
         raise RuntimeError("no planner-capable model on today's roster")
     import drivers
@@ -712,11 +720,17 @@ def execute_actions(actions, repo, db_path=None):
 
 # --- the turn -------------------------------------------------------------
 
-async def run_turn(session, repo):
-    """One captain turn: state -> model -> prose + bounded actions."""
+async def run_turn(session, repo, model=None):
+    """One captain turn: state -> model -> prose + bounded actions.
+
+    `model` is the operator's pick from --model (already validated against the
+    roster by main.py); None means config.PLANNER_MODEL. The name actually
+    used is recorded on every assistant line this turn appends.
+    """
     if not session or not SESSION_RE.fullmatch(session):
         print(f"captain: invalid session id {session!r}", file=sys.stderr)
         return 1
+    used = model or config.PLANNER_MODEL
     path = _session_path(session)
     try:
         turns = orchchat.load_session(path)
@@ -727,7 +741,7 @@ async def run_turn(session, repo):
     problem = orchchat._repo_problem(repo)
     if problem is not None:
         err = orchchat._safe_append(path, {
-            "role": "assistant", "ts": time.time(),
+            "role": "assistant", "ts": time.time(), "model": used,
             "text": "I can't supervise a project in that repository — "
                     "please give me a valid one.",
             "error": problem})
@@ -737,19 +751,20 @@ async def run_turn(session, repo):
         state = fleet_state()
     except Exception as exc:
         fp = errors.capture(exc, node="captain.state")
-        state = {"planner_model": config.PLANNER_MODEL, "capacity": {},
+        state = {"planner_model": used, "capacity": {},
                  "task_status_counts": {}, "needs_attention": [],
                  "recent_events": [], "error": f"{fp}: {exc}"}
 
     task_id = f"captain-{session}"
     try:
-        res = await _captain_driver().run(build_prompt(repo, state, turns),
-                                          Path(repo), task_id=task_id)
+        res = await _captain_driver(model).run(
+            build_prompt(repo, state, turns, model),
+            Path(repo), task_id=task_id)
     except Exception as exc:
-        fp = errors.capture(exc, task=task_id, model=config.PLANNER_MODEL,
+        fp = errors.capture(exc, task=task_id, model=used,
                             node="captain")
         err = orchchat._safe_append(path, {
-            "role": "assistant", "ts": time.time(),
+            "role": "assistant", "ts": time.time(), "model": used,
             "text": "Sorry — the captain model failed on that request. "
                     "Please try again.",
             "error": f"{fp}: {exc}"})
@@ -763,10 +778,12 @@ async def run_turn(session, repo):
         if not text:
             err = orchchat._safe_append(path, {
                 "role": "assistant", "ts": time.time(),
+                "model": orchchat._answered_model(res, used),
                 "text": "Sorry — the captain's reply could not be read.",
                 "error": f"{fp}: {exc}"})
             return 1 if err else 0
-    turn = {"role": "assistant", "ts": time.time(), "text": text}
+    turn = {"role": "assistant", "ts": time.time(), "text": text,
+            "model": orchchat._answered_model(res, used)}
     if not text.strip():
         turn["error"] = "captain returned an empty reply"
     else:

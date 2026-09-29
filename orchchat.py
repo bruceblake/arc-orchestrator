@@ -64,6 +64,20 @@ PLANNER_PERSONA = (
 )
 
 
+def persona_for_seat(persona, fixed, seat):
+    """Fleet persona with the 'running on <fixed>' claim set to this turn's model.
+
+    The module constant names the default seat. A dashboard turn can pick
+    another planner; the prompt must identify as that model, not the default.
+    """
+    if not seat or not fixed or seat == fixed:
+        return persona
+    needle = f"running on {fixed}"
+    if needle not in persona:
+        return persona
+    return persona.replace(needle, f"running on {seat}", 1)
+
+
 def chat_dir():
     """Sessions live in $ARC_CHAT_DIR, default <cwd>/logs/chat.
 
@@ -207,12 +221,14 @@ def _history(turns, limit=HISTORY_CHARS):
     return "\n\n".join(reversed(kept))
 
 
-def _planner_driver():
+def _planner_driver(model=None):
     """The planner for CHAT, which is interactive and therefore different.
 
-    Roster-aware through drivers.driver_for: whatever `config.PLANNER_MODEL`
-    is today — DeepSeek-V4.1-Flash-thinking-max (reasonix) on the local
-    profile, Claude-Opus-5.5 on studio (operator decision 2026-09-25).
+    Roster-aware through drivers.driver_for: `model` when the operator picked
+    one on the dashboard (`--model`, already validated against the roster by
+    the caller), else whatever `config.PLANNER_MODEL` is today —
+    DeepSeek-V4.1-Flash-thinking-max (reasonix) on the local profile,
+    Claude-Opus-5.5 on studio (operator decision 2026-09-25).
     Hardcoding a driver class here would
     fail the morning the roster's harness for the planner moves — this call
     site was missed once already when the governed pipeline's was fixed.
@@ -221,19 +237,33 @@ def _planner_driver():
     implementers is fine; a HUMAN waiting on a chat reply behind them is not.
     Interactive work jumps the driver queue (see drivers.Driver.run).
     """
-    model = config.PLANNER_MODEL
+    model = model or config.PLANNER_MODEL
     if model is None:
         raise RuntimeError("no planner-capable model on today's roster")
     return drivers.driver_for(model, "planner", interactive=True)
 
 
-def build_prompt(repo, turns):
-    return (PLANNER_PERSONA
+def build_prompt(repo, turns, model=None):
+    seat = model or config.PLANNER_MODEL
+    return (persona_for_seat(PLANNER_PERSONA, config.PLANNER_MODEL, seat)
             + f"\n\nTARGET REPO: {repo}\n\n"
             + project_contract.planner_block(repo)
             + "CONVERSATION WITH THE OPERATOR (oldest first). Reply as the "
               "planning orchestrator:\n\n"
             + _history(turns))
+
+
+def _answered_model(res, requested):
+    """The seat that produced a completed reply.
+
+    ``Driver.run`` may substitute another model and returns that name on
+    ``res.model``. A crash before a result has no ``res``; the caller keeps
+    the requested name.
+    """
+    name = getattr(res, "model", None)
+    if isinstance(name, str) and name:
+        return name
+    return requested
 
 
 def _reply_text(res):
@@ -317,8 +347,14 @@ def finalize_taskfile(text, repo):
     return dest.name, None
 
 
-async def run_turn(session, repo):
+async def run_turn(session, repo, model=None):
     """One assistant turn for a session whose user turn is already appended.
+
+    `model` is the operator's pick from --model (already validated against
+    the roster by main.py); None means config.PLANNER_MODEL. The name
+    actually used is recorded on every assistant line this turn appends —
+    success, empty reply and the error replies alike — so the dashboard can
+    show which model answered.
 
     Returns the process exit code: 0 for every completed turn, 1 only when
     the session file itself cannot be read or written.
@@ -327,6 +363,7 @@ async def run_turn(session, repo):
         print(f"chat: invalid session id {session!r} "
               f"(expected ^[a-z0-9][a-z0-9-]{{0,39}}$)", file=sys.stderr)
         return 1
+    used = model or config.PLANNER_MODEL
     path = _session_path(session)
     try:
         turns = load_session(path)
@@ -341,7 +378,7 @@ async def run_turn(session, repo):
         # turn (exit 0): the poll loop must show the operator the problem,
         # not hang on it.
         err = _safe_append(path, {
-            "role": "assistant", "ts": time.time(),
+            "role": "assistant", "ts": time.time(), "model": used,
             "text": "I can't plan for that repository — "
                     "please give me a valid one.",
             "error": problem})
@@ -351,22 +388,24 @@ async def run_turn(session, repo):
     # interleave with planner runs in logs/harness/.
     task_id = f"chat-{session}"
     try:
-        res = await _planner_driver().run(
-            build_prompt(repo, turns), Path(repo), task_id=task_id)
+        res = await _planner_driver(model).run(
+            build_prompt(repo, turns, model), Path(repo), task_id=task_id)
     except Exception as exc:
         # A crashed planner did not answer. Same containment as the
         # governed pipeline: capture a fingerprint for triage, keep the
         # turn loop alive.
-        fp = errors.capture(exc, task=task_id, model=config.PLANNER_MODEL, node="chat")
+        fp = errors.capture(exc, task=task_id, model=used, node="chat")
         err = _safe_append(path, {
-            "role": "assistant", "ts": time.time(),
+            "role": "assistant", "ts": time.time(), "model": used,
             "text": "Sorry — the planner failed on that request. "
                     "Please try again.",
             "error": f"{fp}: {exc}"})
         return 1 if err else 0
 
     text = _reply_text(res)
-    turn = {"role": "assistant", "ts": time.time(), "text": text}
+    # Driver.run may substitute another seat; res.model is the one that answered.
+    turn = {"role": "assistant", "ts": time.time(), "text": text,
+            "model": _answered_model(res, used)}
     if not text.strip():
         turn["error"] = "planner returned an empty reply"
     else:

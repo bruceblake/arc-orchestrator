@@ -1303,6 +1303,22 @@ for _m, _fam, _h, _t, _c, _roles in _STRONGEST_FIRST:
         REVIEW_FAMILIES[_fam] = _m
 PLANNER_MODEL = next((m for m, _f, _h, _t, _c, roles in _STRONGEST_FIRST
                       if "planner" in roles), None)
+
+
+def planner_models():
+    """Every live model that may hold the `planner` role, strongest first.
+
+    The same source and the same order ``PLANNER_MODEL`` is picked from —
+    ``_STRONGEST_FIRST`` filtered on the ROLE, never a hand-kept list of
+    names (AGENTS.md Rule 2, "never keep a second list of who may review":
+    a list that drifts from the roster offers a model the driver constructor
+    then refuses). It follows whichever roster THIS process loaded: under
+    ARC_FLEET=studio that is Claude-Opus-5.5 and GPT-6-Sol beside
+    DeepSeek-V4.1-Flash-thinking-max; with no ARC_FLEET it is DeepSeek alone.
+    Empty when no live row carries the role.
+    """
+    return [m for m, _f, _h, _t, _c, roles in _STRONGEST_FIRST
+            if "planner" in roles]
 # The captain autopilot's own seat (Rule 11: its per-tick LLM turn). SEPARATE
 # from PLANNER_MODEL on purpose, set by operator directive 2026-09-25: on the
 # studio profile PLANNER_MODEL is Claude-Opus-5.5 (the plan-backed architect,

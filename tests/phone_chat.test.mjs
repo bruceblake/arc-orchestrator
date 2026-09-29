@@ -42,7 +42,13 @@ let qsaMap = {};
 let alertLog = [];
 let confirmVal = true;
 
-globalThis.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+const phoneStorage = new Map();
+globalThis.localStorage = {
+  getItem: k => (phoneStorage.has(k) ? phoneStorage.get(k) : null),
+  setItem: (k, v) => phoneStorage.set(k, String(v)),
+  removeItem: k => phoneStorage.delete(k),
+  clear: () => phoneStorage.clear(),
+};
 globalThis.fetch = async (url, opts) => { fetchLog.push({ url, opts }); return impl; };
 globalThis.alert = m => { alertLog.push(m); };
 globalThis.confirm = () => confirmVal;
@@ -125,7 +131,7 @@ function loadPage(withSR) {
     " sendPlanMessage, pollPlan, renderPlanTranscript, renderPlanTaskcard," +
     " loadPlanHistory, loadPlanRepos, onPlanRepoChange, wireRun, runProject, init," +
     " loadPlanSessions, onPlanSessionChange, newPlanSession, freshPlanSession," +
-    " showPlanSession};")();
+    " showPlanSession, loadPlanModels};")();
   const el = id => document.getElementById(id);
   return {
     api, el,
@@ -154,7 +160,7 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "partial" }, isFinal: false }] }), "handleSpeechResult() interim");
   ok(input.value === "hello world more", "interim text stays out of the committed value");
   ok(p.el("plan-interim").textContent.includes("partial"), "interim text goes to the dedicated interim element");
-  ok(input.placeholder === "Ask the planner", "interim speech never pollutes the input placeholder");
+  ok(input.placeholder === INPUT_PLACEHOLDER, "interim speech never pollutes the input placeholder");
   input.value = "  x";
   run(() => p.api.handleSpeechResult({ resultIndex: 0, results: [{ 0: { transcript: "y" }, isFinal: true }] }), "handleSpeechResult() final after manual edit");
   ok(input.value === "  x y", "a final appends to, not overwrites, manually typed text");
@@ -173,7 +179,7 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   ok(mic.textContent === "🎤", "mic idle returns to the mic glyph");
   ok(!mic.classList.contains("mic-live"), "mic idle drops the .mic-live class");
   ok(input.value === "keep me", "returning to idle does not discard typed text");
-  ok(p.el("plan-input").placeholder === "Ask the planner", "mic idle leaves the placeholder alone");
+  ok(p.el("plan-input").placeholder === INPUT_PLACEHOLDER, "mic idle leaves the placeholder alone");
   run(() => { p.el("plan-interim").textContent = "partial"; p.api.setMicLive(false); }, "setMicLive(false) clears the interim element");
   ok(p.el("plan-interim").textContent === "", "mic idle clears the interim element");
 }
@@ -209,6 +215,43 @@ ok(loadPage(true).el("plan-mic").style.display === "inline-block", "mic shown wh
   ok(body.message === "build the thing", "chat start body carries the trimmed message");
   ok(input.value === "", "sendPlanMessage() clears the input");
   ok(p.el("plan-send").disabled === false, "send button re-enabled after the poll settles");
+}
+
+// ---- 5b. model-choice flow (arc-talk-model, reopen picker, and POST body) ---
+{
+  globalThis.localStorage.clear();
+  const p = loadPage(false);
+  const modelsData = {
+    models: ["DeepSeek-V4.1-Flash-thinking-max", "Claude-Opus-5.5", "GLM-5.3"],
+    default: "DeepSeek-V4.1-Flash-thinking-max"
+  };
+  p.setImpl({ status: 200, json: async () => modelsData });
+  await p.api.loadPlanModels();
+  const modelEl = p.el("plan-model");
+  ok(modelEl.value === "DeepSeek-V4.1-Flash-thinking-max", "phone model picker defaults to API default");
+
+  // Choose a nondefault model
+  modelEl.value = "Claude-Opus-5.5";
+  modelEl.onchange();
+  ok(globalThis.localStorage.getItem("arc-talk-model") === "Claude-Opus-5.5",
+     "phone model choice saves arc-talk-model to localStorage");
+
+  // Reopen picker (reload models) and verify restored choice
+  modelEl.value = "";
+  await p.api.loadPlanModels();
+  ok(modelEl.value === "Claude-Opus-5.5", "reopening phone picker restores saved arc-talk-model");
+
+  // Verify POST body on sendPlanMessage() carries the chosen model
+  const input = p.el("plan-input");
+  const repo = p.el("plan-repo");
+  repo.value = "/home/x/tasks/demo.json";
+  input.value = "plan with nondefault model";
+  p.setImpl({ status: 200, json: async () => ({ turns: [], running: false }) });
+  await arun(async () => { p.api.sendPlanMessage(); await tick(20); }, "sendPlanMessage() with chosen model");
+  const startCalls = p.fetchLog().filter(f => f.url === "/api/chat/start");
+  ok(startCalls.length >= 1, "sendPlanMessage() posted to /api/chat/start");
+  const lastBody = JSON.parse(startCalls[startCalls.length - 1].opts.body);
+  ok(lastBody.model === "Claude-Opus-5.5", "POST /api/chat/start body carries the chosen nondefault model");
 }
 
 // ---- 6. sendPlanMessage guards ----------------------------------------------

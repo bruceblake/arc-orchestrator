@@ -35,6 +35,37 @@ default port 8787). Routes listed are exactly what `Handler.do_GET` /
 | `/api/projects/create` | `repo` (required, absolute path under `ARC_REPO_ROOT`, default the operator home), plus either `goal` (3..2000 chars, the planner — `config.PLANNER_MODEL`, DeepSeek-V4.1-Flash-thinking-max locally — plans it) or `title` + `tasks` list; optional `overwrite` | `mode: plan` with pid/log/taskfile, or `mode: tasks` with written file name |
 | `/api/projects/run` | `file` = taskfile name, optional `dry_run` | Spawns `main.py code run [--dry-run]`; pid, log name, `dry_run` flag; 409 if already running |
 
+## Talking to the fleet: chat and captain
+
+Both conversations sit in the right-hand column of `static/index.html`
+(`#talk-side`, `#chatmodal`, `#capmodal`). Captain is on screen when the
+page opens. Chat replaces it from the column switch or from the Projects
+buttons. The Plan view of `static/phone.html` is the same composer on a
+small screen, where the column is hidden. Each has a model `<select>`
+(`#c-model`, `#k-model`, `#plan-model`) filled from `/api/chat/models` when it
+opens; the choice is kept in one shared `localStorage` key, `arc-talk-model`,
+so desktop and phone agree.
+
+| Route | Body | Returns |
+|---|---|---|
+| `GET /api/chat/models` | none | `{"models": [...], "default": <PLANNER_MODEL>}` — the planner-capable models on today's roster, strongest first, from `config.planner_models()`. Read-only and parameterless. It never 500s: with no planner on the roster `models` is `[]` and `default` is `null`. |
+| `POST /api/chat/start` | `session`, `repo`, `message`, and optional `model` | Appends the operator turn to the chat dir's `<session>.jsonl` (`orchchat.chat_dir()`) and spawns one `main.py chat` turn; pid. 409 if a turn is already running. |
+| `POST /api/captain/start` | `session`, `repo`, `message`, and optional `model` | Same, spawning `main.py captain`; pid. 409 likewise. |
+
+`model` is optional on both start routes and it is the security boundary
+(AGENTS.md Rule 6b — these routes spawn a process and the dashboard is
+unauthenticated):
+
+- Missing, `null` or `""` keeps the argv exactly as before — no `--model`
+  flag, and the CLI uses `config.PLANNER_MODEL`.
+- Anything else must be byte-identical to one of `config.planner_models()`.
+  It is then appended to the existing argv as `--model <name>` (a list handed
+  to the process, never a shell string).
+- A value that is not a planner **today** gets
+  `400 {"error": "model is not a planner on today's roster"}`. The check runs
+  before the user turn is appended and before anything is spawned, so a
+  rejection leaves the session file untouched and starts no process.
+
 ## Metrics endpoint
 
 `GET /api/metrics` (no params) rolls up all `harness_runs` rows and the

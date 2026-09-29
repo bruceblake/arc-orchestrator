@@ -1076,6 +1076,26 @@ def cmd_board(args):
     return 0
 
 
+def _check_turn_model(model):
+    """Reject a `--model` that is not a planner on today's roster.
+
+    Same allowlist the dashboard enforces before it spawns (`--model` is only
+    ever appended after that check), enforced again here because the CLI is
+    also reachable by hand. Exit non-zero WITHOUT constructing a driver: a
+    name the roster refuses for the planner role must never reach
+    drivers.driver_for. Only None means omitted (then config.PLANNER_MODEL).
+    A present value, including "", must be a planner name.
+    """
+    if model is None:
+        return
+    import config
+    if model not in config.planner_models():
+        print(f"not a planner on today's roster: {model!r}; "
+              f"planner-capable: {', '.join(config.planner_models()) or 'none'}",
+              file=sys.stderr)
+        sys.exit(2)
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="24/7 multi-model graph orchestrator for https://llm-api.arc.vt.edu"
@@ -1371,6 +1391,8 @@ def main():
                         help="session id, ^[a-z0-9][a-z0-9-]{0,39}$")
     chat_p.add_argument("--repo", required=True,
                         help="absolute repo path under ARC_REPO_ROOT (default: your home)")
+    chat_p.add_argument("--model", default=None,
+                        help="planner-capable roster model (default: PLANNER_MODEL)")
     chat_p.add_argument("-v", "--verbose", action="store_true", help="debug logging")
 
     cap_p = sub.add_parser(
@@ -1381,6 +1403,9 @@ def main():
                        help="absolute repo path under ARC_REPO_ROOT (default: your home)")
     cap_p.add_argument("--autopilot", action="store_true",
                        help="run the autonomous project manager (captain_autopilot.py)")
+    cap_p.add_argument("--model", default=None,
+                       help="planner-capable roster model for the conversational turn "
+                            "(default: PLANNER_MODEL; the autopilot keeps its own seat)")
     cap_p.add_argument("--interval", type=int, default=None,
                        help="autopilot: seconds between ticks (default ARC_CAPTAIN_INTERVAL=600)")
     cap_p.add_argument("--once", action="store_true", help="autopilot: one tick, then exit")
@@ -1445,11 +1470,19 @@ def main():
         sys.exit(studio_cli.run(args))
     elif args.cmd == "chat":
         import orchchat
-        sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo)))
+        _check_turn_model(args.model)
+        sys.exit(asyncio.run(orchchat.run_turn(args.session, args.repo,
+                                               args.model)))
     elif args.cmd == "board":
         sys.exit(cmd_board(args))
     elif args.cmd == "captain":
         if args.autopilot:
+            # --model belongs to the conversational turn. The autopilot keeps
+            # its own seat (config.CAPTAIN_MODEL) and must not accept the flag.
+            if args.model is not None:
+                print("captain --autopilot does not take --model "
+                      "(the autopilot keeps its own seat)", file=sys.stderr)
+                sys.exit(2)
             import captain_autopilot
             sys.exit(captain_autopilot.run(
                 interval=args.interval or captain_autopilot.INTERVAL_S,
@@ -1457,7 +1490,9 @@ def main():
         if not args.session or not args.repo:
             ap.error("captain: --session and --repo are required without --autopilot")
         import captain
-        sys.exit(asyncio.run(captain.run_turn(args.session, args.repo)))
+        _check_turn_model(args.model)
+        sys.exit(asyncio.run(captain.run_turn(args.session, args.repo,
+                                              args.model)))
 
 
 if __name__ == "__main__":

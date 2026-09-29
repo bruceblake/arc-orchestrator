@@ -30,7 +30,7 @@ from drivers import DriverResult  # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def _planner_cls(reply="", error=None):
+def _planner_cls(reply="", error=None, result_model=None):
     """A planner-driver stand-in that records its call and returns a canned reply."""
     state = {"calls": 0, "prompt": None, "worktree": None, "task_id": None}
 
@@ -49,7 +49,8 @@ def _planner_cls(reply="", error=None):
             state["task_id"] = task_id
             if error is not None:
                 raise error
-            return DriverResult(harness=config.MODEL_HARNESS[STRONGEST], model=STRONGEST,
+            return DriverResult(harness=config.MODEL_HARNESS[STRONGEST],
+                                model=result_model or STRONGEST,
                                 role="planner", exit_code=0, text=reply)
 
     return _Stub, state
@@ -101,17 +102,19 @@ class TestOrchChat(unittest.TestCase):
         return spath
 
     def _run(self, reply="", error=None, session="sess-1", repo=None,
-             turns=None):
+             turns=None, result_model=None, model=None):
         if turns is None:
             turns = self._user_turns("please build the thing")
         self._write_turns(session, turns)
-        cls, state = _planner_cls(reply, error)
+        cls, state = _planner_cls(reply, error, result_model=result_model)
         # orchchat._planner_driver() chooses the driver from the roster (GLM on
         # the 2026-09-12 two-model fleet), so patch the FACTORY — patching a
         # driver class alone stopped covering the path the day the roster moved.
-        with mock.patch.object(orchchat, "_planner_driver",
-                               lambda: cls("planner", interactive=True)):
-            code = asyncio.run(orchchat.run_turn(session, str(repo)))
+        def factory(model=None):
+            state["driver_model"] = model
+            return cls("planner", interactive=True)
+        with mock.patch.object(orchchat, "_planner_driver", factory):
+            code = asyncio.run(orchchat.run_turn(session, str(repo), model))
         return code, state, self.chat_dir / f"{session}.jsonl"
 
     def _read_turns(self, spath):
@@ -305,6 +308,39 @@ class TestOrchChatFailures(TestOrchChat):
         code, state, spath = self._run(reply="   ", repo=repo)
         self.assertEqual(code, 0)
         last = self._read_turns(spath)[-1]
+        self.assertIn("empty reply", last["error"])
+
+    def test_completed_reply_records_substituted_model(self):
+        repo = self._make_repo()
+        code, state, spath = self._run(
+            reply="hello", repo=repo, result_model="substitute-seat",
+            model=config.PLANNER_MODEL)
+        self.assertEqual(code, 0)
+        self.assertNotEqual("substitute-seat", config.PLANNER_MODEL)
+        last = self._read_turns(spath)[-1]
+        self.assertEqual(last["model"], "substitute-seat")
+        self.assertEqual(last["text"].strip(), "hello")
+
+    def test_nondefault_model_is_named_in_the_prompt(self):
+        # Studio chat can send GPT-6-Sol. The prompt must identify as that
+        # seat, not as config.PLANNER_MODEL.
+        repo = self._make_repo()
+        picked = "GPT-6-Sol"
+        self.assertNotEqual(picked, config.PLANNER_MODEL)
+        code, state, _spath = self._run(reply="hello", repo=repo, model=picked)
+        self.assertEqual(code, 0)
+        self.assertEqual(state["driver_model"], picked)
+        self.assertIn(f"running on {picked}", state["prompt"])
+        self.assertNotIn(f"running on {config.PLANNER_MODEL}", state["prompt"])
+
+    def test_empty_reply_records_substituted_model(self):
+        repo = self._make_repo()
+        code, state, spath = self._run(
+            reply="   ", repo=repo, result_model="substitute-seat",
+            model=config.PLANNER_MODEL)
+        self.assertEqual(code, 0)
+        last = self._read_turns(spath)[-1]
+        self.assertEqual(last["model"], "substitute-seat")
         self.assertIn("empty reply", last["error"])
 
     def test_bad_repo_prefix_rejected_without_calling_driver(self):

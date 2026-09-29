@@ -34,7 +34,13 @@ globalThis.document = {
 globalThis.window = { addEventListener: () => {}, removeEventListener: () => {},
                       matchMedia: () => ({matches:false, addEventListener(){}}),
                       location: {hash: "", search: ""} };
-globalThis.localStorage = { getItem: () => null, setItem(){}, removeItem(){} };
+const localStore = new Map();
+globalThis.localStorage = {
+  getItem: k => (localStore.has(k) ? localStore.get(k) : null),
+  setItem: (k, v) => localStore.set(k, String(v)),
+  removeItem: k => localStore.delete(k),
+  clear: () => localStore.clear(),
+};
 globalThis.location = { hash: "", search: "", href: "http://localhost:8787/" };
 globalThis.history = { replaceState(){}, pushState(){} };
 Object.defineProperty(globalThis, "navigator", {value: {clipboard: {writeText: async () => {}}}, configurable: true});
@@ -62,17 +68,27 @@ const mod = new Function(externals + "\n" + js
   + " if ('RUNNING' in o) CHAT_RUNNING=o.RUNNING;"
   + " if ('LISTENING' in o) CHAT_LISTENING=o.LISTENING;"
   + " if ('FINAL' in o) CHAT_SPEECH_FINAL=o.FINAL;"
+  + " if ('MODEL' in o) CHAT_MODEL=o.MODEL;"
   + " };"
   + "\nglobalThis.__getChat = () => ({"
   + " REPO: CHAT_REPO, REPOS: CHAT_REPOS, SESSION: CHAT_SESSION,"
   + " SESSIONS: CHAT_SESSIONS,"
   + " TURNS: CHAT_TURNS, LAST: CHAT_LAST, RUNNING: CHAT_RUNNING,"
-  + " LISTENING: CHAT_LISTENING, FINAL: CHAT_SPEECH_FINAL"
+  + " LISTENING: CHAT_LISTENING, FINAL: CHAT_SPEECH_FINAL,"
+  + " MODEL: CHAT_MODEL"
   + " });"
+  + "\nglobalThis.__setCap = o => {"
+  + " if ('REPO' in o) CAP_REPO=o.REPO;"
+  + " if ('SESSION' in o) CAP_SESSION=o.SESSION;"
+  + " if ('RUNNING' in o) CAP_RUNNING=o.RUNNING;"
+  + " if ('MODEL' in o) CAP_MODEL=o.MODEL;"
+  + " };"
   + "\nreturn {chatSend, chatPoll, chatRender, chatTurnHTML, chatTaskcardHTML,"
   + " chatEmptyState, chatSupportsSpeech, chatUpdateMic, chatMic, chatStopMic,"
-  + " chatLoadRepos, chatNewRepo, chatStartSession, chatOpen,"
-  + " chatLoadSessions, chatSelectSession, chatNewSession, chatFreshSession};");
+  + " chatLoadRepos, chatNewRepo, chatStartSession, chatOpen, chatSetSend,"
+  + " capSetSend,"
+  + " chatLoadSessions, chatSelectSession, chatNewSession, chatFreshSession,"
+  + " capTurnHTML, chatLoadModels, capLoadModels, capSend, capOpen};");
 const c = mod();
 
 let n = 0;
@@ -92,12 +108,96 @@ ok(typeof c.chatEmptyState === "function", "chatEmptyState defined");
 
 // ---- empty-state text (exact spec string) -----------------------------------
 const empty = c.chatEmptyState();
-// The planner is named by the page constant, not a retired model: assert the
-// RULE (the live planner is named, plus the spec wording), not a model id.
-ok(/\S+ will turn it into a governed project/.test(empty)
-   && empty.includes("and hand it back ready to run")
+// One sentence, no retired model: talking is the whole instruction now.
+ok(/Send a message to start\./.test(empty)
    && !empty.includes("Kimi"),
-   "empty state names a live planner and keeps the spec wording");
+   "empty state is one sentence and names no retired model");
+
+// Opening a dialog calls chatSetSend(false) / capSetSend(false). The idle
+// label is the spec word "Send", not the old lowercase "send".
+c.chatSetSend(false);
+ok(document.querySelector("#c-send").textContent === "Send",
+   "chat idle button label is Send");
+c.capSetSend(false);
+ok(document.querySelector("#k-send").textContent === "Send",
+   "captain idle button label is Send");
+
+// ---- model choice flow: arc-talk-model saved, restored on reopen, sent in POST
+{
+  const modelFixture = {
+    models: ["DeepSeek-V4.1-Flash-thinking-max", "Claude-Opus-5.5", "GLM-5.3"],
+    default: "DeepSeek-V4.1-Flash-thinking-max",
+  };
+  let chatLastPost = null;
+  let capLastPost = null;
+  const prevFetch = globalThis.fetch;
+  globalThis.fetch = async (url, opts) => {
+    const u = String(url).split("?")[0];
+    if (u === "/api/chat/models") return { status: 200, json: async () => modelFixture };
+    if (u === "/api/chat/start") {
+      chatLastPost = JSON.parse((opts && opts.body) || "{}");
+      return { status: 200, json: async () => ({ ok: true }) };
+    }
+    if (u === "/api/captain/start") {
+      capLastPost = JSON.parse((opts && opts.body) || "{}");
+      return { status: 200, json: async () => ({ ok: true }) };
+    }
+    return { status: 200, json: async () => ({}) };
+  };
+
+  // 1. Chat model choice
+  localStore.clear();
+  await c.chatLoadModels();
+  const cModelEl = document.querySelector("#c-model");
+  ok(cModelEl.value === "DeepSeek-V4.1-Flash-thinking-max",
+     "chat model picker initializes to API default");
+
+  // Choose a nondefault model in chat
+  cModelEl.value = "Claude-Opus-5.5";
+  cModelEl.onchange();
+  ok(localStorage.getItem("arc-talk-model") === "Claude-Opus-5.5",
+     "choosing nondefault chat model saves arc-talk-model in localStorage");
+
+  // Reopen chat picker (simulate fresh load / reopen)
+  cModelEl.value = "";
+  await c.chatLoadModels();
+  ok(cModelEl.value === "Claude-Opus-5.5",
+     "reopening chat picker restores saved arc-talk-model");
+
+  // Send a chat turn and verify POST body carries the chosen model
+  document.querySelector("#c-text").value = "plan something";
+  __setChat({ RUNNING: false, SESSION: "plan-alpha", REPO: "/home/test/repo" });
+  await c.chatSend();
+  ok(chatLastPost && chatLastPost.model === "Claude-Opus-5.5",
+     "POST /api/chat/start carries the selected nondefault model");
+
+  // 2. Captain model choice (shares arc-talk-model)
+  const kModelEl = document.querySelector("#k-model");
+  await c.capLoadModels();
+  ok(kModelEl.value === "Claude-Opus-5.5",
+     "captain picker adopts saved arc-talk-model on open");
+
+  // Choose a different nondefault model in captain
+  kModelEl.value = "GLM-5.3";
+  kModelEl.onchange();
+  ok(localStorage.getItem("arc-talk-model") === "GLM-5.3",
+     "choosing nondefault captain model updates arc-talk-model in localStorage");
+
+  // Reopen captain picker
+  kModelEl.value = "";
+  await c.capLoadModels();
+  ok(kModelEl.value === "GLM-5.3",
+     "reopening captain picker restores updated arc-talk-model");
+
+  // Send a captain turn and verify POST body carries the chosen model
+  document.querySelector("#k-text").value = "status report";
+  __setCap({ RUNNING: false, SESSION: "captain-alpha", REPO: "/home/test/repo" });
+  await c.capSend();
+  ok(capLastPost && capLastPost.model === "GLM-5.3",
+     "POST /api/captain/start carries the selected nondefault model");
+
+  globalThis.fetch = prevFetch;
+}
 
 // ---- mic renders iff SpeechRecognition exists ------------------------------
 window.SpeechRecognition = function(){};
@@ -164,6 +264,19 @@ ok(c.chatTurnHTML({ role: "user", text: EVIL, ts: null }).includes("&lt;img"),
    "escaping: hostile text rendered escaped, not dropped");
 ok(clean(c.chatTurnHTML({ role: "assistant", text: "hi", error: EVIL, taskfile: null })),
    "escaping: turn error escaped");
+
+// The model name sits inside the assistant bubble, not as a sibling above it.
+function nameInsideBubble(html) {
+  const open = html.indexOf('class="chat-bubble"');
+  const name = html.indexOf("chat-model-name");
+  const close = html.indexOf("</div>", open);
+  return open >= 0 && name > open && name < close;
+}
+const named = c.chatTurnHTML({ role: "assistant", text: "hi", model: "Sub Seat" });
+ok(nameInsideBubble(named), "chat: model name is inside the assistant bubble");
+ok(named.includes("Sub Seat"), "chat: model name text is rendered");
+const capNamed = c.capTurnHTML({ role: "assistant", text: "hi", model: "Sub Seat" });
+ok(nameInsideBubble(capNamed), "captain: model name is inside the assistant bubble");
 
 // ---- taskcard: both buttons only when a taskfile is present -----------------
 ok(c.chatTaskcardHTML(null) === "", "taskcard: no card when no taskfile");

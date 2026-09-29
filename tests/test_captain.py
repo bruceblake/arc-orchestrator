@@ -338,6 +338,11 @@ class CaptainRoutes(unittest.TestCase):
         self._dir.cleanup()
 
     def _spawn(self, argv, log_name):
+        # Record every spawn so a test can assert both WHAT was launched and
+        # that a rejected request launched nothing at all.
+        if not hasattr(self, "spawned"):
+            self.spawned = []
+        self.spawned.append(list(argv))
         proc = mock.Mock(pid=4242)
         proc.wait.side_effect = subprocess.TimeoutExpired(argv, 1.5)
         return proc, log_name
@@ -414,6 +419,57 @@ class CaptainRoutes(unittest.TestCase):
                                   {"session": "captain-x", "repo": "/etc",
                                    "message": ""})
         self.assertEqual(status, 400)
+
+    # ---- the optional `model` field (Rule 6b boundary) ---------------------
+    def _spawn_target(self):
+        """A repo on the allowlist, so only the model can fail the request.
+
+        _list_repos always lists config.ROOT first, so the fleet checkout is
+        its own allowlist entry — no copy needed.
+        """
+        return str(config.ROOT)
+
+    def test_models_route_lists_planners(self):
+        status, resp = self._get("/api/chat/models")
+        self.assertEqual(status, 200)
+        self.assertEqual(resp["default"], config.PLANNER_MODEL)
+        self.assertEqual(resp["models"], config.planner_models())
+        for name in resp["models"]:
+            self.assertIn("planner", config.MODEL_ROLES.get(name, set()))
+
+    def test_start_without_model_spawns_no_model_flag(self):
+        repo = self._spawn_target()
+        status, _ = self._post("/api/captain/start",
+                               {"session": "captain-a", "repo": repo,
+                                "message": "hi"})
+        self.assertEqual(status, 200)
+        argv = self.spawned[0]
+        self.assertNotIn("--model", argv)
+        self.assertEqual(argv[1:], ["main.py", "captain", "--session",
+                                    "captain-a", "--repo", repo])
+
+    def test_start_with_planner_model_appends_the_flag(self):
+        repo = self._spawn_target()
+        status, _ = self._post("/api/captain/start",
+                               {"session": "captain-b", "repo": repo,
+                                "message": "hi",
+                                "model": config.PLANNER_MODEL})
+        self.assertEqual(status, 200)
+        argv = self.spawned[0]
+        self.assertEqual(argv[argv.index("--model") + 1], config.PLANNER_MODEL)
+
+    def test_start_rejects_a_model_that_is_not_a_planner(self):
+        repo = self._spawn_target()
+        status, resp = self._post("/api/captain/start",
+                                  {"session": "captain-c", "repo": repo,
+                                   "message": "hi", "model": "not-a-model"})
+        self.assertEqual(status, 400)
+        self.assertEqual(resp["error"],
+                         "model is not a planner on today's roster")
+        self.assertEqual(getattr(self, "spawned", []), [],
+                         "a rejected model must start no process")
+        self.assertFalse((self._capdir / "captain-c.jsonl").exists(),
+                         "a rejected model must leave the session file untouched")
 
 
 class CaptainLiveThinking(unittest.TestCase):
@@ -650,6 +706,166 @@ class CaptainQueueDrain(unittest.TestCase):
         queued = captain.queue_view()["queued"]
         self.assertEqual(queued[0]["taskfile"], "old.json")
         self.assertIn("historical", queued[0]["reason"])
+
+
+class TurnModelCli(unittest.TestCase):
+    """`--model` is a conversational-turn flag. None means omitted.
+
+    An explicit empty string is present and must not construct a driver.
+    `captain --autopilot --model` is rejected: the autopilot keeps its own seat.
+    """
+
+    def test_empty_chat_model_exits_without_a_driver(self):
+        import main
+        import orchchat
+        argv = ["main.py", "chat", "--session", "plan-x", "--repo", "/tmp/nope",
+                "--model", ""]
+        with mock.patch("sys.argv", argv), \
+                mock.patch.object(orchchat, "run_turn") as run:
+            with self.assertRaises(SystemExit) as cm:
+                main.main()
+        self.assertEqual(cm.exception.code, 2)
+        run.assert_not_called()
+
+    def test_empty_captain_model_exits_without_a_driver(self):
+        import main
+        argv = ["main.py", "captain", "--session", "captain-x",
+                "--repo", "/tmp/nope", "--model", ""]
+        with mock.patch("sys.argv", argv), \
+                mock.patch.object(captain, "run_turn") as run:
+            with self.assertRaises(SystemExit) as cm:
+                main.main()
+        self.assertEqual(cm.exception.code, 2)
+        run.assert_not_called()
+
+    def test_autopilot_rejects_model(self):
+        import main
+        import captain_autopilot
+        argv = ["main.py", "captain", "--autopilot", "--model",
+                config.PLANNER_MODEL]
+        with mock.patch("sys.argv", argv), \
+                mock.patch.object(captain_autopilot, "run") as run:
+            with self.assertRaises(SystemExit) as cm:
+                main.main()
+        self.assertEqual(cm.exception.code, 2)
+        run.assert_not_called()
+
+    def test_autopilot_without_model_still_runs(self):
+        import main
+        import captain_autopilot
+        argv = ["main.py", "captain", "--autopilot", "--once"]
+        with mock.patch("sys.argv", argv), \
+                mock.patch.object(captain_autopilot, "run", return_value=0) as run:
+            with self.assertRaises(SystemExit) as cm:
+                main.main()
+        self.assertEqual(cm.exception.code, 0)
+        run.assert_called_once()
+
+
+class CaptainAnsweredModel(unittest.TestCase):
+    """A completed captain reply records DriverResult.model, not the request."""
+
+    def test_empty_reply_records_substituted_model(self):
+        import asyncio
+        import shutil
+        from drivers import DriverResult
+
+        repo = Path(tempfile.mkdtemp(prefix="arc-cap-repo-", dir=str(config.REPO_ROOT)))
+        (repo / ".git").mkdir()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        capdir = Path(tempfile.mkdtemp(prefix="arc-capdir-"))
+        self.addCleanup(shutil.rmtree, capdir, ignore_errors=True)
+        old = os.environ.get("ARC_CAPTAIN_DIR")
+        os.environ["ARC_CAPTAIN_DIR"] = str(capdir)
+
+        def _restore():
+            if old is None:
+                os.environ.pop("ARC_CAPTAIN_DIR", None)
+            else:
+                os.environ["ARC_CAPTAIN_DIR"] = old
+        self.addCleanup(_restore)
+        (capdir / "captain-sub.jsonl").write_text(
+            json.dumps({"role": "user", "ts": 1, "text": "hi"}) + "\n",
+            encoding="utf-8")
+
+        class _Stub:
+            def __init__(self, role, bench=False, interactive=False):
+                assert role == "planner" and interactive
+
+            async def run(self, *args, **kwargs):
+                return DriverResult(harness="reasonix", model="substitute-seat",
+                                    role="planner", exit_code=0, text="   ")
+
+        with mock.patch.object(
+                captain, "_captain_driver",
+                lambda model=None: _Stub("planner", interactive=True)), \
+                mock.patch.object(captain, "fleet_state", return_value={
+                    "planner_model": config.PLANNER_MODEL, "capacity": {},
+                    "task_status_counts": {}, "needs_attention": [],
+                    "recent_events": []}):
+            code = asyncio.run(captain.run_turn(
+                "captain-sub", str(repo), config.PLANNER_MODEL))
+        self.assertEqual(code, 0)
+        self.assertNotEqual("substitute-seat", config.PLANNER_MODEL)
+        last = json.loads((capdir / "captain-sub.jsonl").read_text(
+            encoding="utf-8").splitlines()[-1])
+        self.assertEqual(last["model"], "substitute-seat")
+        self.assertIn("empty reply", last["error"])
+
+    def test_nondefault_model_is_named_in_the_prompt(self):
+        # Selecting GPT-6-Sol must not leave "running on <CAPTAIN_MODEL>"
+        # (DeepSeek) or the studio planner (Claude) in the identity line.
+        import asyncio
+        import shutil
+        from drivers import DriverResult
+
+        repo = Path(tempfile.mkdtemp(prefix="arc-cap-repo-", dir=str(config.REPO_ROOT)))
+        (repo / ".git").mkdir()
+        self.addCleanup(shutil.rmtree, repo, ignore_errors=True)
+        capdir = Path(tempfile.mkdtemp(prefix="arc-capdir-"))
+        self.addCleanup(shutil.rmtree, capdir, ignore_errors=True)
+        old = os.environ.get("ARC_CAPTAIN_DIR")
+        os.environ["ARC_CAPTAIN_DIR"] = str(capdir)
+
+        def _restore():
+            if old is None:
+                os.environ.pop("ARC_CAPTAIN_DIR", None)
+            else:
+                os.environ["ARC_CAPTAIN_DIR"] = old
+        self.addCleanup(_restore)
+        (capdir / "captain-pick.jsonl").write_text(
+            json.dumps({"role": "user", "ts": 1, "text": "hi"}) + "\n",
+            encoding="utf-8")
+        picked = "GPT-6-Sol"
+        self.assertNotEqual(picked, config.CAPTAIN_MODEL)
+        self.assertNotEqual(picked, config.PLANNER_MODEL)
+        asked = {}
+
+        class _Stub:
+            def __init__(self, role, bench=False, interactive=False):
+                assert role == "planner" and interactive
+
+            async def run(self, prompt, *args, **kwargs):
+                asked["prompt"] = prompt
+                return DriverResult(harness="reasonix", model=picked,
+                                    role="planner", exit_code=0, text="ok")
+
+        def factory(model=None):
+            asked["model"] = model
+            return _Stub("planner", interactive=True)
+
+        with mock.patch.object(captain, "_captain_driver", factory), \
+                mock.patch.object(captain, "fleet_state", return_value={
+                    "planner_model": config.PLANNER_MODEL, "capacity": {},
+                    "task_status_counts": {}, "needs_attention": [],
+                    "recent_events": []}):
+            code = asyncio.run(captain.run_turn(
+                "captain-pick", str(repo), picked))
+        self.assertEqual(code, 0)
+        self.assertEqual(asked["model"], picked)
+        self.assertIn(f"running on {picked}", asked["prompt"])
+        self.assertNotIn(f"running on {config.CAPTAIN_MODEL}", asked["prompt"])
+        self.assertNotIn(f"running on {config.PLANNER_MODEL}", asked["prompt"])
 
 
 if __name__ == "__main__":

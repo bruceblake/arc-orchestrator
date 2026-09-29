@@ -23,6 +23,15 @@ let CAP_RUNNING = false;
 let CAP_POLL = null;
 let CAP_STATE = null;
 let CAP_THINKING = null;   // {pending, blocks} from the running turn's transcript
+let CAP_MODEL = "";        // planner the operator picked for the next turn
+
+// GET /api/chat/models fills the picker (same route, same saved choice as the
+// chat panel and the phone page: localStorage "arc-talk-model").
+async function capLoadModels() {
+  let data = null;
+  try { data = await jget("/api/chat/models"); } catch (e) { data = null; }
+  CAP_MODEL = talkFillModels($("#k-model"), data);
+}
 
 // Captain sessions are `captain-<repo slug>` so they share the chat panel's
 // session id rules (^[a-z0-9][a-z0-9-]{0,39}$) but never collide with a
@@ -36,7 +45,7 @@ function capSetSend(busy) {
   const s = $("#k-send");
   if (!s) return;
   s.disabled = !!busy;
-  s.textContent = busy ? "…" : "send";
+  s.textContent = busy ? "…" : "Send";
 }
 
 function capSetSession(id) {
@@ -44,7 +53,12 @@ function capSetSession(id) {
   const head = $("#k-session");
   if (head) head.textContent = CAP_SESSION;
   const sel = $("#k-sessions");
-  if (sel && CAP_SESSION) sel.value = CAP_SESSION;
+  if (sel && CAP_SESSION) {
+    if (!Array.from(sel.options || []).some(o => o.value === CAP_SESSION)) {
+      sel.innerHTML = `<option value="${attr(CAP_SESSION)}">${esc(CAP_SESSION)} (${CAP_TURNS.length})</option>` + (sel.innerHTML || "");
+    }
+    sel.value = CAP_SESSION;
+  }
 }
 
 async function capStartSession(id) {
@@ -212,7 +226,12 @@ function capActionsHTML(actions) {
 function capTurnHTML(turn) {
   const who = turn.role === "user" ? "user" : "assistant";
   const parts = [];
-  if (turn.text) parts.push(`<div class="chat-bubble">${esc(turn.text)}</div>`);
+  // The model that actually answered, in small type on the assistant bubble.
+  const name = (who === "assistant" && turn.model)
+    ? `<span class="chat-model-name">${esc(turn.model)}</span>` : "";
+  if (turn.text || name) {
+    parts.push(`<div class="chat-bubble">${name}${turn.text ? esc(turn.text) : ""}</div>`);
+  }
   if (turn.actions && turn.actions.length) parts.push(capActionsHTML(turn.actions));
   if (turn.error) parts.push(`<div class="chat-err">${esc(turn.error)}</div>`);
   const ts = turn.ts ? `<span class="chat-ts">${AGO(turn.ts)}</span>` : "";
@@ -259,7 +278,7 @@ function capRender() {
 }
 
 function capEmptyState() {
-  return `<div class="chat-empty">Captain online. Ask it what the fleet is doing, tell it what to build, or ask it to keep the project on track — it reads live state and can plan, run, and resume work without you touching the CLI.</div>`;
+  return `<div class="chat-empty">Send a message to start.</div>`;
 }
 
 async function capPoll() {
@@ -291,8 +310,11 @@ async function capSend() {
   if (!input) return;
   const text = input.value;
   if (!text.trim() || CAP_RUNNING) return;
+  const modelSel = $("#k-model");
+  const m = (modelSel && modelSel.value) || CAP_MODEL;
   const { code, body: resp } = await jpost("/api/captain/start",
-    { session: CAP_SESSION, repo: CAP_REPO, message: text });
+    { session: CAP_SESSION, repo: CAP_REPO, message: text,
+      model: m || undefined });
   if (code === 200) {
     input.value = "";
     CAP_RUNNING = true;
@@ -332,10 +354,11 @@ function stopCapPoll() { if (CAP_POLL) { clearInterval(CAP_POLL); CAP_POLL = nul
 
 // ---- open / close ----
 async function capOpen() {
-  const modal = $("#capmodal");
-  if (modal) modal.classList.add("open");
+  if (typeof talkShow === "function") talkShow("captain");
+  else { const modal = $("#capmodal"); if (modal) modal.classList.add("open"); }
   const msg = $("#k-msg");
   if (msg) { msg.className = ""; msg.textContent = ""; }
+  await capLoadModels();
   await chatLoadRepos();
   CAP_REPO = CHAT_REPO;
   const sel = $("#k-repo");
@@ -343,15 +366,15 @@ async function capOpen() {
     sel.innerHTML = CHAT_REPOS.map(r => `<option value="${attr(r.path)}">${esc(r.name)}</option>`).join("");
     sel.value = CAP_REPO;
   }
+  capSetSession(capSessionFor(CAP_REPO));
   await capLoadState();
-  await capStartSession(capSessionFor(CAP_REPO));
+  await capStartSession(CAP_SESSION);
   startCapPoll();
 }
 
 function capClose() {
   const modal = $("#capmodal");
-  if (modal) modal.classList.remove("open");
-  stopCapPoll();
+  if (modal) { modal.classList.remove("open"); modal.classList.add("live"); }
 }
 
 // ---- wire up ----
@@ -359,10 +382,18 @@ function capClose() {
   const modal = $("#capmodal");
   const btn = $("#btn-captain");
   if (btn) btn.onclick = capOpen;
+  const side = $("#talk-captain");
+  if (side) side.onclick = capOpen;
+  if (modal && modal.classList.contains("live")) capOpen();
   const close = $("#k-close");
   if (close) close.onclick = capClose;
   const send = $("#k-send");
   if (send) send.onclick = capSend;
+  const model = $("#k-model");
+  if (model) model.onchange = () => {
+    CAP_MODEL = model.value;   // applies to the next turn sent
+    talkSaveModel(CAP_MODEL);
+  };
   const repo = $("#k-repo");
   if (repo) repo.onchange = () => {
     CAP_REPO = repo.value;
