@@ -86,7 +86,19 @@ class LoadTaskfile(unittest.TestCase):
         for model in config.IMPLEMENTER_MODELS:
             fam = config.MODEL_FAMILY[model]
             rev = config.cross_family_reviewer(model)
-            self.assertIsNotNone(rev, f"{model} has no cross-family reviewer")
+            if rev is None:
+                # GLM-5.3 became implement-only on 2026-09-28, so a profile
+                # whose only other family was GLM has ONE review family left:
+                # a model in it genuinely cannot have a cross-family reviewer
+                # and `cross_family_reviewer` says so instead of quietly
+                # self-reviewing. That is the local two-model profile; the
+                # studio roster still fields five review families, so there
+                # the assertion below is enforced as before.
+                self.assertEqual(len(config.REVIEW_FAMILIES), 1,
+                                 f"{model} lost its cross-family reviewer while "
+                                 f"{sorted(config.REVIEW_FAMILIES)} remain")
+                self.assertIn(fam, config.REVIEW_FAMILIES)
+                continue
             self.assertNotEqual(rev, fam, f"{model} would self-review")
             self.assertIn(rev, config.REVIEW_FAMILIES)
             # And the loader accepts the pairing it implies.
@@ -150,6 +162,63 @@ class LoadTaskfile(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             code_tasks.load_taskfile(taskfile([bad]))
         self.assertIn("unknown dep", str(cm.exception))
+
+    def test_a_reviewer_is_never_the_implementers_own_family(self):
+        """REGRESSION: `_reviewer_for` used to fall back to `current`.
+
+        A GLM task carries reviewer `"deepseek"`. Escalating it onto DeepSeek —
+        which the `escalate` node and the dashboard's manual escalation both do
+        — makes `cross_family_reviewer` return None on the local profile, so
+        `or current` handed back `"deepseek"` and `_select_reviewer` returned
+        DeepSeek with reason `planned`: a SAME-FAMILY pre-merge review, which
+        Rule 2 forbids and which the loader would have rejected. Neither path
+        re-enters the loader, so this is where it has to fail closed. The same
+        fallback fired after a yield onto DeepSeek, because `wrote_the_code` is
+        the substitute.
+        """
+        t = {"reviewer": "deepseek"}
+        checked = 0
+        for model in config.IMPLEMENTER_MODELS:
+            if (config.MODEL_FAMILY[model] != "deepseek"
+                    or config.cross_family_reviewer(model)):
+                continue
+            checked += 1
+            with self.assertRaises(ValueError) as cm:
+                code_tasks._reviewer_for(t, model)
+            self.assertIn("no cross-family reviewer", str(cm.exception))
+            # The bookkeeping variant returns None so a row can still be
+            # written, instead of a dead task dying a second time.
+            self.assertIsNone(code_tasks._reviewer_or_none(t, model))
+        if not checked:
+            self.skipTest("every implementer on this profile has a reviewer")
+
+    def test_a_reviewer_token_of_glm_remaps_off_glm(self):
+        """The spec's remap path, asserted on a GLM-5.3 task.
+
+        GLM-5.3 implements only since 2026-09-28, so `"glm"` is no longer in
+        `config.REVIEW_FAMILIES` and a taskfile that still names it must be
+        remapped like any other dead token — NOT special-cased back in, and
+        not left as `"glm"` for `_select_reviewer` to trip over. The remapped
+        family is cross-family for the implementer, so the same taskfile still
+        loads. Deleting the remap fails here.
+        """
+        self.assertNotIn("glm", config.REVIEW_FAMILIES)
+        t = {**BASIC, "model": "GLM-5.3", "reviewer": "glm"}
+        loaded = code_tasks.load_taskfile(taskfile([t]))
+        rev = loaded["tasks"]["t1"]["reviewer"]
+        self.assertNotEqual(rev, "glm")
+        self.assertIn(rev, config.REVIEW_FAMILIES)
+        self.assertNotEqual(rev, config.MODEL_FAMILY["GLM-5.3"])
+
+    def test_the_avoid_family_is_a_family_token_not_a_model_name(self):
+        """`driver._swap_candidates` compares `avoid_families` against
+        `MODEL_FAMILY.get(candidate)`, so the set must hold FAMILY TOKENS.
+        `_reviewer_for` already returns one; resolving it through `MODEL_FAMILY`
+        a second time yields None (that dict is keyed by MODEL name) and
+        silently drops the Rule 2 constraint from every implementer swap."""
+        t = {"reviewer": "deepseek"}
+        self.assertEqual(code_tasks._reviewer_family(t, "GLM-5.3"), {"deepseek"})
+        self.assertLessEqual({"deepseek"}, set(config.REVIEW_FAMILIES))
 
     def test_rejects_dependency_cycle(self):
         a = {**BASIC, "id": "a", "deps": ["b"]}
@@ -375,9 +444,17 @@ class ResumePlanning(unittest.TestCase):
     def test_capability_failure_escalates_one_tier(self):
         p = self.plan([{"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
                         "error": "exhausted fix rounds"}])
-        self.assertEqual(p["escalated_on_resume"],
-                         {"t1": config.ESCALATION_PATH[1]},
-                         "a capability failure at the entry tier moves up one")
+        # The higher tier must also be a seat whose work can be REVIEWED;
+        # GLM-5.3 became implement-only on 2026-09-28, so the local profile's
+        # only review family is a DeepSeek task's own family and the resume
+        # stays put (the task then ends as "exhausted escalation"). Studio,
+        # with five review families, moves up one tier as before.
+        nxt = config.ESCALATION_PATH[1]
+        self.assertEqual(
+            p["escalated_on_resume"],
+            {"t1": nxt} if config.cross_family_reviewer(nxt) else {},
+            "a capability failure at the entry tier moves up one when a "
+            "cross-family reviewer exists for the higher tier")
 
     def test_killed_run_resumes_at_the_same_tier(self):
         """The regression that put four tasks on one scarce tier at once."""
@@ -1454,8 +1531,13 @@ class OffPathModelsCanStillEscalate(unittest.TestCase):
         the live example; it is retired, so _next_tier is checked directly."""
         self.assertEqual(code_tasks._next_tier("some-off-path-model"),
                          config.ESCALATION_PATH[0])
-        self.assertEqual(code_tasks._next_tier(config.ESCALATION_PATH[0]),
-                         config.ESCALATION_PATH[1])
+        # Escalation also skips a seat whose work cannot be REVIEWED, so on
+        # the local one-review-family profile there is no higher destination
+        # and the task ends as "exhausted escalation" instead of dying on a
+        # reviewer that cannot be named. Studio escalates to it as before.
+        nxt = config.ESCALATION_PATH[1]
+        want = nxt if config.cross_family_reviewer(nxt) else None
+        self.assertEqual(code_tasks._next_tier(config.ESCALATION_PATH[0]), want)
         self.assertIsNone(code_tasks._next_tier(config.ESCALATION_PATH[-1]))
 
     def test_the_top_tier_still_does_not_escalate(self):
@@ -2441,6 +2523,13 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
         """
         with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
             wanted = min(config.PR_REVIEWERS, len(config.REVIEW_FAMILIES) - 1)
+            if wanted < 1:
+                # One review family left (the local profile since GLM-5.3
+                # became implement-only on 2026-09-28): no family can field a
+                # CROSS-family reviewer there. The studio roster fields five,
+                # and the rule below is enforced on it.
+                self.assertEqual(len(config.REVIEW_FAMILIES), 1)
+                return
             for fam in sorted(config.REVIEW_FAMILIES):
                 with self.subTest(family=fam):
                     self.assertGreaterEqual(
@@ -2576,14 +2665,16 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
     def test_idle_arc_reviewers_prefer_deepseek_for_a_third_family(self):
         ds = "DeepSeek-V4.1-Flash-thinking-max"
         glm = "GLM-5.3"
-        # A third-family implementer leaves both ARC families eligible.
+        # A third-family implementer leaves the cross-family seats eligible.
+        # GLM-5.3 is NOT one of them (implement-only since 2026-09-28), even
+        # when a bench-style ESCALATION_PATH still names it: the pool is built
+        # by constructing drivers, never from a second list.
         with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False), \
              mock.patch.object(config, "ESCALATION_PATH", [ds, glm]):
             pool = code_tasks._eligible_pr_reviewers("openai", None)
         self.assertEqual(sorted(pool, key=lambda m: code_tasks._reviewer_rank(m, {})),
-                         [ds, glm])
-        self.assertEqual(sorted(pool, key=lambda m: code_tasks._reviewer_rank(
-            m, {ds: config.driver_limit(ds)}))[0], glm)
+                         [ds])
+        self.assertNotIn(glm, pool)
 
     def _stand_in(self, patch_driver=True):
         """An idle hard-tier reviewer on its own harness.
@@ -2624,17 +2715,72 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
             self.addCleanup(p.stop)
         return alt
 
-    def test_a_saturated_planned_reviewer_yields_to_an_idle_stronger_one(self):
+    def _weak_planned(self):
+        """A medium-tier review-capable stand-in, plus a token that names it.
+
+        Several tests below are about *capacity*: a saturated planned reviewer
+        must yield upward, never downward, and must be kept when nothing
+        stronger is free. They used the "glm" family token for the weaker
+        planned seat — GLM-5.3 was the medium reviewer until 2026-09-28, when
+        it became implement-only. The rule did not change, so the stand-in
+        moves to the medium slot instead of putting GLM back on review.
+        """
+        alt, med = "Idle-Weak", config.TIER_ORDER[0]
+        real_dl, real_hl = config.driver_limit, config.harness_limit
+        patches = [
+            mock.patch.dict(config.MODEL_ROLES,
+                            {alt: {"reviewer", "pr_reviewer"}}),
+            mock.patch.dict(config.MODEL_FAMILY, {alt: "standin-weak"}),
+            mock.patch.dict(config.MODEL_TIER, {alt: med}),
+            mock.patch.dict(config.MODEL_HARNESS, {alt: "standin-wh"}),
+            mock.patch.dict(config.REVIEW_FAMILIES, {"standin-weak": alt}),
+            mock.patch.object(
+                config, "driver_limit",
+                lambda m, interactive=False: 8 if m == alt
+                else real_dl(m, interactive)),
+            mock.patch.object(
+                config, "harness_limit",
+                lambda h: 8 if h == "standin-wh" else real_hl(h)),
+        ]
+        real = code_tasks._driver
+
+        def _drv(m, role, pol):
+            if m == alt:
+                return mock.Mock(model=m, harness="standin-wh", images=None)
+            return real(m, role, pol)
+
+        patches.append(mock.patch.object(code_tasks, "_driver", _drv))
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return alt, "standin-weak"
+
+    def test_a_stale_reviewer_token_falls_back_instead_of_crashing(self):
+        """A taskfile still naming "glm" as its reviewer must RUN, not die.
+
+        The token can no longer resolve to a driver (implement-only since
+        2026-09-28), and `_select_reviewer` used to raise KeyError on its cap
+        lookup. The token stays on the taskfile; the review moves to a live
+        cross-family seat.
+        """
         self._stand_in()
-        # The planned reviewer is the WEAKER live family, so room exists above
-        # it: the operator directive of 2026-09-25 made DeepSeek hard and
-        # GLM-5.3 medium, so "stronger than the plan" only exists above a
-        # medium plan. With the roles the other way round the planned reviewer
-        # IS the top tier and there is nothing stronger to yield to.
-        planned = config.REVIEW_FAMILIES["glm"]
+        model, reason = code_tasks._select_reviewer(
+            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, {})
+        self.assertEqual(model, "Idle-Strong")
+        self.assertEqual(reason, "planned_full_fallback")
+        self.assertNotEqual(config.MODEL_FAMILY.get(model), "deepseek")
+
+    def test_a_saturated_planned_reviewer_yields_to_an_idle_stronger_one(self):
+        _weak, tok = self._weak_planned()
+        self._stand_in()
+        # The planned reviewer is the WEAKER live tier, so room exists above
+        # it: "stronger than the plan" only exists above a medium plan. With
+        # the roles the other way round the planned reviewer IS the top tier
+        # and there is nothing stronger to yield to.
+        planned = config.REVIEW_FAMILIES[tok]
         impl = "DeepSeek-V4.1-Flash-thinking-max"
         usage = self._full(planned)
-        model, reason = code_tasks._select_reviewer("glm", impl, None, usage)
+        model, reason = code_tasks._select_reviewer(tok, impl, None, usage)
         self.assertEqual(reason, "planned_full_fallback")
         self.assertGreater(code_tasks._tier_rank(model),
                            code_tasks._tier_rank(planned))
@@ -2643,41 +2789,48 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         self.assertLess(code_tasks._reviewer_pressure(model, usage), 1.0)
 
     def test_a_full_harness_counts_as_no_headroom(self):
+        _weak, tok = self._weak_planned()
         self._stand_in()
-        planned = config.REVIEW_FAMILIES["glm"]
-        usage = {"harness:opencode": config.harness_limit("opencode")}
+        planned = config.REVIEW_FAMILIES[tok]
+        usage = {"harness:standin-wh": config.harness_limit("standin-wh")}
         model, reason = code_tasks._select_reviewer(
-            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+            tok, "DeepSeek-V4.1-Flash-thinking-max", None, usage)
         self.assertEqual(reason, "planned_full_fallback")
         self.assertNotEqual(model, planned)
         self.assertGreaterEqual(code_tasks._tier_rank(model),
                                 code_tasks._tier_rank(planned))
-        self.assertNotEqual(config.MODEL_HARNESS[model], "opencode")
+        self.assertNotEqual(config.MODEL_HARNESS[model], "standin-wh")
 
     def test_when_every_eligible_reviewer_is_full_the_planned_one_is_kept(self):
-        planned = config.REVIEW_FAMILIES["glm"]
+        _weak, tok = self._weak_planned()
+        planned = config.REVIEW_FAMILIES[tok]
         usage = self._full(*config.REVIEW_FAMILIES.values())
         model, reason = code_tasks._select_reviewer(
-            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+            tok, "DeepSeek-V4.1-Flash-thinking-max", None, usage)
         self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
 
     def test_an_idle_same_family_model_is_never_the_fallback(self):
+        _weak, tok = self._weak_planned()
+        # No other cross-family seat free: the planned reviewer is kept, so
+        # the only thing being checked is that it is not the implementer's
+        # own family (Claude's).
         impl = "Claude-Opus-5.5"
-        planned = config.REVIEW_FAMILIES["glm"]
+        planned = config.REVIEW_FAMILIES[tok]
         others = [m for fam, m in config.REVIEW_FAMILIES.items()
                   if fam != "anthropic"]
         model, reason = code_tasks._select_reviewer(
-            "glm", impl, None, self._full(*others))
+            tok, impl, None, self._full(*others))
         self.assertEqual(model, planned)
         self.assertNotEqual(config.MODEL_FAMILY.get(model), "anthropic")
         self.assertEqual(reason, "planned_full_no_alternative")
 
     def test_an_idle_weaker_reviewer_is_not_chosen(self):
-        # 2026-09-25: the planned reviewer is the TOP tier (deepseek, hard) and
-        # the idle family is the weaker one (glm, medium). A weaker reviewer
-        # never takes over however idle it is.
+        # The planned reviewer is the TOP tier (deepseek, hard) and the idle
+        # seat is a weaker one. A weaker reviewer never takes over however
+        # idle it is.
+        _weak, tok = self._weak_planned()
         planned = config.REVIEW_FAMILIES["deepseek"]
-        weaker = config.REVIEW_FAMILIES["glm"]
+        weaker = config.REVIEW_FAMILIES[tok]
         busy = [m for m in config.REVIEW_FAMILIES.values() if m != weaker]
         model, reason = code_tasks._select_reviewer(
             "deepseek", "Claude-Opus-5.5", None, self._full(*busy))
@@ -2728,7 +2881,8 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         for p in patches:
             p.start()
             self.addCleanup(p.stop)
-        planned = config.REVIEW_FAMILIES["glm"]
+        _weak, tok = self._weak_planned()
+        planned = config.REVIEW_FAMILIES[tok]
         usage = self._full(planned)
         for m in config.MODEL_ROLES:
             if m in ("Cursor-X", "Claude-X"):
@@ -2739,17 +2893,18 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         usage["Claude-X"] = 0
         usage["usage_limit:agy"] = 1
         model, reason = code_tasks._select_reviewer(
-            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+            tok, "DeepSeek-V4.1-Flash-thinking-max", None, usage)
         self.assertEqual(reason, "planned_full_fallback")
         self.assertEqual(model, "Claude-X")
         self.assertNotEqual(config.MODEL_FAMILY[model], "deepseek")
 
     def test_a_crashed_fallback_reviewer_is_recorded_and_is_not_a_rejection(self):
-        # The plan is the MEDIUM family's reviewer (glm, since 2026-09-25), so
-        # a stronger cross-family seat exists to fall back to; the implementer
-        # is DeepSeek, whose family the fallback must stay out of.
+        # The plan is a MEDIUM-tier reviewer, so a stronger cross-family seat
+        # exists to fall back to; the implementer is DeepSeek, whose family the
+        # fallback must stay out of.
+        _weak, tok = self._weak_planned()
         self._stand_in(patch_driver=False)
-        planned = config.REVIEW_FAMILIES["glm"]
+        planned = config.REVIEW_FAMILIES[tok]
         store = FakeStore()
         store.lease_usage = lambda: self._full(planned)
         seen = {}
@@ -2765,7 +2920,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
 
         ts = code_tasks.load_taskfile(taskfile([{
             "id": "t1", "title": "T1", "prompt": "do it", "verify_cmd": "true",
-            "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm"}]))
+            "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": tok}]))
         orig = code_tasks._driver
         code_tasks._driver = lambda model, role, pol: _Boom(model)
         wt = tempfile.mkdtemp(prefix="arc-rev-fallback-")
@@ -2804,7 +2959,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         selected = ev.first("task.reviewer_selected")
         self.assertEqual(selected["reason"], "planned_full_fallback")
         self.assertEqual(selected["model"], out["reviewer_model"])
-        self.assertEqual(selected["planned_token"], "glm")
+        self.assertEqual(selected["planned_token"], tok)
 
 
 class AReviewerThatCrashedDidNotReview(unittest.TestCase):
@@ -3579,6 +3734,18 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
                 target = code_tasks.RETIRED_MODELS[old]()
                 self.assertIn(target, config.IMPLEMENT_TIERS["hard"])
                 same_family = config.MODEL_FAMILY[target]
+                if len(config.REVIEW_FAMILIES) < 2:
+                    # The remap lands on deepseek, and "deepseek" as the
+                    # reviewer then means the SAME family. With one review
+                    # family left on the profile (local, since GLM-5.3 became
+                    # implement-only on 2026-09-28) there is no cross-family
+                    # reviewer to flip to, and the loader refuses rather than
+                    # self-review — which is the correct outcome. The FLIP is
+                    # what this test is about, so it needs a roster that has
+                    # two: the studio profile runs it with five.
+                    self.skipTest(
+                        "one review family left on this profile; a flip needs "
+                        "another family to flip to")
                 with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
                     ts = code_tasks.load_taskfile(taskfile([
                         {**BASIC, "model": old, "reviewer": same_family}]))
@@ -3908,7 +4075,13 @@ class DossierWiring(unittest.TestCase):
     def test_crash_paths_record_the_attempt(self):
         body = self._slice("async def implement(ctx):", "async def gate(ctx):")
         self.assertIn('outcome="crashed"', body)
-        self.assertIn('outcome="usage_swap"', body)
+        # Two ways an attempt lands on a different model, and both must be
+        # recorded: a spent plan window (usage_swap) and the GLM yield
+        # (glm_yield — nothing was spent, so calling it a usage swap was the
+        # false report the issue comment carried too).
+        self.assertIn('outcome = "usage_swap"', body)
+        self.assertIn('outcome = "glm_yield"', body)
+        self.assertIn('getattr(res, "swap_reason", None) == "alone"', body)
         body = self._slice("async def review(ctx):", "async def escalate(ctx):")
         self.assertIn('outcome="crashed"', body)
         body = self._slice("async def escalate(ctx):", "async def publish(ctx):")
@@ -4473,6 +4646,14 @@ print(text)
             text = code_tasks._routing_tiers_prose()
         self.assertNotIn("The hardest tasks prefer", text)
         self.assertIn("GLM-5.3", text)
+        # The implement-only ruling must be IN the prompt, not just the model
+        # name: the medium-tier line above already mentions GLM-5.3, so a bare
+        # name check would pass with the ruling deleted.
+        self.assertIn("GLM-5.3 IMPLEMENTS AND DOES NOT REVIEW", text)
+        self.assertIn("Never give it the `reviewer` role", text)
+        self.assertIn("never plan it as the only task in a graph", text)
+        self.assertIn("Name GLM-5.3 ONLY for an ADDITIONAL task", text)
+        self.assertNotIn("glm", config.REVIEW_FAMILIES)
         self.assertIn("DeepSeek-V4.1-Flash-thinking-max", text)
         self.assertNotIn("Cursor-Grok-4.7", text)
         self.assertNotIn("Antigravity-Gemini", text)
@@ -4484,9 +4665,14 @@ print(text)
 
     def test_local_planning_stays_on_deepseek_and_the_planned_reviewer(self):
         self.assertEqual(drivers.planning_model(), config.PLANNER_MODEL)
-        model, reason = code_tasks._select_reviewer(
-            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, {})
-        self.assertEqual((model, reason), (config.REVIEW_FAMILIES["glm"], "planned"))
+        # A live reviewer token stays the deterministic plan when its seat is
+        # free. ("glm" can no longer be that token: GLM-5.3 is implement-only
+        # since 2026-09-28, so the local profile's only review family is
+        # deepseek. Naming it with a GLM implementer keeps this a genuine
+        # cross-family pairing.)
+        tok = next(iter(config.REVIEW_FAMILIES))
+        model, reason = code_tasks._select_reviewer(tok, "GLM-5.3", None, {})
+        self.assertEqual((model, reason), (config.REVIEW_FAMILIES[tok], "planned"))
 
     def test_studio_planning_uses_gpt_when_claude_is_closed(self):
         script = """
@@ -4655,8 +4841,15 @@ class EscalationSkipsSpentPlanWindows(unittest.TestCase):
         with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
             self.assertEqual(code_tasks._next_tier_m("some-off-path-model"),
                              config.ESCALATION_PATH[0])
+            # The next tier up must also be one whose work can be REVIEWED:
+            # the local profile has ONE review family since GLM-5.3 became
+            # implement-only, so escalating onto DeepSeek is skipped and there
+            # is nowhere higher to go. A multi-family profile (studio) escalates
+            # to it as before.
+            nxt = config.ESCALATION_PATH[1]
+            want = nxt if config.cross_family_reviewer(nxt) else None
             self.assertEqual(code_tasks._next_tier_m(config.ESCALATION_PATH[0]),
-                             config.ESCALATION_PATH[1])
+                             want)
             self.assertIsNone(code_tasks._next_tier_m(config.ESCALATION_PATH[-1]))
 
     def test_a_blocked_next_harness_skips_to_the_following_model(self):

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from helpers import capture_events  # noqa: F401  (sys.path)
 from helpers import ENTRY, STRONGEST  # noqa: E402,F401
-from helpers import STRONGEST_FAMILY, STRONGEST_REVIEWER  # noqa: E402,F401
+from helpers import STRONGEST_FAMILY, second_review_family  # noqa: E402,F401
 from helpers import PRICE_PAIR, needs_two_rates  # noqa: E402,F401
 
 import config
@@ -355,6 +355,57 @@ class AtomicTaskfileWrite(unittest.TestCase):
                 f, {"project": {"repo": "/tmp", "title": "new", "tasks": []}})
             self.assertEqual(json.loads(f.read_text())["project"]["title"], "new")
             self.assertGreater(f.stat().st_size, 0)
+
+
+class ProjectCreateRefusesAnUnreviewableImplementer(unittest.TestCase):
+    """Creating a task must not write a reviewer the loader would reject.
+
+    The default reviewer used to be
+    `cross_family_reviewer(model) or next(iter(REVIEW_FAMILIES), "glm")`. On
+    the local profile DeepSeek has no cross-family reviewer (GLM-5.3 became
+    implement-only on 2026-09-28 and local has one review family), so the
+    fallback wrote `reviewer: "deepseek"` on a DeepSeek task — the
+    implementer's OWN family, which Rule 2 forbids — and returned 200 for a
+    taskfile that fails validation. GLM-5.3's default (deepseek) still
+    resolves and must keep working.
+    """
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._tasks = config.TASKS_DIR
+        config.TASKS_DIR = self.dir
+        self.addCleanup(setattr, config, "TASKS_DIR", self._tasks)
+
+    def _create(self, model):
+        return dashboard._create_project({
+            "repo": os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "title": f"probe-{abs(hash(model)) % 10**6}",
+            "tasks": [{"id": "t1", "title": "T", "prompt": "p", "model": model}]})
+
+    def test_a_glm_task_still_defaults_to_a_cross_family_reviewer(self):
+        rev = config.cross_family_reviewer("GLM-5.3")
+        out, code = self._create("GLM-5.3")
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["n_tasks"], 1)
+        doc = json.loads((Path(self.dir) / out["file"]).read_text())
+        written = doc["project"]["tasks"][0]["reviewer"]
+        self.assertEqual(written, rev)
+        self.assertNotEqual(written, config.MODEL_FAMILY["GLM-5.3"])
+
+    def test_an_unreviewable_implementer_is_refused_with_the_real_reason(self):
+        if config.cross_family_reviewer(config.ESCALATION_PATH[-1]) is not None:
+            self.skipTest("this profile fields a reviewer for the top tier")
+        with self.assertRaises(ValueError) as cm:
+            code_tasks._reviewer_for({}, config.ESCALATION_PATH[-1])
+        out, code = self._create(config.ESCALATION_PATH[-1])
+        self.assertEqual(code, 400)
+        # The refusal carries `_reviewer_for`'s own message, so the dashboard
+        # and the loader cannot disagree about what is wrong.
+        self.assertEqual(out["error"], str(cm.exception)[:300])
+        self.assertIn("no cross-family reviewer", out["error"])
+        # And nothing was written: no half-created taskfile for a later run.
+        self.assertEqual(list(Path(self.dir).iterdir()), [])
 
 
 class ProjectPhase(unittest.TestCase):
@@ -1171,14 +1222,23 @@ class ManualEscalation(unittest.TestCase):
         self._tasks = config.TASKS_DIR
         config.TASKS_DIR = self.dir
         self.addCleanup(setattr, config, "TASKS_DIR", self._tasks)
+        # Manual escalation pairs the new implementer with a cross-family
+        # reviewer. GLM-5.3 became implement-only on 2026-09-28, so the LOCAL
+        # roster has ONE review family and STRONGEST (deepseek) no longer has a
+        # cross-family reviewer. These tests are about the escalation path, not
+        # the roster's size, so they run with a second review family patched in
+        # — which is what the studio profile has five of.
+        self._second = second_review_family()
+        self._second.__enter__()
+        self.addCleanup(self._second.__exit__, None, None, None)
         self.tf = Path(self.dir) / "p.json"
         self.tf.write_text(json.dumps({"project": {"repo": "/x", "title": "p", "tasks": [
             {"id": "t1", "title": "T", "prompt": "p", "model": config.ESCALATION_PATH[0],
-             "reviewer": STRONGEST_REVIEWER, "verify_cmd": "", "files_hint": [], "deps": []}]}}))
+             "reviewer": "deepseek", "verify_cmd": "", "files_hint": [], "deps": []}]}}))
         self._store = dashboard.Handler.store
         dashboard.Handler.store = _store.Store(":memory:")
         dashboard.Handler.store.upsert_code_task(str(self.tf), "t1", "T", config.ESCALATION_PATH[0],
-                                                 STRONGEST_REVIEWER, "running")
+                                                 "deepseek", "running")
         self.addCleanup(setattr, dashboard.Handler, "store", self._store)
         import reconcile
         self._live = reconcile.live_runs
@@ -1205,11 +1265,12 @@ class ManualEscalation(unittest.TestCase):
 
     def test_the_reviewer_follows_the_implementer_across_families(self):
         # The strongest model's work must be reviewed by another family, never
-        # by itself — kimi->glm today, glm->deepseek after Kimi leaves.
+        # by itself. The second review family is patched in by setUp (GLM-5.3,
+        # once the token that landed here, is implement-only since 2026-09-28).
         out, _ = dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": STRONGEST})
-        self.assertEqual(out["reviewer"], STRONGEST_REVIEWER)
+        self.assertEqual(out["reviewer"], "second")
         self.assertNotEqual(out["reviewer"], STRONGEST_FAMILY)
-        self.assertEqual(self._task()["reviewer"], STRONGEST_REVIEWER)
+        self.assertEqual(self._task()["reviewer"], "second")
 
     def test_it_refuses_to_move_down(self):
         dashboard._escalate_task({"file": "p.json", "task": "t1", "to_model": STRONGEST})
@@ -1240,6 +1301,75 @@ class ManualEscalation(unittest.TestCase):
             dashboard._escalate_task({"file": "p.json", "task": "t1"})
         esc = [f for t, f in ev.seen if t == "task.escalated"]
         self.assertTrue(esc and esc[0].get("manual"))
+
+
+class ManualEscalationWithoutASecondReviewFamily(unittest.TestCase):
+    """The local profile's REAL roster: one review family (deepseek).
+
+    `ManualEscalation` patches in a second review family so it can exercise
+    the pairing rule; this class deliberately does NOT, because the bug it
+    guards against only exists when there is no second family. On that roster
+    `_next_tier("GLM-5.3")` returns None — not because DeepSeek's window is
+    spent, but because `_next_tier_m` SKIPS a seat with no cross-family
+    reviewer. The dashboard used to report every such None as "later seats are
+    usage-blocked", sending the operator to look at plan windows while the
+    real cause was the reviewer pairing. The 409 must carry
+    `_reviewer_for`'s own reason, so the two cannot drift apart.
+    """
+
+    def setUp(self):
+        import store as _store
+        self.dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self._tasks = config.TASKS_DIR
+        config.TASKS_DIR = self.dir
+        self.addCleanup(setattr, config, "TASKS_DIR", self._tasks)
+        self.tf = Path(self.dir) / "p.json"
+        # The entry tier is GLM-5.3; on the local profile its only higher seat
+        # is DeepSeek, which no one can review here.
+        self.tf.write_text(json.dumps({"project": {"repo": "/x", "title": "p", "tasks": [
+            {"id": "t1", "title": "T", "prompt": "p", "model": "GLM-5.3",
+             "reviewer": "deepseek", "verify_cmd": "", "files_hint": [], "deps": []}]}}))
+        self._store = dashboard.Handler.store
+        dashboard.Handler.store = _store.Store(":memory:")
+        dashboard.Handler.store.upsert_code_task(str(self.tf), "t1", "T", "GLM-5.3",
+                                                 "deepseek", "running")
+        self.addCleanup(setattr, dashboard.Handler, "store", self._store)
+        import reconcile
+        self._live = reconcile.live_runs
+        reconcile.live_runs = lambda: []
+        self.addCleanup(setattr, reconcile, "live_runs", self._live)
+
+    def test_the_reason_is_the_missing_reviewer_not_a_spent_window(self):
+        if config.cross_family_reviewer("DeepSeek-V4.1-Flash-thinking-max") is not None:
+            self.skipTest("this profile fields a reviewer for the higher tier")
+        out, code = dashboard._escalate_task({"file": "p.json", "task": "t1"})
+        self.assertEqual(code, 409)
+        # The real cause: `_reviewer_for`'s own message, verbatim.
+        with self.assertRaises(ValueError) as cm:
+            code_tasks._reviewer_for({"reviewer": "deepseek"},
+                                     "DeepSeek-V4.1-Flash-thinking-max")
+        self.assertEqual(out["error"], str(cm.exception)[:300])
+        self.assertIn("no cross-family reviewer", out["error"])
+        self.assertNotIn("usage-blocked", out["error"])
+
+    def test_a_named_target_is_refused_when_it_has_no_reviewer(self):
+        target = "DeepSeek-V4.1-Flash-thinking-max"
+        rev = config.cross_family_reviewer(target)
+        out, code = dashboard._escalate_task(
+            {"file": "p.json", "task": "t1", "to_model": target})
+        if rev is None:
+            self.assertEqual(code, 409)
+            self.assertIn("no cross-family reviewer", out["error"])
+            return
+        # A profile that fields a reviewer for the target must still allow the
+        # move, with a reviewer that is not the implementer's own family. This
+        # branch keeps the test honest on studio, which reaches it whenever a
+        # subscription seat is available — asserting a local-only 409 there
+        # would pass or fail on ambient plan-window state.
+        self.assertEqual(code, 200, out)
+        self.assertEqual(out["reviewer"], rev)
+        self.assertNotEqual(rev, config.MODEL_FAMILY[target])
 
 
 class TheRunningGraphHonoursTheOverride(unittest.TestCase):

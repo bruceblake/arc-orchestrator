@@ -887,8 +887,9 @@ class FleetContextConfig(unittest.TestCase):
 
     def test_opencode_model_arg_keeps_the_real_model_key(self):
         # The serve path names the model with this string; a renamed key is
-        # rejected by ARC as "Model not found".
-        arg = drivers.OpencodeDriver("GLM-5.3", "reviewer").model_arg()
+        # rejected by ARC as "Model not found". Role "implementer": GLM-5.3
+        # holds no reviewer role since 2026-09-28 (see RoleEnforcement below).
+        arg = drivers.OpencodeDriver("GLM-5.3", "implementer").model_arg()
         self.assertIn("ARC/GLM-5.3", arg)
 
 
@@ -1022,6 +1023,35 @@ class ReviewingAnOpenPullRequest(unittest.TestCase):
             for role in ("pr_reviewer", "reviewer", "planner", "implementer"):
                 with self.assertRaises(ValueError):
                     drivers.OpencodeDriver(model, role)
+
+
+class GlmImplementsOnly(unittest.TestCase):
+    """GLM-5.3 holds no review role (operator decision 2026-09-28).
+
+    It is the fleet's slowest model and is kept as PARALLEL implementation
+    capacity, so it neither gate-reviews nor PR-reviews. Enforced by the same
+    roster lookup every other role uses — no second, hand-kept list of who may
+    review — which is why `driver_for` refuses it as well.
+    """
+
+    def test_the_implementer_role_still_constructs(self):
+        drv = drivers.OpencodeDriver("GLM-5.3", "implementer")
+        self.assertEqual((drv.model, drv.role), ("GLM-5.3", "implementer"))
+        self.assertEqual(drivers.driver_for("GLM-5.3", "implementer").role,
+                         "implementer")
+
+    def test_the_review_roles_are_refused(self):
+        for role in ("reviewer", "pr_reviewer"):
+            with self.subTest(role=role):
+                with self.assertRaises(ValueError):
+                    drivers.OpencodeDriver("GLM-5.3", role)
+                with self.assertRaises(ValueError):
+                    drivers.driver_for("GLM-5.3", role)
+
+    def test_the_refusal_names_the_model_and_its_allowed_roles(self):
+        with self.assertRaises(ValueError) as cm:
+            drivers.OpencodeDriver("GLM-5.3", "reviewer")
+        self.assertIn("GLM-5.3", str(cm.exception))
 
 
 class GitHubOpsRoles(unittest.TestCase):

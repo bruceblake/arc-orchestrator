@@ -108,7 +108,7 @@ task per slug, then rotate when a pool returns `FreeUsageLimitError`.
 
 Roster names are `Zen-<Slug>` (for example `Zen-Mimo-V2.6-Flash-Free`); the
 harness is `opencode` with provider alias `opencode/<slug>`. They implement
-only: pre-merge review and PR review stay on GLM-5.3 / DeepSeek / the studio
+only: pre-merge review and PR review stay on DeepSeek and the studio
 frontier models. On a spent subscription window, `ARC_USAGE_SWAP` tries Cursor,
 Antigravity, Claude, and Codex first, then any unblocked `Zen-*` implementer,
 then billed OpenRouter rows.
@@ -178,8 +178,12 @@ capability question is answered by the roster at call time.
 ### Review pairing
 
 `config.cross_family_reviewer` skips the implementer's family and prefers
-the unlimited ARC seats: `deepseek`, then `glm`. On the two-family local
-fleet this still pairs glm and deepseek in both directions. On the studio
+the unlimited ARC seats: `deepseek`, then the subscription review families.
+GLM-5.3 left the review pool on 2026-09-28 (implement-only), so on the
+two-family local
+fleet only an implementer whose family is not `deepseek` has a reviewer at
+all — GLM-5.3's work goes to DeepSeek, and a DeepSeek implementer has none;
+its task does not run locally. On the studio
 fleet, the other subscription families follow the ARC seats, with
 `anthropic` last so Claude's smaller plan stays available for planning,
 final escalation and hard reviews.

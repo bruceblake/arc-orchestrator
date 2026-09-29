@@ -1,5 +1,6 @@
 """Shared test scaffolding: import path, event capture, fake store."""
 import atexit
+import contextlib as _contextlib
 import logging
 import os
 import pathlib
@@ -7,6 +8,7 @@ import shutil
 import sys
 import tempfile
 from pathlib import Path
+from unittest import mock as _mock
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
@@ -157,6 +159,53 @@ MODEL_OF = {fam: m for m, fam in
             ((m, config.MODEL_FAMILY[m]) for m in config.IMPLEMENTER_MODELS)}
 FAMILIES_LIVE = sorted(MODEL_OF)
 DISTINCT_MODELS = [MODEL_OF[f] for f in FAMILIES_LIVE]   # one per family, no repeats
+# Since 2026-09-28 GLM-5.3 is implement-only, so on a profile whose only
+# families are glm and deepseek, work by the strongest model (deepseek) has NO
+# cross-family reviewer left: `cross_family_reviewer` returns None, honestly,
+# rather than putting GLM back on review. Fixtures that need "a valid
+# cross-family reviewer for STRONGEST" are testing a two-family roster fact
+# that the current roster no longer provides.
+HAS_CROSS_FAMILY_FOR_STRONGEST = config.cross_family_reviewer(STRONGEST) is not None
+needs_strongest_reviewer = _ut.skipUnless(
+    HAS_CROSS_FAMILY_FOR_STRONGEST,
+    f"no cross-family reviewer for {STRONGEST} on this profile")
+
+
+@_contextlib.contextmanager
+def second_review_family(model="Second-Family-Reviewer", family="second"):
+    """Patch a live second review family onto the roster for this block.
+
+    GLM-5.3 became implement-only on 2026-09-28, so the LOCAL profile has one
+    review family (deepseek) and a deepseek implementer has no cross-family
+    reviewer at all. Tests that exercise the *pairing rule* — a reviewer that
+    follows the implementer, an amendment that flips a now-same-family
+    reviewer, a plan whose implementer is the top tier — still describe real
+    behaviour and need a second family to describe it with, so they run
+    against this stand-in instead of skipping. The studio profile, which
+    fields five review families, is the live example the stand-in imitates.
+    """
+    real_dl = config.driver_limit
+    real_hl = config.harness_limit
+    with _contextlib.ExitStack() as st:
+        st.enter_context(_mock.patch.dict(
+            config.MODEL_ROLES, {model: {"reviewer", "pr_reviewer"}}))
+        st.enter_context(_mock.patch.dict(config.MODEL_FAMILY, {model: family}))
+        st.enter_context(_mock.patch.dict(
+            config.MODEL_TIER, {model: config.TIER_ORDER[-1]}))
+        st.enter_context(_mock.patch.dict(
+            config.MODEL_HARNESS, {model: "second-h"}))
+        st.enter_context(_mock.patch.dict(config.REVIEW_FAMILIES, {family: model}))
+        st.enter_context(_mock.patch.object(
+            config, "PR_REVIEW_FAMILIES",
+            set(config.PR_REVIEW_FAMILIES) | {family}))
+        st.enter_context(_mock.patch.object(
+            config, "driver_limit",
+            lambda m, interactive=False: 4 if m == model
+            else real_dl(m, interactive)))
+        st.enter_context(_mock.patch.object(
+            config, "harness_limit",
+            lambda h: 4 if h == "second-h" else real_hl(h)))
+        yield model
 
 # The model on the OTHER harness. Harness-pressure tests need "the one model
 # that does not contend for the opencode pool", which is a harness fact, not a

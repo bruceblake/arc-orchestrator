@@ -307,10 +307,26 @@ class SeatCaps(unittest.TestCase):
 
     def test_cross_family_reviewer_prefers_arc_and_skips_own_family(self):
         ds = "DeepSeek-V4.1-Flash-thinking-max"
+        # GLM-5.3 holds no reviewer role since 2026-09-28, so a GLM
+        # implementer's reviewer is deepseek (first in _REVIEW_SEAT_ORDER and
+        # not glm) while a deepseek implementer has NO reviewer left on this
+        # profile — None, honestly, not glm back on review.
         self.assertEqual(config.cross_family_reviewer("GLM-5.3"), "deepseek")
-        # Preferred family is deepseek; the implementer is deepseek, so glm.
-        self.assertEqual(config.cross_family_reviewer(ds), "glm")
-        self.assertNotEqual(config.cross_family_reviewer(ds), "deepseek")
+        self.assertIsNone(config.cross_family_reviewer(ds))
+
+    def test_glm_implements_only_and_never_reviews(self):
+        """Operator decision 2026-09-28: GLM-5.3 is implement-only.
+
+        The roster row is shared by both fleet profiles, so this holds on
+        either one; the roles tuple is the single source both REVIEW_FAMILIES
+        and the driver constructors read.
+        """
+        self.assertEqual(config.MODEL_ROLES["GLM-5.3"], {"implementer"})
+        self.assertNotIn("glm", config.REVIEW_FAMILIES)
+        self.assertNotIn("glm", config.PR_REVIEW_FAMILIES)
+        self.assertNotIn("glm", config._REVIEW_SEAT_ORDER)
+        # The four implementation slots stay: this is not a cap cut.
+        self.assertEqual(config.driver_limit("GLM-5.3", True), 4)
 
     def test_studio_seat_driver_caps_and_reviewer_order(self):
         import json
@@ -339,7 +355,9 @@ class SeatCaps(unittest.TestCase):
         ds = "DeepSeek-V4.1-Flash-thinking-max"
         for model, fam in data["review"].items():
             if model == ds:
-                self.assertEqual(fam, "glm")
+                # deepseek's own family is skipped, and GLM-5.3 left the
+                # review roster on 2026-09-28, so the next live seat reviews.
+                self.assertEqual(fam, "openai")
             else:
                 self.assertEqual(fam, "deepseek")
             self.assertNotEqual(fam, config.MODEL_FAMILY.get(model))

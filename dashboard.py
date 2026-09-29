@@ -3471,8 +3471,22 @@ def _create_project(body):
             # Cross-family, from the roster — the literal {Kimi: glm, GLM: kimi}
             # map this replaces would have defaulted every task to a retired
             # family the day after Kimi-K3 left (2026-09-12).
-            entry["reviewer"] = (config.cross_family_reviewer(entry["model"])
-                                 or next(iter(config.REVIEW_FAMILIES), "glm"))
+            rev = config.cross_family_reviewer(entry["model"])
+            if rev is None:
+                # REFUSE, rather than `or next(iter(REVIEW_FAMILIES), "glm")`.
+                # That fallback wrote the implementer's OWN family into the
+                # taskfile — on the local profile DeepSeek's only review family
+                # IS deepseek — and returned 200 for a task the loader rejects
+                # (Rule 2). GLM-5.3 still resolves here (deepseek), so this is
+                # the DeepSeek-on-local case, which genuinely cannot be planned.
+                import code_tasks as _ct
+                try:
+                    _ct._reviewer_for({}, entry["model"])
+                except ValueError as exc:
+                    return {"error": str(exc)[:300]}, 400
+                return {"error": f"no cross-family reviewer for "
+                                 f"{entry['model']} on this profile"}, 400
+            entry["reviewer"] = rev
         deps_in = t.get("deps") if isinstance(t.get("deps"), list) else t.get("depends")
         if isinstance(deps_in, list):
             deps = [d for d in deps_in if isinstance(d, str)]
@@ -5081,6 +5095,19 @@ def _escalate_task(body):
             top = config.ESCALATION_PATH[-1] if config.ESCALATION_PATH else None
             if current == top:
                 return {"error": f"{current} is already the top tier"}, 409
+            # The tier walk skips a seat for THREE different reasons, and they
+            # are not the same answer. "later seats are usage-blocked" was
+            # reported for all of them, which is wrong — and actively
+            # misleading on the local profile, where GLM-5.3's only higher
+            # seat (DeepSeek) is skipped because it has no cross-family
+            # reviewer, not because any window is spent. Ask that seat why,
+            # through the SAME function the escalation itself would use, so
+            # the 409 and the failure a run would hit cannot drift apart.
+            for cand in code_tasks._higher_tiers(current):
+                try:
+                    code_tasks._reviewer_for(t, cand)
+                except ValueError as exc:
+                    return {"error": str(exc)[:300]}, 409
             return {"error": f"{current} has no open higher tier "
                              "(later seats are usage-blocked)"}, 409
     if target not in config.IMPLEMENTER_MODELS:
@@ -5097,10 +5124,19 @@ def _escalate_task(body):
 
     reason = (body.get("reason") or "operator escalation")[:200]
     key = row["taskfile"] if row else str(path)
+    # Resolve the reviewer BEFORE mutating anything: `_reviewer_for` fails
+    # closed when the target model has no cross-family reviewer on this
+    # profile (the local fleet has one review family), and a half-applied
+    # escalation — override written, taskfile rewritten, no reviewer — would
+    # leave the task in a state the loader rejects on its next run.
+    try:
+        reviewer = code_tasks._reviewer_for(t, target)
+    except ValueError as exc:
+        return {"error": str(exc)[:300]}, 409
     Handler.store.set_model_override(key, tid, target, reason)
     # the taskfile too, so a fresh run starts here
     t["model"] = target
-    t["reviewer"] = code_tasks._reviewer_for(t, target)
+    t["reviewer"] = reviewer
     _write_taskfile_atomically(path, doc)
     if row:
         Handler.store.upsert_code_task(row["taskfile"], tid, row["title"], target,

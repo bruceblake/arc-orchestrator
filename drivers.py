@@ -92,6 +92,12 @@ class DriverResult:
     tokens: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    # Why this attempt ran on a model other than the one it started on, when
+    # it did: drivers._cap_swap_run sets it ("alone" = the GLM yield, "cap" =
+    # a real concurrency wait). `code_tasks` words its issue comment and its
+    # dossier note from this — a yield is NOT a spent plan window, and
+    # reporting it as one sent the reader to look at plan windows.
+    swap_reason: str = None
 
 
 _semaphores = {}
@@ -670,7 +676,36 @@ class CapSwap(Exception):
     def __init__(self, to_model, waited_s, lease):
         super().__init__(f"cap swap to {to_model} after {waited_s:.0f}s on {lease}")
         self.to_model, self.waited_s, self.lease = to_model, waited_s, lease
+        self.reason = "cap"
 
+
+class GlmYield(CapSwap):
+    """GLM-5.3's slot is FREE and it would be the only agent working.
+
+    A separate trigger from the cap swap above (operator decision 2026-09-28).
+    Nothing was full and nothing waited: GLM-5.3 is the fleet's slowest model
+    and is kept as PARALLEL capacity, so a lone GLM attempt moves to a faster
+    free seat (``_glm_yield_alone``). ``reason`` is what
+    ``Driver._cap_swap_run`` words its event, its log line and its handoff by —
+    under this reason they must never claim the GLM cap was full or that the
+    attempt waited for a slot.
+    """
+
+    def __init__(self, to_model, lease):
+        super().__init__(to_model, 0.0, lease)
+        # CapSwap.__init__ sets reason="cap" on the INSTANCE, which shadows any
+        # class attribute; this trigger must say "alone".
+        self.reason = "alone"
+
+
+# Harnesses fast enough that a lone GLM-5.3 attempt yields its slot to one:
+# Cursor, Antigravity and DeepSeek. Operator decision 2026-09-28 — a faster
+# seat is one whose harness is cursor, agy or reasonix. Claude and Codex are
+# not in it, and `_swap_candidates` keeps ordinary implementation off both.
+_FAST_YIELD_HARNESSES = ("cursor", "agy", "reasonix")
+# The one model this check exists for. A literal, guarded by the roster
+# queries around it: if the row ever leaves the roster, no GLM attempt exists.
+_GLM_MODEL = "GLM-5.3"
 
 _CAP_SWAP_ROLES = ("implementer", "reviewer", "pr_reviewer")
 
@@ -821,6 +856,11 @@ async def _lease_wait_loop(model, task_id, emit_ctx, cap, shown, deadline, sub,
         in_use = _lease_db().acquire_driver_lease(
             model, os.getpid(), task_id, limit, config.DRIVER_LEASE_TTL)
         if in_use is None:
+            # The slot is OURS now, before anything runs on it: a free GLM slot
+            # is only worth keeping while somebody else is working. Raises
+            # GlmYield (after releasing the lease it just took) when GLM would
+            # be alone and a faster seat is free; returns quietly otherwise.
+            _glm_yield_alone(model, task_id, emit_ctx, interactive)
             return
         _maybe_cap_swap(model, t0, waits)
         if time.monotonic() >= deadline:
@@ -858,6 +898,132 @@ def _maybe_cap_swap(lease, t0, waits):
     sub = cap_substitute(model, harness, role, exclude=tried, avoid_families=avoid)
     if sub:
         raise CapSwap(sub, time.monotonic() - t0, lease)
+
+
+def _faster_seat_than_glm(model, exclude, usage):
+    """A FREE cursor / agy / reasonix seat for `model`'s attempt, or None.
+
+    Built on `_swap_candidates` — the same roster rules the cap swap uses
+    (role, tier floor, harness, spent windows) — but with two deliberate
+    differences, both of which the review of 2026-09-28 caught:
+
+    * NO `avoid_families`. `Driver.run` sets that to the planned reviewer's
+      family, which is `deepseek` on every GLM-5.3 task, so passing it here
+      would hide DeepSeek — the fastest free seat on the local profile and the
+      whole point of the check. The pairing is not lost: the review node
+      re-derives the reviewer from the model that actually wrote the code
+      (`code_tasks.wrote_the_code`), and `_reviewer_for` refuses to return the
+      implementer's own family.
+    * NO `CAP_SWAP_AFTER` gate. That switch belongs to the cap swap; this path
+      runs when nothing was full, so an operator setting it to 0 must not
+      re-enable lone-GLM work.
+
+    A candidate that is not fast, or has no room on its own cap or its harness
+    pool, is SKIPPED — never treated as the end of the search. Stopping at the
+    first candidate let a hard opencode seat that sorts ahead of the fast ones
+    (studio-api) abandon a yield while DeepSeek sat free.
+    """
+    for cand in _swap_candidates(model, config.MODEL_HARNESS.get(model) or "",
+                                 "implementer", exclude, (), other_harness_only=False):
+        if config.MODEL_HARNESS.get(cand) not in _FAST_YIELD_HARNESSES:
+            continue
+        try:
+            if usage.get(cand, 0) >= config.driver_limit(cand):
+                continue
+        except (KeyError, ValueError):
+            continue
+        h = config.MODEL_HARNESS.get(cand)
+        if h and usage.get(f"harness:{h}", 0) >= config.harness_limit(h):
+            continue
+        return cand
+    return None
+
+
+def _glm_yield_alone(model, task_id, emit_ctx, interactive=False):
+    """Keep a FREE GLM-5.3 slot only while another model is in flight.
+
+    Operator decision 2026-09-28: GLM-5.3 implements only, and it is the
+    fleet's SLOWEST model, so a GLM attempt is worth starting when the fleet
+    is already working (parallel capacity) but not when it would be the single
+    agent a task waits on while a faster seat sits free. Runs in the
+    `_lease_wait_loop` success branch — the lease is already held at entry.
+
+    * another model's live lease exists -> keep GLM, return (the parallel case)
+    * nobody else is in flight -> look for a faster seat among
+      `_FAST_YIELD_HARNESSES` (cursor / agy / reasonix) with real headroom.
+      NOT `cap_substitute`: that helper's `avoid_families` is the planned
+      reviewer's family — `deepseek` on every GLM task — so it would hide the
+      very seat this rule exists to hand the attempt to, and its
+      `CAP_SWAP_AFTER` kill switch belongs to the cap swap, not to this path.
+      A candidate is SKIPPED when it is not fast or has no room; the search
+      continues, so an opencode hard seat ahead of the fast ones (studio-api)
+      cannot abandon the yield.
+    * a faster seat exists -> release the lease we just took and raise
+      GlmYield, which Driver.run turns into a moved attempt. The event and log
+      say GLM would have been alone — never that its cap was full.
+    * no faster seat -> keep the lease; a task with nowhere else to go runs.
+
+    Distinct from the cap swap: nothing was full and nothing waited, so this
+    does not consult `CAP_SWAP_AFTER`. Review and PR-review never reach it —
+    the driver refuses those roles for GLM-5.3 — and the role guard below
+    keeps it that way. Never raises anything but GlmYield.
+    """
+    if model != _GLM_MODEL or not config.model_may(model, "implementer"):
+        return
+    # The RUNNING driver's harness, not the roster's: a test double wearing the
+    # GLM-5.3 name on another harness (tests/test_drivers.py's ScriptedDriver
+    # does exactly this) is not the fleet's slow seat, and yielding it would
+    # spend a real seat on a fake attempt.
+    running_harness = (emit_ctx or {}).get("harness")
+    harness = config.MODEL_HARNESS.get(model) or ""
+    if harness != "opencode" or (running_harness and running_harness != harness):
+        return
+    role = (emit_ctx or {}).get("role")
+    if role and role != "implementer":
+        return
+    try:
+        usage = _lease_db().lease_usage()
+    except Exception:
+        return                     # no lease-table view: keep the slot and run
+    # "Somebody else is working" means another MODEL. Our own lease on `model`
+    # does not count, nor does a sibling of the winner: harness leases
+    # ("harness:opencode") belong to a model already counted here.
+    others = [m for m, n in (usage or {}).items()
+              if n and not m.startswith("harness:") and m != model]
+    if others:
+        return
+    ctx = _cap_swap_ctx.get()
+    # `exclude` is the models this attempt has ALREADY been moved through
+    # (`_swapped_from`), exactly as the cap swap passes it. Passing the task id
+    # there instead would leave the model we just came from a candidate.
+    # `avoid` (ctx[4], the planned reviewer's family) is deliberately NOT
+    # applied here: on a GLM task it is always deepseek, and hiding the
+    # fastest free seat is the opposite of what this check is for. The review
+    # node re-pairs the reviewer from `wrote_the_code`, so the pairing holds.
+    tried = ctx[3] if ctx else frozenset()
+    to_model = _faster_seat_than_glm(model, tried, usage)
+    if not to_model:
+        return
+    to_harness = config.MODEL_HARNESS.get(to_model) or ""
+    # The event and the release go inside one try: GlmYield is what moves the
+    # attempt, so the release must not be able to replace it (and
+    # _lease_release does not raise by design).
+    try:
+        # emit_ctx is the CALLER's context (harness/role/attempt/pid) and wins:
+        # it also settles this attempt's driver.queued in the wait views. The
+        # fallbacks matter only for a caller that passed none.
+        fields = dict(emit_ctx or {})
+        fields.setdefault("harness", config.MODEL_HARNESS.get(model))
+        fields.setdefault("role", role or "implementer")
+        events.emit("driver.glm_yield", model=model, task=task_id,
+                    to_model=to_model, to_harness=to_harness, reason="alone",
+                    **fields)
+        log.warning("%s would be the only agent working (no other model holds "
+                    "a lease); moving this attempt to %s (%s) instead",
+                    model, to_model, to_harness)
+    finally:
+        _lease_release(model, task_id)
+    raise GlmYield(to_model, model)
 
 
 def _lease_release(model, task_id):
@@ -1852,27 +2018,57 @@ class Driver:
 
     async def _cap_swap_run(self, sw, prompt, worktree, task_id, attempt, tried,
                             avoid_families):
-        """Hand an attempt that is still queued for a slot to an idle seat."""
+        """Hand an attempt to another seat: queued for a slot, or alone.
+
+        Two triggers reach here, and the event, the log line and the handoff
+        must say which one it was (`sw.reason`):
+        * "cap"   — the model was at its concurrency cap and waited.
+        * "alone" — GLM-5.3 held a free slot while no other model was in
+          flight, so it would have been the only agent working (2026-09-28).
+          Nothing was full and nothing waited; claiming a full GLM cap here
+          would be a lie in the log and in the handoff.
+        """
         to_h = config.MODEL_HARNESS.get(sw.to_model) or "?"
+        alone = getattr(sw, "reason", "cap") == "alone"
         # Settles this attempt's driver.queued/cap_wait in every wait view.
         events.emit("driver.cap_swap", harness=self.harness, model=self.model,
                     role=self.role, task=task_id, attempt=attempt,
                     to_model=sw.to_model, to_harness=to_h,
+                    reason=getattr(sw, "reason", "cap"),
                     waited_s=round(sw.waited_s), lease=sw.lease, pid=os.getpid())
-        log.warning("%s: no slot after %.0fs on %s; %s has room -- moving this "
-                    "attempt there", self.model, sw.waited_s, sw.lease, sw.to_model)
+        if alone:
+            log.warning("%s held a free slot but would have been the only "
+                        "agent working; moving this attempt to %s (%s) instead",
+                        self.model, sw.to_model, to_h)
+            note = (f"{self.model} would have been the only agent working — no "
+                    f"other model was in flight — so this attempt runs on "
+                    f"{to_h}/{sw.to_model} instead. Do not resume a "
+                    f"{self.harness} session there.")
+        else:
+            log.warning("%s: no slot after %.0fs on %s; %s has room -- moving "
+                        "this attempt there", self.model, sw.waited_s,
+                        sw.lease, sw.to_model)
+            note = (f"{self.model} was at its concurrency cap for "
+                    f"{sw.waited_s / 60:.0f} min; this attempt runs on "
+                    f"{to_h}/{sw.to_model} instead. Do not resume a "
+                    f"{self.harness} session there.")
         post_handoff(worktree, task_id, self.role, self.model, self.harness,
-                     (f"{self.model} was at its concurrency cap for "
-                      f"{sw.waited_s / 60:.0f} min; this attempt runs on "
-                      f"{to_h}/{sw.to_model} instead. Do not resume a "
-                      f"{self.harness} session there."),
-                     to_model=sw.to_model, to_harness=to_h)
+                     note, to_model=sw.to_model, to_harness=to_h)
         other = driver_for(sw.to_model, self.role,
                            interactive=getattr(self, "interactive", False))
         other.images = self.images
-        return await other.run(prompt, worktree, session_id=None, task_id=task_id,
-                               _swapped_from=set(tried) | {self.model},
-                               avoid_families=avoid_families)
+        out = await other.run(prompt, worktree, session_id=None, task_id=task_id,
+                              _swapped_from=set(tried) | {self.model},
+                              avoid_families=avoid_families)
+        # Tell the caller WHY this attempt moved. `code_tasks` words its
+        # GitHub issue comment and its dossier note from this: a yield must
+        # not be reported as a spent plan window — nothing was full, and no
+        # plan window moved.
+        try:
+            out.swap_reason = getattr(sw, "reason", "cap")
+        except Exception:                                      # noqa: BLE001
+            pass
+        return out
 
     async def run(self, prompt, worktree, session_id=None, task_id=None,
                   _swapped_from=None, avoid_families=()):

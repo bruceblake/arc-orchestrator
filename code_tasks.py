@@ -956,6 +956,21 @@ def _tier_index_m(model):
     except ValueError:
         return None
 
+def _higher_tiers(model):
+    """The seats above `model` on the escalation path that ordinary
+    implementation may use, in order.
+
+    Same filter `_next_tier_m` applies: Claude and GPT-6 plan and review, so
+    escalating ordinary code onto them would spend the windows reserved for
+    that work. Used by the dashboard to explain WHY an escalation found
+    nothing, which `_next_tier_m`'s bare None cannot say.
+    """
+    idx = _tier_index_m(model)
+    start = 0 if idx is None else idx + 1
+    return [c for c in config.ESCALATION_PATH[start:]
+            if config.MODEL_FAMILY.get(c) not in ("anthropic", "openai")]
+
+
 def _next_tier_m(model):
     """The next stronger model for `model`, or None at the top.
 
@@ -976,6 +991,14 @@ def _next_tier_m(model):
         # Claude and GPT-6 plan and review. Escalating ordinary code onto
         # them spends the windows reserved for that work.
         if config.MODEL_FAMILY.get(cand) in ("anthropic", "openai"):
+            continue
+        # A seat whose work NOBODY can review is not a destination either:
+        # since GLM-5.3 became implement-only (2026-09-28) the local profile
+        # has ONE review family, so escalating a GLM task onto DeepSeek would
+        # produce a pairing the loader — and Rule 2 — refuse. Skipping it here
+        # lets the escalation gate report a failed task instead of the run
+        # dying on a reviewer that cannot be named.
+        if config.cross_family_reviewer(cand) is None:
             continue
         if _harness_of(cand) not in blocked:
             return cand
@@ -1002,7 +1025,53 @@ def _reviewer_for(t, model):
     if current in config.REVIEW_FAMILIES and (
             current != fam or config.ALLOW_SAME_FAMILY_REVIEW):
         return current
-    return config.cross_family_reviewer(model) or current
+    nxt = config.cross_family_reviewer(model)
+    if nxt:
+        return nxt
+    # No cross-family reviewer exists for this model on this profile (the local
+    # two-model fleet, since GLM-5.3 became implement-only on 2026-09-28).
+    # Returning `current` — the implementer's own family — is a SAME-FAMILY
+    # review, which Rule 2 forbids and which `load_taskfile` would have
+    # rejected. Escalation (code_tasks.py:3763) and a yield onto the substitute
+    # never re-enter the loader, so this is where it has to fail CLOSED rather
+    # than record a pairing nobody is allowed to make.
+    raise ValueError(
+        f"no cross-family reviewer for {model} on this profile "
+        f"({sorted(config.REVIEW_FAMILIES)}): this task cannot be reviewed on "
+        f"it. Move it back down, or run the studio fleet, or set "
+        f"ARC_ALLOW_SAME_FAMILY_REVIEW=1 (the documented capacity hatch).")
+
+
+def _reviewer_family(t, model):
+    """The reviewer FAMILY an implementer's swapped attempt must avoid.
+
+    `Driver.run`'s `avoid_families` keeps a swap out of the family that will
+    review the work (Rule 2). `_reviewer_for` already returns a FAMILY token
+    (`config.MODEL_FAMILY` is keyed by model name, so resolving it again here
+    would produce None and silently drop the constraint), which is exactly what
+    `driver._swap_candidates` compares against `MODEL_FAMILY.get(candidate)`.
+    When no reviewer can be named at all the set is empty — there is no family
+    to stay away from.
+    """
+    tok = _reviewer_or_none(t, model)
+    return {tok} if tok else set()
+
+
+def _reviewer_or_none(t, model):
+    """`_reviewer_for`, but None instead of raising — for BOOKKEEPING writes.
+
+    The places that only RECORD state (`failed`, an already-merged row's
+    status, the last-tier row of a dead task) must not turn a reviewer they
+    cannot name into an exception: the task has already ended, and the row
+    still has to be written. Every path that will actually RUN a review, and
+    every path that will wire a reviewer into an attempt, uses `_reviewer_for`
+    and fails closed instead. `store.upsert_code_task` takes the taskfile's
+    reviewer when this is None.
+    """
+    try:
+        return _reviewer_for(t, model)
+    except ValueError:
+        return None
 
 
 _GATE_FAILURE = re.compile(
@@ -1977,7 +2046,15 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
     planned seat does not take that handoff.
     """
     planned = config.REVIEW_FAMILIES.get(planned_tok, planned_tok)
-    pressure = _reviewer_pressure(planned, usage)
+    if planned not in config.MODEL_ROLES:
+        # A token no longer on the roster (a reviewer family that left it —
+        # "glm" after 2026-09-28, when GLM-5.3 became implement-only) has no
+        # cap, tier or harness left to score, and asking for its pressure used
+        # to raise KeyError out of the review node. Treat it as fully
+        # contended and let the cross-family fallback below pick the reviewer;
+        # the token itself stays on the taskfile, as it always has.
+        planned = None
+    pressure = _reviewer_pressure(planned, usage) if planned else 1.0
     blocked = _blocked_harnesses()
     frontier = _frontier_reviewer(impl_model, pol, usage, blocked)
     if frontier:
@@ -1996,9 +2073,9 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
             if alt:
                 return alt, "planned_pressure_subscription"
         return planned, "planned"
-    if config.ALLOW_SAME_FAMILY_REVIEW:
+    if config.ALLOW_SAME_FAMILY_REVIEW and planned:
         return planned, "planned_full_hatch"
-    if pol:
+    if pol and planned:
         # A bench variant measures the reviewer it names; never swap it.
         return planned, "planned_full_bench"
     impl_fam = config.MODEL_FAMILY.get(impl_model)
@@ -2025,7 +2102,30 @@ def _select_reviewer(planned_tok, impl_model, pol, usage):
             continue
         fit.append(m)
     if not fit:
-        return planned, "planned_full_no_alternative"
+        if planned:
+            return planned, "planned_full_no_alternative"
+        # The taskfile named a reviewer that is no longer review-capable AND
+        # every eligible seat is contended. There is nothing to wait on (the
+        # token has no driver), so take the best cross-family review-capable
+        # model and let it queue for its lease: a review is never skipped.
+        fallback = []
+        for m in config.MODEL_ROLES:
+            if not config.model_may(m, "reviewer"):
+                continue
+            if config.MODEL_FAMILY.get(m) == impl_fam:
+                continue
+            try:
+                if config.driver_limit(m) <= 0:
+                    continue
+            except (KeyError, ValueError):
+                continue
+            fallback.append(m)
+        if not fallback:
+            raise ValueError(
+                f"no cross-family reviewer is available for {impl_model}: the "
+                f"taskfile's {planned_tok!r} is not review-capable any more")
+        fallback.sort(key=lambda m: _reviewer_rank(m, usage))
+        return fallback[0], "planned_stale_token_fallback"
     # Claude, then GPT-6, then the other free seats.
     fit.sort(key=lambda m: _reviewer_rank(m, usage))
     return fit[0], "planned_full_fallback"
@@ -2742,11 +2842,26 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) or None
         if stage == "implement":
             if r.get("model") and r["model"] != before:
-                await issue_step(tid, "usage_swap", kind="usage swap",
-                                 impl_model=r["model"],
-                                 body=f"{before} → {r['model']}: the plan "
-                                      f"window of {before} is spent.",
-                                 attempt=attempt, model=r["model"])
+                # WHICH swap, though: a spent plan window (drivers._swap_run /
+                # usage_substitute), or the GLM yield. Reporting the yield as
+                # "the plan window of {before} is spent" was false and sent the
+                # reader to look at plan windows; the driver stamps the reason
+                # onto the result it returns.
+                if r.get("swap_reason") == "alone":
+                    await issue_step(
+                        tid, "usage_swap", kind="model moved",
+                        impl_model=r["model"],
+                        body=f"{before} → {r['model']}: {before} would have "
+                             f"been the only agent working, so the attempt "
+                             f"moved to {r['model']}. No plan window was spent "
+                             f"and no cap was reached.",
+                        attempt=attempt, model=r["model"])
+                else:
+                    await issue_step(tid, "usage_swap", kind="usage swap",
+                                     impl_model=r["model"],
+                                     body=f"{before} → {r['model']}: the plan "
+                                          f"window of {before} is spent.",
+                                     attempt=attempt, model=r["model"])
         elif stage == "gate":
             if r.get("passed"):
                 await issue_step(tid, stage, kind="gate passed",
@@ -2757,7 +2872,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                                  body="```\n" + (r.get("output") or "")[-3000:]
                                       + "\n```", attempt=attempt)
         elif stage == "review" and not r.get("skipped"):
-            who = r.get("reviewer_model") or reviewer_for(t, cur(ctx))
+            who = (r.get("reviewer_model")
+                   or _reviewer_or_none(t, cur(ctx)) or t.get("reviewer"))
             issues = r.get("issues") or []
             listing = "\n".join(f"- {i}" for i in issues[:30])
             kind = ("review crashed" if r.get("crashed") else
@@ -3136,7 +3252,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         async def alloc(ctx):
             wt = await gitstore.alloc(repo, tid, base)
             store.upsert_code_task(taskfile, tid, t["title"], model0,
-                                   reviewer_for(t, model0), "running",
+                                   _reviewer_or_none(t, model0)
+                                   or t.get("reviewer"), "running",
                                    branch=f"task/{tid}", worktree=str(wt))
             events.set_context(module=tid)
             events.emit("worktree.alloc", path=str(wt), base=base)
@@ -3153,7 +3270,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # task was mid-rework, and acting on the status would have raced a
             # live agent through the same merge.
             store.upsert_code_task(taskfile, tid, t["title"], cur_model(ctx),
-                                   reviewer_for(t, cur_model(ctx)), "running",
+                                   _reviewer_or_none(t, cur_model(ctx))
+                                   or t.get("reviewer"), "running",
                                    branch=f"task/{tid}")
             feedback = _rework_feedback(tid, results)
             attempt = ctx.get("runs", {}).get(f"implement_{tid}", 0) + 1
@@ -3195,7 +3313,7 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await harvesting(tid, wt, "implementer", model, driver.run(
                     prompt, wt,
                     session_id=resume, task_id=f"{tid}-x{attempt}",
-                    avoid_families={reviewer_for(t, model)}))
+                    avoid_families=_reviewer_family(t, model)))
                 ran["model"] = getattr(res, "model", None) or model
             except DriverError as exc:
                 if not (pol or {}).get("tolerate_driver_error", True):
@@ -3265,13 +3383,24 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             dossier_after(tid, wt, attempt=attempt, model=ran_model,
                           role="implementer")
             if ran_model != model:
+                # Word it by WHY it moved. A yield is neither a spent plan
+                # window nor the GLM cap — nothing was full — and recording it
+                # as `usage_swap` here (and on the row below) was the second
+                # half of the same false report the issue comment carried.
+                if getattr(res, "swap_reason", None) == "alone":
+                    why = (f"{model} would have been the only agent working "
+                           f"— no plan window spent, no cap reached")
+                    outcome = "glm_yield"
+                else:
+                    why = "plan window spent"
+                    outcome = "usage_swap"
                 dossier_call(tid, dossier_mod.note_model_change,
-                             f"attempt {attempt}: usage swap {model} -> "
-                             f"{ran_model} (plan window spent)")
+                             f"attempt {attempt}: {model} -> "
+                             f"{ran_model} ({why})")
                 dossier_after(tid, None, attempt=attempt, model=ran_model,
-                              role="implementer", outcome="usage_swap",
+                              role="implementer", outcome=outcome,
                               harness=ran_harness,
-                              summary=f"plan window moved {model} -> {ran_model}",
+                              summary=f"{why}: {model} -> {ran_model}",
                               session_id=res.session_id)
             board.post(wt, task=tid, role="implementer", model=ran_model,
                        harness=ran_harness, session_id=res.session_id,
@@ -3281,7 +3410,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 store, project_slug, taskfile, tid, "implementer",
                 ran_model, ran_harness, res.session_id, wt)
             return {"session_id": res.session_id, "harness": ran_harness,
-                    "model": ran_model}
+                    "model": ran_model,
+                    # Carried to issue_after(), which words the tracking
+                    # comment: a yield is not a spent plan window.
+                    "swap_reason": getattr(res, "swap_reason", None)}
 
         async def capture_evidence(wt, attempt):
             """(manifest, gate_error). Rule 7d; see evidence.py.
@@ -3561,9 +3693,21 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             wt = await worktree(ctx)
             diff = await gitstore.diff_full(wt, base)
             impact = await graft.blast(wt, task=tid)   # uncommitted: tree vs HEAD
-            rev_tok = reviewer_for(t, wrote_the_code(
-                ctx, tid, cur_model(ctx), store))
             impl_now = wrote_the_code(ctx, tid, cur_model(ctx), store)
+            try:
+                # Rule 2 is not negotiable: a model with no cross-family
+                # reviewer on this profile (the local fleet has ONE review
+                # family since GLM-5.3 became implement-only, 2026-09-28) makes
+                # this review FAILS the task — never a same-family review, and
+                # never an exception out of the node, which would abort every
+                # sibling task in the run.
+                rev_tok = reviewer_for(t, impl_now)
+            except ValueError as exc:
+                events.emit("task.reviewed", task=tid, passed=False,
+                            crashed=True, implementer=impl_now,
+                            issues=[str(exc)[:300]])
+                return {"pass": False, "crashed": True,
+                        "issues": [str(exc)[:300]], "reviewer_model": None}
             try:
                 usage = store.lease_usage()
             except Exception:
@@ -3729,7 +3873,12 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         async def escalate(ctx):
             src = cur_model(ctx)
             nxt = _next_tier(src)
-            rev = reviewer_for(t, nxt)
+            rev = _reviewer_or_none(t, nxt)
+            if rev is None:
+                raise ValueError(
+                    f"cannot escalate {tid} to {nxt}: no cross-family "
+                    f"reviewer for it on this profile "
+                    f"({sorted(config.REVIEW_FAMILIES)})")
             store.upsert_code_task(taskfile, tid, t["title"], nxt, rev, "running")
             events.emit("task.escalated", task=tid, from_model=src, to_model=nxt,
                         n=esc_n(ctx) + 1)
@@ -3774,7 +3923,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                         if pr_st == "MERGED":
                             store.upsert_code_task(
                                 taskfile, tid, t["title"],
-                                cur_model(ctx), reviewer_for(t, cur_model(ctx)),
+                                cur_model(ctx),
+                                _reviewer_or_none(t, cur_model(ctx))
+                                or t.get("reviewer"),
                                 "merged", finished=True)
                             events.emit("task.merged", task=tid, pr=number,
                                         url=url,
@@ -4280,7 +4431,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             """Merge the PR — reached only once every reviewer approved."""
             rv = ctx.get("results", {}).get(f"pr_review_{tid}") or {}
             number = rv.get("pr")
-            model, rev = cur_model(ctx), reviewer_for(t, cur_model(ctx))
+            model = cur_model(ctx)
+            rev = _reviewer_or_none(t, model) or t.get("reviewer")
             pub = ctx.get("results", {}).get(f"publish_{tid}") or {}
             if pub.get("empty") and pub.get("merged"):
                 gate_res = ctx.get("results", {}).get(f"gate_{tid}") or {}
@@ -4429,7 +4581,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                        f"(no escalation was taken)")
 
             store.upsert_code_task(taskfile, tid, t["title"], last,
-                                   reviewer_for(t, last), "failed",
+                                   _reviewer_or_none(t, last)
+                                   or t.get("reviewer"), "failed",
                                    error=why[:400], finished=True)
             # `reason` says WHY the task died; `detail` says WHAT was wrong
             # with it. Without it the activity feed could only repeat "verify
@@ -4723,6 +4876,32 @@ def _routing_tiers_prose():
         lines.append(f"- Spread hard implementation across {' and '.join(hard)} "
                      "so independent tasks run in parallel. Do not send every "
                      "hard task to the same model.\n")
+    # GLM-5.3 is IMPLEMENT-ONLY and the fleet's slowest model (operator
+    # decision 2026-09-28): it is parallel capacity beside another model's
+    # task, never the seat a task or a chain waits on. Said in the prompt
+    # because the runtime yield (drivers._glm_yield_alone) only rescues plans
+    # that already name GLM — new plans must not route work there.
+    if "GLM-5.3" in config.IMPLEMENTER_MODELS:
+        medium_first = [m for m in (tiers.get("medium") or []) if m != "GLM-5.3"]
+        hard_first = [m for m in (tiers.get("hard") or []) if m != "GLM-5.3"]
+        lines.append(
+            "- GLM-5.3 IMPLEMENTS AND DOES NOT REVIEW. Never give it the "
+            "`reviewer` role, and never plan it as the only task in a graph or "
+            "as every task of a chain — it is the slowest model, so a task "
+            "would then be waiting on it alone.\n")
+        if medium_first or hard_first:
+            # On the studio profile the medium tier holds ONLY GLM-5.3, so
+            # `medium_first` is empty there and the hard seats are what
+            # ordinary medium work goes to instead of waiting on GLM alone.
+            lines.append(f"- Medium work goes to "
+                         f"{' and '.join(medium_first or hard_first)} first.\n")
+        if hard_first:
+            lines.append(f"- Hard work goes to {' and '.join(hard_first)} "
+                         "first.\n")
+        lines.append(
+            "- Name GLM-5.3 ONLY for an ADDITIONAL task that has `deps: []` "
+            "and can run BESIDE a task assigned to another model, so it adds "
+            "parallel capacity instead of carrying the critical path.\n")
     if claude in config.MODEL_ROLES:
         lines.append(
             f"- {claude} implements ONLY 3D asset design: Blender, modelling "

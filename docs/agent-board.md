@@ -174,7 +174,7 @@ The `code_tasks` filter is the one the dashboard already applies
 `<WORKTREE_ROOT>/<project>/`, or its taskfile stem is the project.
 Deliberately excluded:
 
-- **the `reviewer` column** — it holds a *family* (`deepseek`, `glm`), not a
+- **the `reviewer` column** — it holds a *family* (`deepseek`, `openai`), not a
   model name, and `_targets` cannot match a family, so `@deepseek` would
   validate and be delivered to nobody;
 - **task ids from other projects** — no agent here will ever read them.

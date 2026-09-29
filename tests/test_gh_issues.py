@@ -823,6 +823,75 @@ class Wiring(Base):
         self.assertIn(f"{old} → {new}", swaps[0])
         self.assertIn("plan window", swaps[0])
 
+    def test_a_glm_yield_is_not_reported_as_a_spent_plan_window(self):
+        """REGRESSION: a yield is not a plan window.
+
+        `implement()` sees a model change and issue_after() used to word EVERY
+        one as "{before} → {seat}: the plan window of {before} is spent". A
+        GlmYield moves the attempt because GLM would have been the only agent
+        working — nothing was spent and no cap was reached — so that comment
+        sent the operator to look at plan windows. The driver stamps
+        `swap_reason` onto its result; this asserts the comment follows it.
+        """
+        n = self.opened()["t1"]
+        _, g = self.graph()
+
+        class YieldingDrv:
+            harness, images = "fake", None
+            model = MODEL
+
+            async def run(self_, prompt, cwd, **kw):
+                # A DIFFERENT seat, or implement() sees no model change at all
+                # and there is no swap comment to inspect.
+                other = ("DeepSeek-V4.1-Flash-thinking-max"
+                         if MODEL != "DeepSeek-V4.1-Flash-thinking-max"
+                         else "GLM-5.3")
+                return types.SimpleNamespace(
+                    exit_code=0, transcript_path="", seconds=0.0, session_id=None,
+                    text="done", model=other, harness="reasonix",
+                    # What drivers._cap_swap_run stamps for reason "alone".
+                    swap_reason="alone")
+
+        with mock.patch.object(code_tasks, "_driver",
+                               lambda model, role, pol: YieldingDrv()):
+            self.node(g, "implement_t1", self.ctx())
+
+        cs = self.gh.comments(n)
+        swaps = [c for c in cs if "→" in c]
+        self.assertTrue(swaps, cs)
+        self.assertTrue(swaps[0].startswith("**model moved**"), swaps[0])
+        self.assertIn("only agent working", swaps[0])
+        # The false sentence is what matters, not the substring: the body
+        # legitimately says "No plan window was spent".
+        self.assertNotIn("plan window of", swaps[0])
+        self.assertNotIn("is spent.", swaps[0])
+
+    def test_a_real_plan_window_swap_still_says_so(self):
+        """The other side of the same branch: a genuine usage swap keeps its
+        wording, so the fix above did not silence the real report."""
+        n = self.opened()["t1"]
+        _, g = self.graph()
+
+        class UsageDrv:
+            harness, images = "fake", None
+            model = MODEL
+
+            async def run(self_, prompt, cwd, **kw):
+                other = ("DeepSeek-V4.1-Flash-thinking-max"
+                         if MODEL != "DeepSeek-V4.1-Flash-thinking-max"
+                         else "GLM-5.3")
+                return types.SimpleNamespace(
+                    exit_code=0, transcript_path="", seconds=0.0, session_id=None,
+                    text="done", model=other, harness="reasonix",
+                    swap_reason="cap")
+
+        with mock.patch.object(code_tasks, "_driver",
+                               lambda model, role, pol: UsageDrv()):
+            self.node(g, "implement_t1", self.ctx())
+
+        swaps = [c for c in self.gh.comments(n) if "plan window" in c]
+        self.assertTrue(swaps, self.gh.comments(n))
+
     def test_a_pr_reviewer_usage_swap_is_commented(self):
         n = self.opened()["t1"]
         _, g = self.graph()

@@ -7,6 +7,7 @@ survivors to the taskfile on disk. These tests cover the parse/delete channel
 semantics, every proposal kind, the freeze boundary (merged/running tasks are
 immutable), per-entry rollback on loader rejection, and the recording trail.
 """
+import contextlib
 import json
 import tempfile
 import time
@@ -16,6 +17,7 @@ from unittest import mock
 
 from helpers import FakeStore, capture_events
 from helpers import ENTRY, STRONGEST, ENTRY_REVIEWER, STRONGEST_REVIEWER  # noqa: E402,F401
+from helpers import second_review_family  # noqa: E402,F401
 
 import code_tasks
 import config
@@ -220,16 +222,30 @@ class TestChangeVerify(_Base):
 class TestChangeModel(_Base):
     def test_change_model_applies_with_reviewer_flip(self):
         # t1 starts on ENTRY with ENTRY's cross-family reviewer. Switching it
-        # to STRONGEST makes the pairing same-family (with a two-family roster:
-        # ENTRY_REVIEWER *is* STRONGEST's family), so the reviewer flips to the
-        # other family rather than let loader validation reject the amendment.
-        counts = self.apply([{"kind": "change_model", "task": "t1",
-                              "model": STRONGEST}])
-        self.assertEqual(counts["applied"], 1)
-        t1 = _read_tasks(self.tf)[0]
-        self.assertEqual(t1["model"], STRONGEST)
-        if config.MODEL_FAMILY[STRONGEST] == ENTRY_REVIEWER:
-            self.assertEqual(t1["reviewer"], STRONGEST_REVIEWER)
+        # to STRONGEST makes the pairing same-family (ENTRY_REVIEWER *is*
+        # STRONGEST's family in the usual two-tier arrangement), so the reviewer
+        # flips to another family rather than let loader validation reject the
+        # amendment.
+        #
+        # The flip needs a SECOND review family to flip TO. The local profile
+        # has one since GLM-5.3 became implement-only on 2026-09-28, so a
+        # stand-in second family is patched in for this test (the studio
+        # profile has five of them); with no second family the loader correctly
+        # REFUSES the amendment and there is no flip to assert.
+        empty = config.cross_family_reviewer(STRONGEST) is None
+        with second_review_family() if empty else contextlib.nullcontext():
+            # Computed under the patch: STRONGEST_REVIEWER is bound at import.
+            expected = config.cross_family_reviewer(STRONGEST)
+            counts = self.apply([{"kind": "change_model", "task": "t1",
+                                  "model": STRONGEST}])
+            self.assertEqual(counts["applied"], 1)
+            t1 = _read_tasks(self.tf)[0]
+            self.assertEqual(t1["model"], STRONGEST)
+            if config.MODEL_FAMILY[STRONGEST] == ENTRY_REVIEWER:
+                self.assertIsNotNone(expected, "a flip needs another family")
+                self.assertEqual(t1["reviewer"], expected)
+                self.assertNotEqual(t1["reviewer"],
+                                    config.MODEL_FAMILY[STRONGEST])
 
     def test_change_model_rejects_non_implementer(self):
         counts = self.apply([{"kind": "change_model", "task": "t1",

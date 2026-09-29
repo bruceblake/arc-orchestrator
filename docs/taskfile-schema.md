@@ -132,7 +132,7 @@ the run is down is kept and applied when it resumes to that PR round.
 | `title` | string | `id` | One-line human summary; becomes the merge commit message `task(<id>): <title>` and appears in `describe()`/status output. |
 | `prompt` | string | — (required) | The complete task spec. **The implementing agent sees ONLY its own prompt** — prefixed with the task id/title and `files_hint`, plus standard boilerplate ("make only the changes this task requires; do not git-commit; keep changes minimal and working"). No other tasks, no project context. The reviewer also judges the diff against exactly this prompt. |
 | `model` | string | `""` (rejected) | Implementer model, one of today's live implementers, tier-routed — see table below. `DeepSeek-V4.1-Flash-thinking-max` runs via the `reasonix` harness; `GLM-5.3` via `opencode`. |
-| `reviewer` | string | `""` (rejected) | `"glm"` (GLM-5.3 via `opencode`) or `"deepseek"` (DeepSeek via `reasonix`) — the only two review families today, subject to the cross-family rule below. |
+| `reviewer` | string | `""` (rejected) | A review FAMILY — `"deepseek"` on the local profile, plus `"openai"`, `"cursor"`, `"google"`, `"anthropic"` on the studio roster — subject to the cross-family rule below. `"glm"` is **not** a review family since 2026-09-28 (GLM-5.3 implements only); a taskfile that still names it is remapped at load time. |
 | `verify_cmd` | string | `""` (gate skipped) | Deterministic honesty gate: a shell command run in the task's worktree that **must fail when the work is wrong**. Exit 0 = pass. See "The verify gate" below. |
 | `files_hint` | list of strings | `[]` | Repo-relative paths the task expects to touch. Injected into the implementer prompt as `Files you are expected to touch: ...`. Informational (not enforced), but keep **disjoint between dep-independent (parallel) tasks** — two agents editing the same file is the main cause of `conflict` merge failures. |
 | `probe_cmd` | string | `""` | Optional. A shell command run in the task's worktree **after its gate passes**; the last top-level JSON object it prints is the task's **verdict**, stored on the row (`code_tasks.verdict`) and emitted as `task.verdict`. A probe that exits non-zero or prints no JSON object fails the gate — a branch skipped because the probe crashed would be a bug disguised as a decision. Dependents read the verdict through `when`. |
@@ -164,17 +164,22 @@ reserve (`config.driver_limit`; see
 
 ### Reviewer and the cross-family rule
 
-`reviewer` names a FAMILY from `config.REVIEW_FAMILIES` — today `"glm"` or
-`"deepseek"` — and the loader rejects any that shares a family with
+`reviewer` names a FAMILY from `config.REVIEW_FAMILIES` — `"deepseek"` on the
+local profile, plus `"openai"`, `"cursor"`, `"google"`, `"anthropic"` on the
+studio roster — and the loader rejects any that shares a family with
 the implementer:
 
 | Implementer | Allowed `reviewer` |
 |---|---|
-| `DeepSeek-V4.1-Flash-thinking-max` | `"glm"` |
+| `DeepSeek-V4.1-Flash-thinking-max` | `"openai"` (studio), then `"cursor"`, `"google"`, `"anthropic"` — **none on the local profile** |
 | `GLM-5.3` | `"deepseek"` |
 
-With two families the pairing is forced; the scheduler still load-balances PR
-reviewers at run time (`_reviewer_pressure`).
+With GLM-5.3 implement-only (operator decision 2026-09-28) the pairing is no
+longer symmetric: a GLM implementer always has a reviewer (`deepseek`), while
+a DeepSeek implementer has one only on a profile that fields another review
+family — locally there is none, and a DeepSeek-only local taskfile does not
+run. On studio the scheduler still load-balances PR reviewers at run time
+(`_reviewer_pressure`).
 A taskfile that names a reviewer family which is not live today is
 remapped by `config.cross_family_reviewer` (code_tasks.py:94), not rejected —
 the remap tests the REVIEWER family, so it covers `"kimi"` on any task, not
@@ -338,10 +343,12 @@ Not checked by the loader (know where these live):
 ## 4. Complete example
 
 One hard task first (`notes-schema`, DeepSeek-V4.1-Flash-thinking-max
-implements, glm reviews), then three tasks fanning out in parallel once it
+implements, reviewed by the next live review family — `openai` on the studio
+roster, and nothing on the local profile), then three tasks fanning out in
+parallel once it
 merges — all medium, all implemented by GLM-5.3 and reviewed by deepseek —
-with disjoint `files_hint` (glm reviews the DeepSeek work; the reverse pairing
-is deepseek reviewing GLM-5.3):
+with disjoint `files_hint` (deepseek reviews the GLM work; a DeepSeek task
+takes the next live review family instead):
 
 ```json
 {
@@ -354,7 +361,7 @@ is deepseek reviewing GLM-5.3):
         "title": "Note model and JSON persistence",
         "prompt": "This repo is a small note-taking CLI. Create the package dir src/notes/ (with an empty __init__.py) and src/notes/schema.py defining: a Note dataclass with fields id: str, text: str, created: str (ISO-8601); load_notes(path) -> list[Note] that reads a JSON array of note objects (missing file returns []); save_notes(path, notes) that writes the same shape back. Acceptance: python -m py_compile passes and both functions exist with exactly these names. Do not add a CLI, tests, or touch any other file.",
         "model": "DeepSeek-V4.1-Flash-thinking-max",
-        "reviewer": "glm",
+        "reviewer": "<cross-family>",
         "verify_cmd": "python -m py_compile src/notes/schema.py && grep -q 'def load_notes' src/notes/schema.py && grep -q 'def save_notes' src/notes/schema.py",
         "files_hint": ["src/notes/__init__.py", "src/notes/schema.py"],
         "deps": []

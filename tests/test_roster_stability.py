@@ -29,8 +29,14 @@ class TheSuiteIsTwoTierRegardlessOfOperatorEnv(unittest.TestCase):
         # or, in test_workqueue's lease test, into false failures.
         self.assertNotEqual(ENTRY, STRONGEST)
         self.assertGreaterEqual(len(config.ESCALATION_PATH), 2)
-        self.assertIn("glm", config.REVIEW_FAMILIES)
         self.assertIn("deepseek", config.REVIEW_FAMILIES)
+        # GLM-5.3 is NOT a review family since 2026-09-28 (implement-only).
+        # This suite runs on the DEFAULT local fleet, where deepseek is
+        # therefore the only review family; the studio profile is where the
+        # multi-family fixtures get their second family (it has five).
+        self.assertEqual(sorted(config.REVIEW_FAMILIES), ["deepseek"])
+        self.assertNotIn("glm", config.REVIEW_FAMILIES,
+                         "GLM-5.3 implements only and must not review")
 
     def test_poisoned_env_does_not_collapse_the_path(self):
         # The real shape of the 2026-09-15 breakage: a gate subprocess that

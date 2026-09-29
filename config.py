@@ -986,9 +986,19 @@ ROSTER = [
     # still constructs-fails loudly for old transcripts.
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
-    # Operator decision (2026-09-12, tier roles corrected 2026-09-25): GLM-5.3
-    # is the OTHER family — medium tier, implementer/reviewer/pr_reviewer, and
-    # it does NOT plan (the captain's own seat is DeepSeek; see CAPTAIN_MODEL).
+    # Operator decision (2026-09-28, which supersedes the 2026-09-12/09-25
+    # role line): GLM-5.3 IMPLEMENTS ONLY. It is no longer the other review
+    # family — the roles tuple below holds no reviewer/pr_reviewer, so
+    # REVIEW_FAMILIES and PR_REVIEW_FAMILIES drop "glm" from the roster itself
+    # (this row is shared by both fleet profiles; the studio roster does not
+    # re-add it) and OpencodeDriver refuses both roles. GLM-5.3 is the SLOWEST
+    # model on the fleet, so it is parallel capacity: it works when other
+    # models are already working, and must never be the only agent a task
+    # waits on while Cursor-Grok-4.7, Antigravity-Gemini or DeepSeek-V4.1-
+    # Flash-thinking-max are free (drivers._glm_yield_alone). Its four
+    # implementation slots stay — the cap is NOT lowered to 0.
+    # It also does NOT plan (the captain's own seat is DeepSeek; see
+    # CAPTAIN_MODEL).
     # Its cap is 4, the official ARC docs value (docs.arc.vt.edu, checked
     # 2026-09-15), adopted per operator directive. Two live deviations from the
     # table have been observed and are recorded as dated events rather than
@@ -999,7 +1009,7 @@ ROSTER = [
     # lease + capacity backoff. ARC_DRIVER_LIMIT_GLM=1
     # re-serialises GLM harnesses if the backend tightens persistently.
     ("GLM-5.3",             "glm",      "opencode", "medium", 4,
-     ("implementer", "reviewer", "pr_reviewer"),           None,         None),
+     ("implementer",),                                     None,         None),
     # Operator decision (2026-09-25): DeepSeek-V4.1-Flash-thinking-max is the
     # stronger model and holds 10 seats to GLM's 4, so it is the HARD tier, a
     # planner, and holds every role — which is also what lets the captain
@@ -1459,8 +1469,15 @@ def scarcest_seat():
 # planning, final escalation and hard reviews. Operator directive 2026-09-24.
 # Rule 2 still holds: the implementer's own family is skipped, so the next
 # family in this order is the reviewer.
+# "glm" was dropped here on 2026-09-28 (operator decision): GLM-5.3 is an
+# implement-only model, so REVIEW_FAMILIES no longer contains it and naming it
+# here would be dead weight. A DeepSeek implementer therefore defaults to the
+# next live review family, while GLM's own work is still reviewed by deepseek
+# (first in this order, and not glm). On the local two-model profile this can
+# leave a DeepSeek implementer with NO cross-family reviewer (None) — that is
+# the honest answer, and GLM is not put back on review to paper over it.
 _REVIEW_SEAT_ORDER = (
-    "deepseek", "glm",
+    "deepseek",
     "openai", "cursor", "google", "xai",
     "anthropic",
 )
@@ -1470,10 +1487,12 @@ def cross_family_reviewer(impl_model):
     """The family token that reviews `impl_model`'s work, or None.
 
     Cross-review means a DIFFERENT family (Rule 2). Preference, not raw
-    strength: unlimited ARC seats (deepseek, then glm), then the other
+    strength: the unlimited ARC seat (deepseek), then the other
     review-capable families, Claude last. When the preferred family is the
-    implementer's own, the next family in that order is used. On the
-    two-model fleet this is still glm <-> deepseek.
+    implementer's own, the next family in that order is used. GLM-5.3 holds
+    no reviewer role since 2026-09-28, so a GLM implementer is reviewed by
+    deepseek while a deepseek implementer falls through to the next review
+    family — None when no other family is left.
     """
     fam = MODEL_FAMILY.get(impl_model)
     seen = []

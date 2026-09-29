@@ -10,6 +10,7 @@ that was only out of quota.
 import asyncio
 import datetime
 import json
+import os
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -617,3 +618,194 @@ class CapSwapInTheLeaseWait(unittest.TestCase):
         self.assertEqual(swaps[0]["to_model"], "Cursor-Grok-4.7")
         self.assertEqual(drv.calls, 0, "no slot was held, so nothing ran here")
         self.assertIsNone(drivers._cap_swap_ctx.get(), "context must be reset")
+
+
+class GlmDoesNotRunAlone(unittest.TestCase):
+    """A FREE GLM-5.3 slot is kept only while another model is in flight.
+
+    Operator decision 2026-09-28: GLM-5.3 is the fleet's slowest model and the
+    fleet keeps it as PARALLEL implementation capacity — it must not be the
+    single agent a task waits on while Cursor-Grok-4.7, Antigravity-Gemini or
+    DeepSeek-V4.1-Flash-thinking-max are free. This is NOT the cap swap:
+    nothing is full here and nothing waited, so `CAP_SWAP_AFTER` is irrelevant
+    (it is left at its default) and the event is `driver.glm_yield`.
+    """
+
+    # The real roster names, patched: the rule keys off model + harness.
+    GLM = "GLM-5.3"
+    DS = "DeepSeek-V4.1-Flash-thinking-max"
+    CURSOR = "Cursor-Grok-4.7"
+    AGY = "Antigravity-Gemini"
+    ROSTER = {
+        GLM: ("opencode", "glm", "medium", 4, {"implementer"}),
+        DS: ("reasonix", "deepseek", "hard", 10, {"implementer", "planner"}),
+        CURSOR: ("cursor", "cursor", "hard", 3, {"implementer", "reviewer"}),
+        AGY: ("agy", "google", "hard", 3, {"implementer", "reviewer"}),
+    }
+
+    def setUp(self):
+        self.patches = [
+            mock.patch.object(config, "MODEL_HARNESS",
+                              {m: v[0] for m, v in self.ROSTER.items()}),
+            mock.patch.object(config, "MODEL_FAMILY",
+                              {m: v[1] for m, v in self.ROSTER.items()}),
+            mock.patch.object(config, "MODEL_TIER",
+                              {m: v[2] for m, v in self.ROSTER.items()}),
+            mock.patch.object(config, "MODEL_ROLES",
+                              {m: v[4] for m, v in self.ROSTER.items()}),
+            # Both ceilings come from the lease table's view, so they must
+            # cover the patched roster rather than the real one.
+            mock.patch.object(config, "driver_limit",
+                              lambda m, *a, **k: self.ROSTER[m][3]),
+            mock.patch.object(config, "harness_limit",
+                              lambda h: 3),
+        ]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+        ctx = drivers._cap_swap_ctx.set(
+            (self.GLM, "opencode", "implementer", frozenset(), frozenset()))
+        self.addCleanup(drivers._cap_swap_ctx.reset, ctx)
+
+    def _emit_ctx(self, role="implementer"):
+        return {"harness": "opencode", "role": role, "attempt": 1, "pid": 1}
+
+    def _check(self, usage):
+        """Run the check with the lease table reporting `usage`; return the
+        raised GlmYield or None."""
+        with TempLeaseDB() as store, capture_events() as ev:
+            for model, n in usage.items():
+                for _ in range(n):
+                    store.acquire_driver_lease(model, os.getpid(), f"t-{model}",
+                                               99, 300)
+            try:
+                drivers._glm_yield_alone(self.GLM, "t1", self._emit_ctx())
+            except drivers.GlmYield as y:
+                return y, ev
+            return None, ev
+
+    def _held(self):
+        return drivers._lease_db().lease_usage().get(self.GLM, 0)
+
+    def test_yields_to_cursor_when_no_other_model_is_in_flight(self):
+        y, ev = self._check({})
+        self.assertIsNotNone(y, "a lone GLM attempt must yield")
+        self.assertEqual(y.to_model, self.CURSOR)
+        self.assertEqual(y.reason, "alone")
+        events = ev.of("driver.glm_yield")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["reason"], "alone")
+        self.assertEqual(events[0]["to_harness"], "cursor")
+        self.assertNotIn("cap_wait", [t for t, _ in ev.seen],
+                         "nothing was full; this is not a cap warning")
+        # The lease it just took is released, not held while the attempt moves.
+        self.assertEqual(drivers._lease_db().lease_usage().get(self.GLM, 0), 0,
+                         "the GLM lease must be released before yielding")
+
+    def test_a_deepseek_lease_keeps_glm(self):
+        y, _ev = self._check({self.DS: 1})
+        self.assertIsNone(y, "another model is working: GLM is parallel capacity")
+
+    def test_another_glm_attempt_is_not_company(self):
+        # Two GLM tasks are still GLM working alone.
+        self._check({self.GLM: 1})
+
+    def test_the_planned_reviewer_avoid_set_does_not_hide_the_seat(self):
+        """REGRESSION: `Driver.run` sets `avoid_families` to the planned
+        reviewer's family, which is `deepseek` on EVERY GLM-5.3 task. Passing
+        that to the seat lookup hid DeepSeek — the fastest free seat on the
+        local profile and the only cursor/agy/reasonix one — so a lone GLM
+        attempt kept its lease while DeepSeek sat idle. The review node
+        re-pairs from `wrote_the_code`, so the yield must not apply it."""
+        ctx = drivers._cap_swap_ctx.set(
+            (self.GLM, "opencode", "implementer", frozenset(),
+             frozenset({"deepseek"})))
+        self.addCleanup(drivers._cap_swap_ctx.reset, ctx)
+        # A profile whose only fast seat IS the avoided family (deepseek) —
+        # the local fleet exactly. With the avoid set applied the lookup
+        # returned None, so a lone GLM attempt kept its lease while DeepSeek
+        # sat free.
+        roster = {self.GLM: "opencode", self.DS: "reasonix"}
+        with mock.patch.object(config, "MODEL_HARNESS", roster):
+            y, _ev = self._check({})
+        self.assertIsNotNone(y, "the avoid set must not swallow the only seat")
+        self.assertEqual(y.to_model, self.DS)
+
+    def test_cap_swap_after_zero_does_not_disable_the_yield(self):
+        """REGRESSION: `cap_substitute` returns None when CAP_SWAP_AFTER <= 0,
+        and an operator setting that to 0 must not re-enable lone-GLM work.
+        This path runs when nothing was full, so the kill switch is the cap
+        swap's and only the cap swap's."""
+        with mock.patch.object(config, "CAP_SWAP_AFTER", 0.0):
+            y, _ev = self._check({})
+        self.assertIsNotNone(y, "ARC_CAP_SWAP_AFTER=0 must not keep GLM alone")
+        self.assertEqual(y.to_model, self.CURSOR)
+
+    def test_a_non_fast_candidate_does_not_abandon_the_search(self):
+        """REGRESSION: `cap_substitute` returned the FIRST idle candidate.
+        On studio-api that is Claude-Opus-5.5 (opencode, same swap rank as
+        reasonix, earlier name), and the old `to_harness not in
+        _FAST_YIELD_HARNESSES` check then KEPT GLM even though DeepSeek was
+        free. A non-fast candidate must be skipped, not treated as the end of
+        the search."""
+        zen = "Zen-First-Candidate"
+        with mock.patch.dict(config.MODEL_HARNESS, {zen: "opencode"}), \
+                mock.patch.dict(config.MODEL_ROLES, {zen: {"implementer"}}), \
+                mock.patch.dict(config.MODEL_FAMILY, {zen: "zen"}), \
+                mock.patch.dict(config.MODEL_TIER, {zen: "hard"}):
+            y, _ev = self._check({})
+        self.assertIsNotNone(y, "an opencode seat ahead of the fast ones "
+                                "must not abandon the yield")
+        self.assertIn(config.MODEL_HARNESS[y.to_model], ("cursor", "agy",
+                                                         "reasonix"))
+
+    def test_no_faster_seat_free_means_glm_runs(self):
+        # A faster seat that is FULL is also a seat that is WORKING — its lease
+        # is the "somebody else is in flight" signal, so GLM keeps its slot and
+        # runs. (A full seat with no lease at all would be the backend holding
+        # a slot we do not own; that is the cap swap's problem, not this one.)
+        for usage in ({self.CURSOR: 3}, {self.AGY: 3}, {self.DS: 1},
+                      {self.CURSOR: 3, self.AGY: 3}):
+            with self.subTest(usage=usage):
+                y, _ev = self._check(usage)
+                self.assertIsNone(y, "a task with nowhere else to go still runs")
+
+    def test_no_faster_seat_exists_means_glm_runs(self):
+        # "Absent": no cursor / agy / reasonix row at all, so there is nothing
+        # to yield to and a lone GLM attempt runs rather than refusing work.
+        only_glm = {self.GLM: ("opencode", "glm", "medium", 4,
+                               {"implementer"})}
+        with mock.patch.object(config, "MODEL_HARNESS",
+                               {self.GLM: "opencode"}), \
+                mock.patch.object(config, "MODEL_ROLES",
+                                  {self.GLM: {"implementer"}}), \
+                mock.patch.object(config, "MODEL_TIER", {self.GLM: "medium"}), \
+                mock.patch.object(config, "MODEL_FAMILY", {self.GLM: "glm"}), \
+                mock.patch.object(config, "driver_limit",
+                                  lambda m, *a, **k: only_glm[m][3]):
+            y, ev = self._check({})
+        self.assertIsNone(y, "nothing faster exists: GLM runs")
+        self.assertEqual(ev.of("driver.glm_yield"), [])
+
+    def test_a_review_attempt_never_yields(self):
+        with TempLeaseDB(), capture_events():
+            try:
+                drivers._glm_yield_alone(self.GLM, "t1",
+                                         self._emit_ctx(role="reviewer"))
+                raised = None
+            except drivers.GlmYield as y:
+                raised = y
+        self.assertIsNone(raised, "review never reaches the yield branch")
+
+    def test_a_claude_or_codex_seat_is_not_faster(self):
+        # Only cursor / agy / reasonix count. A free Codex seat must not take
+        # a GLM attempt: `_swap_candidates` keeps ordinary implementation off
+        # Claude and Codex for a reason.
+        roster = {**self.ROSTER,
+                  "GPT-6-Sol": ("codex", "openai", "hard", 4, {"implementer"})}
+        usage = {m: v[0] for m, v in roster.items()}
+        with mock.patch.object(config, "MODEL_HARNESS", usage):
+            y, _ev = self._check({})
+        self.assertIn(y.to_model, (self.CURSOR, self.AGY),
+                      "the cursor/agy seat is chosen, never codex")
+        self.assertNotEqual(config.MODEL_HARNESS[y.to_model], "codex")

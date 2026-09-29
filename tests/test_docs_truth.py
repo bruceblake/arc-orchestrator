@@ -343,6 +343,32 @@ class TestDocsTruthTaskfileExamples(unittest.TestCase):
             for m in re.finditer(r'"%s"\s*:\s*"([^"]+)"' % key, block):
                 yield m.group(1)
 
+    @staticmethod
+    def _pairs_of_fenced_blocks():
+        """(model, reviewer) pairs from one fenced block.
+
+        Same line, or the block's only `model` and only `reviewer` when the
+        JSON spreads the keys over separate lines. A block with several tasks
+        and no line-local pairing yields nothing rather than guessing which
+        reviewer belongs to which model.
+        """
+        model_pat = r'"model"\s*:\s*"([^"]+)"'
+        rev_pat = r'"reviewer"\s*:\s*"([^"]+)"'
+        for block in _fenced_blocks():
+            found = []
+            for line in block.splitlines():
+                m = re.search(model_pat, line)
+                r = re.search(rev_pat, line)
+                if m and r:
+                    found.append((m.group(1), r.group(1)))
+            if found:
+                yield from found
+                continue
+            ms = re.findall(model_pat, block)
+            rs = re.findall(rev_pat, block)
+            if len(ms) == 1 and len(rs) == 1:
+                yield ms[0], rs[0]
+
     def test_example_models_are_live_implementers(self):
         live = set(config.IMPLEMENTER_MODELS)
         # A schema line naming the alternatives ("gpt-oss|DeepSeek|GLM") is a
@@ -381,6 +407,31 @@ class TestDocsTruthTaskfileExamples(unittest.TestCase):
             sorted(set(bad)), [],
             "docs show taskfile examples whose `reviewer` is not a live review "
             "family %s: %s" % (sorted(live), sorted(set(bad))))
+
+    def test_example_pairings_would_survive_the_loader(self):
+        """A live reviewer token is not enough: it must be CROSS-FAMILY for
+        the model beside it.
+
+        README.md paired DeepSeek-V4.1-Flash-thinking-max with reviewer
+        "deepseek" — two live names, one family — and the live-token check
+        above passed it happily, while `load_taskfile` rejects that pair on
+        every profile. The example is what a reader copies, so it has to be
+        a taskfile a run would accept: read the pair, and compare families.
+        Placeholders (`<medium tier>` / `<cross-family>`) are skipped — the
+        prose around them, not the fenced literal, carries the instruction.
+        """
+        bad = []
+        for model, reviewer in self._pairs_of_fenced_blocks():
+            if model.startswith("<") or reviewer.startswith("<"):
+                continue
+            if model not in config.MODEL_FAMILY:
+                bad.append(f"{model} is not a live model")
+                continue
+            if config.MODEL_FAMILY[model] == reviewer:
+                bad.append(f"{model} is paired with its own family {reviewer!r}")
+        self.assertEqual(
+            bad, [],
+            "docs show a taskfile example the loader would reject: %s" % bad)
 
 
 if __name__ == "__main__":

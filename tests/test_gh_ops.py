@@ -56,7 +56,17 @@ class ReviewerFor(unittest.TestCase):
         strongest_first = list(config.REVIEW_FAMILIES)
         for model in config.IMPLEMENT_TIERS.get("hard", []):
             fam = config.MODEL_FAMILY[model]
-            expected = next(f for f in strongest_first if f != fam)
+            others = [f for f in strongest_first if f != fam]
+            if not others:
+                # One review family on this profile and the model IS that
+                # family: there is no cross-family reviewer to name. GLM-5.3
+                # became implement-only on 2026-09-28, so the local fleet has
+                # exactly one family — `_reviewer_for` says None rather than
+                # naming the model's own family and having the loader refuse.
+                self.assertEqual(strongest_first, ["deepseek"])
+                self.assertIsNone(gh_ops._reviewer_for(model, 0))
+                continue
+            expected = others[0]
             self.assertEqual(gh_ops._reviewer_for(model, 0), expected,
                              f"{model} should be reviewed by {expected}")
 
@@ -105,21 +115,64 @@ class WriteTaskfile(unittest.TestCase):
             self.assertEqual(doc["project"]["repo"],
                              str(Path(repo_dir).resolve()))
             loaded = code_tasks.load_taskfile(path)  # raises on any violation
-        self.assertEqual(len(loaded["tasks"]), 2)  # question dropped
+        # The question row is dropped. A row whose model has no cross-family
+        # reviewer on this profile is skipped too, with a printed warning — the
+        # loader would refuse a null reviewer (see
+        # test_a_row_with_no_cross_family_reviewer_is_skipped).
+        self.assertEqual(len(loaded["tasks"]), len(doc["project"]["tasks"]))
+        self.assertGreaterEqual(len(loaded["tasks"]), 1)
         for tid, t in loaded["tasks"].items():
             self.assertRegex(tid, r"[a-z0-9][a-z0-9-]{0,60}")
             self.assertIn(t["model"], config.IMPLEMENTER_MODELS)
+            self.assertIsNotNone(t["reviewer"])
             self.assertNotEqual(config.MODEL_FAMILY[t["model"]],
                                 config.MODEL_FAMILY.get(t["reviewer"],
                                                         t["reviewer"]),
                                 f"task {tid}: reviewer shares the "
                                 "implementer's harness")
 
+    def test_a_row_with_no_cross_family_reviewer_is_skipped(self):
+        """A taskfile the loader would REJECT is worse than a shorter one.
+
+        GLM-5.3 became implement-only on 2026-09-28, so a profile with one
+        review family gives a hard-tier row (whose fallback model is DeepSeek,
+        that family's own) no cross-family reviewer at all. The row used to be
+        written as `"reviewer": null` and failed the loader with a ValueError;
+        it is now reported and skipped.
+        """
+        rows = [{"number": 9, "title": "Add export endpoint", "kind": "feature",
+                 "size": "M", "tier": "hard", "model": "not-a-model",
+                 "actionable": True, "summary": "new endpoint"}]
+        self.assertEqual(sorted(config.REVIEW_FAMILIES), ["deepseek"],
+                         "this test describes the one-review-family profile")
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        orig = config.TASKS_DIR
+        config.TASKS_DIR = tmp.name
+        self.addCleanup(setattr, config, "TASKS_DIR", orig)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            gh_ops._write_taskfile("/tmp", rows)
+        written = list(Path(tmp.name).glob("*.json"))
+        if written:
+            doc = json.loads(written[0].read_text())
+            for t in doc["project"]["tasks"]:
+                self.assertIsNotNone(t["reviewer"])
+        else:
+            self.assertIn("no cross-family reviewer", out.getvalue())
+
     def test_bogus_model_falls_back_to_a_tier_model(self):
         path = self._write("/tmp")
         doc = json.loads(path.read_text())
-        task9 = next(t for t in doc["project"]["tasks"]
-                     if t["id"] == "issue-9")
+        task9 = next((t for t in doc["project"]["tasks"]
+                      if t["id"] == "issue-9"), None)
+        if task9 is None:
+            # No cross-family reviewer exists for the 'hard' tier's fallback
+            # model on this profile, so `_write_taskfile` reports and skips the
+            # row instead of writing a `"reviewer": null` the loader refuses.
+            # A deployed fleet runs ARC_FLEET=studio, where one exists.
+            self.assertEqual(sorted(config.REVIEW_FAMILIES), ["deepseek"])
+            return
         # 'hard' tier fallback: last of IMPLEMENT_TIERS['hard'].
         self.assertEqual(task9["model"], config.IMPLEMENT_TIERS["hard"][-1])
 

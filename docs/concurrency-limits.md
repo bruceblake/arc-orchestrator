@@ -287,7 +287,7 @@ GLM's 4 into the 5-wide opencode pool.
 ```
 DeepSeek-V4.1-max  9   ← hard implementers + planner/reviewers (reasonix,
 ────────────────       cap 10, one slot reserved for interactive chat)
-GLM-5.3            4   ← medium implementers + reviewers (opencode, pinned cap 4)
+GLM-5.3            4   ← medium implementers only (opencode, pinned cap 4)
                   13   per-process batch ceiling
 ```
 
@@ -527,15 +527,18 @@ it — that slot comes off DeepSeek, the planner, whose batch cap is 9 of 10.
 (4 opencode + 4 reasonix) against the two pools' 5 + 10, and the rest park in FIFO
 order on `drivers._gate(model)`.
 
-**What queues next — the reviews.** Cross-review is family-based: the 8
-GLM tasks are all reviewed by `deepseek` (DeepSeek-V4.1-Flash-thinking-max),
-and the 4 DeepSeek tasks are reviewed by `glm`. That is eight review firings
+**What queues next — the reviews.** Cross-review is family-based, and GLM-5.3
+is implement-only (2026-09-28), so the 8 GLM tasks are all reviewed by
+`deepseek` (DeepSeek-V4.1-Flash-thinking-max) and the 4 DeepSeek tasks have no
+reviewer at all on this two-family example — on the studio roster they go to
+`openai` (GPT-6-Sol), then the other review families. That is eight review
+firings
 on DeepSeek against a batch driver cap of 9, alongside the 4 hard
-implementations and the planner already holding slots; the four GLM reviews
-queue behind the medium implementations draining through GLM's 4.
+implementations and the planner already holding slots. No review of DeepSeek
+work queues behind GLM, because GLM is not in the review pool.
 
-**Why this is the bottleneck.** GLM-5.3 (batch cap 4) paces everything routed
-to it — the medium implementations AND every review of DeepSeek work — while
+**Why this is the bottleneck.** GLM-5.3 (batch cap 4) paces only the work
+routed to it — the medium implementations — while
 DeepSeek's 9-wide batch share of the reasonix pool drains the hard work, the
 reviews of GLM work and the planner's own turn. Every GLM-side step of a batch
 is serialized through four driver slots, in FIFO order.
