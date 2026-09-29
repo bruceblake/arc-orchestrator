@@ -15,8 +15,7 @@ corrected 2026-09-25 — the 2026-09-12 note had them reversed):
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 10 |
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement, Review, PR-review | 4 | 4 |
+| DeepSeek-V4.1-Flash | `reasonix` (`ReasonixDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 10 |
 
 Subscription seats (studio profile, 2026-09-24) are not unlimited. The plan
 window is the real limit; local caps in `config._SEAT_CAP` keep a burst from
@@ -26,16 +25,17 @@ the most headroom and no recent `driver.usage_limit`. Claude is last.
 
 | Seat | Plan | Harness | Local cap |
 |---|---|---|---|
-| GPT-6-Sol (Codex) | ChatGPT Pro | `codex` | 4 |
+| GPT-6.1-Sol (Codex) | ChatGPT Pro | `codex` | 4 |
 | Cursor-Grok-4.7 | Cursor Pro | `cursor` | 3 |
 | Antigravity-Gemini (`gemini-3.8-flash-high`) | Google AI Pro | `agy` | 3 |
-| Claude-Opus-5.5 | Claude Pro | `claude` | 2 |
+| Claude-Sonnet-5.5 | Claude Pro | `claude` | 2 |
 
 Context windows and defaults per the official ARC docs
 (https://www.docs.arc.vt.edu/ai/011_llm_api_arc_vt_edu.html, checked
-2026-09-15): **GLM-5.3** 128k context, concurrency 4, default
-`reasoning_effort` max; **DeepSeek-V4.1-Flash** (and all thinking variants)
-512k context, concurrency 10, default `reasoning_effort` high.
+2026-09-29): **DeepSeek-V4.1-Flash** is `reasoning_effort` high, 1M
+context, concurrency 10. **DeepSeek-V4.1-Flash-thinking-max** is
+`reasoning_effort` max and is not on the roster. **GLM-5.3** left the
+roster the same day.
 
 **DeepSeek-V4.1-Flash-thinking-max (DS-max) is the fleet's strongest
 model** — operator decision 2026-09-25, and the 2026-09-12 note that said

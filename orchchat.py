@@ -37,6 +37,16 @@ SESSION_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,39}$")
 # refinement session cannot price itself out of the planner's context.
 HISTORY_CHARS = 30000
 
+if len(config.REVIEW_FAMILIES) == 1:
+    _REVIEW_CLAUSE = (
+        f"reviewer is exactly \"{next(iter(config.REVIEW_FAMILIES))}\" "
+        "(the only review family; the review is a fresh agent); ")
+else:
+    _REVIEW_CLAUSE = (
+        "reviewer is exactly one of "
+        + ", ".join(chr(34) + f + chr(34) for f in sorted(config.REVIEW_FAMILIES))
+        + " and MUST NOT share a family with the implementer (never self-review); ")
+
 PLANNER_PERSONA = (
     f"You are the ARC fleet's planning orchestrator, running on "
     f"{config.PLANNER_MODEL}. "
@@ -49,9 +59,7 @@ PLANNER_PERSONA = (
     "\"tasks\": [...]}}; 2-6 tasks, each <30 min for one agent; per-task "
     "model is exactly one of "
     f"{' or '.join(sorted(config.IMPLEMENTER_MODELS))} — {config.tier_sentence()}"
-    "; reviewer is exactly one of "
-    f"{', '.join(chr(34) + f + chr(34) for f in sorted(config.REVIEW_FAMILIES))} "
-    "and MUST NOT share a family with the implementer (never self-review); "
+    f"; {_REVIEW_CLAUSE}"
     "every task gets an honest verify_cmd — when code changes make "
     "./check.sh the first clause, use ./py NEVER .venv/bin/python (worktrees "
     "have no venv), and the command must FAIL on the untouched tree and pass "

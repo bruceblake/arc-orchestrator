@@ -632,30 +632,33 @@ class LiveQueueView(unittest.TestCase):
         self._write()
         models = {m["model"] for m in dashboard._queue(self._store())["models"]}
         self.assertIn(STRONGEST, models)
-        self.assertIn("GLM-5.3", models)
+        self.assertEqual(models, set(config.MODEL_FAMILY))
 
     def test_a_harness_wait_is_shown_under_the_real_model(self):
         # drivers report the harness lease with report_as=<real model> so one
         # attempt does not split into two rows, one of them under a model name
         # ("harness:opencode") that does not exist.
-        self._write(self._ev("driver.cap_wait", "t1", "GLM-5.3",
-                             scope="harness", harness="opencode", cap=5))
+        harness = config.MODEL_HARNESS[STRONGEST]
+        self._write(self._ev("driver.cap_wait", "t1", STRONGEST,
+                             scope="harness", harness=harness, cap=5))
         q = dashboard._queue(self._store())
         self.assertEqual(len(q["waiting"]), 1)
         row = q["waiting"][0]
-        self.assertEqual(row["model"], "GLM-5.3")
+        self.assertEqual(row["model"], STRONGEST)
         self.assertEqual(row["scope"], "harness")
-        self.assertEqual(q["harnesses"][0]["waiting"], 1)
+        shown = next(h for h in q["harnesses"] if h["harness"] == harness)
+        self.assertEqual(shown["waiting"], 1)
 
     def test_a_harness_lease_is_capacity_not_a_second_running_task(self):
         now = time.time()
         q = dashboard._queue(self._store([
-            {"id": 1, "model": "GLM-5.3", "pid": os.getpid(), "task": "t1",
+            {"id": 1, "model": STRONGEST, "pid": os.getpid(), "task": "t1",
              "acquired_at": now - 10},
-            {"id": 2, "model": "harness:opencode", "pid": os.getpid(),
-             "task": "t1", "acquired_at": now - 10}]))
+            {"id": 2, "model": "harness:" + config.MODEL_HARNESS[STRONGEST],
+             "pid": os.getpid(), "task": "t1", "acquired_at": now - 10}]))
         self.assertEqual(q["totals"]["running"], 1)
-        oc = next(h for h in q["harnesses"] if h["harness"] == "opencode")
+        oc = next(h for h in q["harnesses"]
+                  if h["harness"] == config.MODEL_HARNESS[STRONGEST])
         self.assertEqual((oc["running"], oc["free"]), (1, oc["cap"] - 1))
 
     def test_harness_rows_never_appear_as_models(self):
@@ -1164,6 +1167,8 @@ class ManualEscalation(unittest.TestCase):
     """
 
     def setUp(self):
+        if len(config.ESCALATION_PATH) < 2:
+            self.skipTest("escalation needs two tiers")
         import shutil
         import store as _store
         self.dir = tempfile.mkdtemp()
@@ -1257,7 +1262,12 @@ class TheRunningGraphHonoursTheOverride(unittest.TestCase):
         import code_tasks as ct
         g, st = self._graph_and_store()
         # reach cur_model through a node that exposes it: escalate's "from"
-        st.set_model_override("tf.json", "t1", "GLM-5.3", "test")
+        others = [m for m in config.IMPLEMENTER_MODELS
+                  if m != config.ESCALATION_PATH[0]]
+        if not others:
+            self.skipTest("needs a second live model to override to")
+        target = others[0]
+        st.set_model_override("tf.json", "t1", target, "test")
         # implement records the model it is about to use via upsert; read it back
         import asyncio as aio
         orig = ct._driver
@@ -1273,7 +1283,7 @@ class TheRunningGraphHonoursTheOverride(unittest.TestCase):
                 {"results": {"alloc_t1": {"worktree": "/tmp"}}, "runs": {}}))
         finally:
             ct._driver = orig
-        self.assertEqual(seen.get("model"), "GLM-5.3")
+        self.assertEqual(seen.get("model"), target)
 
     def test_the_higher_of_manual_and_automatic_wins(self):
         import code_tasks as ct, asyncio as aio

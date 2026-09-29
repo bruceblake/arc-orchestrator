@@ -290,6 +290,8 @@ class TheLeaseWaitIsPushNotified(unittest.TestCase):
             config.DB_PATH, drivers._lease_store = orig_db, orig_store
 
     def test_a_release_of_another_model_does_not_wake_this_one(self):
+        if ENTRY == STRONGEST:
+            self.skipTest("one live model; there is no other slot to release")
         import config
         import drivers
         orig_db, orig_store = config.DB_PATH, drivers._lease_store

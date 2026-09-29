@@ -506,17 +506,19 @@ def refresh_usage_blocks(now=None):
 def planning_model():
     """Who writes the task breakdown.
 
-    Claude-Opus-5.5 first, then GPT-6, then whoever else may plan (DeepSeek
-    on the local fleet). A closed plan window is skipped. The captain does
-    not use this; supervisor ticks stay on CAPTAIN_MODEL.
+    The live Claude seat first, then GPT-6, then whoever else may plan
+    (DeepSeek on the local fleet). A closed plan window is skipped. The
+    captain does not use this; supervisor ticks stay on CAPTAIN_MODEL.
     """
     refresh_usage_blocks()
     now = time.time()
     blocked = {h for h, until in _usage_blocked_until.items() if until > now}
     names = []
-    for name in ("Claude-Opus-5.5",
-                 getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")):
-        if name not in names and config.model_may(name, "planner"):
+    claude = next((m for m, fam in config.MODEL_FAMILY.items()
+                   if fam == "anthropic" and config.model_may(m, "planner")),
+                  None)
+    for name in (claude, getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6.1-Sol")):
+        if name and name not in names and config.model_may(name, "planner"):
             names.append(name)
     planner = config.PLANNER_MODEL
     if planner and planner not in names and config.model_may(planner, "planner"):
@@ -1413,7 +1415,7 @@ def reasonix_fleet_home():
     models = [m for m, h in config.MODEL_HARNESS.items() if h == "reasonix"]
     models += [m for m in config.MODEL_HARNESS if m not in models]
     if not models:
-        models = ["DeepSeek-V4.1-Flash-thinking-max"]
+        models = ["DeepSeek-V4.1-Flash"]
     cfg = _reasonix_config_toml(models)
     key = config.require_api_key(f"the reasonix harness ({config.REASONIX_FLEET_HOME})")
     env = f"ARC_API_KEY={key}\n"

@@ -124,20 +124,19 @@ class TalkDialogRender(unittest.TestCase):
           const log = document.querySelector('#k-log').getBoundingClientRect();
           const user = document.querySelector('#k-log .chat-turn.user').getBoundingClientRect();
           const asst = document.querySelector('#k-log .chat-turn.assistant').getBoundingClientRect();
+          const bubble = document.querySelector('#k-log .chat-turn.user .chat-bubble');
           return {
             model: !!(b && b.querySelector('.chat-model-name')),
             userFromRight: log.right - user.right,
             asstFromLeft: asst.left - log.left,
             userLeft: user.left, asstLeft: asst.left,
+            userRadius: bubble ? getComputedStyle(bubble).borderBottomRightRadius : "",
           };
         }""")
         open_fleet = page.locator("#capmodal details").evaluate("el => el.open")
         self.assertFalse(open_fleet)
         self.assertTrue(inside["model"], "model name must be inside the captain bubble")
-        self.assertEqual(
-            page.locator("#k-log .chat-turn.user .chat-bubble").evaluate(
-                "el => getComputedStyle(el).borderBottomRightRadius"),
-            "4px")
+        self.assertEqual(inside["userRadius"], "4px", inside)
         self.assertLess(inside["userFromRight"], 30, inside)
         self.assertLess(inside["asstFromLeft"], 30, inside)
         self.assertGreater(inside["userLeft"], inside["asstLeft"], inside)

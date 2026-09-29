@@ -391,7 +391,7 @@ class SwapsOffASpentPlan(unittest.TestCase):
         other.harness = "cursor"
         # A live roster model: the lease gate looks the name up. The swap
         # event still records the substitute usage_substitute returned.
-        other.model = "GLM-5.3"
+        other.model = config.ESCALATION_PATH[0]
         drv = ScriptedDriver([
             DriverError("usage limit", usage_limit=True, resets_at=NOW + 3 * 3600)])
         with TempLeaseDB(), capture_events() as ev, \
@@ -404,7 +404,7 @@ class SwapsOffASpentPlan(unittest.TestCase):
             drivers._semaphores.pop(drv.model, None)
             result = asyncio.run(drv.run("p", Path("."), task_id="t1"))
         self.assertEqual(result.text, "from-cursor")
-        self.assertEqual(result.model, "GLM-5.3",
+        self.assertEqual(result.model, config.ESCALATION_PATH[0],
                          "the result names the model that RAN, for the records")
         self.assertEqual(clock[0], NOW, "swapping must not park for the reset")
         self.assertEqual(len(ev.of("driver.usage_swap")), 1)
@@ -416,7 +416,7 @@ class SwapsOffASpentPlan(unittest.TestCase):
         """A swapped review must still see the screenshots the gate attached."""
         other = ScriptedDriver(['{"pass": true}'])
         other.harness = "cursor"
-        other.model = "GLM-5.3"
+        other.model = config.ESCALATION_PATH[0]
         drv = ScriptedDriver([
             DriverError("usage limit", usage_limit=True, resets_at=NOW + 3 * 3600)])
         drv.images = ("/ev/index-desktop-light.png", "/ev/usage-phone-dark.png")
@@ -468,7 +468,7 @@ class SubscriptionSeatCaps(unittest.TestCase):
     PROBE = ("import config, json; print(json.dumps({"
              "'claude': config.harness_limit('claude'),"
              "'codex': config.harness_limit('codex'),"
-             "'claude_driver': config.driver_limit('Claude-Opus-5.5', True),"
+             "'claude_driver': config.driver_limit('Claude-Sonnet-5.5', True),"
              "'openai_driver': config.driver_limit(config.STUDIO_OPENAI_MODEL, True)}))")
 
     def test_defaults_are_the_per_seat_caps(self):
@@ -487,7 +487,7 @@ class SubscriptionSeatCaps(unittest.TestCase):
     def test_api_profile_is_bound_by_the_opencode_pool_not_the_model(self):
         caps = json.loads(in_studio(
             "import config, json; print(json.dumps({m: config.driver_limit(m, True)"
-            " for m in ('Claude-Opus-5.5', config.STUDIO_OPENAI_MODEL)}))",
+            " for m in ('Claude-Sonnet-5.5', config.STUDIO_OPENAI_MODEL)}))",
             fleet="studio-api"))
         for m, v in caps.items():
             self.assertGreaterEqual(v, config.harness_limit("opencode"), (m, v))
@@ -599,7 +599,7 @@ class CapSwapInTheLeaseWait(unittest.TestCase):
     def test_run_hands_the_queued_attempt_to_the_substitute(self):
         other = ScriptedDriver(["from-cursor"])
         other.harness = "cursor"
-        other.model = "GLM-5.3"
+        other.model = config.ESCALATION_PATH[0]
         drv = ScriptedDriver(["never"])
 
         async def full(*a, **k):

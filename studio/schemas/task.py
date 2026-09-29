@@ -90,14 +90,14 @@ def phase_index(phase):
 # taskfiles written before a roster change.
 WORKERS = {
     "opus_architect": {
-        "models": ("Claude-Opus-5.5",),
+        "models": ("Claude-Sonnet-5.5", "Claude-Opus-5.5"),
         "brief": "System architect and netcode. Authoritative multiplayer "
                  "protocol (delta compression, snapshot interpolation, client "
                  "prediction, server reconciliation), the prison routine state "
                  "machine, inventory, contraband crafting, clearance levels.",
     },
     "gpt_6_astra_operator": {
-        "models": ("GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna"),
+        "models": ("GPT-6.1-Sol", "GPT-6-Astra", "GPT-6-Sol", "GPT-6-Luna"),
         "brief": "3D, rigging and animation operator. Modular asset "
                  "generation and retopology under a triangle budget, "
                  "auto-rigging and weight transfer, synchronised animation "
@@ -110,8 +110,8 @@ WORKERS = {
         # fallback for a roster with neither. Cursor-Grok was missing here,
         # so every Grok task silently resolved to GPT-6-Sol and piled onto
         # one subscription window.
-        "models": ("Cursor-Grok-4.7", "Grok-4.7", "GPT-6-Sol", "GPT-6-Luna",
-                   "GPT-6-Astra"),
+        "models": ("Cursor-Grok-4.7", "Grok-4.7", "GPT-6.1-Sol", "GPT-6-Sol",
+                   "GPT-6-Luna", "GPT-6-Astra"),
         "brief": "In-engine feature driver. Player input controllers "
                  "(sneak/sprint/crawl/crouch, first and third person), HUD and "
                  "UI data-binding: suspicion meter, stamina, noise radius, "
@@ -130,12 +130,12 @@ WORKERS = {
                  "materials, light leaks and z-fighting. NEVER implements.",
     },
     "deepseek_qa_swarm": {
-        "models": ("DeepSeek-V4.1-Flash-thinking-max",),
+        "models": ("DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash-thinking-max"),
         "brief": "Headless multiplayer QA swarm: bot clients, packet-boundary "
                  "fuzzing, desync hunting, tick-rate and leak reporting.",
     },
     "glm_content_swarm": {
-        "models": ("GLM-5.3",),
+        "models": ("DeepSeek-V4.1-Flash", "GLM-5.3"),
         "brief": "Procedural content: contraband spawn tables, inmate dialogue "
                  "trees, guard announcements, achievement definitions.",
     },
@@ -201,7 +201,8 @@ def implementing_workers():
 # already reading this project's renders every round.
 STUDIO_REVIEW_PREFERENCE = {
     # Architect's own work gets the other frontier reader, not a flash model.
-    "Claude-Opus-5.5":  ("openai", "google", "xai", "glm", "deepseek"),
+    "Claude-Sonnet-5.5": ("openai", "google", "xai", "deepseek"),
+    "Claude-Opus-5.5":  ("openai", "google", "xai", "deepseek"),
     # GPT-6 work goes to the judge family when it is live (studio-api), and
     # otherwise to GLM on ARC — NOT to anthropic first: on the subscription
     # profile Claude has ONE slot, shared with the operator's own session.
@@ -209,13 +210,15 @@ STUDIO_REVIEW_PREFERENCE = {
     # Mechanical and content work: Gemini first. It is review-capable on the
     # roster, an order of magnitude cheaper, and has the widest lane (cap 6).
     "Grok-4.7":         ("google", "anthropic", "openai", "glm", "deepseek"),
-    "DeepSeek-V4.1-Flash-thinking-max": ("google", "xai", "openai", "anthropic", "glm"),
+    "DeepSeek-V4.1-Flash": ("google", "xai", "openai", "anthropic"),
+    "DeepSeek-V4.1-Flash-thinking-max": ("google", "xai", "openai", "anthropic"),
     "GLM-5.3":          ("google", "xai", "openai", "anthropic", "deepseek"),
     # On the subscription profile `anthropic` has ONE slot, shared with the
     # operator's own Claude Code session, so ARC-served GLM comes before it:
     # sending every review to anthropic would serialise the whole fleet
     # behind the human at the keyboard.
-    "GPT-6-Sol":        ("google", "glm", "anthropic", "xai", "deepseek"),
+    "GPT-6.1-Sol":      ("google", "anthropic", "xai", "deepseek"),
+    "GPT-6-Sol":        ("google", "anthropic", "xai", "deepseek"),
     "GPT-6-Luna":       ("google", "glm", "anthropic", "xai", "deepseek"),
     # The two other subscription seats: each reviewed by a different plan,
     # so one spent usage window never stalls both writing and reviewing.
@@ -368,7 +371,8 @@ class GameTask:
                 f"game task {self.task_id!r}: reviewer {reviewer!r} is not a "
                 f"review-capable family today ({sorted(config.REVIEW_FAMILIES)})")
         if (config.MODEL_FAMILY[model] == reviewer
-                and not config.ALLOW_SAME_FAMILY_REVIEW):
+                and not config.ALLOW_SAME_FAMILY_REVIEW
+                and len(config.REVIEW_FAMILIES) > 1):
             raise ValueError(
                 f"game task {self.task_id!r}: reviewer {reviewer!r} is "
                 f"{model}'s own family — cross-family review is mandatory "

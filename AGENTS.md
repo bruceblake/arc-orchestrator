@@ -92,28 +92,27 @@ Routing is decided at plan time (by DeepSeek-V4.1-Flash-thinking-max in
 
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
-| DeepSeek-V4.1-Flash-thinking-max | `reasonix` (`ReasonixDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 10 |
-| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement, Review, PR-review | 4 | 4 |
+| DeepSeek-V4.1-Flash | `reasonix` (`ReasonixDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 10 |
 
 Subscription seats (studio profile, operator directive 2026-09-24) are sized
 to the plan, not a flat 32. The plan window is the real limit; local caps
 (`config._SEAT_CAP`, override `ARC_DRIVER_LIMIT_<FAMILY>`) keep a burst from
 spending it. On the studio profile, initial planning and review prefer
-Claude-Opus-5.5, then GPT-6-Sol. GLM-5.3, DeepSeek, Cursor-Grok-4.7 and
-Antigravity-Gemini do the implementation and may review when those two are
-full or their windows are closed. Claude-Opus-5.5 is also the only
+Claude-Sonnet-5.5, then GPT-6.1-Sol. DeepSeek-V4.1-Flash, Cursor-Grok-4.7
+and Antigravity-Gemini do the implementation and may review when those two
+are full or their windows are closed. Claude-Sonnet-5.5 is also the only
 implementer for 3D asset design (Blender, modelling, animation). The
-captain stays on DeepSeek. Rule 2 stays exact: the implementer's own
-family is skipped.
+captain stays on DeepSeek. GLM-5.3 left the roster on 2026-09-29. Rule 2
+skips the implementer's own family while another review family exists.
 
 | Seat | Plan | Harness | Local cap |
 |---|---|---|---|
-| GPT-6-Sol (Codex) | ChatGPT Pro (5-hour + weekly) | `codex` | 4 |
+| GPT-6.1-Sol (Codex) | ChatGPT Pro (5-hour + weekly) | `codex` | 4 |
 | Cursor-Grok-4.7 | Cursor Pro | `cursor` | 3 |
 | Antigravity-Gemini (`gemini-3.8-flash-high`, `ARC_AGY_MODEL`) | Google AI Pro (5-hour + weekly) | `agy` | 3 |
-| Claude-Opus-5.5 | Claude Pro (smallest window) | `claude` | 2 |
+| Claude-Sonnet-5.5 | Claude Pro (smallest window) | `claude` | 2 |
 
-**DeepSeek-V4.1-Flash-thinking-max is the fleet's strongest model** —
+**DeepSeek-V4.1-Flash (reasoning_effort high) is the fleet's ARC model** —
 operator decision 2026-09-25 (the 2026-09-12 note had this the other way
 round, and the roster was corrected to match): hard tier, the planner, and
 the last escalation stage. It holds 10 seats to GLM's 4, is much faster than

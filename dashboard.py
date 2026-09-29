@@ -47,9 +47,11 @@ MAX_EVENTS_PER_RESPONSE = 3000
 # DeepSeek-V4-Flash) stay mapped so their HISTORICAL usage/harness_runs rows
 # still render a name and a price instead of a raw id and $0.00. They are not
 # offered anywhere as a routing choice — see config.MODEL_ROLES.
-PRETTY = {"GLM-5.3": "GLM 5.3",
-          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max",
+PRETTY = {"GLM-5.3": "GLM 5.3 (retired)",
+          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max (retired)",
           "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash",
+          "Claude-Sonnet-5.5": "Claude Sonnet 5.5",
+          "GPT-6.1-Sol": "GPT-6.1 Sol",
           "Kimi-K3": "Kimi K3 (retired)",
           "gpt-oss-120b": "gpt-oss 120B (retired)",
           "DeepSeek-V4-Flash": "DeepSeek V4 Flash (retired)"}

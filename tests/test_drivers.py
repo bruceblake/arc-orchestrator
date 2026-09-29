@@ -768,8 +768,7 @@ class ConfigErrorIsNotRetried(unittest.TestCase):
         """require_api_key raises inside extra_env, before the spawn: the
         attempt is reported once as a config fault and nothing is retried."""
         async def go():
-            drv = drivers.ReasonixDriver(
-                "DeepSeek-V4.1-Flash-thinking-max", "implementer")
+            drv = drivers.ReasonixDriver(STRONGEST, "implementer")
             drivers._semaphores.pop(drv.model, None)
             with capture_events() as ev:
                 with self.assertRaises(config.ConfigError):
@@ -888,8 +887,8 @@ class FleetContextConfig(unittest.TestCase):
     def test_opencode_model_arg_keeps_the_real_model_key(self):
         # The serve path names the model with this string; a renamed key is
         # rejected by ARC as "Model not found".
-        arg = drivers.OpencodeDriver("GLM-5.3", "reviewer").model_arg()
-        self.assertIn("ARC/GLM-5.3", arg)
+        with self.assertRaises(ValueError):
+            drivers.OpencodeDriver("GLM-5.3", "implementer")
 
 
 class LeaseWaitIsBounded(unittest.TestCase):
