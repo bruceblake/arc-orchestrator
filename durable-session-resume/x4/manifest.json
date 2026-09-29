@@ -1,0 +1,61 @@
+{
+  "kind": "ui",
+  "worktree": "/home/proxyie/worktrees/arc-orchestrator/durable-session-resume",
+  "project": "arc-orchestrator",
+  "head": "b1c47cd53a6c9c0771e8bf5950a04fd25bb09d57",
+  "ui_files": [
+    "dashboard.py",
+    "static/panels/board.js",
+    "static/panels/projects.js",
+    "static/panels/timeline.js",
+    "static/panels/work_status.js"
+  ],
+  "shots": [
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/index-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/index-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/index-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/index-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/projects-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/projects-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/projects-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/projects-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/usage-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/usage-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/usage-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/usage-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/phone-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/phone-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/phone-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/shots/phone-phone-dark.png"
+  ],
+  "videos": {},
+  "compare": [],
+  "warnings": [
+    "baseline render failed: the dashboard did not render for its screenshots:\nTraceback (most recent call last):\n  File \"/home/proxyie/repos/arc-orchestrator/tools/visual/capture.py\", line 242, in <module>\n    sys.exit(main())\n "
+  ],
+  "coverage": {
+    "views": {
+      "status": "captured",
+      "reason": ""
+    },
+    "baseline": {
+      "status": "failed",
+      "reason": "baseline render failed: the dashboard did not render for its screenshots:\nTraceback (most recent call last):\n  File \"/home/proxyie/repos/arc-orchestrator/tools/visual/capture.py\", line 242, in <module>\n    sys.exit(main())\n "
+    },
+    "compare": {
+      "status": "skipped",
+      "reason": "no baseline"
+    }
+  },
+  "page_errors": {},
+  "baseline": {
+    "sha": "3fc6b4e040b21c1a68c81b39bbae2538e167989c",
+    "dir": null,
+    "status": "failed",
+    "reason": "baseline render failed: the dashboard did not render for its screenshots:\nTraceback (most recent call last):\n  File \"/home/proxyie/repos/arc-orchestrator/tools/visual/capture.py\", line 242, in <module>\n    sys.exit(main())\n "
+  },
+  "new_page_errors": {},
+  "changed_views": [],
+  "contact_sheet": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/durable-session-resume/x4/contact_sheet.png",
+  "seconds": 6.2
+}
