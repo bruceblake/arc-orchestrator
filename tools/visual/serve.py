@@ -15,7 +15,8 @@ This builds the handler directly over a fixture world instead:
 
 - every path config derives from the tree (DB, events, logs/*) is rewritten
   under the fixture dir, HOME points into it (so ~/tasks, ~/repos and friends
-  are the fixture's), and gh tokens are dropped from the environment;
+  are the fixture's), gh tokens are dropped, and ARC_STUDIO_DIR is cleared so
+  a live studio tree cannot open the Studio tab over the Overview golden;
 - `/proc`-derived "live runs" are reported empty — a real fleet run on this
   machine must not show up in a golden image;
 - time.time() starts at fixture.FROZEN_NOW, so server-side "N minutes ago"
@@ -51,8 +52,12 @@ def _isolate_env(fx):
         # and the Overview goldens miss by the whole page.
         "ARC_STUDIO_DIR": fx["studio"],
     })
+    # ARC_STUDIO_DIR is the operator's live studio tree. Left set, /api/studio
+    # lists those projects and index.html opens the Studio tab, so the
+    # Overview golden (the fixture world has no studio runs) never matches.
     for k in ("GH_TOKEN", "GITHUB_TOKEN", "ARC_DASHBOARD_TOKEN",
-              "ARC_ESCALATION_PATH", "ARC_ALLOW_SAME_FAMILY_REVIEW"):
+              "ARC_ESCALATION_PATH", "ARC_ALLOW_SAME_FAMILY_REVIEW",
+              "ARC_STUDIO_DIR"):
         os.environ.pop(k, None)
     try:
         time.tzset()
@@ -129,6 +134,22 @@ def main(argv=None):
     import reconcile
     reconcile.live_runs = lambda: []
     import dashboard
+    import gh_issues
+    # The fixture repo path is displayed and never opened, so github_slug
+    # cannot read an origin. Without a slug the #N anchors do not render
+    # and a golden would still pass if the link markup were removed.
+    _slug = gh_issues.github_slug
+
+    def _fixture_slug(repo):
+        try:
+            if str(repo) == fixture.REPO or Path(str(repo)).name == "demo-app":
+                return "operator/demo-app"
+        except (TypeError, OSError):
+            pass
+        return _slug(repo)
+
+    gh_issues.github_slug = _fixture_slug
+    gh_issues._slug_cache.clear()
     from http.server import ThreadingHTTPServer
     from store import Store
     dashboard.Handler.store = Store(fx["db"])

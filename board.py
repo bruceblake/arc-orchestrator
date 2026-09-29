@@ -73,12 +73,16 @@ def post(worktree, *, task, role, model, harness, kind="note", body="",
     # legacy import must not see this line first and keep its short body.
     board_project = project or agentboard.infer_project(worktree)[0]
     if board_project:
+        refs = {k: rec[k] for k in ("harness", "session_id") if rec.get(k)}
+        tf = agentboard.taskfile_for_worktree(worktree, rec["task"])
+        if tf:
+            refs["taskfile"] = tf
         agentboard.post(board_project, author=f"{rec['task']}/{rec['role']}",
                         channel=f"task:{rec['task']}" if rec["task"] else "project",
                         kind=kind if kind in agentboard.KINDS else "note",
                         body=body or "", author_model=rec["model"],
                         author_role=rec["role"], author_task=rec["task"],
-                        refs={k: rec[k] for k in ("harness", "session_id") if rec.get(k)},
+                        refs=refs,
                         msg_id=rec["id"], ts=rec["ts"])
     line = json.dumps(rec, ensure_ascii=False) + "\n"
     try:

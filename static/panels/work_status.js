@@ -52,8 +52,13 @@ function workTaskRow(t, file) {
     ? ` · no output <span data-since="${sinceStamp(t.idle_s)}">…</span>` : "";
   const agents = (t.agents || []).map(a => `${a.role || "agent"}: ${short(a.model || "?")}${a.activity ? " · " + a.activity : ""}`);
   const agentLine = agents.length ? agents.join("; ") : (t.role ? `${t.role}${t.model ? " · " + short(t.model) : ""}` : "");
+  const issue = t.issue
+    ? (t.issue_url
+        ? ` <a href="${attr(t.issue_url)}" target="_blank" rel="noopener" onclick="event.stopPropagation()">#${esc(t.issue)}</a>`
+        : ` #${esc(t.issue)}`)
+    : "";
   return `<button class="work-task ${attr(activity)}" type="button" data-work-file="${attr(file)}" data-work-task="${attr(t.id)}" aria-label="${attr(`${t.id}: ${detail}${idle ? " · no output" : ""}. Open project detail`)}">
-    <span><b>${esc(t.id)}</b><span class="title">${esc(t.title || "")}</span></span>
+    <span><b>${esc(t.id)}</b>${issue}<span class="title">${esc(t.title || "")}</span></span>
     <span>${esc(workActivity(t))}</span>
     <span>${esc(workStage(t.stage))}${agentLine ? `<span class="title">${esc(agentLine)}</span>` : ""}</span>
     <span class="reason">${esc(reason)}${age}</span>
@@ -72,12 +77,13 @@ function workProject(p, filter) {
   const graphNodes = ((p.dag || {}).nodes || []).map(n => {
     const t = tasks.find(x => x.id === n.id) || {};
     return {...n, title: t.title || n.title, status: t.status || n.status,
-      live: t.activity === "working", stage: t.stage, activity: t.activity, reason: t.reason};
+      live: t.activity === "working", stage: t.stage, activity: t.activity, reason: t.reason,
+      issue: t.issue || n.issue, issue_url: t.issue_url || n.issue_url};
   });
   const graph = graphNodes.length ? taskDag({nodes:graphNodes, edges:((p.dag || {}).edges || [])}, {size:"full", file:p.file}) : "";
   return `<section class="work-project ${klass}" data-work-section="${attr(p.file)}" aria-label="${attr(p.title || p.file)} task graph">
     <div class="work-head"><button class="act" type="button" data-work-project="${attr(p.file)}" aria-label="Open project ${attr(p.title || p.file)}"><b>${esc(p.title || p.file)}</b></button>
-      <span class="hint">${esc(shown.length)} of ${esc(tasks.length)} tasks · ${esc(p.phase || "unknown")}</span></div>
+      <span class="hint">${esc(shown.length)} of ${esc(tasks.length)} tasks · ${esc(p.phase || "unknown")}${p.epic_issue ? (p.epic_url ? ` · <a href="${attr(p.epic_url)}" target="_blank" rel="noopener">#${esc(p.epic_issue)}</a>` : ` · #${esc(p.epic_issue)}`) : ""}</span></div>
     ${chain}
     <div class="work-dag" aria-label="Dependency graph for ${attr(p.title || p.file)}">${graph}</div>
     <div class="work-tasks">${shown.map(t => workTaskRow(t, p.file)).join("")}</div>

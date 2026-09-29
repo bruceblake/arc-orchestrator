@@ -398,16 +398,133 @@ def post(project, *, author, channel="project", kind="note", body="",
             "refs": refs if isinstance(refs, dict) else {},
             "state": "open" if kind == "question" else "",
         }
+        inserted = 0
         with _lock:
             conn = _db(rec["project"])
-            _insert(conn, rec)
+            inserted = _insert(conn, rec)
             conn.commit()
         events.emit("board.post", project=rec["project"], channel=channel,
                     kind=kind, author=rec["author"], post=mid,
                     mentions=ments[:10])
+        # INSERT OR IGNORE: a repeated message id is not a second comment.
+        if inserted:
+            _mirror_issue(rec)
     except Exception as exc:  # noqa: BLE001 — never raises, per contract
         errors.capture(exc, task=author_task or None, node="agentboard.post")
     return mid
+
+
+def taskfile_for_worktree(worktree, task=None):
+    """The code_tasks taskfile for this worktree, when exactly one matches."""
+    try:
+        wt = str(Path(worktree).resolve())
+    except OSError:
+        return ""
+    try:
+        with _lock:
+            conn = _conn()
+            if task:
+                rows = conn.execute(
+                    "SELECT taskfile, worktree FROM code_tasks WHERE id=?",
+                    (task,)).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT taskfile, worktree FROM code_tasks").fetchall()
+    except sqlite3.Error:
+        return ""
+    hits = []
+    for r in rows:
+        stored = r["worktree"] or ""
+        if not stored or not r["taskfile"]:
+            continue
+        try:
+            same = str(Path(stored).resolve()) == wt
+        except OSError:
+            same = stored == wt
+        if same:
+            hits.append(r["taskfile"])
+    uniq = list(dict.fromkeys(hits))
+    return uniq[0] if len(uniq) == 1 else ""
+
+
+def _mirror_taskfile(rec):
+    refs = rec.get("refs") if isinstance(rec.get("refs"), dict) else {}
+    tf = refs.get("taskfile")
+    return tf.strip() if isinstance(tf, str) else ""
+
+
+def _row_in_project(row, project):
+    """True when this issue row belongs to the board project.
+
+    Board messages are untrusted. A taskfile path in ``refs`` is not a
+    project: the row's repo name or taskfile stem has to be the project
+    the post was written on."""
+    if not project:
+        return False
+    return project in (Path(row["repo"]).name, Path(row["taskfile"]).stem)
+
+
+def _issue_row_for_mirror(tid, project, taskfile):
+    """The one issue row this post may comment on.
+
+    An agent-supplied taskfile may pin a row only after it matches this
+    board project. A path from another project is refused, even when it is
+    the only row for the task id — otherwise a post in project A comments
+    on project B. Without a taskfile, a single project match is used. No
+    project match is no row, including when the task id has exactly one
+    issue recorded for another project. Two taskfiles in one project that
+    reuse the task id are skipped."""
+    import gh_issues
+    rows = gh_issues.rows_for_task(tid)
+    if not rows:
+        return None
+    scoped = [r for r in rows if _row_in_project(r, project)]
+    if taskfile:
+        try:
+            want = str(Path(taskfile).resolve())
+        except OSError:
+            want = str(taskfile)
+        match = [r for r in scoped if r["taskfile"] == want]
+        if len(match) == 1:
+            return match[0]
+        if len(match) > 1:
+            return None
+        if any(r["taskfile"] == want for r in rows):
+            return None
+    if len(scoped) == 1:
+        return scoped[0]
+    return None
+
+
+def _mirror_issue(rec):
+    """Best-effort copy of a decision, a blocker, or a question to @operator
+    onto that task's GitHub issue. One comment per message id (the caller
+    only invokes this after a fresh insert). Operator posts are never
+    mirrored back. A gh failure does not fail the board post."""
+    try:
+        author = rec.get("author") or ""
+        role = rec.get("author_role") or ""
+        if author == "operator" or role == "operator" or author.endswith("/operator"):
+            return
+        kind = rec.get("kind")
+        ments = [str(m).lower() for m in (rec.get("mentions") or [])]
+        if kind not in ("decision", "blocker") and not (
+                kind == "question" and "operator" in ments):
+            return
+        ch = rec.get("channel") or ""
+        tid = ch[5:] if ch.startswith("task:") else (rec.get("author_task") or "")
+        if not tid:
+            return
+        import gh_issues
+        hit = _issue_row_for_mirror(tid, rec.get("project") or "", _mirror_taskfile(rec))
+        if not hit or not gh_issues.enabled(hit["repo"]):
+            return
+        gh_issues.run_sync(gh_issues.comment(
+            hit["repo"], hit["issue"], kind, rec.get("body") or "",
+            model=author or None))
+    except Exception as exc:  # noqa: BLE001 — best-effort, never fails the post
+        errors.capture(exc, task=rec.get("author_task") or None,
+                       node="agentboard.mirror_issue")
 
 
 @_safe(False)
@@ -1136,6 +1253,12 @@ def ingest_file(project, worktree, *, task, role, model):
                       note=fields["body"][:200], ttl_s=CLAIM_TTL_S)
                 n += 1
                 continue
+            refs = dict(fields.get("refs") or {})
+            if not refs.get("taskfile"):
+                found = taskfile_for_worktree(worktree, c_task)
+                if found:
+                    refs["taskfile"] = found
+                    fields = dict(fields, refs=refs)
             post(project, author=author, author_model=model, author_role=role,
                  author_task=c_task, msg_id=mid, **fields)
             n += 1
