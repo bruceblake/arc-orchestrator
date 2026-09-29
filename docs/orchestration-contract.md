@@ -358,7 +358,13 @@ Rules:
 - **Best-effort, always.** Each hook is bounded by `ARC_GH_ISSUES_TIMEOUT`
   (default 60 s). A failure is a `gh.issue_error` event with an
   `errors.capture` fingerprint — never a failed or blocked task.
-- **One comment per state transition**, never per progress event.
+- **One comment per state transition**, never per progress event. A dead
+  run and the watchdog tick also push the `code_tasks` status onto the
+  existing issue: the code-run `finally` calls `gh_issues.reflect_status`
+  after it has marked leaked rows failed and emitted `run.interrupted`, and
+  `fleetwatch.tick` calls `gh_issues.reflect_db` once per tick. Pushing the
+  same status again does not add a comment. Neither path creates an issue,
+  and neither closes a failed or merged issue.
 - **Redacted.** Comments are capped at 6000 chars; worktree and repo paths
   become repo-relative, other home-directory paths keep only the file name,
   and env values of `*TOKEN*/*KEY*/*SECRET*/*PASSWORD*` variables are removed.
