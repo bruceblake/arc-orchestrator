@@ -101,9 +101,14 @@ function boardPaint(snapshot) {
       const dot = (typeof STATUSC !== "undefined" && STATUSC[st]) || "#8b949e";
       const unread = c.unread ? ' <b class="bd-unread">' + esc(String(c.unread)) + "</b>" : "";
       const on = c.channel === BD.channel ? " on" : "";
+      const issue = c.issue
+        ? (c.issue_url
+            ? ' <a href="' + attr(c.issue_url) + '" target="_blank" rel="noopener">#' + esc(c.issue) + "</a>"
+            : " #" + esc(c.issue))
+        : "";
       return '<div class="bd-ch' + on + '" data-ch="' + attr(c.channel) + '">'
         + (st ? '<i class="bd-dot" style="background:' + dot + '" title="' + attr(st) + '"></i>' : "")
-        + esc(c.channel) + unread + "</div>";
+        + esc(c.channel) + issue + unread + "</div>";
     }).join("");
   const shown = (BD.messages || []).filter(boardVisible);
   thread.innerHTML = shown.length ? shown.map(m => boardMsg(m, false)).join("")
@@ -279,6 +284,7 @@ document.addEventListener("click", (e) => {
   if (!t || !t.closest) return;
   const ch = t.closest("[data-ch]");
   if (ch && $("#bd-rail") && $("#bd-rail").contains(ch)) {
+    if (t.closest("a")) return;
     BD.channel = ch.getAttribute("data-ch");
     BD.since = 0; BD.messages = [];
     boardRefresh(true);

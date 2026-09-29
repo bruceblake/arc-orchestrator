@@ -140,10 +140,15 @@ function renderTimeline(d) {
   const body = $("#drawer-body");
   const entries = (d && d.entries) || [];
   const c = (d && d.counts) || {};
-  $("#drawer-sub").textContent =
-    `${entries.length} entr${entries.length === 1 ? "y" : "ies"}` +
+  const counts = `${entries.length} entr${entries.length === 1 ? "y" : "ies"}` +
     ` · ${c.events || 0} events · ${c.runs || 0} runs · ${c.errors || 0} errors` +
     ` · ${c.evidence || 0} evidence`;
+  const issue = d && d.issue
+    ? (d.issue_url
+        ? ` · <a href="${attr(d.issue_url)}" target="_blank" rel="noopener">#${esc(d.issue)}</a>`
+        : ` · #${esc(d.issue)}`)
+    : "";
+  $("#drawer-sub").innerHTML = esc(counts) + issue;
   if (!entries.length) {
     body.innerHTML = `<div class="empty">Nothing recorded for ${esc(d.id || "")} yet — ` +
       `no events, harness runs, errors or evidence.</div>`;

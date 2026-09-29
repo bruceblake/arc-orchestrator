@@ -691,6 +691,63 @@ class Coverage(unittest.TestCase):
         self.assertEqual(status, "skipped")
         self.assertIn("not a Godot project", reason)
 
+    def test_a_png_only_baseline_cache_is_refreshed(self):
+        """Review: PNG caches from before scene stats must not count as a hit.
+
+        `before` would be null and the delta would report pre-existing nodes
+        as additions. The cache is rendered again until scene_stats.json exists.
+        """
+        repo = self.d / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        (repo / "project.godot").write_text("[application]\n")
+        subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(repo), "-c", "user.email=a@b",
+                        "-c", "user.name=t", "commit", "-qm", "init"], check=True)
+        sha = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"],
+                             capture_output=True, text=True).stdout.strip()
+        ev = self.d / "ev"
+        dest = ev / "p" / "baseline" / sha
+        dest.mkdir(parents=True)
+        (dest / "overview.png").write_bytes(b"png")
+
+        def fake_render(project, cameras, out_dir, scratch, *, timeout, log=None,
+                        scene=None):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            png = out_dir / "overview.png"
+            png.write_bytes(b"png")
+            (out_dir / "scene_stats.json").write_text(
+                json.dumps({"mesh_instances": 3,
+                            "node_counts": {"MeshInstance3D": 3}}),
+                encoding="utf-8")
+            return [png]
+
+        with unittest.mock.patch.object(config, "EVIDENCE_DIR", str(ev)), \
+                unittest.mock.patch.object(evidence, "_git"), \
+                unittest.mock.patch.object(evidence, "is_godot_project",
+                                           return_value=True), \
+                unittest.mock.patch.object(evidence, "_cameras", return_value=[]), \
+                unittest.mock.patch("studio.engine.godot.import_assets"), \
+                unittest.mock.patch.object(evidence, "_render_shots",
+                                           side_effect=fake_render) as render:
+            bdir, status, reason = evidence.baseline("p", str(repo), sha, timeout=1)
+        self.assertEqual((status, reason), ("captured", ""))
+        self.assertEqual(Path(bdir), dest)
+        self.assertTrue((dest / "scene_stats.json").is_file(),
+                        "the stale cache was not backfilled")
+        self.assertEqual(render.call_count, 1)
+        self.assertEqual(evidence.parse_scene_stats(dest / "scene_stats.json")
+                         ["mesh_instances"], 3)
+        # A cache that already has the JSON is a hit: no second render.
+        with unittest.mock.patch.object(config, "EVIDENCE_DIR", str(ev)), \
+                unittest.mock.patch.object(evidence, "_git") as git, \
+                unittest.mock.patch.object(evidence, "_render_shots") as render2:
+            bdir, status, reason = evidence.baseline("p", str(repo), sha, timeout=1)
+        self.assertEqual(status, "captured")
+        self.assertEqual(Path(bdir), dest)
+        render2.assert_not_called()
+        git.assert_not_called()
+
     def test_a_scene_entry_with_no_image_is_not_a_scene_render(self):
         """Review: a nonempty `scenes` list used to suppress the flag on its own."""
         _png(self.d / "real.png", lambda x, y: (9, 9, 9))
@@ -765,15 +822,22 @@ class CaptureWiring(unittest.TestCase):
         (self.wt / "scripts" / "suspicion.gd").write_text("var hp = 1\n")
         (self.wt / "README.md").write_text("x\n")
 
-    def _capture(self, *, repo=None, base=None, out=None, **kw):
-        """capture() with renders stubbed: two PNGs, no videos, no playtest."""
-        def fake_shots(project, cameras, out_dir, scratch, *, timeout, log=None):
+    def _capture(self, *, repo=None, base=None, out=None, stats=None, **kw):
+        """capture() with renders stubbed: two PNGs, no videos, no playtest.
+
+        `stats`, when set, is written as scene_stats.json next to the shots.
+        """
+        def fake_shots(project, cameras, out_dir, scratch, *, timeout, log=None,
+                       scene=None):
             out_dir.mkdir(parents=True, exist_ok=True)
             made = []
             for i, name in enumerate(("overview", "corridor")):
                 p = out_dir / f"{name}.png"
                 _png(p, lambda x, y, i=i: (9 + i, 9, 9))
                 made.append(p)
+            if stats is not None:
+                (out_dir / "scene_stats.json").write_text(
+                    json.dumps(stats), encoding="utf-8")
             return made
 
         old = config.EVIDENCE_DIR
@@ -823,6 +887,135 @@ class CaptureWiring(unittest.TestCase):
                         "an invisible gameplay diff went unflagged")
         self.assertEqual(m["compare"], rows)
         self.assertTrue(any("NO VISIBLE CHANGE" in w for w in m["warnings"]))
+
+    def test_missing_stats_output_is_not_captured(self):
+        """Review: no scene_stats.json must not read as captured nulls."""
+        (self.wt / "project.godot").write_text(
+            '[application]\nrun/main_scene="res://main.tscn"\n')
+        m = self._capture()
+        st = m["scene_stats"]["res://main.tscn"]
+        self.assertFalse(st["available"])
+        self.assertIsNone(st["after"])
+        self.assertIsNone(st["before"])
+        self.assertEqual(st["delta"], "scene stats unavailable")
+        self.assertEqual(m["coverage"]["scene_stats"]["status"], "failed")
+        self.assertIn("unavailable", m["coverage"]["scene_stats"]["reason"])
+        text = evidence.prompt_block(m)
+        self.assertIn("scene stats unavailable", text)
+        self.assertNotIn("no scene-tree changes", text)
+        board = evidence.board_body(m)
+        self.assertIn("scene stats unavailable", board)
+        self.assertNotIn("no scene-tree changes", board)
+
+    def test_png_only_baseline_does_not_count_nodes_as_added(self):
+        """Review: a baseline dir with shots but no stats JSON.
+
+        The after tree is real. A null before must not become '+N MeshInstance3D'.
+        """
+        (self.wt / "project.godot").write_text(
+            '[application]\nrun/main_scene="res://main.tscn"\n')
+        after = {"mesh_instances": 7, "node_counts": {"MeshInstance3D": 7}}
+        bdir = self.d / "stale-baseline"
+        bdir.mkdir()
+        (bdir / "overview.png").write_bytes(b"png")
+        with unittest.mock.patch.object(evidence, "compare", return_value=[]), \
+                unittest.mock.patch.object(evidence, "merge_base",
+                                           return_value="a" * 40), \
+                unittest.mock.patch.object(evidence, "baseline",
+                                           return_value=(bdir, "captured", "")):
+            m = self._capture(repo=str(self.wt), base="main", stats=after)
+        st = m["scene_stats"]["res://main.tscn"]
+        self.assertFalse(st["available"])
+        self.assertEqual(st["delta"], "scene stats unavailable")
+        self.assertNotIn("+7", st["delta"])
+        self.assertEqual(m["coverage"]["scene_stats"]["status"], "failed")
+        # The same dir, once the JSON is backfilled, is a real before.
+        (bdir / "scene_stats.json").write_text(json.dumps(after), encoding="utf-8")
+        with unittest.mock.patch.object(evidence, "compare", return_value=[]), \
+                unittest.mock.patch.object(evidence, "merge_base",
+                                           return_value="a" * 40), \
+                unittest.mock.patch.object(evidence, "baseline",
+                                           return_value=(bdir, "captured", "")):
+            m2 = self._capture(repo=str(self.wt), base="main", stats=after)
+        st2 = m2["scene_stats"]["res://main.tscn"]
+        self.assertTrue(st2["available"])
+        self.assertEqual(st2["delta"], "no scene-tree changes")
+        self.assertEqual(st2["before"]["mesh_instances"], 7)
+        self.assertEqual(m2["coverage"]["scene_stats"]["status"], "captured")
+
+    def test_failed_baseline_does_not_count_nodes_as_added(self):
+        """Review: a merge base whose render fails must not read as all-new.
+
+        bdir is None. Requiring before only when that dir exists marked the
+        main scene available and reported every existing node as added.
+        """
+        (self.wt / "project.godot").write_text(
+            '[application]\nrun/main_scene="res://main.tscn"\n')
+        after = {"mesh_instances": 7, "node_counts": {"MeshInstance3D": 7}}
+        with unittest.mock.patch.object(evidence, "compare", return_value=[]), \
+                unittest.mock.patch.object(evidence, "merge_base",
+                                           return_value="a" * 40), \
+                unittest.mock.patch.object(
+                    evidence, "baseline",
+                    return_value=(None, "failed",
+                                  "baseline render failed: no camera rendered")):
+            m = self._capture(repo=str(self.wt), base="main", stats=after)
+        st = m["scene_stats"]["res://main.tscn"]
+        self.assertFalse(st["available"])
+        self.assertIsNone(st["before"])
+        self.assertIsNone(st["after"])
+        self.assertEqual(st["delta"], "scene stats unavailable")
+        self.assertNotIn("+7", st["delta"])
+        self.assertEqual(m["coverage"]["baseline"]["status"], "failed")
+        self.assertEqual(m["coverage"]["scene_stats"]["status"], "failed")
+        text = evidence.prompt_block(m)
+        self.assertIn("scene stats unavailable", text)
+        self.assertNotIn("+7 MeshInstance3D", text)
+
+    def test_no_merge_base_does_not_count_existing_nodes_as_added(self):
+        """Review: no merge base is not "the base has no Godot project".
+
+        The main scene already exists. A null before must not list its nodes
+        as additions.
+        """
+        (self.wt / "project.godot").write_text(
+            '[application]\nrun/main_scene="res://main.tscn"\n')
+        after = {"mesh_instances": 7, "node_counts": {"MeshInstance3D": 7}}
+        m = self._capture(stats=after)
+        st = m["scene_stats"]["res://main.tscn"]
+        self.assertFalse(st["available"])
+        self.assertIsNone(st["before"])
+        self.assertIsNone(st["after"])
+        self.assertEqual(st["delta"], "scene stats unavailable")
+        self.assertNotIn("+7", st["delta"])
+        self.assertEqual(m["coverage"]["baseline"]["reason"], "no merge base")
+        self.assertEqual(m["coverage"]["scene_stats"]["status"], "failed")
+        text = evidence.prompt_block(m)
+        self.assertIn("scene stats unavailable", text)
+        self.assertNotIn("+7 MeshInstance3D", text)
+
+    def test_non_godot_base_keeps_a_real_delta(self):
+        """A base commit that is not a Godot project has no tree to miss.
+
+        The after nodes are the change. No merge base must not take this path.
+        """
+        (self.wt / "project.godot").write_text(
+            '[application]\nrun/main_scene="res://main.tscn"\n')
+        after = {"mesh_instances": 7, "node_counts": {"MeshInstance3D": 7}}
+        with unittest.mock.patch.object(evidence, "merge_base",
+                                       return_value="b" * 40), \
+                unittest.mock.patch.object(
+                    evidence, "baseline",
+                    return_value=(None, "skipped",
+                                  "the base commit is not a Godot project")):
+            m = self._capture(repo=str(self.wt), base="main", stats=after)
+        st = m["scene_stats"]["res://main.tscn"]
+        self.assertTrue(st["available"])
+        self.assertIsNone(st["before"])
+        self.assertEqual(st["after"]["mesh_instances"], 7)
+        self.assertIn("+7 MeshInstance3D", st["delta"])
+        self.assertEqual(m["coverage"]["baseline"]["status"], "skipped")
+        self.assertEqual(m["coverage"]["scene_stats"]["status"], "captured")
 
 
 class PipelineWiring(unittest.TestCase):
@@ -898,6 +1091,9 @@ class RealCapture(unittest.TestCase):
             self.assertTrue(m["compare"])
             self.assertTrue(all((c.get("changed") or 0) < 0.01 for c in m["compare"]),
                             "HEAD against itself must not change")
+            self.assertIn("scene_stats", m)
+            self.assertTrue(m["scene_stats"])
+            self.assertEqual(m["coverage"]["scene_stats"]["status"], "captured")
             st = subprocess.run(["git", "-C", str(repo), "status", "--porcelain"],
                                 capture_output=True, text=True).stdout
             self.assertEqual(st.strip(), "", "the capture left files in the worktree")
@@ -1242,6 +1438,137 @@ class CaptureScenesWiring(unittest.TestCase):
                 self.wt, self.d / "out", str(self.d), timeout=5)
         self.assertTrue(all(e["error"] for e in picked))
         self.assertTrue(any("did not render" in w for w in warns))
+        self.assertTrue(picked, "the changed scenes were not attempted")
+        self.assertTrue(all(e["stats"]["available"] is False for e in picked))
+        self.assertTrue(all(e["stats_delta"] == "scene stats unavailable"
+                            for e in picked))
+        self.assertTrue(all("no scene-tree changes" != e["stats_delta"]
+                            for e in picked))
+
+    def test_missing_stats_json_is_unavailable(self):
+        """Review: shots without scene_stats.json are not 'no scene-tree changes'.
+
+        A changed scene whose before JSON is missing must not count the after
+        tree as newly added either.
+        """
+        canned = {"mesh_instances": 4, "node_counts": {"MeshInstance3D": 4}}
+
+        def pngs_only(project, cameras, out_dir, scratch, *, timeout, log=None,
+                      scene=None):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            made = []
+            for c in cameras:
+                p = out_dir / f"{c['name']}.png"
+                _png(p, lambda x, y: (10, 10, 10))
+                made.append(p)
+            return made
+
+        def after_only(project, cameras, out_dir, scratch, *, timeout, log=None,
+                       scene=None):
+            made = pngs_only(project, cameras, out_dir, scratch,
+                             timeout=timeout, log=log, scene=scene)
+            if Path(project) == self.wt:
+                (out_dir / "scene_stats.json").write_text(
+                    json.dumps(canned), encoding="utf-8")
+            return made
+
+        def both_sides(project, cameras, out_dir, scratch, *, timeout, log=None,
+                       scene=None):
+            made = pngs_only(project, cameras, out_dir, scratch,
+                             timeout=timeout, log=log, scene=scene)
+            (out_dir / "scene_stats.json").write_text(
+                json.dumps(canned), encoding="utf-8")
+            return made
+
+        def run(render):
+            with unittest.mock.patch.object(
+                    evidence, "_probe_scene",
+                    return_value=({"position": [0, 0, 0], "size": [10, 2, 8]}, 0)), \
+                    unittest.mock.patch.object(evidence, "_render_shots",
+                                               side_effect=render), \
+                    unittest.mock.patch.object(evidence, "_scene_video",
+                                               side_effect=evidence.EvidenceError("x")), \
+                    unittest.mock.patch("studio.engine.godot.import_assets"):
+                picked, _skipped, _warns = evidence.capture_scenes(
+                    self.wt, self.d / "out", str(self.d), repo=self.wt,
+                    sha=self.base, timeout=5)
+            return {e["path"]: e for e in picked}
+
+        missing = run(pngs_only)
+        for path, e in missing.items():
+            self.assertFalse(e["stats"]["available"], path)
+            self.assertEqual(e["stats_delta"], "scene stats unavailable", path)
+            self.assertIsNone(e["stats"]["after"], path)
+            self.assertIsNone(e["stats"]["before"], path)
+
+        onesided = run(after_only)
+        lab = onesided["scenes/lab.tscn"]
+        self.assertEqual(lab["status"], "changed")
+        self.assertFalse(lab["stats"]["available"])
+        self.assertEqual(lab["stats_delta"], "scene stats unavailable")
+        self.assertNotIn("+4", lab["stats_delta"])
+        new = onesided["scenes/new.tscn"]
+        self.assertEqual(new["status"], "added")
+        self.assertTrue(new["stats"]["available"])
+        self.assertIn("+4 MeshInstance3D", new["stats_delta"])
+
+        measured = run(both_sides)
+        lab = measured["scenes/lab.tscn"]
+        self.assertTrue(lab["stats"]["available"])
+        self.assertEqual(lab["stats_delta"], "no scene-tree changes")
+        self.assertEqual(lab["stats"]["before"]["mesh_instances"], 4)
+        self.assertEqual(lab["stats"]["after"]["mesh_instances"], 4)
+
+    def test_no_merge_base_does_not_count_an_existing_scene_as_added(self):
+        """Review: without a merge base, a changed scene has no before tree.
+
+        Its nodes are not additions. A scene this diff added still is, and a
+        base known to have no Godot project still is.
+        """
+        canned = {"mesh_instances": 4, "node_counts": {"MeshInstance3D": 4}}
+
+        def after_only(project, cameras, out_dir, scratch, *, timeout, log=None,
+                       scene=None):
+            out_dir.mkdir(parents=True, exist_ok=True)
+            made = []
+            for c in cameras:
+                p = out_dir / f"{c['name']}.png"
+                _png(p, lambda x, y: (10, 10, 10))
+                made.append(p)
+            if Path(project) == self.wt:
+                (out_dir / "scene_stats.json").write_text(
+                    json.dumps(canned), encoding="utf-8")
+            return made
+
+        def run(**kw):
+            with unittest.mock.patch.object(
+                    evidence, "_probe_scene",
+                    return_value=({"position": [0, 0, 0], "size": [10, 2, 8]}, 0)), \
+                    unittest.mock.patch.object(evidence, "_render_shots",
+                                               side_effect=after_only), \
+                    unittest.mock.patch.object(evidence, "_scene_video",
+                                               side_effect=evidence.EvidenceError("x")), \
+                    unittest.mock.patch("studio.engine.godot.import_assets"):
+                picked, _skipped, _warns = evidence.capture_scenes(
+                    self.wt, self.d / "out", str(self.d), timeout=5, **kw)
+            return {e["path"]: e for e in picked}
+
+        none = run()
+        lab = none["scenes/lab.tscn"]
+        self.assertEqual(lab["status"], "changed")
+        self.assertFalse(lab["stats"]["available"])
+        self.assertEqual(lab["stats_delta"], "scene stats unavailable")
+        self.assertNotIn("+4", lab["stats_delta"])
+        new = none["scenes/new.tscn"]
+        self.assertEqual(new["status"], "added")
+        self.assertTrue(new["stats"]["available"])
+        self.assertIn("+4 MeshInstance3D", new["stats_delta"])
+
+        bare = run(base_not_godot=True)
+        lab = bare["scenes/lab.tscn"]
+        self.assertEqual(lab["status"], "changed")
+        self.assertTrue(lab["stats"]["available"])
+        self.assertIn("+4 MeshInstance3D", lab["stats_delta"])
 
 
 class PlaytestRecording(unittest.TestCase):
@@ -1427,6 +1754,245 @@ class NonVisualSurvivesResume(unittest.TestCase):
         m = evidence.latest_manifest("p", "t1")
         self.assertIs(m["non_visual"], False)
         self.assertIn("BLOCKING RULE", evidence.prompt_block(m))
+
+
+class SceneStats(unittest.TestCase):
+    """Scene-tree stats before and after, provable without pixels."""
+
+    def test_parse_canned_harness_json(self):
+        canned = {
+            "node_counts": {"Node3D": 2, "MeshInstance3D": 14, "CollisionShape3D": 3,
+                            "Camera3D": 1, "DirectionalLight3D": 1},
+            "mesh_instances": 14,
+            "collision_shapes": 3,
+            "aabb": {
+                "position": [0.0, 1.0, 2.0],
+                "size": [30.0, 10.0, 20.0],
+            },
+            "cameras": [{"name": "MainCam", "type": "Camera3D"}],
+            "lights": [{"name": "Sun", "type": "DirectionalLight3D"}],
+            "cameras_and_lights": [
+                {"name": "MainCam", "type": "Camera3D"},
+                {"name": "Sun", "type": "DirectionalLight3D"},
+            ],
+            "scripts": ["res://scripts/systems/suspicion_tracker.gd"],
+            "exported_variables": {
+                "res://scripts/systems/suspicion_tracker.gd": ["detection_radius", "alert_level"]
+            },
+            "signal_connections": 5,
+        }
+        # Parse from dict
+        parsed = evidence.parse_scene_stats(canned)
+        self.assertEqual(parsed["mesh_instances"], 14)
+        self.assertEqual(parsed["collision_shapes"], 3)
+        self.assertEqual(parsed["node_counts"]["MeshInstance3D"], 14)
+        self.assertEqual(parsed["aabb"]["size"], [30.0, 10.0, 20.0])
+        self.assertEqual(len(parsed["cameras"]), 1)
+        self.assertEqual(parsed["cameras"][0]["name"], "MainCam")
+        self.assertEqual(parsed["cameras"][0]["type"], "Camera3D")
+        self.assertEqual(len(parsed["lights"]), 1)
+        self.assertEqual(parsed["lights"][0]["name"], "Sun")
+        self.assertEqual(parsed["lights"][0]["type"], "DirectionalLight3D")
+        self.assertEqual(parsed["scripts"], ["res://scripts/systems/suspicion_tracker.gd"])
+        self.assertEqual(parsed["exported_variables"]["res://scripts/systems/suspicion_tracker.gd"],
+                         ["detection_radius", "alert_level"])
+        self.assertEqual(parsed["signal_connections"], 5)
+
+        # Parse from JSON string
+        parsed_str = evidence.parse_scene_stats(json.dumps(canned))
+        self.assertEqual(parsed_str["mesh_instances"], 14)
+        self.assertEqual(parsed_str["signal_connections"], 5)
+
+        # Parse from file path
+        with tempfile.TemporaryDirectory() as tmp:
+            fp = Path(tmp) / "stats.json"
+            fp.write_text(json.dumps(canned), encoding="utf-8")
+            parsed_file = evidence.parse_scene_stats(fp)
+            self.assertEqual(parsed_file["mesh_instances"], 14)
+            self.assertEqual(parsed_file["scripts"], canned["scripts"])
+
+    def test_compute_delta_between_two_canned_stats(self):
+        before = {
+            "node_counts": {"Node3D": 2, "MeshInstance3D": 0, "CollisionShape3D": 2},
+            "mesh_instances": 0,
+            "collision_shapes": 2,
+            "aabb": {"position": [0, 0, 0], "size": [10.0, 5.0, 8.0]},
+            "cameras": [],
+            "lights": [],
+            "scripts": [],
+            "exported_variables": {},
+            "signal_connections": 0,
+        }
+        after = {
+            "node_counts": {"Node3D": 2, "MeshInstance3D": 14, "CollisionShape3D": 2},
+            "mesh_instances": 14,
+            "collision_shapes": 2,
+            "aabb": {"position": [0, 0, 0], "size": [30.0, 15.0, 20.0]},
+            "cameras": [],
+            "lights": [],
+            "scripts": ["res://scripts/systems/suspicion_tracker.gd"],
+            "exported_variables": {"res://scripts/systems/suspicion_tracker.gd": ["alert"]},
+            "signal_connections": 0,
+        }
+        delta = evidence.scene_stats_delta(before, after)
+        expected = ("+14 MeshInstance3D, +1 script res://scripts/systems/suspicion_tracker.gd, "
+                    "AABB grew 10x8 -> 30x20 m, AABB height 5 -> 15 m")
+        self.assertEqual(delta, expected)
+
+    def test_delta_various_changes(self):
+        before = {
+            "mesh_instances": 5,
+            "collision_shapes": 1,
+            "node_counts": {"MeshInstance3D": 5, "CollisionShape3D": 1, "SpotLight3D": 1},
+            "aabb": {"position": [0, 0, 0], "size": [20.0, 10.0, 20.0]},
+            "scripts": ["res://old.gd", "res://common.gd"],
+            "exported_variables": {"res://common.gd": ["old_var"]},
+            "signal_connections": 2,
+        }
+        after = {
+            "mesh_instances": 3,
+            "collision_shapes": 4,
+            "node_counts": {"MeshInstance3D": 3, "CollisionShape3D": 4, "OmniLight3D": 2},
+            "aabb": {"position": [0, 0, 0], "size": [10.0, 5.0, 10.0]},
+            "scripts": ["res://common.gd", "res://new.gd"],
+            "exported_variables": {"res://common.gd": ["new_var"]},
+            "signal_connections": 5,
+        }
+        delta = evidence.scene_stats_delta(before, after)
+        self.assertIn("-2 MeshInstance3D", delta)
+        self.assertIn("+3 CollisionShape3D", delta)
+        self.assertIn("+2 OmniLight3D", delta)
+        self.assertIn("-1 SpotLight3D", delta)
+        self.assertIn("-1 script res://old.gd", delta)
+        self.assertIn("+1 script res://new.gd", delta)
+        self.assertIn("+1 export new_var (res://common.gd)", delta)
+        self.assertIn("-1 export old_var (res://common.gd)", delta)
+        self.assertIn("+3 signal connections", delta)
+        self.assertIn("AABB shrank 20x20 -> 10x10 m", delta)
+        self.assertIn("AABB height 10 -> 5 m", delta)
+
+    def test_delta_fractional_aabb_footprint(self):
+        """Review: whole-meter rounding hid 10 -> 10.1 as '10x8 -> 10x8'."""
+        before = {"aabb": {"position": [0, 0, 0], "size": [10.0, 5.0, 8.0]}}
+        after = {"aabb": {"position": [0, 0, 0], "size": [10.1, 5.0, 8.0]}}
+        delta = evidence.scene_stats_delta(before, after)
+        self.assertEqual(delta, "AABB grew 10x8 -> 10.1x8 m")
+        self.assertNotIn("10x8 -> 10x8", delta)
+
+    def test_delta_position_height_and_camera_light_identity(self):
+        """Review: a move or a rename must not read as 'no scene-tree changes'.
+
+        X/Z size and class counts stay put. Position, height, and the
+        camera/light name+type are the recorded fields that changed.
+        """
+        base = {
+            "mesh_instances": 1,
+            "collision_shapes": 0,
+            "node_counts": {"MeshInstance3D": 1, "Camera3D": 1,
+                            "DirectionalLight3D": 1},
+            "aabb": {"position": [0, 0, 0], "size": [10.0, 5.0, 8.0]},
+            "cameras": [{"name": "MainCam", "type": "Camera3D"}],
+            "lights": [{"name": "Sun", "type": "DirectionalLight3D"}],
+            "scripts": [],
+            "signal_connections": 0,
+        }
+
+        def with_aabb(pos, size):
+            nxt = json.loads(json.dumps(base))
+            nxt["aabb"] = {"position": pos, "size": size}
+            return nxt
+
+        moved = with_aabb([4, 0, 1], [10.0, 5.0, 8.0])
+        self.assertEqual(evidence.scene_stats_delta(base, moved),
+                         "AABB moved 0,0,0 -> 4,0,1")
+        taller = with_aabb([0, 0, 0], [10.0, 12.0, 8.0])
+        self.assertEqual(evidence.scene_stats_delta(base, taller),
+                         "AABB height 5 -> 12 m")
+
+        renamed_cam = json.loads(json.dumps(base))
+        renamed_cam["cameras"] = [{"name": "Overview", "type": "Camera3D"}]
+        cam = evidence.scene_stats_delta(base, renamed_cam)
+        self.assertIn("-1 camera MainCam (Camera3D)", cam)
+        self.assertIn("+1 camera Overview (Camera3D)", cam)
+        self.assertNotEqual(cam, "no scene-tree changes")
+
+        renamed_light = json.loads(json.dumps(base))
+        renamed_light["lights"] = [{"name": "Moon", "type": "DirectionalLight3D"}]
+        light = evidence.scene_stats_delta(base, renamed_light)
+        self.assertIn("-1 light Sun (DirectionalLight3D)", light)
+        self.assertIn("+1 light Moon (DirectionalLight3D)", light)
+        self.assertNotEqual(light, "no scene-tree changes")
+
+    def test_delta_no_changes(self):
+        stats = {
+            "mesh_instances": 2,
+            "collision_shapes": 1,
+            "node_counts": {"MeshInstance3D": 2, "CollisionShape3D": 1},
+            "aabb": {"position": [0, 0, 0], "size": [10.0, 5.0, 8.0]},
+            "scripts": ["res://a.gd"],
+            "exported_variables": {"res://a.gd": ["x"]},
+            "signal_connections": 1,
+        }
+        self.assertEqual(evidence.scene_stats_delta(stats, stats), "no scene-tree changes")
+        self.assertEqual(evidence.scene_stats_delta(None, None), "no scene-tree changes")
+
+    def test_missing_output_is_unavailable_not_no_changes(self):
+        """A missing stats JSON is not an empty tree."""
+        rec = evidence._stats_record(None, None, available=False)
+        self.assertFalse(rec["available"])
+        self.assertIsNone(rec["after"])
+        self.assertIsNone(rec["before"])
+        self.assertEqual(rec["delta"], "scene stats unavailable")
+        self.assertEqual(evidence._stats_delta_text(rec), "scene stats unavailable")
+        manifest = {
+            "scene_stats": {"res://scenes/lab.tscn": rec},
+            "shots": [], "compare": [], "scenes": [],
+            "coverage": {"scene_stats": {"status": "failed",
+                                         "reason": "scene stats unavailable"}},
+            "warnings": [],
+        }
+        text = evidence.prompt_block(manifest)
+        self.assertIn("scene stats unavailable", text)
+        self.assertNotIn("no scene-tree changes", text)
+        md = evidence.pr_markdown(manifest, "https://github.com/o/r/blob/ev/x1",
+                                  task_id="t1", attempt=1)
+        self.assertIn("scene stats unavailable", md)
+        self.assertNotIn("no scene-tree changes", md)
+
+    def test_prompt_block_and_pr_markdown_include_stats_delta(self):
+        delta = "+14 MeshInstance3D, +1 script res://scripts/systems/suspicion_tracker.gd, AABB grew 10x8 -> 30x20 m"
+        manifest = {
+            "scene_stats": {
+                "res://scenes/main.tscn": {
+                    "before": {"mesh_instances": 0},
+                    "after": {"mesh_instances": 14},
+                    "delta": delta,
+                }
+            },
+            "shots": [], "compare": [], "scenes": [],
+            "coverage": {}, "warnings": [],
+        }
+        prompt = evidence.prompt_block(manifest)
+        self.assertIn(delta, prompt)
+        self.assertIn("SCENE TREE STATS", prompt)
+
+        md = evidence.pr_markdown(manifest, "https://github.com/o/r/blob/ev/x1", task_id="t1", attempt=1)
+        self.assertIn(delta, md)
+        self.assertIn("Scene tree stats vs branch point", md)
+
+        board = evidence.board_body(manifest)
+        self.assertIn(delta, board)
+        self.assertIn("Scene stats", board)
+
+    def test_harness_never_writes_into_worktree(self):
+        # Inspect HARNESS_STATS_GD and SCENE_STATS_HARNESS
+        self.assertNotIn("res://", evidence.HARNESS_STATS_GD)
+        self.assertIn("FileAccess.open(out_file, FileAccess.WRITE)", evidence.HARNESS_STATS_GD)
+        # out_file is only constructed from dest parameter
+        self.assertIn("var out_file: String = dest", evidence.HARNESS_STATS_GD)
+        # SCENE_STATS_HARNESS takes out_path from args[1]
+        self.assertIn("var out_path: String = args[1]", evidence.SCENE_STATS_HARNESS)
+        self.assertIn("_save_scene_stats(inst, out_path)", evidence.SCENE_STATS_HARNESS)
 
 
 if __name__ == "__main__":

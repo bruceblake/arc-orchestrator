@@ -15,9 +15,9 @@ This builds the handler directly over a fixture world instead:
 
 - every path config derives from the tree (DB, events, logs/*) is rewritten
   under the fixture dir, HOME points into it (so ~/tasks, ~/repos and friends
-  are the fixture's), and gh tokens plus ARC_STUDIO_DIR are dropped from
-  the environment (a live studio tree would open the index page on the
-  Studio tab and miss the Overview goldens);
+  are the fixture's). Gh tokens are dropped, and a live ARC_STUDIO_DIR is
+  replaced with the empty fixture studio so the Studio tab cannot cover
+  the Overview golden;
 - `/proc`-derived "live runs" are reported empty — a real fleet run on this
   machine must not show up in a golden image;
 - time.time() starts at fixture.FROZEN_NOW, so server-side "N minutes ago"
@@ -47,10 +47,18 @@ def _isolate_env(fx):
         "ARC_REPO_ROOT": fx["home"],
         "ARC_REPOS_DIR": fx["repos"],
         "ARC_DASHBOARD_BIND": "127.0.0.1",
+        # config.STUDIO_DIR is read from this env at import, and it is not under
+        # the tree, so _redirect_config cannot move it. A live value lists the
+        # operator's games on /api/studio; index.html then opens the Studio tab
+        # and the Overview goldens miss by the whole page.
+        "ARC_STUDIO_DIR": fx["studio"],
     })
+    # The assignment replaced the operator's live studio tree. config reads
+    # ARC_STUDIO_DIR at import, and load_dotenv will not override a value
+    # that is already set. Popping it here lets the live path back in, and
+    # index.html opens the Studio tab over the Overview golden.
     for k in ("GH_TOKEN", "GITHUB_TOKEN", "ARC_DASHBOARD_TOKEN",
-              "ARC_ESCALATION_PATH", "ARC_ALLOW_SAME_FAMILY_REVIEW",
-              "ARC_STUDIO_DIR"):
+              "ARC_ESCALATION_PATH", "ARC_ALLOW_SAME_FAMILY_REVIEW"):
         os.environ.pop(k, None)
     try:
         time.tzset()
@@ -107,9 +115,12 @@ def main(argv=None):
     link = root / "static"
     if not link.exists():
         link.symlink_to(tree / "static", target_is_directory=True)
+    studio = root / "logs" / "studio"
+    studio.mkdir(parents=True, exist_ok=True)
     fx = {"db": str(root / "orchestrator.db"), "events": str(root / "logs" / "events.jsonl"),
           "tasks": str(fxdir / "tasks"), "home": str(fxdir / "home"),
-          "repos": str(fxdir / "repos"), "worktrees": str(fxdir / "worktrees")}
+          "repos": str(fxdir / "repos"), "worktrees": str(fxdir / "worktrees"),
+          "studio": str(studio)}
     _isolate_env(fx)
     _freeze_clock(fixture.FROZEN_NOW)
     import config
@@ -124,6 +135,22 @@ def main(argv=None):
     import reconcile
     reconcile.live_runs = lambda: []
     import dashboard
+    import gh_issues
+    # The fixture repo path is displayed and never opened, so github_slug
+    # cannot read an origin. Without a slug the #N anchors do not render
+    # and a golden would still pass if the link markup were removed.
+    _slug = gh_issues.github_slug
+
+    def _fixture_slug(repo):
+        try:
+            if str(repo) == fixture.REPO or Path(str(repo)).name == "demo-app":
+                return "operator/demo-app"
+        except (TypeError, OSError):
+            pass
+        return _slug(repo)
+
+    gh_issues.github_slug = _fixture_slug
+    gh_issues._slug_cache.clear()
     from http.server import ThreadingHTTPServer
     from store import Store
     dashboard.Handler.store = Store(fx["db"])

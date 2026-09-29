@@ -86,6 +86,19 @@ ROWS = [
      "conflict in docs/api.md"),
 ]
 
+# Epic number, then task id -> issue number. The fixture repo is not a
+# checkout; serve.py maps REPO to github.com/operator/demo-app so the
+# dashboard paints a real #N link. Numbers are stable across captures.
+ISSUES = {
+    "demo-checkout.json": (10, {
+        "cart-model": 11, "payment-form": 12,
+        "receipt-page": 13, "checkout-e2e": 14,
+    }),
+    "demo-docs.json": (20, {
+        "docs-install": 21, "docs-api": 22,
+    }),
+}
+
 # (task_id, harness, model, role, attempt, exit, seconds, verdict, age -s)
 RUNS = [
     ("cart-model-x1", "reasonix", "DeepSeek-V4.1-Flash-thinking-max", "implementer", 1, 0, 412.0, None, 6800),
@@ -169,6 +182,18 @@ def build(root):
                     "VALUES (?,?,?,?,?,?,?,?,?,?)",
                     (tid, harness, model, role, attempt, rc, "", secs, verdict,
                      _iso(FROZEN_NOW - age)))
+    created = _iso(FROZEN_NOW)
+    for name, (epic, tasks_n) in ISSUES.items():
+        tf = str((tasks / name).resolve())
+        con.execute(
+            "INSERT INTO task_issues(repo, taskfile, task, issue, epic, created_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (REPO, tf, "", epic, None, created))
+        for tid, num in tasks_n.items():
+            con.execute(
+                "INSERT INTO task_issues(repo, taskfile, task, issue, epic, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (REPO, tf, tid, num, epic, created))
     con.commit()
     con.close()
     events_log = root / "logs" / "events.jsonl"

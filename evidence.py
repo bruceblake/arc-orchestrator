@@ -405,6 +405,138 @@ def _cameras(project):
     return [c.to_dict() for c in camera_system.load_anchors(project)]
 
 
+HARNESS_STATS_GD = '''
+func _save_scene_stats(inst: Node, dest: String) -> void:
+\tvar all_nodes: Array = [inst]
+\tall_nodes.append_array(inst.find_children("*", "", true, false))
+\tvar node_counts: Dictionary = {}
+\tvar mesh_instances: int = 0
+\tvar collision_shapes: int = 0
+\tvar cameras: Array = []
+\tvar lights: Array = []
+\tvar cameras_and_lights: Array = []
+\tvar scripts: Array = []
+\tvar exported_variables: Dictionary = {}
+\tvar signal_connections: int = 0
+\tvar combined_aabb: Variant = null
+\tfor n in all_nodes:
+\t\tvar cls: String = n.get_class()
+\t\tnode_counts[cls] = int(node_counts.get(cls, 0)) + 1
+\t\tif n is MeshInstance3D:
+\t\t\tmesh_instances += 1
+\t\tif n is CollisionShape3D:
+\t\t\tcollision_shapes += 1
+\t\tif n is Camera3D:
+\t\t\tvar cam_info: Dictionary = {"name": String(n.name), "type": cls}
+\t\t\tcameras.append(cam_info)
+\t\t\tcameras_and_lights.append(cam_info)
+\t\telif n is Light3D:
+\t\t\tvar light_info: Dictionary = {"name": String(n.name), "type": cls}
+\t\t\tlights.append(light_info)
+\t\t\tcameras_and_lights.append(light_info)
+\t\tvar scr: Variant = n.get_script()
+\t\tif scr != null and scr is Script:
+\t\t\tvar path: String = scr.resource_path
+\t\t\tif path != "":
+\t\t\t\tif not scripts.has(path):
+\t\t\t\t\tscripts.append(path)
+\t\t\t\tif not exported_variables.has(path):
+\t\t\t\t\tvar exports: Array = []
+\t\t\t\t\tfor prop in scr.get_script_property_list():
+\t\t\t\t\t\tif (int(prop.get("usage", 0)) & PROPERTY_USAGE_EDITOR) != 0:
+\t\t\t\t\t\t\texports.append(String(prop.get("name", "")))
+\t\t\t\t\texported_variables[path] = exports
+\t\tfor sig in n.get_signal_list():
+\t\t\tvar sig_name: String = String(sig.get("name", ""))
+\t\t\tsignal_connections += n.get_signal_connection_list(sig_name).size()
+\t\tif n is GeometryInstance3D:
+\t\t\tvar gi := n as GeometryInstance3D
+\t\t\tif gi != null and gi.is_visible_in_tree():
+\t\t\t\tvar box: AABB = gi.global_transform * gi.get_aabb()
+\t\t\t\tif is_finite(box.position.x) and is_finite(box.size.x) and box.size.length() > 0.0:
+\t\t\t\t\tif combined_aabb == null:
+\t\t\t\t\t\tcombined_aabb = box
+\t\t\t\t\telse:
+\t\t\t\t\t\tcombined_aabb = (combined_aabb as AABB).merge(box)
+\tvar aabb_dict: Variant = null
+\tif combined_aabb != null:
+\t\tvar ca := combined_aabb as AABB
+\t\taabb_dict = {
+\t\t\t"position": [round(ca.position.x * 10000.0) / 10000.0,
+\t\t\t\t\t\t round(ca.position.y * 10000.0) / 10000.0,
+\t\t\t\t\t\t round(ca.position.z * 10000.0) / 10000.0],
+\t\t\t"size": [round(ca.size.x * 10000.0) / 10000.0,
+\t\t\t\t\t round(ca.size.y * 10000.0) / 10000.0,
+\t\t\t\t\t round(ca.size.z * 10000.0) / 10000.0]
+\t\t}
+\tvar stats := {
+\t\t"node_counts": node_counts,
+\t\t"nodes_by_class": node_counts,
+\t\t"mesh_instances": mesh_instances,
+\t\t"mesh_instance_count": mesh_instances,
+\t\t"collision_shapes": collision_shapes,
+\t\t"collision_shape_count": collision_shapes,
+\t\t"aabb": aabb_dict,
+\t\t"cameras": cameras,
+\t\t"lights": lights,
+\t\t"cameras_and_lights": cameras_and_lights,
+\t\t"scripts": scripts,
+\t\t"attached_scripts": scripts,
+\t\t"exported_variables": exported_variables,
+\t\t"exports_per_script": exported_variables,
+\t\t"signal_connections": signal_connections,
+\t\t"signal_connections_count": signal_connections
+\t}
+\tvar out_file: String = dest if dest.ends_with(".json") else dest.path_join("scene_stats.json")
+\tvar f := FileAccess.open(out_file, FileAccess.WRITE)
+\tif f != null:
+\t\tf.store_string(JSON.stringify(stats, "  "))
+\t\tf.close()
+'''
+
+
+SCENE_STATS_HARNESS = '''extends SceneTree
+# Written by arc-orchestrator evidence.py into a temp dir; never committed.
+#   godot --path <project> --script <this> -- <scene> <out.json>
+
+func _initialize() -> void:
+\tvar args := OS.get_cmdline_user_args()
+\tif args.size() < 2:
+\t\tpush_error("usage: stats.gd -- <scene> <out.json>")
+\t\tquit(2)
+\t\treturn
+\tvar scene_path: String = args[0]
+\tvar out_path: String = args[1]
+\tvar packed: PackedScene = load(scene_path) as PackedScene
+\tif packed == null:
+\t\tpush_error("cannot load scene: " + scene_path)
+\t\tquit(2)
+\t\treturn
+\tvar inst: Node = packed.instantiate()
+\tif inst == null:
+\t\tpush_error("cannot instantiate scene: " + scene_path)
+\t\tquit(2)
+\t\treturn
+\tget_root().add_child(inst)
+\tawait process_frame
+\tawait process_frame
+\t_save_scene_stats(inst, out_path)
+\tprint("EVIDENCE_STATS_OK")
+\tquit(0)
+
+''' + HARNESS_STATS_GD
+
+
+def _extended_render_harness():
+    from studio.engine import godot
+    src = godot._HARNESS_SRC
+    call = '\t_save_scene_stats(inst, out_dir)\n\tprint("STUDIO_RENDER_OK ", manifest.size())'
+    if '\tprint("STUDIO_RENDER_OK ", manifest.size())' in src:
+        src = src.replace('\tprint("STUDIO_RENDER_OK ", manifest.size())', call)
+    src += "\n" + HARNESS_STATS_GD
+    return src
+
+
 def _render_shots(project, cameras, out_dir, scratch, *, timeout, log=None,
                   scene=None):
     """One PNG per camera via the studio render harness, run from `scratch`.
@@ -414,7 +546,7 @@ def _render_shots(project, cameras, out_dir, scratch, *, timeout, log=None,
     from studio.engine import godot
     out_dir.mkdir(parents=True, exist_ok=True)
     harness = Path(scratch) / "render.gd"
-    harness.write_text(godot._HARNESS_SRC, encoding="utf-8")
+    harness.write_text(_extended_render_harness(), encoding="utf-8")
     cam_file = Path(scratch) / "cameras.json"
     cam_file.write_text(json.dumps({"cameras": cameras}), encoding="utf-8")
     # The harness renders only what it is given: without the scene argument
@@ -830,6 +962,17 @@ def merge_base(worktree, base):
     return _git(["merge-base", base, "HEAD"], worktree, check=False) or None
 
 
+def _baseline_ready(dest):
+    """A cached baseline is usable only with shots AND scene_stats.json.
+
+    Caches written before scene-tree stats have PNGs and no JSON. Accepting
+    them makes `before` null, so the delta reports every pre-existing node
+    as an addition. A PNG-only cache is stale and must be rendered again.
+    """
+    dest = Path(dest)
+    return any(dest.glob("*.png")) and (dest / "scene_stats.json").is_file()
+
+
 def baseline(project, repo, sha, *, timeout, log=None):
     """Screenshots of `sha` from the fixed cameras, rendered once and cached.
 
@@ -844,13 +987,13 @@ def baseline(project, repo, sha, *, timeout, log=None):
     really a Godot script error reaches manifest['godot_errors'] instead of
     vanishing."""
     dest = Path(config.EVIDENCE_DIR) / _slug(project) / "baseline" / sha
-    if any(dest.glob("*.png")):
+    if _baseline_ready(dest):
         return dest, "captured", ""
     lock = Path(config.EVIDENCE_DIR) / _slug(project) / ".baseline.lock"
     lock.parent.mkdir(parents=True, exist_ok=True)
     with open(lock, "w") as fh:
         fcntl.flock(fh, fcntl.LOCK_EX)
-        if any(dest.glob("*.png")):
+        if _baseline_ready(dest):
             return dest, "captured", ""
         with tempfile.TemporaryDirectory(prefix="arc-evidence-base-") as tmp:
             wt = Path(tmp) / "wt"
@@ -1175,6 +1318,321 @@ def _probe_scene(project, res, scratch, *, timeout, log=None):
     return scene_bounds(data.get("boxes")), int(data.get("canvas_items") or 0)
 
 
+def probe_scene_stats(project, res, scratch=None, *, timeout=None, log=None):
+    """Extract machine-readable scene stats from one scene via SCENE_STATS_HARNESS."""
+    timeout = timeout or config.EVIDENCE_TIMEOUT
+    if scratch is None:
+        with tempfile.TemporaryDirectory(prefix="arc-evidence-stats-") as tmp:
+            return probe_scene_stats(project, res, tmp, timeout=timeout, log=log)
+    harness = Path(scratch) / "stats.gd"
+    harness.write_text(SCENE_STATS_HARNESS, encoding="utf-8")
+    out_json = Path(scratch) / "scene_stats.json"
+    out_json.unlink(missing_ok=True)
+    rc, out = _godot(project, ["--headless", "--script", str(harness), "--", res,
+                               str(out_json)], timeout=timeout, log=log)
+    if "EVIDENCE_STATS_OK" not in out or not out_json.exists():
+        from studio.engine import godot
+        raise EvidenceError(f"could not extract stats from {res} (godot rc={rc}):\n"
+                            + "\n".join(godot.output_errors(out)[:10] or [out[-800:]]))
+    return parse_scene_stats(out_json)
+
+
+def parse_scene_stats(source):
+    """Parse and normalize scene-tree stats from a JSON string, dict, or file path.
+
+    Returns dict with keys: node_counts, mesh_instances, collision_shapes,
+    aabb, cameras, lights, cameras_and_lights, scripts, exported_variables,
+    and signal_connections.
+    """
+    if source is None:
+        return None
+    if isinstance(source, Path):
+        data = json.loads(source.read_text(encoding="utf-8"))
+    elif isinstance(source, str):
+        try:
+            p = Path(source)
+            if "\n" not in source and p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+            else:
+                data = json.loads(source)
+        except (OSError, ValueError):
+            data = json.loads(source)
+    elif isinstance(source, dict):
+        data = source
+    else:
+        raise ValueError(f"unsupported source type: {type(source)}")
+
+    node_counts = dict(data.get("node_counts") or data.get("nodes_by_class") or {})
+    mesh_instances = int(data.get("mesh_instances") if data.get("mesh_instances") is not None
+                         else data.get("mesh_instance_count") if data.get("mesh_instance_count") is not None
+                         else node_counts.get("MeshInstance3D", 0))
+    collision_shapes = int(data.get("collision_shapes") if data.get("collision_shapes") is not None
+                           else data.get("collision_shape_count") if data.get("collision_shape_count") is not None
+                           else node_counts.get("CollisionShape3D", 0))
+    if "MeshInstance3D" not in node_counts and mesh_instances:
+        node_counts["MeshInstance3D"] = mesh_instances
+    if "CollisionShape3D" not in node_counts and collision_shapes:
+        node_counts["CollisionShape3D"] = collision_shapes
+
+    aabb = data.get("aabb")
+    if isinstance(aabb, (list, tuple)) and len(aabb) == 6:
+        aabb = {"position": [round(float(x), 4) for x in aabb[:3]],
+                "size": [round(float(x), 4) for x in aabb[3:]]}
+    elif isinstance(aabb, dict):
+        aabb = {
+            "position": [round(float(x), 4) for x in aabb.get("position", [0, 0, 0])],
+            "size": [round(float(x), 4) for x in aabb.get("size", [0, 0, 0])]
+        }
+    else:
+        aabb = None
+
+    cams = list(data.get("cameras") or [])
+    lights = list(data.get("lights") or [])
+    cam_and_lights = list(data.get("cameras_and_lights") or (cams + lights))
+    scripts = list(data.get("scripts") or data.get("attached_scripts") or [])
+    exported_vars = dict(data.get("exported_variables") or data.get("exports_per_script") or {})
+    sig_conns = int(data.get("signal_connections") if data.get("signal_connections") is not None
+                    else data.get("signal_connections_count", 0))
+
+    return {
+        "node_counts": node_counts,
+        "nodes_by_class": node_counts,
+        "mesh_instances": mesh_instances,
+        "mesh_instance_count": mesh_instances,
+        "collision_shapes": collision_shapes,
+        "collision_shape_count": collision_shapes,
+        "aabb": aabb,
+        "cameras": cams,
+        "lights": lights,
+        "cameras_and_lights": cam_and_lights,
+        "scripts": scripts,
+        "attached_scripts": scripts,
+        "exported_variables": exported_vars,
+        "exports_per_script": exported_vars,
+        "signal_connections": sig_conns,
+        "signal_connections_count": sig_conns,
+    }
+
+
+def scene_stats_delta(before, after):
+    """Compute human-readable delta between before and after scene stats.
+
+    e.g. '+14 MeshInstance3D, +1 script res://scripts/systems/suspicion_tracker.gd, AABB grew 10x8 -> 30x20 m'
+    """
+    if before is None and after is None:
+        return "no scene-tree changes"
+
+    b = parse_scene_stats(before) if before else {}
+    a = parse_scene_stats(after) if after else {}
+    parts = []
+
+    mesh_diff = a.get("mesh_instances", 0) - b.get("mesh_instances", 0)
+    if mesh_diff > 0:
+        parts.append(f"+{mesh_diff} MeshInstance3D")
+    elif mesh_diff < 0:
+        parts.append(f"{mesh_diff} MeshInstance3D")
+
+    col_diff = a.get("collision_shapes", 0) - b.get("collision_shapes", 0)
+    if col_diff > 0:
+        parts.append(f"+{col_diff} CollisionShape3D")
+    elif col_diff < 0:
+        parts.append(f"{col_diff} CollisionShape3D")
+
+    all_classes = set(b.get("node_counts", {}).keys()) | set(a.get("node_counts", {}).keys())
+    for cls in sorted(all_classes - {"MeshInstance3D", "CollisionShape3D"}):
+        cb = b.get("node_counts", {}).get(cls, 0)
+        ca = a.get("node_counts", {}).get(cls, 0)
+        cdiff = ca - cb
+        if cdiff > 0:
+            parts.append(f"+{cdiff} {cls}")
+        elif cdiff < 0:
+            parts.append(f"{cdiff} {cls}")
+
+    scr_b = set(b.get("scripts") or [])
+    scr_a = set(a.get("scripts") or [])
+    for s in sorted(scr_a - scr_b):
+        parts.append(f"+1 script {s}")
+    for s in sorted(scr_b - scr_a):
+        parts.append(f"-1 script {s}")
+
+    exp_b = b.get("exported_variables") or {}
+    exp_a = a.get("exported_variables") or {}
+    for s in sorted(scr_a & scr_b):
+        ea = set(exp_a.get(s) or [])
+        eb = set(exp_b.get(s) or [])
+        for var in sorted(ea - eb):
+            parts.append(f"+1 export {var} ({s})")
+        for var in sorted(eb - ea):
+            parts.append(f"-1 export {var} ({s})")
+
+    sig_diff = a.get("signal_connections", 0) - b.get("signal_connections", 0)
+    if sig_diff > 0:
+        parts.append(f"+{sig_diff} signal connection" + ("s" if sig_diff != 1 else ""))
+    elif sig_diff < 0:
+        parts.append(f"{sig_diff} signal connection" + ("s" if sig_diff != -1 else ""))
+
+    def _labels(items):
+        labels = []
+        for it in items or []:
+            if isinstance(it, dict):
+                name = str(it.get("name") or "")
+                typ = str(it.get("type") or "")
+                if name or typ:
+                    labels.append(f"{name} ({typ})" if typ else name)
+            elif it:
+                labels.append(str(it))
+        return labels
+
+    def _identity(kind, before_items, after_items):
+        """Name+type that left or arrived. A rename is not a count change."""
+        left = _labels(before_items)
+        right = _labels(after_items)
+        for label in list(right):
+            if label in left:
+                left.remove(label)
+                right.remove(label)
+        out = [f"-1 {kind} {label}" for label in sorted(left)]
+        out += [f"+1 {kind} {label}" for label in sorted(right)]
+        return out
+
+    parts.extend(_identity("camera", b.get("cameras"), a.get("cameras")))
+    parts.extend(_identity("light", b.get("lights"), a.get("lights")))
+
+    aabb_b = b.get("aabb")
+    aabb_a = a.get("aabb")
+
+    def _sz(aabb):
+        if not aabb or not isinstance(aabb, dict):
+            return None
+        sz = aabb.get("size")
+        if not sz or not isinstance(sz, (list, tuple)):
+            return None
+        return [float(x) for x in sz]
+
+    sz_b = _sz(aabb_b)
+    sz_a = _sz(aabb_a)
+
+    def _axis(x):
+        """Footprint text. Whole meters stay '10'; 10.1 must not round to 10."""
+        r = round(float(x), 4)
+        if r == int(r):
+            return str(int(r))
+        return f"{r:.4f}".rstrip("0").rstrip(".")
+
+    def _fmt(sz):
+        if not sz:
+            return ""
+        if len(sz) == 2:
+            return f"{_axis(sz[0])}x{_axis(sz[1])}"
+        return f"{_axis(sz[0])}x{_axis(sz[2])}"
+
+    if sz_b and sz_a:
+        b_area = sz_b[0] * (sz_b[2] if len(sz_b) >= 3 else sz_b[1])
+        a_area = sz_a[0] * (sz_a[2] if len(sz_a) >= 3 else sz_a[1])
+        b_str = _fmt(sz_b)
+        a_str = _fmt(sz_a)
+        if b_str != a_str or abs(a_area - b_area) > 0.01:
+            if a_area > b_area:
+                verb = "grew"
+            elif a_area < b_area:
+                verb = "shrank"
+            else:
+                verb = "changed"
+            parts.append(f"AABB {verb} {b_str} -> {a_str} m")
+    elif sz_a and not sz_b:
+        parts.append(f"AABB {_fmt(sz_a)} m")
+    elif sz_b and not sz_a:
+        parts.append(f"AABB removed (was {_fmt(sz_b)} m)")
+
+    def _num(x):
+        r = round(float(x), 4)
+        if r == int(r):
+            return str(int(r))
+        return f"{r:.4f}".rstrip("0").rstrip(".")
+
+    def _height(sz):
+        # Index 1 is height only for a 3-axis size. A 2-axis size is the
+        # footprint the X/Z line already printed.
+        if not sz or len(sz) < 3:
+            return None
+        return round(float(sz[1]), 4)
+
+    hb, ha = _height(sz_b), _height(sz_a)
+    if hb is not None and ha is not None and hb != ha:
+        parts.append(f"AABB height {_num(hb)} -> {_num(ha)} m")
+
+    def _pos(aabb):
+        if not isinstance(aabb, dict):
+            return None
+        pos = aabb.get("position")
+        if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+            return None
+        return [round(float(x), 4) for x in pos[:3]]
+
+    pb, pa = _pos(aabb_b), _pos(aabb_a)
+    if pb is not None and pa is not None and pb != pa:
+        parts.append(
+            f"AABB moved {','.join(_num(x) for x in pb)} -> "
+            f"{','.join(_num(x) for x in pa)}")
+
+    return ", ".join(parts) if parts else "no scene-tree changes"
+
+
+_STATS_UNAVAILABLE = "scene stats unavailable"
+
+
+def _base_not_godot(baseline):
+    """True only when baseline() skipped a commit that is not a Godot project.
+
+    No merge base is not this case. There is no measured tree, so an existing
+    scene's nodes must not be reported as additions.
+    """
+    if not isinstance(baseline, dict) or baseline.get("status") != "skipped":
+        return False
+    return "not a Godot project" in str(baseline.get("reason") or "")
+
+
+def _stats_comparable(before, after, *, added=False, base_not_godot=False,
+                      errored=False):
+    """Whether before/after can be diffed without inventing additions.
+
+    A null before is a real delta only when the scene is known to be added,
+    or the merge base is known not to contain a Godot project. No merge base,
+    a failed render, and a missing stats JSON are none of those.
+    """
+    if errored or after is None:
+        return False
+    if before is not None:
+        return True
+    return bool(added or base_not_godot)
+
+
+def _stats_record(before, after, *, available):
+    """One scene's manifest entry.
+
+    `available=False` is a failed render or a missing stats JSON. That is not
+    an empty tree: null before/after must not become "no scene-tree changes"
+    or a list of additions.
+    """
+    if not available:
+        return {"after": None, "before": None, "delta": _STATS_UNAVAILABLE,
+                "available": False}
+    return {"after": after, "before": before,
+            "delta": scene_stats_delta(before, after), "available": True}
+
+
+def _stats_delta_text(st):
+    """Delta text for a manifest entry. Never re-derives it from null sides."""
+    if not isinstance(st, dict):
+        return ""
+    if st.get("available") is False:
+        return st.get("delta") or _STATS_UNAVAILABLE
+    delta = st.get("delta")
+    if not delta:
+        delta = scene_stats_delta(st.get("before"), st.get("after"))
+    return delta or ""
+
+
 @contextlib.contextmanager
 def _detached(repo, sha, *, timeout):
     """A throwaway detached worktree of `repo` at `sha`, assets imported."""
@@ -1215,7 +1673,7 @@ def max_changed(rows):
 
 
 def capture_scenes(worktree, out_dir, scratch, *, repo=None, sha=None,
-                   timeout, log=None, limit=None):
+                   timeout, log=None, limit=None, base_not_godot=False):
     """Render every scene the diff changes, auto-framed, before and after.
 
     Returns (entries, skipped, warnings). An entry is the changed_scenes()
@@ -1247,6 +1705,8 @@ def capture_scenes(worktree, out_dir, scratch, *, repo=None, sha=None,
             shots = _render_shots(worktree, e["cameras"], sdir / "after", scratch,
                                   timeout=timeout, log=log, scene=e["res"])
             e["shots"] = [str(s) for s in shots]
+            af_file = sdir / "after" / "scene_stats.json"
+            e["stats_after"] = parse_scene_stats(af_file) if af_file.exists() else None
         except (EvidenceError, OSError, ValueError) as exc:
             e["error"] = str(exc).splitlines()[0][:300]
             warnings.append(f"scene {e['path']} did not render: {e['error']}")
@@ -1283,6 +1743,8 @@ def capture_scenes(worktree, out_dir, scratch, *, repo=None, sha=None,
                                         f"branch point: {str(exc).splitlines()[0][:200]}")
                         continue
                     e["before"] = [str(b) for b in before]
+                    bf_file = sdir / "before" / "scene_stats.json"
+                    e["stats_before"] = parse_scene_stats(bf_file) if bf_file.exists() else None
                     e["compare"] = compare(sdir / "before",
                                            [Path(s) for s in e["shots"]],
                                            sdir / "compare", before_sha=sha,
@@ -1291,6 +1753,22 @@ def capture_scenes(worktree, out_dir, scratch, *, repo=None, sha=None,
         except (EvidenceError, subprocess.SubprocessError, OSError) as exc:
             warnings.append(f"no branch-point render of the changed scenes: "
                             f"{str(exc)[:200]}")
+    for e in picked:
+        after = e.get("stats_after")
+        before = e.get("stats_before")
+        # A null before counts the whole after tree as new. That is the
+        # change only for a scene this diff added, or a base commit that is
+        # not a Godot project. No merge base is neither: the scene already
+        # existed and its nodes were not measured.
+        available = _stats_comparable(
+            before, after,
+            added=e.get("status") == "added",
+            base_not_godot=base_not_godot,
+            errored=bool(e.get("error")))
+        rec = _stats_record(before, after, available=available)
+        e["stats"] = rec
+        e["stats_delta"] = rec["delta"]
+        e["stats_available"] = rec["available"]
     return picked, skipped, warnings
 
 
@@ -1403,8 +1881,10 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
                 "head": _git(["rev-parse", "HEAD"], worktree,
                              check=False),
                 "shots": [], "videos": {}, "compare": [], "warnings": [],
-                "coverage": {}, "godot_errors": [],
+                "coverage": {}, "godot_errors": [], "scene_stats": {},
                 "non_visual": bool(non_visual)}
+    main_after_stats = None
+    main_before_stats = None
     with tempfile.TemporaryDirectory(prefix="arc-evidence-") as scratch, \
             _leave_no_trace(worktree):
         godot.import_assets(worktree, timeout=timeout)
@@ -1412,6 +1892,8 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
         shots = _render_shots(worktree, cams, out_dir / "shots", scratch,
                               timeout=timeout, log=glog)
         manifest["shots"] = [str(s) for s in shots]
+        main_af_file = out_dir / "shots" / "scene_stats.json"
+        main_after_stats = parse_scene_stats(main_af_file) if main_af_file.exists() else None
         _cover(manifest, "fixed_cameras", "captured" if shots else "failed",
                "" if shots else "no camera rendered a screenshot")
         for s in shots:
@@ -1449,6 +1931,7 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
                "" if manifest["playtest_shots"] else
                (_NO_PLAYTEST if not (worktree / "tools" / "playtest.gd").is_file()
                 else "the playtest wrote no screenshots to studio_shots/"))
+    bdir = None
     if repo and base:
         sha = merge_base(worktree, base)
         if not sha:
@@ -1468,6 +1951,8 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
             if bdir:
                 # Cached renders and fresh ones both land here.
                 bstatus, breason = "captured", ""
+                main_bf_file = Path(bdir) / "scene_stats.json"
+                main_before_stats = parse_scene_stats(main_bf_file) if main_bf_file.exists() else None
             _cover(manifest, "baseline", bstatus,
                    "" if bstatus == "captured"
                    else (breason or f"no baseline at {sha[:10]}"))
@@ -1486,6 +1971,19 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
     else:
         _cover(manifest, "baseline", "skipped", "no merge base")
         _cover(manifest, "compare", "skipped", "no merge base")
+    main_res = main_scene(worktree)
+    # No merge base leaves baseline unset. That is not "the base has no
+    # Godot project": the main scene already exists, and a null before
+    # would list every node as added.
+    no_godot = _base_not_godot(manifest.get("baseline"))
+    if main_res or main_after_stats or main_before_stats:
+        ok = _stats_comparable(
+            main_before_stats, main_after_stats, base_not_godot=no_godot)
+        main_st = _stats_record(main_before_stats, main_after_stats, available=ok)
+        main_key = main_res or "main"
+        manifest["scene_stats"][main_key] = main_st
+        if main_key.startswith("res://"):
+            manifest["scene_stats"][main_key[len("res://"):]] = main_st
     # Every scene the diff changes, rendered on its own and framed on its
     # content, before and after (the fixed cameras only ever see the main
     # scene). Its own scratch dir: the one above is gone by now.
@@ -1494,10 +1992,34 @@ def capture(worktree, out_dir, *, repo=None, base=None, project="",
             _leave_no_trace(worktree):
         picked, skipped, swarn = capture_scenes(
             worktree, out_dir, scratch, repo=repo, sha=sha, timeout=timeout,
-            log=glog)
+            log=glog, base_not_godot=no_godot)
     manifest["scenes"] = picked
     manifest["scenes_skipped"] = [e["path"] for e in skipped]
     manifest["warnings"] += swarn
+    for e in picked:
+        st = e.get("stats") if isinstance(e.get("stats"), dict) else None
+        if st is None or "available" not in st:
+            st = _stats_record(
+                e.get("stats_before"), e.get("stats_after"),
+                available=_stats_comparable(
+                    e.get("stats_before"), e.get("stats_after"),
+                    added=e.get("status") == "added",
+                    base_not_godot=no_godot,
+                    errored=bool(e.get("error"))))
+        p = e.get("path")
+        r = e.get("res")
+        if p:
+            manifest["scene_stats"][p] = st
+        if r and r != p:
+            manifest["scene_stats"][r] = st
+    uniq = {id(st): st for st in manifest["scene_stats"].values()}
+    usable = [st for st in uniq.values() if st.get("available")]
+    if usable:
+        _cover(manifest, "scene_stats", "captured", "")
+    elif uniq:
+        _cover(manifest, "scene_stats", "failed", "scene stats unavailable")
+    else:
+        _cover(manifest, "scene_stats", "skipped", "no scene stats recorded")
     compared = [e for e in picked if e.get("compare")]
     _cover(manifest, "scene_compare",
            "captured" if compared else "skipped",
@@ -1612,7 +2134,7 @@ def review_images(manifest, limit=10):
     return keep[:limit]
 
 
-_COVERAGE_ORDER = ("scenes", "scene_compare", "fixed_cameras", "flythrough",
+_COVERAGE_ORDER = ("scenes", "scene_compare", "scene_stats", "fixed_cameras", "flythrough",
                    "playtest", "playtest_shots", "baseline", "compare")
 
 
@@ -1677,6 +2199,8 @@ def prompt_block(manifest):
                   "the level around it."]
         for sc in scenes:
             lines.append("- " + scene_summary(sc).replace("`", ""))
+            if sc.get("stats_delta"):
+                lines.append(f"    stats: {sc['stats_delta']}")
             for p in _ranked_panels(sc):
                 lines.append(f"    image: {p}")
             if sc.get("video"):
@@ -1723,6 +2247,19 @@ def prompt_block(manifest):
         lines.append(f"- {kind} video: {v.get('mp4')} (preview {v.get('gif')})")
     for p in manifest.get("playtest_shots") or []:
         lines.append(f"- playtest screenshot: {p}")
+    stats_map = manifest.get("scene_stats") or {}
+    if stats_map:
+        lines += ["", "SCENE TREE STATS (deltas vs branch point):"]
+        seen_dedup = set()
+        for sp, st in stats_map.items():
+            delta = _stats_delta_text(st)
+            if not delta:
+                continue
+            norm_key = (sp[6:] if sp.startswith("res://") else sp, delta)
+            if norm_key in seen_dedup:
+                continue
+            seen_dedup.add(norm_key)
+            lines.append(f"- {sp}: {delta}")
     lines += coverage_lines(manifest)
     for e in manifest.get("godot_errors") or []:
         lines.append(f"- GODOT ERROR: {e}")
@@ -1755,6 +2292,18 @@ def board_body(manifest):
     changed = [f"{c['name']} {_pct(c.get('changed'))}" for c in
                manifest.get("compare") or [] if c.get("changed")]
     body = f"evidence: {n} screenshot(s)" + (f", video: {vids}" if vids else "")
+    stats_map = manifest.get("scene_stats") or {}
+    stats_items = []
+    seen_dedup = set()
+    for sp, st in stats_map.items():
+        delta = _stats_delta_text(st)
+        if delta and delta != "no scene-tree changes":
+            norm_key = (sp[6:] if sp.startswith("res://") else sp, delta)
+            if norm_key not in seen_dedup:
+                seen_dedup.add(norm_key)
+                stats_items.append((sp, delta))
+    if stats_items:
+        body += "; stats: " + "; ".join(f"{Path(sp).name}: {d}" for sp, d in stats_items[:3])
     scenes = manifest.get("scenes") or []
     if scenes:
         body += "; changed scenes: " + ", ".join(
@@ -1776,10 +2325,13 @@ def board_body(manifest):
         body += "; NO VISIBLE CHANGE for a gameplay diff"
     if manifest.get("warnings"):
         body += f"; {len(manifest['warnings'])} warning(s)"
-    body += f" — {Path(manifest.get('shots', ['.'])[0]).parent.parent}"
+    body += f" — {Path((manifest.get('shots') or ['.'])[0]).parent.parent}"
     if scenes:
         body += "\n\n**Changed scenes**\n" + "\n".join(
             "- " + scene_summary(sc) for sc in scenes)
+    if stats_items:
+        body += "\n\n**Scene stats**\n" + "\n".join(
+            f"- `{sp}`: {d}" for sp, d in stats_items)
     table = _coverage_table(manifest)
     if table:
         body += "\n\n**Evidence coverage**\n" + "\n".join(table)
@@ -1868,7 +2420,10 @@ def evidence_root(manifest):
     """The capture's out_dir: every published path is relative to it."""
     if manifest.get("out_dir"):
         return Path(manifest["out_dir"])
-    return Path(manifest["shots"][0]).parent.parent
+    shots = manifest.get("shots") or []
+    if shots:
+        return Path(shots[0]).parent.parent
+    return Path(".")
 
 
 def pr_markdown(manifest, web_base, *, task_id, attempt):
@@ -1962,6 +2517,20 @@ def pr_markdown(manifest, web_base, *, task_id, attempt):
                   + ") but no rendered view moved. Either the change is invisible or "
                   "the capture missed it; the coverage table below says which kinds "
                   "ran.", ""]
+    stats_map = manifest.get("scene_stats") or {}
+    if stats_map:
+        lines += ["#### Scene tree stats vs branch point", ""]
+        seen_dedup = set()
+        for sp, st in stats_map.items():
+            delta = _stats_delta_text(st)
+            if not delta:
+                continue
+            norm_key = (sp[6:] if sp.startswith("res://") else sp, delta)
+            if norm_key in seen_dedup:
+                continue
+            seen_dedup.add(norm_key)
+            lines.append(f"- `{sp}`: {delta}")
+        lines.append("")
     sheet = manifest.get("contact_sheet")
     if sheet and Path(sheet).exists():
         # One labeled grid of everything captured: what tells a reviewer at a

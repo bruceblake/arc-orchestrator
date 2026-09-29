@@ -91,6 +91,7 @@ function taskDag(dag, opts) {
       n.stage ? `stage: ${typeof workStage === "function" ? workStage(n.stage) : n.stage}` : "",
       n.activity ? `activity: ${n.activity}` : "",
       n.reason ? `reason: ${n.reason}` : "",
+      n.issue ? (n.issue_url ? `#${n.issue} ${n.issue_url}` : `#${n.issue}`) : "",
       `impl: ${short(n.model)} · review: ${revShort(n.reviewer)}`,
       att > 1 || escn ? `fix loop: implement attempt ${att}${escn ? `, escalated x${escn}` : ""}` : "",
       bncText,
@@ -125,6 +126,8 @@ function taskDag(dag, opts) {
            `<text x="${p.x + NW / 2}" y="${p.y - 4}" font-size="${mini ? 7 : 8.5}" fill="#d29922" text-anchor="middle">x${att}${escn ? " ⬆" + escn : ""}</text>`;
     if (!topo && n.last_verdict && n.last_verdict.pass === false && n.status !== "merged")
       s += `<circle cx="${p.x + NW - 5}" cy="${p.y + 5}" r="3" fill="#f85149"/>`;
+    if (!topo && !mini && n.issue && n.issue_url)
+      s += `<a href="${attr(n.issue_url)}" target="_blank" rel="noopener"><text x="${p.x + NW - 8}" y="${p.y + 12}" font-size="9" fill="#58a6ff" text-anchor="end">#${esc(n.issue)}</text></a>`;
     s += `</g>`; }
   if (dropped) s += `<text x="${PAD}" y="${H - 4}" font-size="9" fill="#8b949e">+${dropped} more — see the full DAG in the project detail</text>`;
   const wide = W > 1400;
@@ -134,6 +137,7 @@ function bindDagClicks(sel, runsCache) {
   document.querySelectorAll(sel + " g.node").forEach(g => {
     g.onclick = ev => {
       ev.stopPropagation();
+      if (ev.target && ev.target.closest && ev.target.closest("a")) return;
       if (g.dataset.kind === "chain") { if (g.dataset.file) openDetail(g.dataset.file); return; }
       // A task node opens the TIMELINE: what happened to this task, in order,
       // is the question a click on a task asks. The transcript is not lost —

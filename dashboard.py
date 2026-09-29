@@ -2062,6 +2062,49 @@ def _projects_invalidate():
     _projects_cache["value"] = None
 
 
+def _issue_fields(taskfile):
+    """(epic number, epic url, {task id: (issue, url)}) from task_issues.
+
+    A lookup failure leaves the page without links; it does not fail the
+    project list."""
+    try:
+        import gh_issues
+        recs = gh_issues.recorded(taskfile)
+    except Exception:
+        return None, "", {}
+    epic = recs.get("") or {}
+    repo = epic.get("repo") or ""
+    epic_n = epic.get("issue")
+    if not epic_n:
+        for rec in recs.values():
+            if rec.get("epic"):
+                epic_n = rec["epic"]
+                repo = repo or rec.get("repo") or ""
+                break
+    try:
+        epic_url = gh_issues.issue_url(repo, epic_n) if epic_n else ""
+    except Exception:
+        epic_url = ""
+    by_task = {}
+    for tid, rec in recs.items():
+        if not tid:
+            continue
+        try:
+            url = gh_issues.issue_url(rec.get("repo") or repo, rec["issue"])
+        except Exception:
+            url = ""
+        by_task[tid] = (rec["issue"], url)
+    return epic_n, epic_url, by_task
+
+
+def _task_issue_link(tid, taskfile=None):
+    try:
+        import gh_issues
+        return gh_issues.link_for_task(tid, taskfile)
+    except Exception:
+        return None, ""
+
+
 def _projects(store):
     now = time.time()
     inflight, _kimi = _collect_inflight(now, store)
@@ -2195,6 +2238,7 @@ def _projects(store):
                 v = r.get(k)
                 if v and (last is None or v > last):
                     last = v
+        epic_issue, epic_url, issue_by_task = _issue_fields(f)
         nodes = []
         loop_stats = all_loop_stats
         for t in tdefs:
@@ -2238,6 +2282,9 @@ def _projects(store):
                     "conflicts": ls.get("conflicts", 0),
                     "last_verdict": ls.get("last_verdict"),
                     "last_bounce": ls.get("last_bounce")}
+            pair = issue_by_task.get(tid)
+            node["issue"] = pair[0] if pair else None
+            node["issue_url"] = pair[1] if pair else ""
             nodes.append(node)
         edges = []
         for t in tdefs:
@@ -2282,6 +2329,7 @@ def _projects(store):
         if phase == "new" and chain and not chain["ready"]:
             phase = "chained"
         out.append({"file": f.name, "title": proj.get("title") or f.stem,
+                    "epic_issue": epic_issue, "epic_url": epic_url,
                     "chain": chain,
                     "repo": proj.get("repo"), "n_tasks": len(tdefs), "task_ids": ids,
                     "models": sorted({t.get("model") for t in tdefs if t.get("model")}),
@@ -2941,7 +2989,9 @@ def _work_status(store):
                     "last_event_at": _ts(ev.get("ts")) if live_run else None,
                     "idle_s": (agent or {}).get("idle_s"),
                     "elapsed_s": (agent or {}).get("elapsed_s"),
-                    "usage_resets_at": (ev.get("resets_at") if activity == "usage_wait" else None)}
+                    "usage_resets_at": (ev.get("resets_at") if activity == "usage_wait" else None),
+                    "issue": n.get("issue"),
+                    "issue_url": n.get("issue_url") or ""}
             tasks.append(task)
         p["tasks"] = tasks
     out = {"now": now, "projects": projects, "agents": agents}
@@ -3952,7 +4002,10 @@ def _timeline(tid, taskfile=None, store=None):
                 break
     except Exception:
         status = None
+    issue, issue_url = _task_issue_link(
+        tid, (Path(config.TASKS_DIR) / taskfile) if taskfile else None)
     return {"id": tid, "taskfile": taskfile, "status": status,
+            "issue": issue, "issue_url": issue_url,
             "title": (project or {}).get("title") if isinstance(project, dict) else None,
             "entries": entries, "counts": {
                 "events": len(ev["events"]), "runs": len(runs),
@@ -5173,9 +5226,15 @@ def _board_channels(store, project):
         slot["title"] = row.get("title") or ""
     for slot in seen.values():
         ch = slot["channel"]
-        if ch.startswith("task:") and "status" not in slot:
-            row = by_id.get(ch[5:])
-            slot["status"] = (row or {}).get("status") or ""
+        if not ch.startswith("task:"):
+            continue
+        tid = ch[5:]
+        row = by_id.get(tid) or {}
+        if "status" not in slot:
+            slot["status"] = row.get("status") or ""
+        n, url = _task_issue_link(tid, row.get("taskfile"))
+        slot["issue"] = n
+        slot["issue_url"] = url
     order = {"project": 0, "captain": 2, "operator": 3}
     def key(slot):
         ch = slot["channel"]
@@ -5186,9 +5245,14 @@ def _board_channels(store, project):
         else:
             rank = order.get(ch, 5)
         return (rank, -(slot["last_ts"] or 0), ch)
+    def task_link(r):
+        slot = seen.get(f"task:{r['id']}") or {}
+        return slot.get("issue"), slot.get("issue_url") or ""
+
     return {"channels": sorted(seen.values(), key=key),
             "tasks": [{"id": r["id"], "status": r.get("status") or "",
-                       "model": r.get("model") or "", "title": r.get("title") or ""}
+                       "model": r.get("model") or "", "title": r.get("title") or "",
+                       "issue": task_link(r)[0], "issue_url": task_link(r)[1]}
                       for r in tasks]}
 
 
