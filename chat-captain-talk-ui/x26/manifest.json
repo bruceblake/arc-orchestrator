@@ -1,0 +1,234 @@
+{
+  "kind": "ui",
+  "worktree": "/home/proxyie/worktrees/arc-orchestrator/chat-captain-talk-ui",
+  "project": "arc-orchestrator",
+  "head": "6ab6b23f0fc594fb45aa2af8eef47a4af2516749",
+  "ui_files": [
+    "dashboard.py",
+    "static/index.html",
+    "static/panels/captain.js",
+    "static/panels/chat.js",
+    "static/phone.html"
+  ],
+  "shots": [
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/index-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/index-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/index-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/index-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/projects-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/projects-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/projects-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/projects-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/usage-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/usage-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/usage-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/usage-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/phone-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/phone-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/phone-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/shots/phone-phone-dark.png"
+  ],
+  "videos": {},
+  "compare": [
+    {
+      "name": "index-desktop-light",
+      "changed": 0.7730604985090107,
+      "box": [
+        0,
+        89,
+        1440,
+        1625
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/compare/index-desktop-light.png",
+      "size": {
+        "before": [
+          1440,
+          900
+        ],
+        "after": [
+          1440,
+          1714
+        ]
+      },
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/before/index-desktop-light.png"
+    },
+    {
+      "name": "index-desktop-dark",
+      "changed": 0.7730604985090107,
+      "box": [
+        0,
+        89,
+        1440,
+        1625
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/compare/index-desktop-dark.png",
+      "size": {
+        "before": [
+          1440,
+          900
+        ],
+        "after": [
+          1440,
+          1714
+        ]
+      },
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/before/index-desktop-dark.png"
+    },
+    {
+      "name": "index-phone-light",
+      "changed": 0.7198901907511179,
+      "box": [
+        0,
+        268,
+        390,
+        1997
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/compare/index-phone-light.png",
+      "size": {
+        "before": [
+          390,
+          1890
+        ],
+        "after": [
+          390,
+          2265
+        ]
+      },
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/before/index-phone-light.png"
+    },
+    {
+      "name": "index-phone-dark",
+      "changed": 0.7198901907511179,
+      "box": [
+        0,
+        268,
+        390,
+        1997
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/compare/index-phone-dark.png",
+      "size": {
+        "before": [
+          390,
+          1890
+        ],
+        "after": [
+          390,
+          2265
+        ]
+      },
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/before/index-phone-dark.png"
+    },
+    {
+      "name": "projects-desktop-light",
+      "changed": 2.2376543209876542e-05,
+      "box": [
+        134,
+        93,
+        176,
+        16
+      ],
+      "side_by_side": null
+    },
+    {
+      "name": "projects-desktop-dark",
+      "changed": 4.861111111111111e-05,
+      "box": [
+        36,
+        93,
+        1368,
+        162
+      ],
+      "side_by_side": null
+    },
+    {
+      "name": "projects-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    }
+  ],
+  "warnings": [],
+  "coverage": {
+    "views": {
+      "status": "captured",
+      "reason": ""
+    },
+    "baseline": {
+      "status": "captured",
+      "reason": ""
+    },
+    "compare": {
+      "status": "captured",
+      "reason": ""
+    }
+  },
+  "page_errors": {},
+  "baseline": {
+    "sha": "3fc6b4e040b21c1a68c81b39bbae2538e167989c",
+    "dir": "/home/proxyie/arc-orchestrator/logs/evidence/_ui_baseline/3fc6b4e040b21c1a68c81b39bbae2538e167989c-cf939ccce9",
+    "status": "captured"
+  },
+  "new_page_errors": {},
+  "changed_views": [
+    "index-desktop-light",
+    "index-desktop-dark",
+    "index-phone-light",
+    "index-phone-dark"
+  ],
+  "contact_sheet": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/chat-captain-talk-ui/x26/contact_sheet.png",
+  "seconds": 10.4
+}
