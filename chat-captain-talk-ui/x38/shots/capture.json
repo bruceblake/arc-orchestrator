@@ -1,0 +1,22 @@
+{
+  "tree": "/home/proxyie/worktrees/arc-orchestrator/chat-captain-talk-ui",
+  "shots": [
+    "/tmp/column-evidence-ce13588/shots/index-desktop-light.png",
+    "/tmp/column-evidence-ce13588/shots/index-desktop-dark.png",
+    "/tmp/column-evidence-ce13588/shots/index-phone-light.png",
+    "/tmp/column-evidence-ce13588/shots/index-phone-dark.png",
+    "/tmp/column-evidence-ce13588/shots/projects-desktop-light.png",
+    "/tmp/column-evidence-ce13588/shots/projects-desktop-dark.png",
+    "/tmp/column-evidence-ce13588/shots/projects-phone-light.png",
+    "/tmp/column-evidence-ce13588/shots/projects-phone-dark.png",
+    "/tmp/column-evidence-ce13588/shots/usage-desktop-light.png",
+    "/tmp/column-evidence-ce13588/shots/usage-desktop-dark.png",
+    "/tmp/column-evidence-ce13588/shots/usage-phone-light.png",
+    "/tmp/column-evidence-ce13588/shots/usage-phone-dark.png",
+    "/tmp/column-evidence-ce13588/shots/phone-desktop-light.png",
+    "/tmp/column-evidence-ce13588/shots/phone-desktop-dark.png",
+    "/tmp/column-evidence-ce13588/shots/phone-phone-light.png",
+    "/tmp/column-evidence-ce13588/shots/phone-phone-dark.png"
+  ],
+  "page_errors": {}
+}
