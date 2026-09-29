@@ -1176,3 +1176,65 @@ class HttpParamsSeats(EndpointCase):
         plain = self.get("/api/seats").json()
         queried = self.get("/api/seats?since_hours=1&model=nope").json()
         self.assertEqual(queried, plain)
+
+
+class IssueLinks(EndpointCase):
+    """/api/projects, /api/work-status and the timeline carry the GitHub
+    issue number and URL recorded in task_issues. gh is not called: the
+    URL builder is the only piece that would talk to a remote."""
+
+    def setUp(self):
+        super().setUp()
+        import gh_issues
+        self.gh_issues = gh_issues
+        gh_issues.use_db(str(self.tmp / "issues.db"))
+        self.addCleanup(gh_issues.use_db, None)
+        tasks = self.tmp / "tasks"
+        tasks.mkdir()
+        self.tf = tasks / "demo.json"
+        repo = self.tmp / "widgets"
+        repo.mkdir()
+        self.tf.write_text(json.dumps({"project": {
+            "title": "Demo", "repo": str(repo),
+            "tasks": [{"id": "t1", "title": "One", "model": "GLM-5.3",
+                       "reviewer": "deepseek", "verify_cmd": "true", "deps": []}]}}),
+            encoding="utf-8")
+        gh_issues._record(repo, self.tf, "", 9, None)
+        gh_issues._record(repo, self.tf, "t1", 4, 9)
+        from unittest import mock
+        self._patch = mock.patch.object(
+            gh_issues, "issue_url",
+            side_effect=lambda repo, n: f"https://github.com/acme/widgets/issues/{int(n)}" if n else "")
+        self._patch.start()
+        self.addCleanup(self._patch.stop)
+        dashboard._projects_cache["value"] = None
+        dashboard._work_status_cache.update(at=0.0, value=None)
+        dashboard._timeline_cache.update(key=None, value=None)
+
+    def test_projects_work_status_and_timeline_name_the_issue(self):
+        projects = self.get("/api/projects").json()["projects"]
+        demo = next(p for p in projects if p["file"] == "demo.json")
+        self.assertEqual(demo["epic_issue"], 9)
+        self.assertEqual(demo["epic_url"], "https://github.com/acme/widgets/issues/9")
+        node = next(n for n in demo["dag"]["nodes"] if n["id"] == "t1")
+        self.assertEqual(node["issue"], 4)
+        self.assertEqual(node["issue_url"], "https://github.com/acme/widgets/issues/4")
+
+        dashboard._work_status_cache.update(at=0.0, value=None)
+        work = self.get("/api/work-status").json()["projects"]
+        live = next(p for p in work if p["file"] == "demo.json")
+        self.assertEqual(live["epic_url"], "https://github.com/acme/widgets/issues/9")
+        task = next(t for t in live["tasks"] if t["id"] == "t1")
+        self.assertEqual(task["issue"], 4)
+        self.assertEqual(task["issue_url"], "https://github.com/acme/widgets/issues/4")
+
+        timeline = self.get("/api/tasks/t1/timeline?taskfile=demo.json").json()
+        self.assertEqual(timeline["issue"], 4)
+        self.assertEqual(timeline["issue_url"], "https://github.com/acme/widgets/issues/4")
+
+        dashboard.Handler.store.upsert_code_task(
+            str(self.tf), "t1", "One", "GLM-5.3", "deepseek", "running")
+        chans = self.get("/api/board/channels?project=demo").json()
+        slot = next(c for c in chans["channels"] if c["channel"] == "task:t1")
+        self.assertEqual(slot["issue"], 4)
+        self.assertEqual(slot["issue_url"], "https://github.com/acme/widgets/issues/4")
