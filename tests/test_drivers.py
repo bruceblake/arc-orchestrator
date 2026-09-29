@@ -265,6 +265,9 @@ class InvalidSessionRetriesFresh(unittest.TestCase):
             slept.append(d)
 
         with TempLeaseDB() as store:
+            # The row and the invalidation path are the same file here.
+            # test_refusal_invalidates_the_runs_db is the case where they differ.
+            drivers.use_db(store.path)
             store.save_task_session(
                 "p", "tf.json", "t1", "implementer", Drv.model, "codex",
                 "sid-old", "/tmp/wt", "abc1234")
@@ -283,6 +286,7 @@ class InvalidSessionRetriesFresh(unittest.TestCase):
                     asyncio.run(go())
             finally:
                 drivers.asyncio.sleep = orig
+                drivers.use_db(None)
             row = store.conn.execute(
                 "SELECT valid FROM task_sessions WHERE session_id=?",
                 ("sid-old",)).fetchone()
@@ -302,6 +306,61 @@ class InvalidSessionRetriesFresh(unittest.TestCase):
                 self.assertIn("driver.resume_invalid", kinds)
                 self.assertEqual(len(ev.of("driver.done")), 1)
                 self.assertEqual(ev.first("driver.done")["attempt"], 1)
+
+    def test_refusal_invalidates_the_runs_db(self):
+        """`code run --db` records the row in the selected Store. A refusal
+        must mark that file, not the lease database (config.DB_PATH)."""
+        run_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(run_dir.cleanup)
+        run = Store(str(Path(run_dir.name) / "run.db"))
+        self.addCleanup(run.conn.close)
+        self.assertNotEqual(Path(run.path).resolve(), Path(config.DB_PATH).resolve())
+
+        class Drv(Driver):
+            harness = "cursor"
+            model = config.ESCALATION_PATH[0]
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                return ["true"]
+
+            async def _once(self, prompt, worktree, session_id, task_id, attempt):
+                if session_id:
+                    raise DriverError("no rollout found")
+                return drivers.DriverResult(
+                    self.harness, self.model, self.role, 0, "fresh", "", "ok", 0.0)
+
+        with TempLeaseDB() as lease:
+            self.assertNotEqual(Path(run.path).resolve(), Path(lease.path).resolve())
+            fields = ("p", "tf.json", "t1", "implementer", Drv.model, "cursor",
+                      "sid-old", "/tmp/wt", "abc1234")
+            run.save_task_session(*fields)
+            lease.save_task_session(*fields)
+            drivers.use_db(run.path)
+            drv = Drv()
+            drivers._semaphores.pop(drv.model, None)
+
+            async def fake_sleep(d):
+                return None
+
+            orig = drivers.asyncio.sleep
+            drivers.asyncio.sleep = fake_sleep
+            wt = Path(tempfile.mkdtemp(prefix="arc-resume-"))
+            self.addCleanup(shutil.rmtree, wt, ignore_errors=True)
+            try:
+                asyncio.run(drv.run("the task", wt, session_id="sid-old",
+                                    task_id="t1"))
+            finally:
+                drivers.asyncio.sleep = orig
+                drivers.use_db(None)
+            run_row = run.conn.execute(
+                "SELECT valid FROM task_sessions WHERE session_id=?",
+                ("sid-old",)).fetchone()
+            lease_row = lease.conn.execute(
+                "SELECT valid FROM task_sessions WHERE session_id=?",
+                ("sid-old",)).fetchone()
+        self.assertEqual(run_row["valid"], 0)
+        self.assertEqual(lease_row["valid"], 1)
 
 
 class ChildTermination(unittest.TestCase):

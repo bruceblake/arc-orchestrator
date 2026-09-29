@@ -2403,6 +2403,9 @@ def _resume_pr_start(repo, tid, *, known_open=False, prior_error=""):
 
 
 def build_code_graph(store, taskset, taskfile="", policy=None):
+    # task_sessions live in this run's Store (`code run --db`, orchbench).
+    # A harness refusal must invalidate that file, not the fleet lease db.
+    drivers.use_db(getattr(store, "path", None))
     repo = taskset["repo"]
     tasks = taskset["tasks"]
     project_slug = Path(repo).name

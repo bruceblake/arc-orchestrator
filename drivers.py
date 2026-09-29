@@ -126,6 +126,11 @@ def _harness_gate(harness):
 
 
 _lease_store = None
+# The run's task_sessions database (`code run --db`, orchbench). None means
+# config.DB_PATH. Leases stay on `_lease_db`; a harness refusal must mark the
+# row in the database that recorded it, which is not always the fleet db.
+_session_db = None
+_session_store = None
 
 
 def _lease_db():
@@ -134,6 +139,35 @@ def _lease_db():
         import store as _s
         _lease_store = _s.Store(config.DB_PATH)
     return _lease_store
+
+
+def use_db(path):
+    """Point session invalidation at the run's own database.
+
+    `code run --db` and orchbench record task_sessions in the Store they
+    pass to `build_code_graph`, while config.DB_PATH is left untouched.
+    None falls back to config.DB_PATH. A `:memory:` path cannot be shared
+    with a second connection, so it falls back too. Leases are unchanged.
+    """
+    global _session_db, _session_store
+    new = str(path) if path and str(path) != ":memory:" else None
+    if new != _session_db:
+        if _session_store is not None:
+            try:
+                _session_store.conn.close()
+            except Exception:                              # noqa: BLE001
+                pass
+            _session_store = None
+        _session_db = new
+
+
+def _sessions():
+    """The Store that holds this run's task_sessions rows."""
+    global _session_store
+    if _session_store is None:
+        import store as _s
+        _session_store = _s.Store(_session_db or config.DB_PATH)
+    return _session_store
 
 
 def arc_reachable(timeout=6.0):
@@ -1954,7 +1988,7 @@ class Driver:
                     # until MAX_RETRIES. Drop the id, mark the stored row
                     # invalid, and continue from the worktree in THIS attempt.
                     try:
-                        _lease_db().invalidate_task_session(sid, self.harness)
+                        _sessions().invalidate_task_session(sid, self.harness)
                     except Exception:                          # noqa: BLE001
                         log.warning("could not invalidate session %s", sid)
                     events.emit("driver.resume_invalid", harness=self.harness,

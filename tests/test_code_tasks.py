@@ -1151,6 +1151,14 @@ class ARestartResumesFromTheSessionTable(unittest.TestCase):
         subprocess.run(["git", "commit", "-qm", message], cwd=self.wt,
                        check=True, env=self.env)
 
+    def test_graph_points_invalidation_at_the_run_db(self):
+        """build_code_graph hands drivers the Store that recorded the row."""
+        self.addCleanup(drivers.use_db, None)
+        ts = code_tasks.load_taskfile(taskfile([BASIC]))
+        code_tasks.build_code_graph(self.store, ts, taskfile=self.tf)
+        self.assertEqual(drivers._session_db, self.store.path)
+        self.assertNotEqual(self.store.path, str(config.DB_PATH))
+
     def _resume(self, results=None, **kw):
         args = dict(store=self.store, taskfile=self.tf, worktree=self.wt)
         args.update(kw)
