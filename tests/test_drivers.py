@@ -170,6 +170,199 @@ class RetryLoop(unittest.TestCase):
                              config.DRIVER_CAPACITY_BACKOFF_CAP * 1.25)
 
 
+def _has_seq(argv, needle):
+    n = len(needle)
+    return any(list(argv[i:i + n]) == list(needle) for i in range(len(argv) - n + 1))
+
+
+class ResumeArgv(unittest.TestCase):
+    """Each harness resumes with the flag its driver actually passes.
+
+    The forms are the ones in drivers.py. A session id must not invent a
+    flag the CLI does not take (reasonix continues the workspace with `-c`;
+    dsh cannot resume at all)."""
+
+    SID = "sess-42"
+
+    def test_each_driver_resume_flag(self):
+        sid = self.SID
+        # (label, factory, resume subsequence, binary name, id is an argv token)
+        table = [
+            ("codex", lambda: drivers.CodexDriver("m", "implementer", bench=True),
+             ["exec", "resume", sid], "codex", True),
+            ("claude", lambda: drivers.ClaudeCodeDriver("m", "implementer", bench=True),
+             ["--resume", sid], "claude", True),
+            ("cursor", lambda: drivers.CursorDriver("m", "implementer", bench=True),
+             ["--resume", sid], "agent", True),
+            ("agy", lambda: drivers.AntigravityDriver("m", "implementer", bench=True),
+             ["--conversation", sid], "agy", True),
+            ("gemini", lambda: drivers.GeminiDriver("m", "implementer", bench=True),
+             ["--session-id", sid], "gemini", True),
+            ("reasonix", lambda: drivers.ReasonixDriver("m", "implementer", bench=True),
+             ["-c"], "reasonix", False),
+            ("kimi", lambda: drivers.KimiDriver("implementer", bench=True),
+             ["--session", sid], "kimi", True),
+            ("dsh", lambda: drivers.DeepseekDriver("m", "implementer", bench=True),
+             None, "dsh", False),
+        ]
+        for label, factory, seq, binary, id_in_argv in table:
+            with self.subTest(label):
+                drv = factory()
+                argv = drv.argv("do the thing", sid)
+                fresh = drv.argv("do the thing", None)
+                self.assertEqual(Path(argv[0]).name, binary, label)
+                if seq is None:
+                    self.assertNotIn(sid, argv)
+                    self.assertNotIn("--resume", argv)
+                    self.assertNotIn("resume", argv)
+                    continue
+                self.assertTrue(_has_seq(argv, seq), f"{label}: {argv}")
+                self.assertFalse(_has_seq(fresh, seq), f"{label} fresh: {fresh}")
+                if id_in_argv:
+                    self.assertIn(sid, argv)
+                    self.assertNotIn(sid, fresh)
+                else:
+                    self.assertNotIn(sid, argv)
+                    self.assertNotIn("--resume", argv)
+                    self.assertNotIn("--session", argv)
+
+    def test_opencode_reuses_the_session_id(self):
+        import inspect
+        src = inspect.getsource(drivers.OpencodeDriver._once)
+        self.assertIn("session_id=session_id", src)
+        self.assertIn("OcserveClient.create", src)
+        self.assertRaises(NotImplementedError,
+                          drivers.OpencodeDriver.argv,
+                          drivers.OpencodeDriver.__new__(drivers.OpencodeDriver),
+                          "p", "sid")
+
+
+class InvalidSessionRetriesFresh(unittest.TestCase):
+    """A harness that refuses the session id marks the row and retries
+    inside the same attempt — the retry ladder is not spent."""
+
+    def _run(self, message):
+        seen = []
+
+        class Drv(Driver):
+            harness = "codex"
+            model = config.ESCALATION_PATH[0]
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                return ["true"]
+
+            async def _once(self, prompt, worktree, session_id, task_id, attempt):
+                seen.append((session_id, attempt))
+                if session_id:
+                    raise DriverError(message)
+                return drivers.DriverResult(
+                    self.harness, self.model, self.role, 0, "fresh", "", "ok", 0.0)
+
+        slept = []
+
+        async def fake_sleep(d):
+            slept.append(d)
+
+        with TempLeaseDB() as store:
+            # The row and the invalidation path are the same file here.
+            # test_refusal_invalidates_the_runs_db is the case where they differ.
+            drivers.use_db(store.path)
+            store.save_task_session(
+                "p", "tf.json", "t1", "implementer", Drv.model, "codex",
+                "sid-old", "/tmp/wt", "abc1234")
+            drv = Drv()
+            drivers._semaphores.pop(drv.model, None)
+            orig = drivers.asyncio.sleep
+            drivers.asyncio.sleep = fake_sleep
+            wt = Path(tempfile.mkdtemp(prefix="arc-resume-"))
+            self.addCleanup(shutil.rmtree, wt, ignore_errors=True)
+            try:
+                with capture_events() as ev:
+                    async def go():
+                        return await drv.run("the task", wt, session_id="sid-old",
+                                              task_id="t1")
+
+                    asyncio.run(go())
+            finally:
+                drivers.asyncio.sleep = orig
+                drivers.use_db(None)
+            row = store.conn.execute(
+                "SELECT valid FROM task_sessions WHERE session_id=?",
+                ("sid-old",)).fetchone()
+        return seen, slept, ev, row
+
+    def test_refusal_marks_the_row_and_retries_fresh(self):
+        for message in ("no rollout found",
+                        "session not found",
+                        "unknown conversation",
+                        "prompt_async failed: HTTP 404: missing"):
+            with self.subTest(message):
+                seen, slept, ev, row = self._run(message)
+                self.assertEqual(seen, [("sid-old", 1), (None, 1)])
+                self.assertEqual(slept, [])
+                self.assertEqual(row["valid"], 0)
+                kinds = [t for t, _f in ev.seen]
+                self.assertIn("driver.resume_invalid", kinds)
+                self.assertEqual(len(ev.of("driver.done")), 1)
+                self.assertEqual(ev.first("driver.done")["attempt"], 1)
+
+    def test_refusal_invalidates_the_runs_db(self):
+        """`code run --db` records the row in the selected Store. A refusal
+        must mark that file, not the lease database (config.DB_PATH)."""
+        run_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(run_dir.cleanup)
+        run = Store(str(Path(run_dir.name) / "run.db"))
+        self.addCleanup(run.conn.close)
+        self.assertNotEqual(Path(run.path).resolve(), Path(config.DB_PATH).resolve())
+
+        class Drv(Driver):
+            harness = "cursor"
+            model = config.ESCALATION_PATH[0]
+            role = "implementer"
+
+            def argv(self, prompt, session_id):
+                return ["true"]
+
+            async def _once(self, prompt, worktree, session_id, task_id, attempt):
+                if session_id:
+                    raise DriverError("no rollout found")
+                return drivers.DriverResult(
+                    self.harness, self.model, self.role, 0, "fresh", "", "ok", 0.0)
+
+        with TempLeaseDB() as lease:
+            self.assertNotEqual(Path(run.path).resolve(), Path(lease.path).resolve())
+            fields = ("p", "tf.json", "t1", "implementer", Drv.model, "cursor",
+                      "sid-old", "/tmp/wt", "abc1234")
+            run.save_task_session(*fields)
+            lease.save_task_session(*fields)
+            drivers.use_db(run.path)
+            drv = Drv()
+            drivers._semaphores.pop(drv.model, None)
+
+            async def fake_sleep(d):
+                return None
+
+            orig = drivers.asyncio.sleep
+            drivers.asyncio.sleep = fake_sleep
+            wt = Path(tempfile.mkdtemp(prefix="arc-resume-"))
+            self.addCleanup(shutil.rmtree, wt, ignore_errors=True)
+            try:
+                asyncio.run(drv.run("the task", wt, session_id="sid-old",
+                                    task_id="t1"))
+            finally:
+                drivers.asyncio.sleep = orig
+                drivers.use_db(None)
+            run_row = run.conn.execute(
+                "SELECT valid FROM task_sessions WHERE session_id=?",
+                ("sid-old",)).fetchone()
+            lease_row = lease.conn.execute(
+                "SELECT valid FROM task_sessions WHERE session_id=?",
+                ("sid-old",)).fetchone()
+        self.assertEqual(run_row["valid"], 0)
+        self.assertEqual(lease_row["valid"], 1)
+
+
 class ChildTermination(unittest.TestCase):
     """A cancelled or timed-out attempt must not orphan the harness process.
 

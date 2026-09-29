@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import threading
 import time
@@ -1331,7 +1332,94 @@ def save_review_log(project, tid, attempt, model, text, kind="review"):
         return None
 
 
-def _resume_session(results, tid, model, harness=None):
+# Spoken to a session resumed from the DB after the run process died.
+# In-process fix rounds already hold the worktree they just wrote.
+RESTART_RESUME_PREFIX = (
+    "resuming after restart: the working tree may have changed; "
+    "re-check git status before editing\n\n"
+)
+
+_SHA_RE = re.compile(r"^[0-9a-fA-F]{7,64}$")
+# gitstore.publish commits `task(<id>): <title>`. A restart may resume only
+# when HEAD is still the recorded sha, or every commit since then is one of
+# these — a sibling merge or an agent commit starts a cold session.
+_PUBLISH_SUBJECT = re.compile(r"^task\([^)]+\):")
+
+
+def _git_text(worktree, args):
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(worktree), *args],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.strip()
+
+
+def _same_worktree(a, b):
+    if not a or not b:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return os.path.normpath(str(a)) == os.path.normpath(str(b))
+
+
+def _session_head_ok(worktree, recorded, head_sha):
+    """True when this worktree is the one the session wrote, and HEAD is
+    still that commit or only orchestrator publish commits sit on top."""
+    if not worktree or not recorded or not head_sha:
+        return False
+    head_sha = head_sha.strip()
+    if not _SHA_RE.fullmatch(head_sha):
+        return False
+    if not _same_worktree(worktree, recorded):
+        return False
+    head = _git_text(worktree, ["rev-parse", "HEAD"])
+    if not head or not _SHA_RE.fullmatch(head):
+        return False
+    if head.lower() == head_sha.lower():
+        return True
+    try:
+        anc = subprocess.run(
+            ["git", "-C", str(worktree), "merge-base", "--is-ancestor",
+             head_sha, "HEAD"],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    if anc.returncode != 0:
+        return False
+    log = _git_text(worktree, ["log", "--format=%s", f"{head_sha}..HEAD"])
+    if log is None:
+        return False
+    subjects = [s for s in log.splitlines() if s.strip()]
+    return bool(subjects) and all(_PUBLISH_SUBJECT.match(s) for s in subjects)
+
+
+def _record_task_session(store, project, taskfile, task, role, model, harness,
+                         session_id, worktree):
+    """Persist a successful run's session id. Never raises into the graph."""
+    if not session_id or not harness or store is None:
+        return
+    save = getattr(store, "save_task_session", None)
+    if save is None:
+        return
+    try:
+        head = _git_text(worktree, ["rev-parse", "HEAD"]) if worktree else None
+        if not head or not _SHA_RE.fullmatch(head):
+            head = ""
+        wt = str(Path(worktree).resolve()) if worktree else ""
+        save(project or "", str(taskfile or ""), task, role, model, harness,
+             session_id, wt, head)
+    except Exception as exc:                                   # noqa: BLE001
+        errors.capture(exc, task=task, model=model, node="task_session",
+                       role=role, harness=harness)
+
+
+def _resume_session(results, tid, model, harness=None, *, store=None,
+                    taskfile=None, worktree=None):
     """The harness session to continue for this fix round, or None.
 
     A rework continues only when the SAME model on the SAME harness is
@@ -1342,15 +1430,41 @@ def _resume_session(results, tid, model, harness=None):
     actually ran; a mismatch starts fresh and the shared board carries what
     the other harness did. A recorded session with no harness cannot be
     proven to belong to this one, so it is not resumed either.
+
+    The in-memory graph result is lost when the run process dies. The newest
+    valid task_sessions row for (taskfile, task, implementer, model, harness)
+    is the same fact, used only when the graph has no implement result, and
+    only when this worktree's HEAD is still the recorded commit or descends
+    from it through orchestrator publish commits.
     """
-    prev = (results or {}).get(f"implement_{tid}") or {}
-    if prev.get("model") != model or not prev.get("session_id"):
-        return None
-    prev_h = prev.get("harness")
-    if harness:
-        if not prev_h or prev_h != harness:
+    results = results or {}
+    key = f"implement_{tid}"
+    if key in results:
+        prev = results[key] or {}
+        if prev.get("model") != model or not prev.get("session_id"):
             return None
-    return prev["session_id"]
+        prev_h = prev.get("harness")
+        if harness:
+            if not prev_h or prev_h != harness:
+                return None
+        return prev["session_id"]
+    if not harness or store is None or not taskfile:
+        return None
+    latest = getattr(store, "latest_task_session", None)
+    if latest is None:
+        return None
+    row = latest(taskfile, tid, "implementer", model, harness)
+    if not row or not row.get("session_id"):
+        return None
+    if not _session_head_ok(worktree, row.get("worktree"), row.get("head_sha")):
+        return None
+    touch = getattr(store, "touch_task_session", None)
+    if touch is not None and row.get("id") is not None:
+        try:
+            touch(row["id"])
+        except Exception:                                      # noqa: BLE001
+            pass
+    return row["session_id"]
 
 
 def wrote_the_code(ctx, tid, assigned, store=None):
@@ -2289,6 +2403,9 @@ def _resume_pr_start(repo, tid, *, known_open=False, prior_error=""):
 
 
 def build_code_graph(store, taskset, taskfile="", policy=None):
+    # task_sessions live in this run's Store (`code run --db`, orchbench).
+    # A harness refusal must invalidate that file, not the fleet lease db.
+    drivers.use_db(getattr(store, "path", None))
     repo = taskset["repo"]
     tasks = taskset["tasks"]
     project_slug = Path(repo).name
@@ -3044,7 +3161,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # this as `-c` (continue the newest session in the workspace, and
             # the worktree is per-task): drivers.py argv treats a truthy
             # session_id as exactly that flag.
-            resume = _resume_session(results, tid, model, driver.harness)
+            resume = _resume_session(
+                results, tid, model, driver.harness,
+                store=store, taskfile=taskfile, worktree=wt)
             # Lease files_hint for this round (re-taken every fix round, so
             # the lease never lapses under a live agent), then the digest.
             conflicts = claim_files(tid)
@@ -3059,6 +3178,10 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             prompt = _impl_prompt(t, feedback, hints, roster, thread,
                                   project_contract.role_block(wt, "implementer"),
                                   dossier=dossier_block(tid, "implementer"))
+            # A DB resume is a new process: the tree may have moved since the
+            # session last saw it. An in-graph fix round already knows.
+            if resume and f"implement_{tid}" not in results:
+                prompt = RESTART_RESUME_PREFIX + prompt
             note_prompt(tid, "implementer", prompt)
             try:
                 res = await harvesting(tid, wt, "implementer", model, driver.run(
@@ -3146,6 +3269,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                        harness=ran_harness, session_id=res.session_id,
                        kind="result", body=(getattr(res, "text", "") or "")[:400],
                        project=project_slug)
+            _record_task_session(
+                store, project_slug, taskfile, tid, "implementer",
+                ran_model, ran_harness, res.session_id, wt)
             return {"session_id": res.session_id, "harness": ran_harness,
                     "model": ran_model}
 
@@ -3500,6 +3626,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             # Record the model that RAN, the same way implement does.
             ran_model = getattr(res, "model", None) or driver.model
             ran_harness = getattr(res, "harness", None) or driver.harness
+            _record_task_session(
+                store, project_slug, taskfile, tid, "reviewer",
+                ran_model, ran_harness, getattr(res, "session_id", None), wt)
             store.save_harness_run(tid, ran_harness, ran_model, "reviewer",
                                    attempt, res.exit_code, res.transcript_path,
                                    res.seconds, verdict=json.dumps(verdict)[:500])
