@@ -506,17 +506,19 @@ def refresh_usage_blocks(now=None):
 def planning_model():
     """Who writes the task breakdown.
 
-    Claude-Opus-5.5 first, then GPT-6, then whoever else may plan (DeepSeek
-    on the local fleet). A closed plan window is skipped. The captain does
-    not use this; supervisor ticks stay on CAPTAIN_MODEL.
+    The live Claude seat first, then GPT-6, then whoever else may plan
+    (DeepSeek on the local fleet). A closed plan window is skipped. The
+    captain does not use this; supervisor ticks stay on CAPTAIN_MODEL.
     """
     refresh_usage_blocks()
     now = time.time()
     blocked = {h for h, until in _usage_blocked_until.items() if until > now}
     names = []
-    for name in ("Claude-Opus-5.5",
-                 getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")):
-        if name not in names and config.model_may(name, "planner"):
+    claude = next((m for m, fam in config.MODEL_FAMILY.items()
+                   if fam == "anthropic" and config.model_may(m, "planner")),
+                  None)
+    for name in (claude, getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6.1-Sol")):
+        if name and name not in names and config.model_may(name, "planner"):
             names.append(name)
     planner = config.PLANNER_MODEL
     if planner and planner not in names and config.model_may(planner, "planner"):

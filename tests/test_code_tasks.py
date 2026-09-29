@@ -3620,6 +3620,16 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
                 else:
                     self.assertEqual(task["reviewer"], same_family)
 
+    def test_a_retired_row_model_still_names_a_live_family(self):
+        for old in ("GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"):
+            with self.subTest(model=old):
+                live = code_tasks.live_model(old)
+                self.assertIn(live, config.IMPLEMENTER_MODELS)
+                self.assertEqual(code_tasks.implementer_family(old),
+                                 config.MODEL_FAMILY[live])
+                self.assertEqual(code_tasks._avoid_implementer(old),
+                                 {config.MODEL_FAMILY[live]})
+
 
 class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
     """A retired model's task lands on a live tier; if that tier's family is
@@ -4529,6 +4539,15 @@ print(text)
         model, reason = code_tasks._select_reviewer(
             "deepseek", "DeepSeek-V4.1-Flash", None, {})
         self.assertEqual((model, reason), (config.REVIEW_FAMILIES["deepseek"], "planned"))
+
+    def test_studio_planning_prefers_sonnet_while_its_window_is_open(self):
+        script = """
+import drivers
+drivers.refresh_usage_blocks = lambda *a, **k: None
+drivers._usage_blocked_until.clear()
+print(drivers.planning_model())
+"""
+        self.assertEqual(_studio_stdout(script).strip(), "Claude-Sonnet-5.5")
 
     def test_studio_planning_uses_gpt_when_claude_is_closed(self):
         script = """

@@ -84,6 +84,32 @@ RETIRED_MODELS = {
 }
 
 
+def live_model(model):
+    """A name a driver can be built for.
+
+    ``load_taskfile`` remaps a retired name in the taskfile. A ``code_tasks``
+    row written before the retirement still carries the old name, and resume
+    reads that row. Review then subscripts ``MODEL_FAMILY`` with it and
+    KeyErrors, and a re-implement dies in ``driver_for`` before the remap
+    can run.
+    """
+    if model in RETIRED_MODELS:
+        return RETIRED_MODELS[model]() or (
+            config.ESCALATION_PATH[0] if config.ESCALATION_PATH else model)
+    return model
+
+
+def implementer_family(model):
+    """The family reviewers must avoid, after a retirement remap."""
+    return config.MODEL_FAMILY.get(live_model(model))
+
+
+def _avoid_implementer(model):
+    """``avoid_families`` for a review run. Empty when the name is unknown."""
+    fam = implementer_family(model)
+    return {fam} if fam else set()
+
+
 def load_taskfile(path, policy=None):
     """Load + validate a taskfile. `policy` (bench variant overrides) may widen
     the allowed implementers/reviewers, permit self-review, or disable review;
@@ -723,7 +749,8 @@ def _plan_window_pairs(blocked):
             grouped.setdefault(harness, set()).add(model)
     known = {
         "codex": getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol"),
-        "claude": "Claude-Opus-5.5",
+        "claude": next((m for m, fam in config.MODEL_FAMILY.items()
+                        if fam == "anthropic"), "Claude-Sonnet-5.5"),
         "cursor": "Cursor-Grok-4.7",
         "agy": "Antigravity-Gemini",
     }
@@ -2856,15 +2883,20 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         """
         t = tasks[tid]
         r = prior.get(tid)
+        named = (r or {}).get("model") or t["model"]
         if not r or not escalate_on:
-            return t["model"]
-        if r["status"] == "failed" and _is_capability_failure(r.get("error")):
-            nxt = _next_tier(r.get("model") or t["model"])
+            return live_model(t["model"])
+        # A retired row is not evidence the replacement was too weak. Land
+        # on the replacement with a fresh budget instead of skipping past it.
+        if (r["status"] == "failed" and _is_capability_failure(r.get("error"))
+                and named not in RETIRED_MODELS):
+            nxt = _next_tier(named)
             if nxt:
                 return nxt
         # conflict resumes at the same model — a merge conflict is not a
-        # model-capability signal — and so does an interrupted run.
-        return r.get("model") or t["model"]
+        # model-capability signal — and so does an interrupted run. A row
+        # that still names a retired model lands on its replacement.
+        return live_model(named)
 
     if prior:
         skipped = sorted(tid for tid, r in prior.items()
@@ -3611,8 +3643,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await harvesting(tid, wt, "reviewer", driver.model, driver.run(
                     prompt,
                     wt, task_id=f"{tid}-x{attempt}",
-                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
-                        ctx, tid, cur_model(ctx), store)]}))
+                    avoid_families=_avoid_implementer(
+                        wrote_the_code(ctx, tid, cur_model(ctx), store))))
             except asyncio.CancelledError:
                 # A cancelled graph: land what the reviewer wrote, and end the
                 # implementer's lease — nobody will edit these files now.
@@ -4140,8 +4172,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await harvesting(tid, wt, "pr-reviewer", model, drv.run(
                     prompt,
                     wt, task_id=f"{tid}-pr{it['round']}",
-                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
-                        ctx, tid, cur_model(ctx), store)]}))
+                    avoid_families=_avoid_implementer(
+                        wrote_the_code(ctx, tid, cur_model(ctx), store))))
             except asyncio.CancelledError:
                 board_ingest(tid, wt, "pr-reviewer", model)
                 release_files(tid)
