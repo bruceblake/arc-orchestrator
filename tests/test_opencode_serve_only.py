@@ -25,6 +25,18 @@ import ocserve
 from fake_ocserve import FakeOcserve
 
 
+def _pin_glm(test):
+    """GLM-5.3 left the roster. The serve transport still has to build a driver."""
+    roles = ("implementer", "reviewer", "pr_reviewer")
+    for p in (
+        mock.patch.dict(config.MODEL_ROLES, {"GLM-5.3": roles}),
+        mock.patch.dict(config.MODEL_FAMILY, {"GLM-5.3": "glm"}),
+        mock.patch.dict(config._MODEL_DRIVER_CAP, {"GLM-5.3": 4}),
+    ):
+        p.start()
+        test.addCleanup(p.stop)
+
+
 class NoModeKnobRemains(unittest.TestCase):
     def test_config_exposes_no_mode_knob(self):
         self.assertFalse(hasattr(config, "opencode_mode"),
@@ -42,6 +54,7 @@ class TheDriverOnlyEverUsesTheServer(unittest.TestCase):
     """A fake server receives the prompt; no process is ever spawned."""
 
     def setUp(self):
+        _pin_glm(self)
         self.fake = FakeOcserve().start()
         self.addCleanup(self.fake.stop)
         self.worktree = tempfile.mkdtemp(prefix="ocserve-only-")

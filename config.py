@@ -363,32 +363,22 @@ class Family:
 # commit). Leaving the family here would keep `main.py ask --family kimi`
 # reaching a retired model and mint a per-family limit knob nothing may use.
 # Kimi-K3's historical rate stays in MODEL_PRICING for old harness_runs rows.
-# TWO families are live today: glm and deepseek.
+# ONE ARC family is live: deepseek. GLM-5.3's family was removed 2026-09-29
+# with its roster row (operator decision: DeepSeek replaces it). A family
+# with no live row raises KeyError in every family_limit consumer, the same
+# failure that retired Union-Alpha. GLM's historical rate stays in
+# MODEL_PRICING.
 FAMILIES = {
-    "glm": Family(
-        "glm",
-        # 4, the official ARC docs value (docs.arc.vt.edu model table, checked
-        # 2026-09-15: GLM-5.3 = 128k context, concurrency 4), adopted per
-        # operator directive. Live rejections have twice deviated from the
-        # table — "max 3 in flight per user on this backend" on 2026-09-14,
-        # "max 5 in flight" on 2026-09-15 — so other consumers of the key
-        # clearly share it; the lease + capacity backoff absorb those dips
-        # rather than us pinning the config to a transient observation. The
-        # derived driver cap is 4 // 2 = 2; ARC_LIMIT_GLM/ARC_DRIVER_LIMIT_GLM
-        # restore tighter behaviour if the backend tightens again.
-        4,
-        {
-            "default": "GLM-5.3",
-            "high": "GLM-5.3-thinking-high",
-        },
-        websearch_model="glm-52-thinking-high-legacy-tool-calling",
-    ),
     "deepseek": Family(
         "deepseek",
-        10,   # provider-published per-account cap on the refreshed ARC docs
-              # page (2026-09-12); the measurement test asserts agreement with
-              # _MEASURED_CONCURRENCY, which carries the same 10.
+        10,   # provider-published per-account cap (docs.arc.vt.edu, the
+              # DeepSeek-V4.1-Flash row, concurrency 10).
         {
+            # docs.arc.vt.edu model table, checked 2026-09-29:
+            #   DeepSeek-V4.1-Flash              reasoning_effort high
+            #   DeepSeek-V4.1-Flash-thinking-low reasoning_effort low
+            #   DeepSeek-V4.1-Flash-thinking-max reasoning_effort max
+            # The roster routes the high one. There is no -thinking-high id.
             "default": "DeepSeek-V4.1-Flash",
             "low": "DeepSeek-V4.1-Flash-thinking-low",
             "max": "DeepSeek-V4.1-Flash-thinking-max",
@@ -418,16 +408,17 @@ FAMILIES = {
 # for the work that actually needs it, and measure whether it converged in
 # fewer rounds; that is the only comparison worth the money.
 _STUDIO_OPENAI_CHOICES = {
+    "GPT-6.1-Sol": "openrouter/openai/gpt-6.1-sol",
     "GPT-6-Astra": "openrouter/openai/gpt-6-astra",
     "GPT-6-Sol":   "openrouter/openai/gpt-6-sol",
     "GPT-6-Luna":  "openrouter/openai/gpt-6-luna",
 }
-# GPT-6 Sol on both studio profiles, by operator decision 2026-09-22. On the
-# subscription profile it comes through the ChatGPT plan (verified: the plan
-# serves gpt-6-astra, gpt-6-sol and gpt-6-luna), and Sol at high reasoning
-# effort (CODEX_REASONING_EFFORT) is the chosen trade between Astra's depth
-# and the plan's rolling allowance. Astra and Luna stay one variable away.
-STUDIO_OPENAI_MODEL = os.getenv("ARC_STUDIO_OPENAI_MODEL", "GPT-6-Sol")
+# GPT-6.1-Sol on both studio profiles, by operator decision 2026-09-29. The
+# Codex model cache lists gpt-6.1-sol ahead of gpt-6-sol; the operator called
+# it the better and cheaper seat. Astra, the previous Sol, and Luna stay
+# valid ARC_STUDIO_OPENAI_MODEL overrides. The CLI slug is the roster name
+# lowercased (GPT-6.1-Sol -> gpt-6.1-sol).
+STUDIO_OPENAI_MODEL = os.getenv("ARC_STUDIO_OPENAI_MODEL", "GPT-6.1-Sol")
 if STUDIO_OPENAI_MODEL not in _STUDIO_OPENAI_CHOICES:
     raise ValueError(
         f"ARC_STUDIO_OPENAI_MODEL={STUDIO_OPENAI_MODEL!r} is not one of "
@@ -456,7 +447,7 @@ def _studio_family_limit(family, api_limit):
 
 _STUDIO_FAMILIES = {
     "anthropic": Family("anthropic", _studio_family_limit("anthropic", _STUDIO_API_FRONTIER_CAP),
-                        {"default": "Claude-Opus-5.5"}),
+                        {"default": "Claude-Sonnet-5.5"}),
     "openai":    Family("openai", _studio_family_limit("openai", _STUDIO_API_FRONTIER_CAP),
                         {"default": STUDIO_OPENAI_MODEL}),
     "xai":       Family("xai",       4, {"default": "Grok-4.7"}),
@@ -986,29 +977,18 @@ ROSTER = [
     # still constructs-fails loudly for old transcripts.
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
-    # Operator decision (2026-09-12, tier roles corrected 2026-09-25): GLM-5.3
-    # is the OTHER family — medium tier, implementer/reviewer/pr_reviewer, and
-    # it does NOT plan (the captain's own seat is DeepSeek; see CAPTAIN_MODEL).
-    # Its cap is 4, the official ARC docs value (docs.arc.vt.edu, checked
-    # 2026-09-15), adopted per operator directive. Two live deviations from the
-    # table have been observed and are recorded as dated events rather than
-    # stated values: "max 3 in flight per user on this backend" on 2026-09-14
-    # (basis of PR #59's pin to 3, since reverted) and "max 5 in flight" on
-    # 2026-09-15 — other consumers of the key share the account cap. The
-    # derived driver cap is pinned at 4; dips below 4 are absorbed by the
-    # lease + capacity backoff. ARC_DRIVER_LIMIT_GLM=1
-    # re-serialises GLM harnesses if the backend tightens persistently.
-    ("GLM-5.3",             "glm",      "opencode", "medium", 4,
-     ("implementer", "reviewer", "pr_reviewer"),           None,         None),
-    # Operator decision (2026-09-25): DeepSeek-V4.1-Flash-thinking-max is the
-    # stronger model and holds 10 seats to GLM's 4, so it is the HARD tier, a
-    # planner, and holds every role — which is also what lets the captain
-    # autopilot start its turns here. It is far faster than GLM-5.3, so it
-    # carries the implementation load. The 10 is the provider-published
-    # per-account concurrency on the refreshed ARC docs page (docs.arc.vt.edu,
-    # 2026-09-12), per the operator —
-    # not the carried-over measured 5. Reasonix is counted as one session per
-    # process (operator directive 2026-09-24), so the driver cap is 10 // 1 = 10.
+    # GLM-5.3's row was DELETED on 2026-09-29 by operator decision. It was the
+    # medium tier and the slow seat: long thinking, the lowest tokens/sec, and
+    # tasks serialised on it. DeepSeek-V4.1-Flash takes that work. Old
+    # taskfiles naming GLM-5.3 remap through code_tasks.RETIRED_MODELS. Its
+    # price stays in MODEL_PRICING for historical harness_runs.
+    # Operator decision (2026-09-29): the live DeepSeek is DeepSeek-V4.1-Flash,
+    # which the ARC docs table defines as reasoning_effort high (1M context,
+    # concurrency 10). DeepSeek-V4.1-Flash-thinking-max is reasoning_effort max
+    # and left the roster the same day; there is no -thinking-high id. The
+    # high model is the HARD tier, a planner, and holds every role, including
+    # the mechanical work GLM used to take. Cap 10 is the docs figure.
+    # Reasonix is one session per process, so the driver cap is 10 // 1 = 10.
     # Harness: "reasonix" — Reasonix (github.com/esengine/DeepSeek-Reasonix,
     # npm `reasonix`), the DeepSeek-native cache-first agent, by operator
     # decision 2026-09-13, replacing dsh (2026-09-12..13). It streams every
@@ -1016,7 +996,7 @@ ROSTER = [
     # and stall clock work unmodified; dsh needed a session-log probe to see
     # progress at all. Measured on the first run: 6720 of 6881 prompt tokens
     # were prefix-cache hits. DeepseekDriver (dsh) stays for old transcripts.
-    ("DeepSeek-V4.1-Flash-thinking-max", "deepseek", "reasonix", "hard", 10,
+    ("DeepSeek-V4.1-Flash", "deepseek", "reasonix", "hard", 10,
      ALL_ROLES,                                            "2026-09-12", None),
 ]
 # --- studio fleet roster -----------------------------------------------------
@@ -1066,7 +1046,7 @@ _STUDIO_SUB_ROSTER = [
     # Claude Code on the Claude plan: architect, netcode, and the studio
     # PLANNER. Local cap is _SEAT_CAP["anthropic"] (the smallest plan);
     # the plan's usage window is the real limit.
-    ("Claude-Opus-5.5",  "anthropic", "claude", "hard",   _SEAT_CAP["anthropic"],
+    ("Claude-Sonnet-5.5", "anthropic", "claude", "hard",   _SEAT_CAP["anthropic"],
      ALL_ROLES,                                            None, None),
 ]
 
@@ -1080,7 +1060,7 @@ _STUDIO_API_ROSTER = [
      ("implementer", "reviewer", "pr_reviewer"),           None, None),
     (STUDIO_OPENAI_MODEL, "openai",    "opencode", "hard",   _STUDIO_API_FRONTIER_CAP,
      ("implementer", "planner", "reviewer", "pr_reviewer"), None, None),
-    ("Claude-Opus-5.5",   "anthropic", "opencode", "hard",   _STUDIO_API_FRONTIER_CAP,
+    ("Claude-Sonnet-5.5", "anthropic", "opencode", "hard",   _STUDIO_API_FRONTIER_CAP,
      ALL_ROLES,                                            None, None),
 ]
 _STUDIO_ROSTER = _STUDIO_API_ROSTER if FLEET == "studio-api" else _STUDIO_SUB_ROSTER
@@ -1094,7 +1074,7 @@ if ZEN_FREE and STUDIO:
 # which is what keeps EXTERNAL_MODELS empty there, so nothing tries to route a
 # subscription model through the openrouter provider.
 _STUDIO_ALIASES = {
-    "Claude-Opus-5.5":  "openrouter/anthropic/claude-opus-5.5",
+    "Claude-Sonnet-5.5": "openrouter/anthropic/claude-sonnet-5.5",
     STUDIO_OPENAI_MODEL: _STUDIO_OPENAI_CHOICES[STUDIO_OPENAI_MODEL],
     "Grok-4.7":         "openrouter/x-ai/grok-4.7",
     "Gemini-3.8-Flash": "openrouter/google/gemini-3.8-flash",
@@ -1109,7 +1089,9 @@ _ZEN_ALIASES = ({
 # The model argument each subscription CLI is invoked with. Empty means "let
 # the CLI use its own default", which is the safest posture: a plan serves
 # what it serves, and naming a model the plan does not carry fails the run.
-CLAUDE_CLI_MODEL = os.getenv("ARC_CLAUDE_MODEL", "opus")
+# claude-sonnet-5-5 is Sonnet 5.5 on this account's model catalog. The alias
+# "sonnet" can resolve to a different Sonnet, so the full id is the default.
+CLAUDE_CLI_MODEL = os.getenv("ARC_CLAUDE_MODEL", "claude-sonnet-5-5")
 # Derived from the roster model by default (GPT-6-Astra -> gpt-6-astra), so the
 # model the roster NAMES is the model Codex RUNS; ARC_CODEX_MODEL overrides.
 CODEX_CLI_MODEL = os.getenv("ARC_CODEX_MODEL", "") or STUDIO_OPENAI_MODEL.lower()
@@ -1313,8 +1295,8 @@ def planner_models():
     names (AGENTS.md Rule 2, "never keep a second list of who may review":
     a list that drifts from the roster offers a model the driver constructor
     then refuses). It follows whichever roster THIS process loaded: under
-    ARC_FLEET=studio that is Claude-Opus-5.5 and GPT-6-Sol beside
-    DeepSeek-V4.1-Flash-thinking-max; with no ARC_FLEET it is DeepSeek alone.
+    ARC_FLEET=studio that is Claude-Sonnet-5.5 and GPT-6.1-Sol beside
+    DeepSeek-V4.1-Flash; with no ARC_FLEET it is DeepSeek alone.
     Empty when no live row carries the role.
     """
     return [m for m, _f, _h, _t, _c, roles in _STRONGEST_FIRST
@@ -1330,7 +1312,7 @@ def planner_models():
 # DeepSeek's own window is spent, the driver's governed swap/park path still
 # applies, exactly as for any other attempt.
 CAPTAIN_MODEL_WANTED = os.getenv("ARC_CAPTAIN_MODEL",
-                                 "DeepSeek-V4.1-Flash-thinking-max")
+                                 "DeepSeek-V4.1-Flash")
 # gh_ops default model: the planner model, which never names a retired model.
 GH_MODEL = os.getenv("ARC_GH_MODEL") or PLANNER_MODEL
 # Families that may review an OPEN PR. A superset of REVIEW_FAMILIES: DeepSeek
@@ -1460,7 +1442,7 @@ def scarcest_seat():
 # Rule 2 still holds: the implementer's own family is skipped, so the next
 # family in this order is the reviewer.
 _REVIEW_SEAT_ORDER = (
-    "deepseek", "glm",
+    "deepseek",
     "openai", "cursor", "google", "xai",
     "anthropic",
 )
@@ -1469,11 +1451,11 @@ _REVIEW_SEAT_ORDER = (
 def cross_family_reviewer(impl_model):
     """The family token that reviews `impl_model`'s work, or None.
 
-    Cross-review means a DIFFERENT family (Rule 2). Preference, not raw
-    strength: unlimited ARC seats (deepseek, then glm), then the other
-    review-capable families, Claude last. When the preferred family is the
-    implementer's own, the next family in that order is used. On the
-    two-model fleet this is still glm <-> deepseek.
+    Preference, not raw strength: DeepSeek first, then the subscription
+    families, Claude last. The implementer's own family is skipped while
+    another review family exists. When it is the only review family — the
+    local profile after GLM-5.3 left on 2026-09-29 — that family reviews
+    its own work. A missing review is worse than a same-family one.
     """
     fam = MODEL_FAMILY.get(impl_model)
     seen = []
@@ -1486,6 +1468,10 @@ def cross_family_reviewer(impl_model):
     for f in seen:
         if f != fam:
             return f
+    if fam in REVIEW_FAMILIES:
+        return fam
+    if len(REVIEW_FAMILIES) == 1:
+        return next(iter(REVIEW_FAMILIES))
     return None
 
 ESCALATION_PATH = [m.strip() for m in os.getenv(
@@ -1550,13 +1536,13 @@ def opencode_context_for(model):
 # on the fleet-ops run, every resumed attempt folded at line ~6 of its
 # transcript (one fold discarded 393,635 tokens), and after enough folds the
 # loop-guard refused the model's own writes mid-task ("blocked: the current
-# constraints forbid state mutation"). Windows per the refreshed ARC docs
-# (docs.arc.vt.edu, 2026-09-12): every DeepSeek-V4.1-Flash variant 512K,
-# everything else on the roster 128K. Keys are model-name PREFIXES so the
-# thinking variants share one entry; drivers._reasonix_config_toml emits one
-# provider per model with this window.
+# constraints forbid state mutation"). Windows per the ARC docs
+# (docs.arc.vt.edu, checked 2026-09-29): every DeepSeek-V4.1-Flash variant
+# 1M, everything else on the roster 128K. 1048576 is 1M in the same
+# kibibyte counting the old 512K figure used (524288). Keys are model-name
+# PREFIXES so the thinking variants share one entry.
 REASONIX_MODEL_CONTEXT = {
-    "DeepSeek-V4.1-Flash": int(os.getenv("ARC_REASONIX_CONTEXT_DEEPSEEK", "524288")),
+    "DeepSeek-V4.1-Flash": int(os.getenv("ARC_REASONIX_CONTEXT_DEEPSEEK", "1048576")),
 }
 REASONIX_CONTEXT = int(os.getenv("ARC_REASONIX_CONTEXT", "131072"))
 
@@ -1736,7 +1722,9 @@ DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
 # tightens persistently, ARC_DRIVER_LIMIT_GLM (see driver_limit) still wins
 # over this pin. A pin may never EXCEED the account's own session budget —
 # that is the over-subscription bug one level up (test_config.py asserts it).
-_DRIVER_CAP_PIN = {"GLM-5.3": 4}
+# GLM-5.3's pin left with the model on 2026-09-29. An empty pin means every
+# live driver cap is account sessions // sessions-per-process.
+_DRIVER_CAP_PIN = {}
 _MODEL_DRIVER_CAP = {
     m: _DRIVER_CAP_PIN.get(
         m, max(1, n // _SESSIONS_PER_PROCESS[_harness_of_model(m)] - DRIVER_HEADROOM))
@@ -2095,8 +2083,7 @@ MODEL_PRICING = {
     # estimate with a note. Override with ARC_PRICE_DEEPSEEK_V4_1_FLASH_PROMPT
     # and ARC_PRICE_DEEPSEEK_V4_1_FLASH_COMPLETION.
     "DeepSeek-V4.1-Flash": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
-    # The fleet actually routes the thinking-max variant (ROSTER). Same price
-    # assumption: thinking tokens are completion tokens.
+    # thinking-max left the roster 2026-09-29. Kept so old harness_runs still price.
     "DeepSeek-V4.1-Flash-thinking-max": {"prompt_per_mtok": 0.15, "completion_per_mtok": 0.20},
     "GLM-5.3": {"prompt_per_mtok": 1.00, "completion_per_mtok": 2.00},
     "Kimi-K3": {"prompt_per_mtok": 0.50, "completion_per_mtok": 2.00},
@@ -2117,8 +2104,15 @@ MODEL_PRICING = {
     # one Astra implementation attempt that reads 200k tokens of context and
     # writes 20k costs about $3.00; the same attempt on GLM-5.3 costs $0.24.
     "Claude-Opus-5.5":  {"prompt_per_mtok":  4.00, "completion_per_mtok": 20.00},
+    # Sonnet 5.5 replaced Opus on the subscription plan 2026-09-29. The plan
+    # is the meter there, same as Cursor and Antigravity. Opus stays priced
+    # for historical rows.
+    "Claude-Sonnet-5.5": {"prompt_per_mtok": 0.0, "completion_per_mtok": 0.0},
     "GPT-6-Astra":      {"prompt_per_mtok": 10.00, "completion_per_mtok": 50.00},
     "GPT-6-Sol":        {"prompt_per_mtok":  2.00, "completion_per_mtok": 10.00},
+    # GPT-6.1-Sol replaced GPT-6-Sol on 2026-09-29. Subscription plan is the
+    # meter. The previous Sol price stays for historical rows.
+    "GPT-6.1-Sol":      {"prompt_per_mtok":  0.0, "completion_per_mtok":  0.0},
     "GPT-6-Luna":       {"prompt_per_mtok":  0.10, "completion_per_mtok":  0.50},
     "Grok-4.7":         {"prompt_per_mtok":  1.60, "completion_per_mtok":  4.80},
     "Gemini-3.8-Flash": {"prompt_per_mtok":  0.75, "completion_per_mtok":  3.75},

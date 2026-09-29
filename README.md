@@ -525,7 +525,7 @@ the fleet's number from `task.budget` tokens before and after.
  "tasks": [
    {"id": "t01-html", "title": "Create src/index.html hello page",
     "prompt": "Create the file src/index.html: <detailed spec>",
-    "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
+    "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
     "verify_cmd": "test -f src/index.html && grep -q Hello src/index.html",
     "files_hint": ["src/index.html"], "deps": []}
  ]}}

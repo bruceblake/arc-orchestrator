@@ -56,7 +56,8 @@ class ReviewerFor(unittest.TestCase):
         strongest_first = list(config.REVIEW_FAMILIES)
         for model in config.IMPLEMENT_TIERS.get("hard", []):
             fam = config.MODEL_FAMILY[model]
-            expected = next(f for f in strongest_first if f != fam)
+            others = [f for f in strongest_first if f != fam]
+            expected = others[0] if others else fam
             self.assertEqual(gh_ops._reviewer_for(model, 0), expected,
                              f"{model} should be reviewed by {expected}")
 
@@ -109,11 +110,14 @@ class WriteTaskfile(unittest.TestCase):
         for tid, t in loaded["tasks"].items():
             self.assertRegex(tid, r"[a-z0-9][a-z0-9-]{0,60}")
             self.assertIn(t["model"], config.IMPLEMENTER_MODELS)
-            self.assertNotEqual(config.MODEL_FAMILY[t["model"]],
-                                config.MODEL_FAMILY.get(t["reviewer"],
-                                                        t["reviewer"]),
-                                f"task {tid}: reviewer shares the "
-                                "implementer's harness")
+            impl_fam = config.MODEL_FAMILY[t["model"]]
+            rev_fam = config.MODEL_FAMILY.get(t["reviewer"], t["reviewer"])
+            if len(config.REVIEW_FAMILIES) > 1:
+                self.assertNotEqual(impl_fam, rev_fam,
+                                    f"task {tid}: reviewer shares the "
+                                    "implementer's harness")
+            else:
+                self.assertEqual(rev_fam, impl_fam)
 
     def test_bogus_model_falls_back_to_a_tier_model(self):
         path = self._write("/tmp")

@@ -81,8 +81,8 @@ Taskfile task shape (see docs/taskfile-schema.md):
 
 ```json
 {"id": "kebab-id", "title": "...", "prompt": "<self-contained spec>",
- "model": "GLM-5.3|DeepSeek-V4.1-Flash-thinking-max",
- "reviewer": "glm|deepseek", "verify_cmd": "./check.sh && ...",
+ "model": "DeepSeek-V4.1-Flash",
+ "reviewer": "deepseek", "verify_cmd": "./check.sh && ...",
  "files_hint": ["..."], "deps": ["other-id"]}
 ```
 
@@ -106,12 +106,12 @@ chaining", generalized: each link is a full implementer + gate + review.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "chain",
  "tasks": [
-  {"id": "intro-api", "model": "GLM-5.3", "reviewer": "deepseek",
+  {"id": "intro-api", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "prompt": "...", "verify_cmd": "./check.sh", "deps": []},
-  {"id": "migrate-callers", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
+  {"id": "migrate-callers", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "prompt": "... uses the new API from ...", "verify_cmd": "./check.sh",
    "deps": ["intro-api"]},
-  {"id": "delete-old", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
+  {"id": "delete-old", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "prompt": "...", "verify_cmd": "./check.sh", "deps": ["migrate-callers"]}]}}
 ```
 
@@ -141,13 +141,13 @@ same shape with dynamic width.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "fan-out-fan-in",
  "tasks": [
-  {"id": "slice-a", "model": "GLM-5.3", "reviewer": "deepseek",
+  {"id": "slice-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "files_hint": ["a/"], "deps": [], "...": "..."},
-  {"id": "slice-b", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
+  {"id": "slice-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "files_hint": ["b/"], "deps": []},
-  {"id": "slice-c", "model": "GLM-5.3", "reviewer": "deepseek",
+  {"id": "slice-c", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "files_hint": ["c/"], "deps": []},
-  {"id": "integrate", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
+  {"id": "integrate", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "prompt": "Verify the slices work TOGETHER on merged base; fix seams.",
    "verify_cmd": "./check.sh && full test suite",
    "deps": ["slice-a", "slice-b", "slice-c"]}]}}
@@ -188,13 +188,13 @@ coin-flip into a decision.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "diamond",
  "tasks": [
-  {"id": "contract", "model": "GLM-5.3", "reviewer": "deepseek", "deps": [],
+  {"id": "contract", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek", "deps": [],
    "prompt": "Land the shared interface/types both sides will build on."},
-  {"id": "side-a", "model": "GLM-5.3", "reviewer": "deepseek",
+  {"id": "side-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "files_hint": ["impl/a*"], "deps": ["contract"]},
-  {"id": "side-b", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
+  {"id": "side-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "files_hint": ["impl/b*"], "deps": ["contract"]},
-  {"id": "verify-integration", "model": "GLM-5.3", "reviewer": "deepseek",
+  {"id": "verify-integration", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "prompt": "Run the full suite against the merged a+b; repair the seam.",
    "verify_cmd": "./check.sh && pytest tests/integration -x",
    "deps": ["side-a", "side-b"]}]}}
@@ -356,11 +356,11 @@ exactly ONE cross-family reviewer in the two-family fleet, recorded as
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "debate-vote",
  "tasks": [
-  {"id": "cand-a", "model": "GLM-5.3", "reviewer": "deepseek",
+  {"id": "cand-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "files_hint": ["proposals/a.md"], "deps": [], "...": "..."},
-  {"id": "cand-b", "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": "glm",
+  {"id": "cand-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "files_hint": ["proposals/b.md"], "deps": []},
-  {"id": "judge", "model": "GLM-5.3", "reviewer": "deepseek",
+  {"id": "judge", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
    "prompt": "Compare proposals a/b against the criteria in ...; implement "
              "the winner in src/...",
    "verify_cmd": "./check.sh", "deps": ["cand-a", "cand-b"]}]}}

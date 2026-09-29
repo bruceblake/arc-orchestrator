@@ -1413,7 +1413,7 @@ def reasonix_fleet_home():
     models = [m for m, h in config.MODEL_HARNESS.items() if h == "reasonix"]
     models += [m for m in config.MODEL_HARNESS if m not in models]
     if not models:
-        models = ["DeepSeek-V4.1-Flash-thinking-max"]
+        models = ["DeepSeek-V4.1-Flash"]
     cfg = _reasonix_config_toml(models)
     key = config.require_api_key(f"the reasonix harness ({config.REASONIX_FLEET_HOME})")
     env = f"ARC_API_KEY={key}\n"

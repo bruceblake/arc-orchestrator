@@ -86,8 +86,11 @@ class LoadTaskfile(unittest.TestCase):
         for model in config.IMPLEMENTER_MODELS:
             fam = config.MODEL_FAMILY[model]
             rev = config.cross_family_reviewer(model)
-            self.assertIsNotNone(rev, f"{model} has no cross-family reviewer")
-            self.assertNotEqual(rev, fam, f"{model} would self-review")
+            self.assertIsNotNone(rev, f"{model} has no reviewer")
+            if len(config.REVIEW_FAMILIES) > 1:
+                self.assertNotEqual(rev, fam, f"{model} would self-review")
+            else:
+                self.assertEqual(rev, fam, f"{model} has no family left to review it")
             self.assertIn(rev, config.REVIEW_FAMILIES)
             # And the loader accepts the pairing it implies.
             t = {**BASIC, "model": model, "reviewer": rev}
@@ -106,6 +109,8 @@ class LoadTaskfile(unittest.TestCase):
         emergency hatch for a hard-down reviewer backend — 2026-09-12..14
         and re-added 2026-09-15 — so pin it off here, whatever the operator's
         shell happens to export.)"""
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         bad = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         saved = config.ALLOW_SAME_FAMILY_REVIEW
         config.ALLOW_SAME_FAMILY_REVIEW = False
@@ -136,8 +141,13 @@ class LoadTaskfile(unittest.TestCase):
             # And the cross-family default is untouched underneath it:
             config.ALLOW_SAME_FAMILY_REVIEW = False
             pool = code_tasks._eligible_pr_reviewers(STRONGEST_FAMILY, None)
-            for m in pool:
-                self.assertNotEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+            if len(config.REVIEW_FAMILIES) > 1:
+                for m in pool:
+                    self.assertNotEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+            else:
+                self.assertTrue(pool)
+                for m in pool:
+                    self.assertEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
         finally:
             config.ALLOW_SAME_FAMILY_REVIEW = saved
 
@@ -375,8 +385,10 @@ class ResumePlanning(unittest.TestCase):
     def test_capability_failure_escalates_one_tier(self):
         p = self.plan([{"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
                         "error": "exhausted fix rounds"}])
+        nxt = (config.ESCALATION_PATH[1]
+               if len(config.ESCALATION_PATH) > 1 else None)
         self.assertEqual(p["escalated_on_resume"],
-                         {"t1": config.ESCALATION_PATH[1]},
+                         {"t1": nxt} if nxt else {},
                          "a capability failure at the entry tier moves up one")
 
     def test_killed_run_resumes_at_the_same_tier(self):
@@ -1222,7 +1234,8 @@ class ReviewsAvoidTheModelThatWroteTheDiff(unittest.TestCase):
 
     def _pair(self):
         models = list(config.MODEL_FAMILY)
-        self.assertGreaterEqual(len(models), 2)
+        if len(models) < 2:
+            self.skipTest("needs two live models")
         return models[0], models[1]
 
     def test_the_implement_result_wins_over_the_assigned_seat(self):
@@ -1454,8 +1467,11 @@ class OffPathModelsCanStillEscalate(unittest.TestCase):
         the live example; it is retired, so _next_tier is checked directly."""
         self.assertEqual(code_tasks._next_tier("some-off-path-model"),
                          config.ESCALATION_PATH[0])
-        self.assertEqual(code_tasks._next_tier(config.ESCALATION_PATH[0]),
-                         config.ESCALATION_PATH[1])
+        if len(config.ESCALATION_PATH) > 1:
+            self.assertEqual(code_tasks._next_tier(config.ESCALATION_PATH[0]),
+                             config.ESCALATION_PATH[1])
+        else:
+            self.assertIsNone(code_tasks._next_tier(config.ESCALATION_PATH[0]))
         self.assertIsNone(code_tasks._next_tier(config.ESCALATION_PATH[-1]))
 
     def test_the_top_tier_still_does_not_escalate(self):
@@ -1827,7 +1843,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         idle = ENTRY
         usage = {m: config.driver_limit(m)
                  for m in DISTINCT_MODELS if m != idle}
-        self.assertTrue(usage, "needs at least one model to saturate")
+        if not usage:
+            self.skipTest("needs two live models to compare contention")
         picked = self._pick(usage)
         self.assertEqual(picked[0], idle,
                          f"{idle} is idle and must outrank the saturated "
@@ -1877,6 +1894,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         # The RULE, over the whole roster: whichever family implements, no
         # reviewer offered shares it. The family list is derived, not the
         # hard-coded kimi/glm/deepseek of the three-model fleet.
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         for fam in sorted(config.REVIEW_FAMILIES):
             picked = self._pick({}, impl_family=fam, n=2)
             self.assertTrue(picked, f"no reviewer at all for a {fam} implementer")
@@ -1887,6 +1906,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         """An implementer's family is excluded; when the roster still has
         another family, at least one reviewer must remain (the cross-review
         gate is thinner on a two-model fleet, never absent)."""
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         for fam in sorted(config.REVIEW_FAMILIES):
             self.assertGreaterEqual(
                 len(self._pick({}, impl_family=fam, n=len(config.REVIEW_FAMILIES))),
@@ -2452,6 +2473,8 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
         # Pins the DEFAULT pairing; gates run with ARC_ALLOW_SAME_FAMILY_REVIEW=1
         # exported during a backend outage, and under that flag the pool
         # deliberately inverts to same-family only (config.py same-family hatch).
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
             for fam in sorted(config.REVIEW_FAMILIES):
                 for m in code_tasks._eligible_pr_reviewers(fam, None):
@@ -2478,12 +2501,16 @@ class ReviewerContention(unittest.TestCase):
     """
 
     def test_a_saturated_harness_makes_its_models_look_busy(self):
-        usage = {"GLM-5.3": 1, "harness:opencode": config.harness_limit("opencode")}
-        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+        model = config.ESCALATION_PATH[0]
+        harness = config.MODEL_HARNESS[model]
+        usage = {model: 1, f"harness:{harness}": config.harness_limit(harness)}
+        self.assertEqual(code_tasks._reviewer_pressure(model, usage), 1.0)
 
     def test_a_models_own_cap_still_counts_when_the_harness_is_free(self):
-        usage = {"GLM-5.3": config.driver_limit("GLM-5.3"), "harness:opencode": 0}
-        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+        model = config.ESCALATION_PATH[0]
+        harness = config.MODEL_HARNESS[model]
+        usage = {model: config.driver_limit(model), f"harness:{harness}": 0}
+        self.assertEqual(code_tasks._reviewer_pressure(model, usage), 1.0)
 
     def test_a_model_on_a_free_harness_is_preferred_when_one_pool_is_full(self):
         # The point is HARNESS contention, not model strength: every model on
@@ -2563,6 +2590,10 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
     were idle. Fallback is capacity, tier, and family — the taskfile token
     does not change, and a review is never skipped.
     """
+
+    def setUp(self):
+        if "glm" not in config.REVIEW_FAMILIES:
+            self.skipTest("GLM-5.3 left the roster on 2026-09-29")
 
     def _full(self, *models):
         usage = {}
@@ -3584,7 +3615,10 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
                         {**BASIC, "model": old, "reviewer": same_family}]))
                 task = ts["tasks"]["t1"]
                 self.assertEqual(task["model"], target)
-                self.assertNotEqual(task["reviewer"], same_family)
+                if len(config.REVIEW_FAMILIES) > 1:
+                    self.assertNotEqual(task["reviewer"], same_family)
+                else:
+                    self.assertEqual(task["reviewer"], same_family)
 
 
 class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
@@ -3610,9 +3644,15 @@ class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
             ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
         t = ts["tasks"]["t1"]
         self.assertEqual(t["model"], target)
-        self.assertNotEqual(cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"]), same)
+        got = cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"])
+        if len(cfg.REVIEW_FAMILIES) > 1:
+            self.assertNotEqual(got, same)
+        else:
+            self.assertEqual(got, same)
 
     def test_a_live_model_with_its_own_family_as_reviewer_is_still_rejected(self):
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         # Pins the default rejection; the same-family capacity hatch (exported
         # during gate runs in an outage) makes the loader accept this pairing.
@@ -4445,25 +4485,26 @@ print(text)
         self.assertNotIn("The hardest tasks prefer", body)
         hard_line = next(line for line in body.splitlines()
                          if "hard tasks that need" in line)
-        self.assertNotIn("Claude-Opus-5.5", hard_line)
+        self.assertNotIn("Claude-Sonnet-5.5", hard_line)
         self.assertNotIn(openai, hard_line)
         self.assertIn("Cursor-Grok-4.7", hard_line)
-        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", hard_line)
+        self.assertIn("DeepSeek-V4.1-Flash", hard_line)
+        self.assertNotIn("DeepSeek-V4.1-Flash-thinking-max", hard_line)
         self.assertIn(
-            "Spread hard implementation across DeepSeek-V4.1-Flash-thinking-max "
+            "Spread hard implementation across DeepSeek-V4.1-Flash "
             "and Cursor-Grok-4.7 and Antigravity-Gemini", body)
         self.assertIn(
-            "Claude-Opus-5.5 implements ONLY 3D asset design", body)
+            "Claude-Sonnet-5.5 implements ONLY 3D asset design", body)
         self.assertIn(
-            f"Initial planning is Claude-Opus-5.5, then {openai}", body)
-        self.assertIn("prefer Claude-Opus-5.5, then", body)
+            f"Initial planning is Claude-Sonnet-5.5, then {openai}", body)
+        self.assertIn("prefer Claude-Sonnet-5.5, then", body)
         self.assertIn(f"{openai} has a spent plan window. Do not assign it.", body)
-        self.assertIn("Claude-Opus-5.5 has a spent plan window. Do not assign it.",
+        self.assertIn("Claude-Sonnet-5.5 has a spent plan window. Do not assign it.",
                       body)
         self.assertNotIn("is the fleet's strongest", text)
         self.assertIn("reviewed by", body)
         self.assertIn(f"codex/{openai}", closed)
-        self.assertIn("claude/Claude-Opus-5.5", closed)
+        self.assertIn("claude/Claude-Sonnet-5.5", closed)
         self.assertNotIn("Cursor-Grok-4.7", closed)
         self.assertNotIn("cursor/", closed)
         self.assertIn("medium tasks", body)
@@ -4472,8 +4513,9 @@ print(text)
         with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
             text = code_tasks._routing_tiers_prose()
         self.assertNotIn("The hardest tasks prefer", text)
-        self.assertIn("GLM-5.3", text)
-        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", text)
+        self.assertNotIn("GLM-5.3", text)
+        self.assertIn("DeepSeek-V4.1-Flash", text)
+        self.assertNotIn("thinking-max", text)
         self.assertNotIn("Cursor-Grok-4.7", text)
         self.assertNotIn("Antigravity-Gemini", text)
         self.assertNotIn("Spread hard implementation", text)
@@ -4485,8 +4527,8 @@ print(text)
     def test_local_planning_stays_on_deepseek_and_the_planned_reviewer(self):
         self.assertEqual(drivers.planning_model(), config.PLANNER_MODEL)
         model, reason = code_tasks._select_reviewer(
-            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, {})
-        self.assertEqual((model, reason), (config.REVIEW_FAMILIES["glm"], "planned"))
+            "deepseek", "DeepSeek-V4.1-Flash", None, {})
+        self.assertEqual((model, reason), (config.REVIEW_FAMILIES["deepseek"], "planned"))
 
     def test_studio_planning_uses_gpt_when_claude_is_closed(self):
         script = """
@@ -4504,16 +4546,16 @@ print(drivers.planning_model())
 import code_tasks, drivers
 drivers.refresh_usage_blocks = lambda *a, **k: None
 drivers._usage_blocked_until.clear()
-model, reason = code_tasks._select_reviewer("glm", "GLM-5.3", None, {})
+model, reason = code_tasks._select_reviewer("deepseek", "DeepSeek-V4.1-Flash", None, {})
 print(model)
 print(reason)
 drivers._usage_blocked_until["claude"] = 9e9
-model, reason = code_tasks._select_reviewer("glm", "GLM-5.3", None, {})
+model, reason = code_tasks._select_reviewer("deepseek", "DeepSeek-V4.1-Flash", None, {})
 print(model)
 print(reason)
 """
         lines = _studio_stdout(script).strip().splitlines()
-        self.assertEqual(lines[0], "Claude-Opus-5.5")
+        self.assertEqual(lines[0], "Claude-Sonnet-5.5")
         self.assertEqual(lines[1], "frontier_review")
         self.assertTrue(lines[2].startswith("GPT-6"), lines)
         self.assertEqual(lines[3], "frontier_review")
@@ -4655,8 +4697,11 @@ class EscalationSkipsSpentPlanWindows(unittest.TestCase):
         with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
             self.assertEqual(code_tasks._next_tier_m("some-off-path-model"),
                              config.ESCALATION_PATH[0])
-            self.assertEqual(code_tasks._next_tier_m(config.ESCALATION_PATH[0]),
-                             config.ESCALATION_PATH[1])
+            if len(config.ESCALATION_PATH) > 1:
+                self.assertEqual(code_tasks._next_tier_m(config.ESCALATION_PATH[0]),
+                                 config.ESCALATION_PATH[1])
+            else:
+                self.assertIsNone(code_tasks._next_tier_m(config.ESCALATION_PATH[0]))
             self.assertIsNone(code_tasks._next_tier_m(config.ESCALATION_PATH[-1]))
 
     def test_a_blocked_next_harness_skips_to_the_following_model(self):

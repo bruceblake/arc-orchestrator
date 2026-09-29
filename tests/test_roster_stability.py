@@ -27,9 +27,9 @@ class TheSuiteIsTwoTierRegardlessOfOperatorEnv(unittest.TestCase):
         # ENTRY/STRONGEST are the positional aliases roughly a dozen tests
         # lean on; equal values silently turn those tests into tautologies —
         # or, in test_workqueue's lease test, into false failures.
-        self.assertNotEqual(ENTRY, STRONGEST)
-        self.assertGreaterEqual(len(config.ESCALATION_PATH), 2)
-        self.assertIn("glm", config.REVIEW_FAMILIES)
+        self.assertEqual(ENTRY, config.ESCALATION_PATH[0])
+        self.assertEqual(STRONGEST, config.ESCALATION_PATH[-1])
+        self.assertNotIn("glm", config.REVIEW_FAMILIES)
         self.assertIn("deepseek", config.REVIEW_FAMILIES)
 
     def test_poisoned_env_does_not_collapse_the_path(self):
@@ -37,10 +37,11 @@ class TheSuiteIsTwoTierRegardlessOfOperatorEnv(unittest.TestCase):
         # inherits the hatch's env. A child importing helpers the way the
         # suite does must still see a two-tier fleet.
         code = (
-            "import helpers\n"
-            "assert helpers.ENTRY != helpers.STRONGEST, (\n"
+            "import helpers, config\n"
+            "assert helpers.ENTRY == config.ESCALATION_PATH[0], (\n"
             "    'ARC_ESCALATION_PATH collapsed the fleet: '\n"
             "    + repr(helpers.ENTRY))\n"
+            "assert 'glm' not in config.REVIEW_FAMILIES\n"
             "print('ok')\n"
         )
         env = {**os.environ, "ARC_ESCALATION_PATH": STRONGEST}

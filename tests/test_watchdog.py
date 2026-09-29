@@ -136,9 +136,9 @@ class HeartbeatsAloneAreAStall(WatchdogCase):
     """
 
     def test_cap_wait_only_log_reads_stalled_at_cap(self):
-        cap = config.driver_limit("GLM-5.3")
-        leases = [self._lease("GLM-5.3", f"h{i}") for i in range(cap)]
-        self._write(self._ev("driver.cap_wait", task="t1", model="GLM-5.3",
+        cap = config.driver_limit(ENTRY)
+        leases = [self._lease(ENTRY, f"h{i}") for i in range(cap)]
+        self._write(self._ev("driver.cap_wait", task="t1", model=ENTRY,
                              age=300, in_use=cap, cap=cap))
         w = self._wd(_Store(leases=leases))
         self.assertTrue(w["stalled"])
@@ -178,14 +178,15 @@ class SaturatedHarnessNamed(WatchdogCase):
     """
 
     def test_harness_saturation_named(self):
-        hcap = config.harness_limit("opencode")
-        leases = [self._lease("harness:opencode", f"hh{i}")
+        harness = config.MODEL_HARNESS[ENTRY]
+        hcap = config.harness_limit(harness)
+        leases = [self._lease(f"harness:{harness}", f"hh{i}")
                   for i in range(hcap)]
-        self._write(self._ev("driver.cap_wait", task="t1", model="GLM-5.3",
-                             age=300, scope="harness", harness="opencode"))
+        self._write(self._ev("driver.cap_wait", task="t1", model=ENTRY,
+                             age=300, scope="harness", harness=harness))
         w = self._wd(_Store(leases=leases))
         self.assertTrue(w["stalled"])
-        self.assertIn("opencode", w["diagnosis"])
+        self.assertIn(harness, w["diagnosis"])
         self.assertIn("saturated", w["diagnosis"])
 
 

@@ -55,12 +55,12 @@ class TestProfileIsolation(unittest.TestCase):
     def test_local_is_the_two_model_fleet(self):
         self.assertEqual(config.FLEET, "local")
         self.assertFalse(config.STUDIO)
-        self.assertEqual(sorted(config.FAMILIES), ["deepseek", "glm"])
+        self.assertEqual(sorted(config.FAMILIES), ["deepseek"])
         # Operator decision 2026-09-25: DeepSeek is the stronger model (hard
         # tier, planner); GLM-5.3 is medium and does not plan. The captain's
         # own seat is DeepSeek, which on this profile is also the planner.
-        self.assertEqual(config.PLANNER_MODEL, "DeepSeek-V4.1-Flash-thinking-max")
-        self.assertEqual(config.CAPTAIN_MODEL, "DeepSeek-V4.1-Flash-thinking-max")
+        self.assertEqual(config.PLANNER_MODEL, "DeepSeek-V4.1-Flash")
+        self.assertEqual(config.CAPTAIN_MODEL, "DeepSeek-V4.1-Flash")
         self.assertEqual(config.EXTERNAL_MODELS, set())
         self.assertEqual(config.MODEL_HARNESS_ALIAS, {})
 
@@ -100,7 +100,7 @@ print(json.dumps({
         # Subscription: plan CLIs, and NO provider aliases — a plan-backed
         # model is reached by its own CLI. Zen (the only aliased rows on this
         # profile) is opt-in, so the default has none.
-        self.assertEqual(sub["planner"], "Claude-Opus-5.5")
+        self.assertEqual(sub["planner"], "Claude-Sonnet-5.5")
         self.assertEqual(sub["aliases"], {})
         for harness in ("claude", "codex", "cursor", "agy"):
             self.assertIn(harness, sub["harnesses"])
@@ -115,7 +115,7 @@ print(json.dumps({
         self.assertNotIn("agy", api["harnesses"])
 
         # API: everything through opencode/openrouter, with aliases.
-        self.assertEqual(api["planner"], "Claude-Opus-5.5")
+        self.assertEqual(api["planner"], "Claude-Sonnet-5.5")
         self.assertEqual(sorted(api["harnesses"]), ["opencode", "reasonix"])
         self.assertEqual(len(api["aliases"]), 4)
         self.assertIn("xai", api["fams"])
@@ -170,7 +170,7 @@ import json, config, drivers
 out = {}
 for key, d in (("gemini", drivers.GeminiDriver("any", "reviewer", bench=True)),
                ("codex", drivers.driver_for(config.STUDIO_OPENAI_MODEL, "reviewer")),
-               ("claude", drivers.driver_for("Claude-Opus-5.5", "reviewer"))):
+               ("claude", drivers.driver_for("Claude-Sonnet-5.5", "reviewer"))):
     d.images = ["/renders/a.png"]
     out[key] = " ".join(d.argv("SCORE THIS", None))
 print(json.dumps(out))
@@ -320,9 +320,9 @@ print(json.dumps({"model": config.STUDIO_OPENAI_MODEL, "argv": d.argv("P", None)
 
     def test_codex_runs_the_model_the_roster_names(self):
         d = json.loads(in_studio(self.MODEL_PROBE))
-        self.assertEqual(d["model"], "GPT-6-Sol", "operator decision 2026-09-22")
+        self.assertEqual(d["model"], "GPT-6.1-Sol", "operator decision 2026-09-29")
         i = d["argv"].index("-m")
-        self.assertEqual(d["argv"][i + 1], "gpt-6-sol")
+        self.assertEqual(d["argv"][i + 1], "gpt-6.1-sol")
 
     def test_codex_runs_at_high_effort_not_the_model_default(self):
         """gpt-6-sol defaults to medium; the operator chose high."""
@@ -339,7 +339,7 @@ print(json.dumps(d.argv("P", "sess-1")))
     def test_a_resumed_session_keeps_model_and_effort(self):
         argv = json.loads(in_studio(self.RESUME_PROBE))
         self.assertEqual(argv[1:4], ["exec", "resume", "sess-1"])
-        self.assertIn("gpt-6-sol", argv)
+        self.assertIn("gpt-6.1-sol", argv)
         self.assertIn('model_reasoning_effort="high"', argv)
 
     def test_codex_argv_never_uses_the_s_flag(self):
@@ -390,7 +390,7 @@ print(json.dumps({"fresh": d.argv("P", None), "resume": d.argv("P", "sess-1")}))
     def test_api_profile_defaults_to_sol(self):
         out = in_studio("import config; print(config.STUDIO_OPENAI_MODEL)",
                         fleet="studio-api")
-        self.assertEqual(out, "GPT-6-Sol")
+        self.assertEqual(out, "GPT-6.1-Sol")
 
     def test_single_claude_slot_is_not_the_default_reviewer(self):
         """Your own Claude session shares the plan; review must not queue on it."""
@@ -401,7 +401,7 @@ print(json.dumps({"fresh": d.argv("P", None), "resume": d.argv("P", "sess-1")}))
             "print(json.dumps([preferred_reviewer(worker_model(w)) or"
             " config.cross_family_reviewer(worker_model(w))"
             " for w in implementing_workers()"
-            " if worker_model(w) != 'Claude-Opus-5.5']))")
+            " if worker_model(w) != 'Claude-Sonnet-5.5']))")
         self.assertNotIn("anthropic", json.loads(out))
 
 

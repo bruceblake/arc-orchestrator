@@ -463,7 +463,7 @@ class DriversSeeImages(unittest.TestCase):
         self.assertIn("Do NOT read the PNG bytes", p)
         self.assertIn("/x/a.png", p)
         self.assertEqual(drivers._view_image_prompt("review this", ()), "review this")
-        drv = drivers.ReasonixDriver("DeepSeek-V4.1-Flash-thinking-max", "reviewer", bench=True)
+        drv = drivers.ReasonixDriver("DeepSeek-V4.1-Flash", "reviewer", bench=True)
         drv.images = ["/x/a.png"]
         self.assertIn("view_image", drv.argv("p", None)[-1])
 

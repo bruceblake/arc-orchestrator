@@ -395,7 +395,7 @@ class IngestValidation(BoardCase):
         roles = ("implementer", "reviewer", "pr_reviewer", "orchestrator")
         participating = ({f"{tid}/{r}" for tid in ("mine", "locks")
                           for r in roles} | {"captain", "operator", "planner"})
-        model = "GLM-5.3"
+        model = config.ESCALATION_PATH[0]
         for tok in ("mine", "theirs", "deepseek"):
             mid = agentboard.post(P, author="locks/implementer",
                                   body=f"ping @{tok}", mentions=[tok])
@@ -413,7 +413,7 @@ class IngestValidation(BoardCase):
         self._append({"kind": "question", "body": "@locks api ready?",
                       "mentions": ["locks"]},
                      {"kind": "ping", "body": "cc @captain @operator @all"},
-                     {"kind": "note", "body": "for @GLM-5.3"},
+                     {"kind": "note", "body": f"for @{config.ESCALATION_PATH[0]}"},
                      {"kind": "note", "body": "for @doors/implementer"})
         self.assertEqual(self.ingest(), 4)
         self.assertEqual(self._errors(), [])
@@ -536,7 +536,7 @@ class IngestValidation(BoardCase):
                              [bogus], f"@{bogus} must be rejected")
         # The real addresses still resolve.
         for good in ("doors", "doors/implementer", "doors/reviewer",
-                     "doors/pr_reviewer", "GLM-5.3", "captain", "operator",
+                     "doors/pr_reviewer", config.ESCALATION_PATH[0], "captain", "operator",
                      "all"):
             self.assertEqual(agentboard.unknown_mentions([good], known), [],
                              f"@{good} must be accepted")
@@ -565,13 +565,13 @@ class IngestValidation(BoardCase):
         agentboard.post(P, author="doors/implementer", body="x",
                         author_task="doors")
         known = agentboard.known_targets(P)
-        model = "GLM-5.3"
+        model = config.ESCALATION_PATH[0]
         cases = {
             "doors": ["doors/implementer", "doors/reviewer"],   # both roles
             "doors/implementer": ["doors/implementer"],
             "doors/reviewer": ["doors/reviewer"],               # NOT the impl
-            "GLM-5.3": ["doors/implementer", "doors/reviewer", "captain",
-                        "operator", "planner"],
+            model: ["doors/implementer", "doors/reviewer", "captain",
+                    "operator", "planner"],
             "captain": ["captain"],
             "operator": ["operator"],
             "all": ["doors/implementer", "doors/reviewer", "captain",

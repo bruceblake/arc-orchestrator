@@ -399,12 +399,12 @@ override = os.getenv(f"ARC_LIMIT_{name.upper().replace('-', '_')}")
 | Family | Env var |
 |---|---|
 | deepseek | `ARC_LIMIT_DEEPSEEK` |
-| glm | `ARC_LIMIT_GLM` |
 
 Example: `ARC_LIMIT_DEEPSEEK=6`. This raises/lowers the **account-cap** layer
 (used by `pool.py`'s families and reported as `capacity`). It does **not**
 change the driver semaphores. The kimi family's limit knob retired with the
-family itself on 2026-09-12; the `union` family's did the same on 2026-09-17,
+family itself on 2026-09-12; GLM-5.3's account-cap knob did the same on
+2026-09-29, when that model left the roster; the `union` family's did the same on 2026-09-17,
 when Union-Alpha retired and its free OpenRouter preview ended before its
 scheduled date. config reads neither.
 

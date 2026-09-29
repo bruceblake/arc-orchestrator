@@ -88,7 +88,7 @@ $ curl -s localhost:8787/api/metrics | python3 -m json.tool
     "now": 1789000000.42,
     "models": [
         {
-            "model": "GLM-5.3",
+            "model": "DeepSeek-V4.1-Flash",
             "pretty": "GLM-5.3",
             "runs": 41,
             "ok": 38,
