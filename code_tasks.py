@@ -2910,7 +2910,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # whether the fleet is about to pile onto a scarce model.
         def _baseline(tid):
             r = prior.get(tid)
-            return (r.get("model") if r else None) or tasks[tid]["model"]
+            # Compare live names. A retired row remaps onto its replacement;
+            # that is the same seat, not an escalation.
+            return live_model((r.get("model") if r else None) or tasks[tid]["model"])
 
         higher = {tid: m for tid in retried
                   if (m := start_model(tid)) != _baseline(tid)}
