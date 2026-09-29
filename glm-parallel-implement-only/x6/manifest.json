@@ -1,0 +1,164 @@
+{
+  "kind": "ui",
+  "worktree": "/home/proxyie/worktrees/arc-orchestrator/glm-parallel-implement-only",
+  "project": "arc-orchestrator",
+  "head": "8f890e4c882883d32ce9ffa6c145562b26864ba9",
+  "ui_files": [
+    "dashboard.py"
+  ],
+  "shots": [
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/index-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/index-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/index-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/index-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/projects-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/projects-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/projects-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/projects-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/usage-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/usage-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/usage-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/usage-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/phone-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/phone-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/phone-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/shots/phone-phone-dark.png"
+  ],
+  "videos": {},
+  "compare": [
+    {
+      "name": "index-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "index-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "index-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "index-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-desktop-light",
+      "changed": 2.2376543209876542e-05,
+      "box": [
+        134,
+        93,
+        176,
+        16
+      ],
+      "side_by_side": null
+    },
+    {
+      "name": "projects-desktop-dark",
+      "changed": 2.2376543209876542e-05,
+      "box": [
+        134,
+        93,
+        176,
+        16
+      ],
+      "side_by_side": null
+    },
+    {
+      "name": "projects-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    }
+  ],
+  "warnings": [
+    "NO VISIBLE CHANGE: this diff touches dashboard.py but none of the captured views changed a pixel. Either the change is outside the captured views (a dialog, a hover state, another tab), or it does not do what it claims."
+  ],
+  "coverage": {
+    "views": {
+      "status": "captured",
+      "reason": ""
+    },
+    "baseline": {
+      "status": "captured",
+      "reason": ""
+    },
+    "compare": {
+      "status": "captured",
+      "reason": ""
+    }
+  },
+  "page_errors": {},
+  "baseline": {
+    "sha": "8f890e4c882883d32ce9ffa6c145562b26864ba9",
+    "dir": "/home/proxyie/arc-orchestrator/logs/evidence/_ui_baseline/8f890e4c882883d32ce9ffa6c145562b26864ba9-cb2ee0c5f1",
+    "status": "captured"
+  },
+  "new_page_errors": {},
+  "changed_views": [],
+  "no_visible_change": true,
+  "contact_sheet": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x6/contact_sheet.png",
+  "seconds": 7.2
+}
