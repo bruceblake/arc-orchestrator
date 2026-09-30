@@ -1,0 +1,22 @@
+{
+  "tree": "/home/proxyie/worktrees/arc-orchestrator/glm-parallel-implement-only",
+  "shots": [
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-phone-dark.png"
+  ],
+  "page_errors": {}
+}

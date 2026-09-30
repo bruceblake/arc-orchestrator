@@ -1,0 +1,205 @@
+{
+  "kind": "ui",
+  "worktree": "/home/proxyie/worktrees/arc-orchestrator/glm-parallel-implement-only",
+  "project": "arc-orchestrator",
+  "head": "d70b723f25fb27e9498d3a75918a28a553b5e7da",
+  "ui_files": [
+    "dashboard.py",
+    "static/index.html"
+  ],
+  "shots": [
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/index-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/projects-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/usage-phone-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-desktop-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-desktop-dark.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-phone-light.png",
+    "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/shots/phone-phone-dark.png"
+  ],
+  "videos": {},
+  "compare": [
+    {
+      "name": "index-desktop-light",
+      "changed": 3.765317998220031e-05,
+      "box": [
+        1238,
+        188,
+        30,
+        8
+      ],
+      "side_by_side": null
+    },
+    {
+      "name": "index-desktop-dark",
+      "changed": 3.765317998220031e-05,
+      "box": [
+        1238,
+        188,
+        30,
+        8
+      ],
+      "side_by_side": null
+    },
+    {
+      "name": "index-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "index-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-desktop-light",
+      "changed": 6.693440428380188e-05,
+      "box": [
+        1238,
+        188,
+        30,
+        8
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/compare/projects-desktop-light.png",
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/before/projects-desktop-light.png"
+    },
+    {
+      "name": "projects-desktop-dark",
+      "changed": 6.693440428380188e-05,
+      "box": [
+        1238,
+        188,
+        30,
+        8
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/compare/projects-desktop-dark.png",
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/before/projects-desktop-dark.png"
+    },
+    {
+      "name": "projects-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "projects-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "usage-desktop-light",
+      "changed": 0.00014601647263799795,
+      "box": [
+        381,
+        1116,
+        481,
+        17
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/compare/usage-desktop-light.png",
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/before/usage-desktop-light.png"
+    },
+    {
+      "name": "usage-desktop-dark",
+      "changed": 0.00014601647263799795,
+      "box": [
+        381,
+        1116,
+        481,
+        17
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/compare/usage-desktop-dark.png",
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/before/usage-desktop-dark.png"
+    },
+    {
+      "name": "usage-phone-light",
+      "changed": 0.00047092447345772236,
+      "box": [
+        29,
+        1214,
+        281,
+        69
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/compare/usage-phone-light.png",
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/before/usage-phone-light.png"
+    },
+    {
+      "name": "usage-phone-dark",
+      "changed": 0.00047092447345772236,
+      "box": [
+        29,
+        1214,
+        281,
+        69
+      ],
+      "side_by_side": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/compare/usage-phone-dark.png",
+      "before": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/before/usage-phone-dark.png"
+    },
+    {
+      "name": "phone-desktop-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-desktop-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-light",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    },
+    {
+      "name": "phone-phone-dark",
+      "changed": 0.0,
+      "box": null,
+      "side_by_side": null
+    }
+  ],
+  "warnings": [],
+  "coverage": {
+    "views": {
+      "status": "captured",
+      "reason": ""
+    },
+    "baseline": {
+      "status": "captured",
+      "reason": ""
+    },
+    "compare": {
+      "status": "captured",
+      "reason": ""
+    }
+  },
+  "page_errors": {},
+  "baseline": {
+    "sha": "f4319a3ae09b63d6a05f064833e343590c85aa98",
+    "dir": "/home/proxyie/arc-orchestrator/logs/evidence/_ui_baseline/f4319a3ae09b63d6a05f064833e343590c85aa98-cb2ee0c5f1",
+    "status": "captured"
+  },
+  "new_page_errors": {},
+  "changed_views": [
+    "projects-desktop-light",
+    "projects-desktop-dark",
+    "usage-desktop-light",
+    "usage-desktop-dark",
+    "usage-phone-light",
+    "usage-phone-dark"
+  ],
+  "contact_sheet": "/home/proxyie/arc-orchestrator/logs/evidence/arc-orchestrator/glm-parallel-implement-only/x17/contact_sheet.png",
+  "seconds": 8.5
+}
