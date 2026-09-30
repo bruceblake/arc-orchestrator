@@ -57,16 +57,8 @@ class ReviewerFor(unittest.TestCase):
         for model in config.IMPLEMENT_TIERS.get("hard", []):
             fam = config.MODEL_FAMILY[model]
             others = [f for f in strongest_first if f != fam]
-            if not others:
-                # One review family on this profile and the model IS that
-                # family: there is no cross-family reviewer to name. GLM-5.3
-                # became implement-only on 2026-09-28, so the local fleet has
-                # exactly one family — `_reviewer_for` says None rather than
-                # naming the model's own family and having the loader refuse.
-                self.assertEqual(strongest_first, ["deepseek"])
-                self.assertIsNone(gh_ops._reviewer_for(model, 0))
-                continue
-            expected = others[0]
+            self.assertEqual(strongest_first, ["deepseek"])
+            expected = others[0] if others else fam
             self.assertEqual(gh_ops._reviewer_for(model, 0), expected,
                              f"{model} should be reviewed by {expected}")
 
@@ -124,12 +116,19 @@ class WriteTaskfile(unittest.TestCase):
         for tid, t in loaded["tasks"].items():
             self.assertRegex(tid, r"[a-z0-9][a-z0-9-]{0,60}")
             self.assertIn(t["model"], config.IMPLEMENTER_MODELS)
-            self.assertIsNotNone(t["reviewer"])
-            self.assertNotEqual(config.MODEL_FAMILY[t["model"]],
-                                config.MODEL_FAMILY.get(t["reviewer"],
-                                                        t["reviewer"]),
-                                f"task {tid}: reviewer shares the "
-                                "implementer's harness")
+            impl_fam = config.MODEL_FAMILY[t["model"]]
+            rev_fam = config.MODEL_FAMILY.get(t["reviewer"], t["reviewer"])
+            if rev_fam != impl_fam:
+                # The ordinary cross-family pairing. This branch keeps GLM-5.3
+                # as a live implement-only FAMILY (the base branch retired it),
+                # so a GLM task is reviewed by deepseek even on the local
+                # profile — a genuine cross-family pair, not a fallback.
+                self.assertIn(rev_fam, config.REVIEW_FAMILIES)
+            else:
+                # Same family is legal only as the one-family fallback: the
+                # implementer's own family is the ONLY review family left.
+                self.assertEqual(len(config.REVIEW_FAMILIES), 1)
+                self.assertIn(impl_fam, config.REVIEW_FAMILIES)
 
     def test_a_row_with_no_cross_family_reviewer_is_skipped(self):
         """A taskfile the loader would REJECT is worse than a shorter one.

@@ -406,7 +406,9 @@ Example: `ARC_LIMIT_DEEPSEEK=6`. This raises/lowers the **account-cap** layer
 change the driver semaphores. The kimi family's limit knob retired with the
 family itself on 2026-09-12; the `union` family's did the same on 2026-09-17,
 when Union-Alpha retired and its free OpenRouter preview ended before its
-scheduled date. config reads neither.
+scheduled date. config reads neither. (The base branch retired the glm knob
+along with GLM-5.3's roster row on 2026-09-29; this branch keeps that row as
+the implement-only parallel seat, so the family — and this knob — stay live.)
 
 ### `ARC_DRIVER_LIMIT_<FAMILY>` — override the driver semaphore layer
 
@@ -529,9 +531,10 @@ order on `drivers._gate(model)`.
 
 **What queues next — the reviews.** Cross-review is family-based, and GLM-5.3
 is implement-only (2026-09-28), so the 8 GLM tasks are all reviewed by
-`deepseek` (DeepSeek-V4.1-Flash-thinking-max) and the 4 DeepSeek tasks have no
-reviewer at all on this two-family example — on the studio roster they go to
-`openai` (GPT-6-Sol), then the other review families. That is eight review
+`deepseek` (DeepSeek-V4.1-Flash) and the 4 DeepSeek tasks fall back to it too —
+deepseek is the only review family left in this two-family example, so it
+reviews its own work; on the studio roster they go to
+`openai` (GPT-6.1-Sol), then the other review families. That is eight review
 firings
 on DeepSeek against a batch driver cap of 9, alongside the 4 hard
 implementations and the planner already holding slots. No review of DeepSeek

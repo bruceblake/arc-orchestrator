@@ -47,9 +47,15 @@ MAX_EVENTS_PER_RESPONSE = 3000
 # DeepSeek-V4-Flash) stay mapped so their HISTORICAL usage/harness_runs rows
 # still render a name and a price instead of a raw id and $0.00. They are not
 # offered anywhere as a routing choice — see config.MODEL_ROLES.
+# GLM-5.3 is NOT one of them on this branch: the base branch retired it on
+# 2026-09-29, but this branch keeps its roster row as the implement-only
+# parallel seat (operator decision 2026-09-28), so labelling it "(retired)"
+# would mislabel a live, routable model in every usage/seat view.
 PRETTY = {"GLM-5.3": "GLM 5.3",
-          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max",
+          "DeepSeek-V4.1-Flash-thinking-max": "DeepSeek V4.1 Flash max (retired)",
           "DeepSeek-V4.1-Flash": "DeepSeek V4.1 Flash",
+          "Claude-Sonnet-5.5": "Claude Sonnet 5.5",
+          "GPT-6.1-Sol": "GPT-6.1 Sol",
           "Kimi-K3": "Kimi K3 (retired)",
           "gpt-oss-120b": "gpt-oss 120B (retired)",
           "DeepSeek-V4-Flash": "DeepSeek V4 Flash (retired)"}
@@ -3475,10 +3481,11 @@ def _create_project(body):
             if rev is None:
                 # REFUSE, rather than `or next(iter(REVIEW_FAMILIES), "glm")`.
                 # That fallback wrote the implementer's OWN family into the
-                # taskfile — on the local profile DeepSeek's only review family
-                # IS deepseek — and returned 200 for a task the loader rejects
-                # (Rule 2). GLM-5.3 still resolves here (deepseek), so this is
-                # the DeepSeek-on-local case, which genuinely cannot be planned.
+                # taskfile and returned 200 for a task the loader rejects
+                # (Rule 2). `rev is None` means the fleet has NO review family
+                # at all: the one-family fallback covers the local profile,
+                # where a DeepSeek task's reviewer resolves to deepseek, so
+                # nothing is refused there.
                 import code_tasks as _ct
                 try:
                     _ct._reviewer_for({}, entry["model"])
@@ -5098,9 +5105,10 @@ def _escalate_task(body):
             # The tier walk skips a seat for THREE different reasons, and they
             # are not the same answer. "later seats are usage-blocked" was
             # reported for all of them, which is wrong — and actively
-            # misleading on the local profile, where GLM-5.3's only higher
-            # seat (DeepSeek) is skipped because it has no cross-family
-            # reviewer, not because any window is spent. Ask that seat why,
+            # misleading when the real cause is the pairing. On this branch
+            # local no longer skips DeepSeek (the one-family fallback covers
+            # it); a fleet with NO review family still does, and not because
+            # any window is spent. Ask that seat why,
             # through the SAME function the escalation itself would use, so
             # the 409 and the failure a run would hit cannot drift apart.
             for cand in code_tasks._higher_tiers(current):

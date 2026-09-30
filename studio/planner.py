@@ -192,6 +192,14 @@ interrupted. Plan the lab scene that shows each of these.
 """
 
 
+def _architect_name():
+    """The live architect model, or a label when that worker is not on this fleet."""
+    try:
+        return worker_model("opus_architect")
+    except ValueError:
+        return "the architect worker"
+
+
 def _phase_prose(phase):
     body = [f"CURRENT PHASE: {phase}", PHASE_INTENT[phase], ""]
     if phase == PHASE_1_GRAYBOX_PROTOTYPING:
@@ -209,7 +217,7 @@ def _phase_prose(phase):
             "task producing BOTH clips, never two tasks producing one each — "
             "two independently authored clips do not line up. "
             "Blender, modelling and animation tasks are implemented by "
-            "Claude-Opus-5.5 only. Do not assign that work to another model.")
+            f"{_architect_name()} only. Do not assign that work to another model.")
     if phase == PHASE_3_ATMOSPHERE_LIGHTING:
         body.append(
             "Lighting is built as PRESETS the game switches between (day, "
@@ -230,7 +238,7 @@ def _phase_prose(phase):
 def system_prompt(phase, repo):
     """The full studio planner prompt for a phase."""
     return f"""You are the system architect and planner for an autonomous game \
-studio. You decompose a goal into a small graph of tasks. Claude-Opus-5.5 \
+studio. You decompose a goal into a small graph of tasks. {_architect_name()} \
 does this planning when its window is open, and GPT-6 does it when Claude's \
 window is closed. Claude also implements the Blender, modelling and \
 animation tasks. The other models implement the rest and may review.
@@ -300,8 +308,8 @@ async def _plan_via_harness(model, phase, repo, goal, project):
 
     A subscription model has no API route at all — it is reached only through
     its CLI — so the planner runs as an ordinary planner-role driver, exactly
-    as `main.py code plan` runs `config.PLANNER_MODEL` (DeepSeek-V4.1-Flash-
-    thinking-max on the local profile, Claude-Opus-5.5 on studio). That also
+    as `main.py code plan` runs `config.PLANNER_MODEL` (DeepSeek-V4.1-Flash
+    on the local profile, Claude-Sonnet-5.5 on studio). That also
     gives the planning call a transcript and a harness_runs row (Rule 7) and
     puts it under the harness
     cap, which matters here: on Claude Pro the cap is ONE session, shared with

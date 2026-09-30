@@ -345,9 +345,9 @@ class LlmActions(unittest.TestCase):
                            text=True, env=env, cwd=str(root), timeout=60)
         self.assertEqual(p.returncode, 0, p.stderr)
         d = json.loads(p.stdout)
-        self.assertEqual(d["planner"], "Claude-Opus-5.5",
+        self.assertEqual(d["planner"], "Claude-Sonnet-5.5",
                          "the studio planner is Claude — the seat the captain left")
-        self.assertEqual(d["captain"], "DeepSeek-V4.1-Flash-thinking-max")
+        self.assertEqual(d["captain"], "DeepSeek-V4.1-Flash")
         self.assertEqual(d["captain_family"], "deepseek")
         # THE binding assertion: a spent Claude window must not move the
         # captain AT ALL — no swap, because its own seat is not blocked.
@@ -637,9 +637,9 @@ class Observe(Tmp):
                 "passed": False, "tail": "boom"},
                {"ts": NOW - 400, "type": "task.escalated", "task": "t1"},
                {"ts": NOW - 300, "type": "driver.start", "task": "t1-x3",
-                "model": "GLM-5.3"},
+                "model": config.ESCALATION_PATH[0]},
                {"ts": NOW - 200, "type": "driver.cap_wait", "task": "t2",
-                "model": "GLM-5.3"}]
+                "model": config.ESCALATION_PATH[0]}]
         evp.write_text("\n".join(json.dumps(e) for e in evs) + "\n")
         with mock.patch.object(ap, "_watchdog_status", return_value={}):
             s = ap.observe(store=store, db_path=db, now=NOW, events_path=evp)
@@ -650,7 +650,7 @@ class Observe(Tmp):
         self.assertEqual(t["last_driver_ts"], NOW - 300)
         self.assertEqual(s["active_projects"], ["proj"])
         self.assertIn("proj", s["board"])
-        self.assertEqual(s["seats"]["GLM-5.3"]["cap_waits"], 1)
+        self.assertEqual(s["seats"][config.ESCALATION_PATH[0]]["cap_waits"], 1)
 
     def test_status_clock_ignores_events_inside_the_status(self):
         """in_review stays dated from pr_opened; a later gate is not driver work."""

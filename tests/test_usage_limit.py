@@ -393,7 +393,7 @@ class SwapsOffASpentPlan(unittest.TestCase):
         other.harness = "cursor"
         # A live roster model: the lease gate looks the name up. The swap
         # event still records the substitute usage_substitute returned.
-        other.model = "GLM-5.3"
+        other.model = config.ESCALATION_PATH[0]
         drv = ScriptedDriver([
             DriverError("usage limit", usage_limit=True, resets_at=NOW + 3 * 3600)])
         with TempLeaseDB(), capture_events() as ev, \
@@ -406,7 +406,7 @@ class SwapsOffASpentPlan(unittest.TestCase):
             drivers._semaphores.pop(drv.model, None)
             result = asyncio.run(drv.run("p", Path("."), task_id="t1"))
         self.assertEqual(result.text, "from-cursor")
-        self.assertEqual(result.model, "GLM-5.3",
+        self.assertEqual(result.model, config.ESCALATION_PATH[0],
                          "the result names the model that RAN, for the records")
         self.assertEqual(clock[0], NOW, "swapping must not park for the reset")
         self.assertEqual(len(ev.of("driver.usage_swap")), 1)
@@ -418,7 +418,7 @@ class SwapsOffASpentPlan(unittest.TestCase):
         """A swapped review must still see the screenshots the gate attached."""
         other = ScriptedDriver(['{"pass": true}'])
         other.harness = "cursor"
-        other.model = "GLM-5.3"
+        other.model = config.ESCALATION_PATH[0]
         drv = ScriptedDriver([
             DriverError("usage limit", usage_limit=True, resets_at=NOW + 3 * 3600)])
         drv.images = ("/ev/index-desktop-light.png", "/ev/usage-phone-dark.png")
@@ -470,7 +470,7 @@ class SubscriptionSeatCaps(unittest.TestCase):
     PROBE = ("import config, json; print(json.dumps({"
              "'claude': config.harness_limit('claude'),"
              "'codex': config.harness_limit('codex'),"
-             "'claude_driver': config.driver_limit('Claude-Opus-5.5', True),"
+             "'claude_driver': config.driver_limit('Claude-Sonnet-5.5', True),"
              "'openai_driver': config.driver_limit(config.STUDIO_OPENAI_MODEL, True)}))")
 
     def test_defaults_are_the_per_seat_caps(self):
@@ -489,7 +489,7 @@ class SubscriptionSeatCaps(unittest.TestCase):
     def test_api_profile_is_bound_by_the_opencode_pool_not_the_model(self):
         caps = json.loads(in_studio(
             "import config, json; print(json.dumps({m: config.driver_limit(m, True)"
-            " for m in ('Claude-Opus-5.5', config.STUDIO_OPENAI_MODEL)}))",
+            " for m in ('Claude-Sonnet-5.5', config.STUDIO_OPENAI_MODEL)}))",
             fleet="studio-api"))
         for m, v in caps.items():
             self.assertGreaterEqual(v, config.harness_limit("opencode"), (m, v))
@@ -601,7 +601,7 @@ class CapSwapInTheLeaseWait(unittest.TestCase):
     def test_run_hands_the_queued_attempt_to_the_substitute(self):
         other = ScriptedDriver(["from-cursor"])
         other.harness = "cursor"
-        other.model = "GLM-5.3"
+        other.model = config.ESCALATION_PATH[0]
         drv = ScriptedDriver(["never"])
 
         async def full(*a, **k):
@@ -850,29 +850,29 @@ class GlmDoesNotRunAlone(unittest.TestCase):
         self.assertEqual(y.to_model, self.DS)
 
     def test_an_unreviewable_seat_is_not_a_yield(self):
-        """The local profile has ONE review family, and GLM-5.3 was the other
-        one until it became implement-only. So on the REAL local roster
-        `cross_family_reviewer(DeepSeek)` is None: yielding a lone GLM task
-        there would implement on DeepSeek, then fail at the review node, which
-        raises `_reviewer_for`'s ValueError and burns MAX_REVIEW_CRASHES
-        retries on a task that dies UNREVIEWED. The seat is skipped instead,
-        so GLM keeps its slot — "a task with nowhere else to go still runs".
+        """A seat with NO possible reviewer is not a destination.
+
+        `cross_family_reviewer` returns None only when there is no review
+        family AT ALL: since the one-family fallback ("a missing review is
+        worse than a same-family one") a lone family now reviews its own
+        work, so the local profile — one hefty family, deepseek — no longer
+        produces None and DeepSeek work IS reviewable there. What remains is
+        the genuinely unreviewable configuration: zero review families, where
+        the review node's `_reviewer_for` raises its ValueError and burns
+        MAX_REVIEW_CRASHES retries on a task that dies UNREVIEWED. Yielding
+        into it would move a healthy GLM attempt onto a seat that cannot be
+        reviewed, so the seat is skipped and GLM keeps its slot — "a task
+        with nowhere else to go still runs".
 
         setUp patches a roster whose fast seats a second family can review,
         which is what makes the OTHER tests' yields legal; this one pins the
-        one-family layout the local profile really has.
+        no-reviewer configuration.
         """
-        one_family = {"deepseek": self.DS}
-        # The real local roster is exactly these two models. setUp adds
-        # Cursor and Antigravity, and `cross_family_reviewer` happily pairs
-        # either with deepseek — so pinning the families alone is not enough
-        # to reproduce the local layout this test is about.
         real_local = {self.GLM: "opencode", self.DS: "reasonix"}
         with mock.patch.object(config, "MODEL_HARNESS", real_local), \
-                mock.patch.object(config, "REVIEW_FAMILIES", one_family), \
-                mock.patch.object(config, "PR_REVIEW_FAMILIES",
-                                  set(one_family)):
-            # The premise: with one family, the fast seat cannot be reviewed.
+                mock.patch.object(config, "REVIEW_FAMILIES", {}), \
+                mock.patch.object(config, "PR_REVIEW_FAMILIES", set()):
+            # The premise: with no review family, nothing can be reviewed.
             self.assertIsNone(config.cross_family_reviewer(self.DS))
             y, _ev = self._check({}, glm_leased=True)
             self.assertIsNone(y, "an unreviewable seat is not a destination")
@@ -883,13 +883,12 @@ class GlmDoesNotRunAlone(unittest.TestCase):
         """With `ARC_ALLOW_SAME_FAMILY_REVIEW` the whole point is that
         same-family review is allowed, so the filter above must stand down —
         otherwise the documented hatch cannot rescue a one-family fleet."""
-        one_family = {"deepseek": self.DS}
-        # Same pin as the test above: the real local roster is these two only.
+        # Same pin as the test above: no review family at all is the only
+        # configuration `cross_family_reviewer` now answers None for.
         real_local = {self.GLM: "opencode", self.DS: "reasonix"}
         with mock.patch.object(config, "MODEL_HARNESS", real_local), \
-                mock.patch.object(config, "REVIEW_FAMILIES", one_family), \
-                mock.patch.object(config, "PR_REVIEW_FAMILIES",
-                                  set(one_family)), \
+                mock.patch.object(config, "REVIEW_FAMILIES", {}), \
+                mock.patch.object(config, "PR_REVIEW_FAMILIES", set()), \
                 mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", True):
             self.assertIsNone(config.cross_family_reviewer(self.DS))
             y, _ev = self._check({})

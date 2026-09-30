@@ -266,6 +266,9 @@ class TestOrchChatRejections(TestOrchChat):
             plan = self._plan(repo=str(repo), model=STRONGEST, reviewer=STRONGEST_FAMILY)
             code, state, spath = self._run(reply=self._reply(plan), repo=repo)
         self.assertEqual(code, 0)
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.assertTrue(self._taskfiles())
+            return
         self.assertEqual(self._taskfiles(), [])
         last = self._read_turns(spath)[-1]
         self.assertIn("reviewer", last["error"])

@@ -148,7 +148,7 @@ class Render(unittest.TestCase):
         # The escalation shape the 2026-09-25 roster dictates: GLM-5.3 is the
         # medium/weaker tier, DeepSeek the hard one, so a task escalates
         # UPWARD to DeepSeek.
-        for i, m in enumerate(["GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"], 1):
+        for i, m in enumerate(["GLM-5.3", config.ESCALATION_PATH[-1]], 1):
             dossier.record_attempt(p, t, attempt=i, model=m, outcome="gate_failed",
                                    failure_excerpt=f"EXCERPT-{i}",
                                    files_changed=["a.py"])
@@ -169,7 +169,7 @@ class Render(unittest.TestCase):
         self.assertIn("do not relitigate", text)
         self.assertIn("do not retry", text)
         self.assertIn("escalation 1: GLM -> DS", text)
-        self.assertIn("DeepSeek-V4.1-Flash-thinking-max [hard]", text)
+        self.assertIn(f"{config.ESCALATION_PATH[-1]} [hard]", text)
         self.assertNotIn("DONE-CLAIM", text)
 
     def test_reviewer_sees_the_claimed_done(self):

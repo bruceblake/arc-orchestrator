@@ -3,11 +3,14 @@
 Role map (hard rule): the fleet is TWO models. Operator decision 2026-09-28:
 GLM-5.3 (opencode) IMPLEMENTS ONLY — it does not review, does not PR-review,
 never plans, and does not run as the sole agent while a faster seat is free.
-DeepSeek-V4.1-Flash-thinking-max (the `reasonix` harness) plans, implements
-the hard tier, and reviews/PR-reviews.
-A task is always reviewed by a *different model
-family* than the one that implemented it (Rule 2) — so on the local two-model
-profile, which has ONE review family, a DeepSeek task has no reviewer there.
+DeepSeek-V4.1-Flash (the `reasonix` harness) plans, implements the hard tier,
+and reviews/PR-reviews.
+A task is always reviewed by a *different model family* than the one that
+implemented it (Rule 2) wherever another review family exists. GLM-5.3 left
+the review roster on 2026-09-28, so a GLM implementer is reviewed by deepseek;
+on the local profile that leaves ONE review family and it reviews its own
+work, because a missing review is worse than a same-family one
+(config.cross_family_reviewer).
 ARC rejects over-limit
 requests per model, so per-model semaphores cap concurrent harness instances
 below the account limits (config.driver_limit).
@@ -514,17 +517,19 @@ def refresh_usage_blocks(now=None):
 def planning_model():
     """Who writes the task breakdown.
 
-    Claude-Opus-5.5 first, then GPT-6, then whoever else may plan (DeepSeek
-    on the local fleet). A closed plan window is skipped. The captain does
-    not use this; supervisor ticks stay on CAPTAIN_MODEL.
+    The live Claude seat first, then GPT-6, then whoever else may plan
+    (DeepSeek on the local fleet). A closed plan window is skipped. The
+    captain does not use this; supervisor ticks stay on CAPTAIN_MODEL.
     """
     refresh_usage_blocks()
     now = time.time()
     blocked = {h for h, until in _usage_blocked_until.items() if until > now}
     names = []
-    for name in ("Claude-Opus-5.5",
-                 getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")):
-        if name not in names and config.model_may(name, "planner"):
+    claude = next((m for m, fam in config.MODEL_FAMILY.items()
+                   if fam == "anthropic" and config.model_may(m, "planner")),
+                  None)
+    for name in (claude, getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6.1-Sol")):
+        if name and name not in names and config.model_may(name, "planner"):
             names.append(name)
     planner = config.PLANNER_MODEL
     if planner and planner not in names and config.model_may(planner, "planner"):
@@ -921,16 +926,18 @@ def _faster_seat_than_glm(model, exclude, usage):
       re-enable lone-GLM work.
     * A candidate whose work NOBODY can review is skipped, unless the
       capacity hatch is on — the same filter `code_tasks._next_tier_m`
-      applies, and for the same reason. On the local profile
-      `cross_family_reviewer("DeepSeek-V4.1-Flash-thinking-max")` is None (GLM
-      was the only other review family and it is implement-only now), so
-      yielding there produced exactly the dead end this check exists to
-      avoid: the task implemented on DeepSeek, the review node raised
-      `_reviewer_for`'s `ValueError`, and the task burned MAX_REVIEW_CRASHES
-      retries and failed UNREVIEWED. Keeping the GLM slot instead is the
-      documented behaviour for that case — "a task with nowhere else to go
-      still runs" — and studio, which fields five review families, still
-      yields to cursor/agy/reasonix.
+      applies, and for the same reason. `cross_family_reviewer` answers None
+      only when there is no review family AT ALL: since the one-family
+      fallback ("a missing review is worse than a same-family one") a lone
+      family reviews its own work, so the local profile no longer produces
+      None and this skip is inert there. It still guards the genuinely
+      unreviewable fleet, where yielding would walk into exactly the dead end
+      this check exists to avoid: the task implemented on a seat, the review
+      node raised `_reviewer_for`'s `ValueError`, and the task burned
+      MAX_REVIEW_CRASHES retries and failed UNREVIEWED. Keeping the GLM slot
+      instead is the documented behaviour for that case — "a task with
+      nowhere else to go still runs" — and studio, which fields five review
+      families, still yields to cursor/agy/reasonix.
 
     A candidate that is not fast, or has no room on its own cap or its harness
     pool, is SKIPPED — never treated as the end of the search. Stopping at the
@@ -1596,7 +1603,7 @@ def reasonix_fleet_home():
     models = [m for m, h in config.MODEL_HARNESS.items() if h == "reasonix"]
     models += [m for m in config.MODEL_HARNESS if m not in models]
     if not models:
-        models = ["DeepSeek-V4.1-Flash-thinking-max"]
+        models = ["DeepSeek-V4.1-Flash"]
     cfg = _reasonix_config_toml(models)
     key = config.require_api_key(f"the reasonix harness ({config.REASONIX_FLEET_HOME})")
     env = f"ARC_API_KEY={key}\n"

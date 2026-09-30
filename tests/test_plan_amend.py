@@ -232,8 +232,13 @@ class TestChangeModel(_Base):
         # stand-in second family is patched in for this test (the studio
         # profile has five of them); with no second family the loader correctly
         # REFUSES the amendment and there is no flip to assert.
-        empty = config.cross_family_reviewer(STRONGEST) is None
-        with second_review_family() if empty else contextlib.nullcontext():
+        #
+        # `cross_family_reviewer` no longer answers None for a one-family
+        # fleet — it falls back to that family's own review ("a missing review
+        # is worse than a same-family one") — so the number of review
+        # families, not a None, is what says whether a flip is possible.
+        one_family = len(config.REVIEW_FAMILIES) < 2
+        with second_review_family() if one_family else contextlib.nullcontext():
             # Computed under the patch: STRONGEST_REVIEWER is bound at import.
             expected = config.cross_family_reviewer(STRONGEST)
             counts = self.apply([{"kind": "change_model", "task": "t1",

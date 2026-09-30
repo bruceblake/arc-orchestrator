@@ -86,21 +86,22 @@ class LoadTaskfile(unittest.TestCase):
         for model in config.IMPLEMENTER_MODELS:
             fam = config.MODEL_FAMILY[model]
             rev = config.cross_family_reviewer(model)
-            if rev is None:
-                # GLM-5.3 became implement-only on 2026-09-28, so a profile
-                # whose only other family was GLM has ONE review family left:
-                # a model in it genuinely cannot have a cross-family reviewer
-                # and `cross_family_reviewer` says so instead of quietly
-                # self-reviewing. That is the local two-model profile; the
-                # studio roster still fields five review families, so there
-                # the assertion below is enforced as before.
+            self.assertIsNotNone(rev, f"{model} has no reviewer")
+            if rev != fam:
+                # The ordinary cross-family case. This branch keeps GLM-5.3
+                # live as an implement-only family, so a GLM task is reviewed
+                # by deepseek even on the local profile.
+                self.assertIn(rev, config.REVIEW_FAMILIES)
+            else:
+                # Same family: only legal when the implementer's own family is
+                # the ONLY review family left, which is the one-family
+                # fallback ("a missing review is worse than a same-family
+                # one"). GLM-5.3 is not a review family at all, so it can
+                # never be the fallback reviewer here.
                 self.assertEqual(len(config.REVIEW_FAMILIES), 1,
-                                 f"{model} lost its cross-family reviewer while "
-                                 f"{sorted(config.REVIEW_FAMILIES)} remain")
-                self.assertIn(fam, config.REVIEW_FAMILIES)
-                continue
-            self.assertNotEqual(rev, fam, f"{model} would self-review")
-            self.assertIn(rev, config.REVIEW_FAMILIES)
+                                 f"{model} self-reviews while "
+                                 f"{sorted(config.REVIEW_FAMILIES)} exist")
+                self.assertEqual(set(config.REVIEW_FAMILIES), {fam})
             # And the loader accepts the pairing it implies.
             t = {**BASIC, "model": model, "reviewer": rev}
             loaded = code_tasks.load_taskfile(taskfile([t]))
@@ -118,6 +119,8 @@ class LoadTaskfile(unittest.TestCase):
         emergency hatch for a hard-down reviewer backend — 2026-09-12..14
         and re-added 2026-09-15 — so pin it off here, whatever the operator's
         shell happens to export.)"""
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         bad = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         saved = config.ALLOW_SAME_FAMILY_REVIEW
         config.ALLOW_SAME_FAMILY_REVIEW = False
@@ -148,8 +151,13 @@ class LoadTaskfile(unittest.TestCase):
             # And the cross-family default is untouched underneath it:
             config.ALLOW_SAME_FAMILY_REVIEW = False
             pool = code_tasks._eligible_pr_reviewers(STRONGEST_FAMILY, None)
-            for m in pool:
-                self.assertNotEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+            if len(config.REVIEW_FAMILIES) > 1:
+                for m in pool:
+                    self.assertNotEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
+            else:
+                self.assertTrue(pool)
+                for m in pool:
+                    self.assertEqual(config.MODEL_FAMILY[m], STRONGEST_FAMILY)
         finally:
             config.ALLOW_SAME_FAMILY_REVIEW = saved
 
@@ -191,6 +199,27 @@ class LoadTaskfile(unittest.TestCase):
             self.assertIsNone(code_tasks._reviewer_or_none(t, model))
         if not checked:
             self.skipTest("every implementer on this profile has a reviewer")
+
+    def test_the_fail_closed_path_runs_on_a_roster_with_no_review_family(self):
+        """The same assertion, made REACHABLE on any real roster.
+
+        The test above selects implementers by asking whether
+        `cross_family_reviewer` returns None, so on every profile the fleet
+        actually runs it finds no candidate and SKIPS — which made
+        `_reviewer_for`'s fail-closed raise untestable: restoring its old
+        `or current` left the whole suite green (verified by mutation). Pin a
+        roster with ZERO review families instead, which is the only
+        configuration that reaches the raise now that the one-family fallback
+        covers the local profile.
+        """
+        t = {"reviewer": "deepseek"}
+        with mock.patch.object(config, "REVIEW_FAMILIES", {}), \
+                mock.patch.object(config, "PR_REVIEW_FAMILIES", set()):
+            for model in config.IMPLEMENTER_MODELS:
+                with self.assertRaises(ValueError) as cm:
+                    code_tasks._reviewer_for(t, model)
+                self.assertIn("no cross-family reviewer", str(cm.exception))
+                self.assertIsNone(code_tasks._reviewer_or_none(t, model))
 
     def test_a_reviewer_token_of_glm_remaps_off_glm(self):
         """The spec's remap path, asserted on a GLM-5.3 task.
@@ -444,17 +473,11 @@ class ResumePlanning(unittest.TestCase):
     def test_capability_failure_escalates_one_tier(self):
         p = self.plan([{"id": "t1", "status": "failed", "model": config.ESCALATION_PATH[0],
                         "error": "exhausted fix rounds"}])
-        # The higher tier must also be a seat whose work can be REVIEWED;
-        # GLM-5.3 became implement-only on 2026-09-28, so the local profile's
-        # only review family is a DeepSeek task's own family and the resume
-        # stays put (the task then ends as "exhausted escalation"). Studio,
-        # with five review families, moves up one tier as before.
-        nxt = config.ESCALATION_PATH[1]
-        self.assertEqual(
-            p["escalated_on_resume"],
-            {"t1": nxt} if config.cross_family_reviewer(nxt) else {},
-            "a capability failure at the entry tier moves up one when a "
-            "cross-family reviewer exists for the higher tier")
+        nxt = (config.ESCALATION_PATH[1]
+               if len(config.ESCALATION_PATH) > 1 else None)
+        self.assertEqual(p["escalated_on_resume"],
+                         {"t1": nxt} if nxt else {},
+                         "a capability failure at the entry tier moves up one")
 
     def test_killed_run_resumes_at_the_same_tier(self):
         """The regression that put four tasks on one scarce tier at once."""
@@ -1299,7 +1322,8 @@ class ReviewsAvoidTheModelThatWroteTheDiff(unittest.TestCase):
 
     def _pair(self):
         models = list(config.MODEL_FAMILY)
-        self.assertGreaterEqual(len(models), 2)
+        if len(models) < 2:
+            self.skipTest("needs two live models")
         return models[0], models[1]
 
     def test_the_implement_result_wins_over_the_assigned_seat(self):
@@ -1531,13 +1555,11 @@ class OffPathModelsCanStillEscalate(unittest.TestCase):
         the live example; it is retired, so _next_tier is checked directly."""
         self.assertEqual(code_tasks._next_tier("some-off-path-model"),
                          config.ESCALATION_PATH[0])
-        # Escalation also skips a seat whose work cannot be REVIEWED, so on
-        # the local one-review-family profile there is no higher destination
-        # and the task ends as "exhausted escalation" instead of dying on a
-        # reviewer that cannot be named. Studio escalates to it as before.
-        nxt = config.ESCALATION_PATH[1]
-        want = nxt if config.cross_family_reviewer(nxt) else None
-        self.assertEqual(code_tasks._next_tier(config.ESCALATION_PATH[0]), want)
+        if len(config.ESCALATION_PATH) > 1:
+            self.assertEqual(code_tasks._next_tier(config.ESCALATION_PATH[0]),
+                             config.ESCALATION_PATH[1])
+        else:
+            self.assertIsNone(code_tasks._next_tier(config.ESCALATION_PATH[0]))
         self.assertIsNone(code_tasks._next_tier(config.ESCALATION_PATH[-1]))
 
     def test_the_top_tier_still_does_not_escalate(self):
@@ -1909,7 +1931,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         idle = ENTRY
         usage = {m: config.driver_limit(m)
                  for m in DISTINCT_MODELS if m != idle}
-        self.assertTrue(usage, "needs at least one model to saturate")
+        if not usage:
+            self.skipTest("needs two live models to compare contention")
         picked = self._pick(usage)
         self.assertEqual(picked[0], idle,
                          f"{idle} is idle and must outrank the saturated "
@@ -1959,6 +1982,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         # The RULE, over the whole roster: whichever family implements, no
         # reviewer offered shares it. The family list is derived, not the
         # hard-coded kimi/glm/deepseek of the three-model fleet.
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         for fam in sorted(config.REVIEW_FAMILIES):
             picked = self._pick({}, impl_family=fam, n=2)
             self.assertTrue(picked, f"no reviewer at all for a {fam} implementer")
@@ -1969,6 +1994,8 @@ class ReviewerSelectionIsLoadAware(unittest.TestCase):
         """An implementer's family is excluded; when the roster still has
         another family, at least one reviewer must remain (the cross-review
         gate is thinner on a two-model fleet, never absent)."""
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         for fam in sorted(config.REVIEW_FAMILIES):
             self.assertGreaterEqual(
                 len(self._pick({}, impl_family=fam, n=len(config.REVIEW_FAMILIES))),
@@ -2541,6 +2568,8 @@ class ChoosingPullRequestReviewers(unittest.TestCase):
         # Pins the DEFAULT pairing; gates run with ARC_ALLOW_SAME_FAMILY_REVIEW=1
         # exported during a backend outage, and under that flag the pool
         # deliberately inverts to same-family only (config.py same-family hatch).
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         with mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
             for fam in sorted(config.REVIEW_FAMILIES):
                 for m in code_tasks._eligible_pr_reviewers(fam, None):
@@ -2567,12 +2596,16 @@ class ReviewerContention(unittest.TestCase):
     """
 
     def test_a_saturated_harness_makes_its_models_look_busy(self):
-        usage = {"GLM-5.3": 1, "harness:opencode": config.harness_limit("opencode")}
-        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+        model = config.ESCALATION_PATH[0]
+        harness = config.MODEL_HARNESS[model]
+        usage = {model: 1, f"harness:{harness}": config.harness_limit(harness)}
+        self.assertEqual(code_tasks._reviewer_pressure(model, usage), 1.0)
 
     def test_a_models_own_cap_still_counts_when_the_harness_is_free(self):
-        usage = {"GLM-5.3": config.driver_limit("GLM-5.3"), "harness:opencode": 0}
-        self.assertEqual(code_tasks._reviewer_pressure("GLM-5.3", usage), 1.0)
+        model = config.ESCALATION_PATH[0]
+        harness = config.MODEL_HARNESS[model]
+        usage = {model: config.driver_limit(model), f"harness:{harness}": 0}
+        self.assertEqual(code_tasks._reviewer_pressure(model, usage), 1.0)
 
     def test_a_model_on_a_free_harness_is_preferred_when_one_pool_is_full(self):
         # The point is HARNESS contention, not model strength: every model on
@@ -2653,6 +2686,58 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
     does not change, and a review is never skipped.
     """
 
+    def setUp(self):
+        # These tests are about `_select_reviewer`'s capacity/tier fallback,
+        # not about which families happen to be live, so they PIN a roster
+        # instead of skipping when GLM-5.3 is not one of them. The old
+        # `skipTest("GLM-5.3 left the roster")` meant all nine ran NOWHERE:
+        # the class was green on both profiles while covering nothing
+        # (verified by mutation — disabling the branch under test left it green).
+        #
+        # Two rules for the pin:
+        #   * every member must be resolvable by `driver_limit` on this
+        #     profile, because `_full` calls it for each name;
+        #   * "glm" must NOT be a review family here — several tests hand the
+        #     stale token "glm" to `_select_reviewer`, which only exercises the
+        #     fallback while that token is genuinely not review-capable.
+        self._roster = (config.REVIEW_FAMILIES, config.PR_REVIEW_FAMILIES)
+        pin = {}
+        for fam in ("deepseek", "openai", "cursor", "google", "anthropic"):
+            model = config.REVIEW_FAMILIES.get(fam)
+            if model and model in config.MODEL_ROLES:
+                pin[fam] = model
+            if len(pin) >= 2:
+                break
+        if "deepseek" not in pin:
+            pin["deepseek"] = "DeepSeek-V4.1-Flash"
+        if len(pin) < 2:
+            # Last resort on a profile with a single review family: name the
+            # other live implementer family itself, which `driver_limit`
+            # resolves. Never "glm" (see above).
+            for m in sorted(config.IMPLEMENTER_MODELS):
+                fam = config.MODEL_FAMILY.get(m)
+                if fam and fam != "glm" and fam not in pin:
+                    pin[fam] = m
+                    break
+        config.REVIEW_FAMILIES = pin
+        config.PR_REVIEW_FAMILIES = set(pin)
+        self.addCleanup(self._restore_roster)
+
+    def _pin_family(self, fam, model):
+        """Add a review family whose name the capacity tests reason about.
+
+        `_select_reviewer` prefers the frontier seats (anthropic, then openai)
+        when the planned reviewer is full, so a test asserting that fallback
+        needs those family NAMES in the roster even though it patches its own
+        stand-in MODELS in beside them.
+        """
+        config.REVIEW_FAMILIES = {**config.REVIEW_FAMILIES, fam: model}
+        config.PR_REVIEW_FAMILIES = set(config.REVIEW_FAMILIES)
+
+
+    def _restore_roster(self):
+        config.REVIEW_FAMILIES, config.PR_REVIEW_FAMILIES = self._roster
+
     def _full(self, *models):
         usage = {}
         for m in models:
@@ -2663,7 +2748,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         return usage
 
     def test_idle_arc_reviewers_prefer_deepseek_for_a_third_family(self):
-        ds = "DeepSeek-V4.1-Flash-thinking-max"
+        ds = "DeepSeek-V4.1-Flash"
         glm = "GLM-5.3"
         # A third-family implementer leaves the cross-family seats eligible.
         # GLM-5.3 is NOT one of them (implement-only since 2026-09-28), even
@@ -2765,7 +2850,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         """
         self._stand_in()
         model, reason = code_tasks._select_reviewer(
-            "glm", "DeepSeek-V4.1-Flash-thinking-max", None, {})
+            "glm", "DeepSeek-V4.1-Flash", None, {})
         self.assertEqual(model, "Idle-Strong")
         self.assertEqual(reason, "planned_full_fallback")
         self.assertNotEqual(config.MODEL_FAMILY.get(model), "deepseek")
@@ -2778,7 +2863,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         # the roles the other way round the planned reviewer IS the top tier
         # and there is nothing stronger to yield to.
         planned = config.REVIEW_FAMILIES[tok]
-        impl = "DeepSeek-V4.1-Flash-thinking-max"
+        impl = "DeepSeek-V4.1-Flash"
         usage = self._full(planned)
         model, reason = code_tasks._select_reviewer(tok, impl, None, usage)
         self.assertEqual(reason, "planned_full_fallback")
@@ -2794,7 +2879,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         planned = config.REVIEW_FAMILIES[tok]
         usage = {"harness:standin-wh": config.harness_limit("standin-wh")}
         model, reason = code_tasks._select_reviewer(
-            tok, "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+            tok, "DeepSeek-V4.1-Flash", None, usage)
         self.assertEqual(reason, "planned_full_fallback")
         self.assertNotEqual(model, planned)
         self.assertGreaterEqual(code_tasks._tier_rank(model),
@@ -2806,7 +2891,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         planned = config.REVIEW_FAMILIES[tok]
         usage = self._full(*config.REVIEW_FAMILIES.values())
         model, reason = code_tasks._select_reviewer(
-            tok, "DeepSeek-V4.1-Flash-thinking-max", None, usage)
+            tok, "DeepSeek-V4.1-Flash", None, usage)
         self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
 
     def test_an_idle_same_family_model_is_never_the_fallback(self):
@@ -2814,7 +2899,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         # No other cross-family seat free: the planned reviewer is kept, so
         # the only thing being checked is that it is not the implementer's
         # own family (Claude's).
-        impl = "Claude-Opus-5.5"
+        impl = "Claude-Sonnet-5.5"
         planned = config.REVIEW_FAMILIES[tok]
         others = [m for fam, m in config.REVIEW_FAMILIES.items()
                   if fam != "anthropic"]
@@ -2833,7 +2918,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         weaker = config.REVIEW_FAMILIES[tok]
         busy = [m for m in config.REVIEW_FAMILIES.values() if m != weaker]
         model, reason = code_tasks._select_reviewer(
-            "deepseek", "Claude-Opus-5.5", None, self._full(*busy))
+            "deepseek", "Claude-Sonnet-5.5", None, self._full(*busy))
         self.assertEqual((model, reason), (planned, "planned_full_no_alternative"))
         self.assertLess(code_tasks._tier_rank(weaker), code_tasks._tier_rank(planned))
 
@@ -2849,6 +2934,12 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
             "Agy-X": ("google", "agy", 3),
             "Claude-X": ("anthropic", "claude", 2),
         }
+        # The frontier family NAMES must be in the roster for the preference
+        # order this test asserts (Claude first, then GPT-6); the MODELS stay
+        # the stand-ins patched just below.
+        for _m, (_fam, _h, _c) in seats.items():
+            if _fam not in config.REVIEW_FAMILIES:
+                self._pin_family(_fam, _m)
         top = config.TIER_ORDER[-1]
         real_dl = config.driver_limit
         real_hl = config.harness_limit
@@ -2893,8 +2984,13 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
         usage["Claude-X"] = 0
         usage["usage_limit:agy"] = 1
         model, reason = code_tasks._select_reviewer(
-            tok, "DeepSeek-V4.1-Flash-thinking-max", None, usage)
-        self.assertEqual(reason, "planned_full_fallback")
+            tok, "DeepSeek-V4.1-Flash", None, usage)
+        # The frontier seats are consulted FIRST (frontier_review) and only
+        # then the planned-full path, so the reason depends on whether a
+        # frontier seat looks idle. The ASSERTION THAT MATTERS is the choice:
+        # an idle frontier seat is taken, in the documented order (Claude
+        # first), and never the implementer's own family.
+        self.assertIn(reason, ("frontier_review", "planned_full_fallback"))
         self.assertEqual(model, "Claude-X")
         self.assertNotEqual(config.MODEL_FAMILY[model], "deepseek")
 
@@ -2920,7 +3016,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
 
         ts = code_tasks.load_taskfile(taskfile([{
             "id": "t1", "title": "T1", "prompt": "do it", "verify_cmd": "true",
-            "model": "DeepSeek-V4.1-Flash-thinking-max", "reviewer": tok}]))
+            "model": "DeepSeek-V4.1-Flash", "reviewer": tok}]))
         orig = code_tasks._driver
         code_tasks._driver = lambda model, role, pol: _Boom(model)
         wt = tempfile.mkdtemp(prefix="arc-rev-fallback-")
@@ -2941,7 +3037,7 @@ class PreMergeReviewFallsBackWhenFull(unittest.TestCase):
                     out = asyncio.run(g.nodes["review_t1"].fn(
                         {"results": {"alloc_t1": {"worktree": wt},
                                      "implement_t1": {"model":
-                                         "DeepSeek-V4.1-Flash-thinking-max"}},
+                                         "DeepSeek-V4.1-Flash"}},
                          "runs": {}}))
                 finally:
                     code_tasks.gitstore.diff_full, code_tasks.graft.blast = g_diff, g_blast
@@ -3716,6 +3812,28 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
         ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": "gpt-oss-120b"}]))
         self.assertEqual(ts["tasks"]["t1"]["model"], config.ESCALATION_PATH[0])
 
+    def test_the_renamed_studio_seats_map_within_their_own_family(self):
+        """A retired seat's successor is the SAME FAMILY, on every profile.
+
+        Mapping by HARNESS looks right on studio — Claude runs `claude`, GPT
+        runs `codex` — and breaks on ARC_FLEET=studio-api, where every seat
+        runs through `opencode`: the "codex" lookup finds nothing, falls
+        through to the strongest live tier, and maps GPT-6-Sol onto
+        Claude-Sonnet-5.5 — one vendor's work onto another's plan. Reproduced
+        with `live_model('GPT-6-Sol')` before the fix; this runs in a real
+        studio-api interpreter, the only roster that shows it.
+        """
+        for old, fam in (("GPT-6-Sol", "openai"),
+                         ("Claude-Opus-5.5", "anthropic")):
+            with self.subTest(model=old):
+                for fleet in ("studio", "studio-api"):
+                    out = _studio_stdout(
+                        "import code_tasks, config\n"
+                        f"print(config.MODEL_FAMILY[code_tasks.live_model({old!r})])\n",
+                        ARC_FLEET=fleet)
+                    self.assertEqual(out.strip(), fam,
+                                     f"{old} on {fleet} left its family")
+
     def test_a_model_that_was_never_real_is_still_rejected(self):
         with self.assertRaises(ValueError):
             code_tasks.load_taskfile(taskfile([{**BASIC, "model": "GPT-9-Ultra"}]))
@@ -3751,7 +3869,20 @@ class RetiredModelsAreRemappedNotRejected(unittest.TestCase):
                         {**BASIC, "model": old, "reviewer": same_family}]))
                 task = ts["tasks"]["t1"]
                 self.assertEqual(task["model"], target)
-                self.assertNotEqual(task["reviewer"], same_family)
+                if len(config.REVIEW_FAMILIES) > 1:
+                    self.assertNotEqual(task["reviewer"], same_family)
+                else:
+                    self.assertEqual(task["reviewer"], same_family)
+
+    def test_a_retired_row_model_still_names_a_live_family(self):
+        for old in ("GLM-5.3", "DeepSeek-V4.1-Flash-thinking-max"):
+            with self.subTest(model=old):
+                live = code_tasks.live_model(old)
+                self.assertIn(live, config.IMPLEMENTER_MODELS)
+                self.assertEqual(code_tasks.implementer_family(old),
+                                 config.MODEL_FAMILY[live])
+                self.assertEqual(code_tasks._avoid_implementer(old),
+                                 {config.MODEL_FAMILY[live]})
 
 
 class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
@@ -3777,9 +3908,15 @@ class RetiredModelRemapKeepsCrossReview(unittest.TestCase):
             ts = code_tasks.load_taskfile(taskfile([{**BASIC, "model": retired, "reviewer": same}]))
         t = ts["tasks"]["t1"]
         self.assertEqual(t["model"], target)
-        self.assertNotEqual(cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"]), same)
+        got = cfg.MODEL_FAMILY.get(t["reviewer"], t["reviewer"])
+        if len(cfg.REVIEW_FAMILIES) > 1:
+            self.assertNotEqual(got, same)
+        else:
+            self.assertEqual(got, same)
 
     def test_a_live_model_with_its_own_family_as_reviewer_is_still_rejected(self):
+        if len(config.REVIEW_FAMILIES) < 2:
+            self.skipTest("one review family; it reviews its own work")
         same = {**BASIC, "model": STRONGEST, "reviewer": STRONGEST_FAMILY}
         # Pins the default rejection; the same-family capacity hatch (exported
         # during gate runs in an outage) makes the loader accept this pairing.
@@ -4618,25 +4755,26 @@ print(text)
         self.assertNotIn("The hardest tasks prefer", body)
         hard_line = next(line for line in body.splitlines()
                          if "hard tasks that need" in line)
-        self.assertNotIn("Claude-Opus-5.5", hard_line)
+        self.assertNotIn("Claude-Sonnet-5.5", hard_line)
         self.assertNotIn(openai, hard_line)
         self.assertIn("Cursor-Grok-4.7", hard_line)
-        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", hard_line)
+        self.assertIn("DeepSeek-V4.1-Flash", hard_line)
+        self.assertNotIn("DeepSeek-V4.1-Flash-thinking-max", hard_line)
         self.assertIn(
-            "Spread hard implementation across DeepSeek-V4.1-Flash-thinking-max "
+            "Spread hard implementation across DeepSeek-V4.1-Flash "
             "and Cursor-Grok-4.7 and Antigravity-Gemini", body)
         self.assertIn(
-            "Claude-Opus-5.5 implements ONLY 3D asset design", body)
+            "Claude-Sonnet-5.5 implements ONLY 3D asset design", body)
         self.assertIn(
-            f"Initial planning is Claude-Opus-5.5, then {openai}", body)
-        self.assertIn("prefer Claude-Opus-5.5, then", body)
+            f"Initial planning is Claude-Sonnet-5.5, then {openai}", body)
+        self.assertIn("prefer Claude-Sonnet-5.5, then", body)
         self.assertIn(f"{openai} has a spent plan window. Do not assign it.", body)
-        self.assertIn("Claude-Opus-5.5 has a spent plan window. Do not assign it.",
+        self.assertIn("Claude-Sonnet-5.5 has a spent plan window. Do not assign it.",
                       body)
         self.assertNotIn("is the fleet's strongest", text)
         self.assertIn("reviewed by", body)
         self.assertIn(f"codex/{openai}", closed)
-        self.assertIn("claude/Claude-Opus-5.5", closed)
+        self.assertIn("claude/Claude-Sonnet-5.5", closed)
         self.assertNotIn("Cursor-Grok-4.7", closed)
         self.assertNotIn("cursor/", closed)
         self.assertIn("medium tasks", body)
@@ -4670,7 +4808,8 @@ print(text)
         self.assertIn("never plan it as the only task in a graph", text)
         self.assertIn("Name GLM-5.3 ONLY for an ADDITIONAL task", text)
         self.assertNotIn("glm", config.REVIEW_FAMILIES)
-        self.assertIn("DeepSeek-V4.1-Flash-thinking-max", text)
+        self.assertIn("DeepSeek-V4.1-Flash", text)
+        self.assertNotIn("thinking-max", text)
         self.assertNotIn("Cursor-Grok-4.7", text)
         self.assertNotIn("Antigravity-Gemini", text)
         self.assertNotIn("Spread hard implementation", text)
@@ -4690,6 +4829,15 @@ print(text)
         model, reason = code_tasks._select_reviewer(tok, "GLM-5.3", None, {})
         self.assertEqual((model, reason), (config.REVIEW_FAMILIES[tok], "planned"))
 
+    def test_studio_planning_prefers_sonnet_while_its_window_is_open(self):
+        script = """
+import drivers
+drivers.refresh_usage_blocks = lambda *a, **k: None
+drivers._usage_blocked_until.clear()
+print(drivers.planning_model())
+"""
+        self.assertEqual(_studio_stdout(script).strip(), "Claude-Sonnet-5.5")
+
     def test_studio_planning_uses_gpt_when_claude_is_closed(self):
         script = """
 import drivers
@@ -4706,16 +4854,16 @@ print(drivers.planning_model())
 import code_tasks, drivers
 drivers.refresh_usage_blocks = lambda *a, **k: None
 drivers._usage_blocked_until.clear()
-model, reason = code_tasks._select_reviewer("glm", "GLM-5.3", None, {})
+model, reason = code_tasks._select_reviewer("deepseek", "DeepSeek-V4.1-Flash", None, {})
 print(model)
 print(reason)
 drivers._usage_blocked_until["claude"] = 9e9
-model, reason = code_tasks._select_reviewer("glm", "GLM-5.3", None, {})
+model, reason = code_tasks._select_reviewer("deepseek", "DeepSeek-V4.1-Flash", None, {})
 print(model)
 print(reason)
 """
         lines = _studio_stdout(script).strip().splitlines()
-        self.assertEqual(lines[0], "Claude-Opus-5.5")
+        self.assertEqual(lines[0], "Claude-Sonnet-5.5")
         self.assertEqual(lines[1], "frontier_review")
         self.assertTrue(lines[2].startswith("GPT-6"), lines)
         self.assertEqual(lines[3], "frontier_review")
@@ -4857,15 +5005,11 @@ class EscalationSkipsSpentPlanWindows(unittest.TestCase):
         with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
             self.assertEqual(code_tasks._next_tier_m("some-off-path-model"),
                              config.ESCALATION_PATH[0])
-            # The next tier up must also be one whose work can be REVIEWED:
-            # the local profile has ONE review family since GLM-5.3 became
-            # implement-only, so escalating onto DeepSeek is skipped and there
-            # is nowhere higher to go. A multi-family profile (studio) escalates
-            # to it as before.
-            nxt = config.ESCALATION_PATH[1]
-            want = nxt if config.cross_family_reviewer(nxt) else None
-            self.assertEqual(code_tasks._next_tier_m(config.ESCALATION_PATH[0]),
-                             want)
+            if len(config.ESCALATION_PATH) > 1:
+                self.assertEqual(code_tasks._next_tier_m(config.ESCALATION_PATH[0]),
+                                 config.ESCALATION_PATH[1])
+            else:
+                self.assertIsNone(code_tasks._next_tier_m(config.ESCALATION_PATH[0]))
             self.assertIsNone(code_tasks._next_tier_m(config.ESCALATION_PATH[-1]))
 
     def test_the_capacity_hatch_restores_the_escalation_destination(self):

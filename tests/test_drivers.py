@@ -768,8 +768,7 @@ class ConfigErrorIsNotRetried(unittest.TestCase):
         """require_api_key raises inside extra_env, before the spawn: the
         attempt is reported once as a config fault and nothing is retried."""
         async def go():
-            drv = drivers.ReasonixDriver(
-                "DeepSeek-V4.1-Flash-thinking-max", "implementer")
+            drv = drivers.ReasonixDriver(STRONGEST, "implementer")
             drivers._semaphores.pop(drv.model, None)
             with capture_events() as ev:
                 with self.assertRaises(config.ConfigError):

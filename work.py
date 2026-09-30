@@ -136,7 +136,7 @@ def build_round_graph(pool, store, roles, meta, *, questions=None, seeds=None):
         async def one(qi, fam):
             q = qs[qi]
             ev = research.get(qi, {}).get("text", "(no web research)")
-            critics = [f for f in FAMILY_ORDER if f != fam]
+            critics = [f for f in FAMILY_ORDER if f != fam] or [fam]
             cf = critics[(base + qi) % len(critics)]
             prompt = (
                 "You are a skeptical fact-checker. Score the answer below against the web evidence.\n"

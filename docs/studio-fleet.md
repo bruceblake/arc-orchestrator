@@ -181,9 +181,9 @@ capability question is answered by the roster at call time.
 the unlimited ARC seats: `deepseek`, then the subscription review families.
 GLM-5.3 left the review pool on 2026-09-28 (implement-only), so on the
 two-family local
-fleet only an implementer whose family is not `deepseek` has a reviewer at
-all — GLM-5.3's work goes to DeepSeek, and a DeepSeek implementer has none;
-its task does not run locally. On the studio
+fleet there is one review family left, so GLM-5.3's work goes to DeepSeek and
+a DeepSeek implementer falls back to deepseek reviewing its own work — a
+missing review is worse than a same-family one. On the studio
 fleet, the other subscription families follow the ARC seats, with
 `anthropic` last so Claude's smaller plan stays available for planning,
 final escalation and hard reviews.

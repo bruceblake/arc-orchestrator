@@ -29,6 +29,9 @@ class TheSuiteIsTwoTierRegardlessOfOperatorEnv(unittest.TestCase):
         # or, in test_workqueue's lease test, into false failures.
         self.assertNotEqual(ENTRY, STRONGEST)
         self.assertGreaterEqual(len(config.ESCALATION_PATH), 2)
+        self.assertEqual(ENTRY, config.ESCALATION_PATH[0])
+        self.assertEqual(STRONGEST, config.ESCALATION_PATH[-1])
+        self.assertNotIn("glm", config.REVIEW_FAMILIES)
         self.assertIn("deepseek", config.REVIEW_FAMILIES)
         # GLM-5.3 is NOT a review family since 2026-09-28 (implement-only).
         # This suite runs on the DEFAULT local fleet, where deepseek is
@@ -43,10 +46,11 @@ class TheSuiteIsTwoTierRegardlessOfOperatorEnv(unittest.TestCase):
         # inherits the hatch's env. A child importing helpers the way the
         # suite does must still see a two-tier fleet.
         code = (
-            "import helpers\n"
-            "assert helpers.ENTRY != helpers.STRONGEST, (\n"
+            "import helpers, config\n"
+            "assert helpers.ENTRY == config.ESCALATION_PATH[0], (\n"
             "    'ARC_ESCALATION_PATH collapsed the fleet: '\n"
             "    + repr(helpers.ENTRY))\n"
+            "assert 'glm' not in config.REVIEW_FAMILIES\n"
             "print('ok')\n"
         )
         env = {**os.environ, "ARC_ESCALATION_PATH": STRONGEST}

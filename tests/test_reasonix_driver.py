@@ -20,7 +20,7 @@ import code_tasks
 import config
 import drivers
 
-DS = "DeepSeek-V4.1-Flash-thinking-max"
+DS = "DeepSeek-V4.1-Flash"
 
 STREAM = "\n".join([
     '{"kind":"turn_started","messageId":"01A"}',
@@ -87,7 +87,7 @@ class Argv(unittest.TestCase):
         self.assertTrue(a[0].endswith("reasonix"))
         self.assertEqual(a[1], "run")
         self.assertEqual(drivers._reasonix_provider(DS),
-                         "arc-deepseek-v4-1-flash-thinking-max")
+                         "arc-deepseek-v4-1-flash")
         self.assertEqual(a[a.index("--model") + 1],
                          f"{drivers._reasonix_provider(DS)}/{DS}")
         self.assertEqual(a[a.index("--permission-mode") + 1], "bypassPermissions")
@@ -147,18 +147,14 @@ class FleetHome(unittest.TestCase):
         # DeepSeek compacted at ~52K of its 512K and the loop-guard refused
         # the model's writes mid-task (fleet-ops, 2026-09-13).
         cfg = (Path(drivers.reasonix_fleet_home()) / "config.toml").read_text()
-        ds, glm = drivers._reasonix_provider(DS), drivers._reasonix_provider("GLM-5.3")
-        self.assertNotEqual(ds, glm)
+        ds = drivers._reasonix_provider(DS)
         self.assertIn(f'name           = "{ds}"', cfg)
-        self.assertIn(f'name           = "{glm}"', cfg)
         self.assertIn(f'default_model = "{ds}/{DS}"', cfg)
         self.assertIn(f"context_window = {config.reasonix_context(DS)}", cfg)
-        self.assertIn(f"context_window = {config.reasonix_context('GLM-5.3')}", cfg)
-        self.assertEqual(config.reasonix_context(DS), 524288,
-                         "ARC docs 2026-09-12: every V4.1-Flash variant is 512K")
+        self.assertEqual(config.reasonix_context(DS), 1048576,
+                         "ARC docs 2026-09-29: every V4.1-Flash variant is 1M")
         self.assertEqual(config.reasonix_context("DeepSeek-V4.1-Flash-thinking-low"),
-                         524288, "the prefix covers every thinking variant")
-        self.assertEqual(config.reasonix_context("GLM-5.3"), 131072)
+                         1048576, "the prefix covers every thinking variant")
         self.assertIn(f"bash_timeout_seconds = {int(config.GATE_TIMEOUT)}", cfg,
                       "an implementer's own ./check.sh must survive the harness bash")
 
@@ -178,7 +174,14 @@ class FleetHome(unittest.TestCase):
         self.assertEqual(env["REASONIX_HOME"], str(config.REASONIX_FLEET_HOME))
         self.assertEqual(env["REASONIX_TELEMETRY"], "off")
         self.assertEqual(env["REASONIX_WORKSPACE_ROOT"], "/x/wt")
-        self.assertEqual(drivers.OpencodeDriver("GLM-5.3", "implementer").extra_env("/x"), {})
+        # GLM-5.3 stays a live IMPLEMENTER on this branch (the base branch
+        # retired it); what it may no longer do is REVIEW, which is the
+        # operator decision of 2026-09-28 this branch carries.
+        drivers.OpencodeDriver("GLM-5.3", "implementer")
+        with self.assertRaises(ValueError):
+            drivers.OpencodeDriver("GLM-5.3", "reviewer")
+        with self.assertRaises(ValueError):
+            drivers.OpencodeDriver("GLM-5.3", "pr_reviewer")
 
 
 class Transcript(unittest.TestCase):

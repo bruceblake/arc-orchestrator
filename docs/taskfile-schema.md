@@ -171,14 +171,17 @@ the implementer:
 
 | Implementer | Allowed `reviewer` |
 |---|---|
-| `DeepSeek-V4.1-Flash-thinking-max` | `"openai"` (studio), then `"cursor"`, `"google"`, `"anthropic"` — **none on the local profile** |
+| `DeepSeek-V4.1-Flash` | `"deepseek"` (the one-family fallback on local), `"openai"` / `"cursor"` / `"google"` / `"anthropic"` on studio |
 | `GLM-5.3` | `"deepseek"` |
 
 With GLM-5.3 implement-only (operator decision 2026-09-28) the pairing is no
-longer symmetric: a GLM implementer always has a reviewer (`deepseek`), while
-a DeepSeek implementer has one only on a profile that fields another review
-family — locally there is none, and a DeepSeek-only local taskfile does not
-run. On studio the scheduler still load-balances PR reviewers at run time
+longer symmetric: a GLM implementer is reviewed by `deepseek`. A DeepSeek
+implementer is reviewed by `openai` (then `cursor`, `google`, `anthropic`) on
+studio; on the LOCAL profile only one review family is left, so
+`config.cross_family_reviewer` falls back to it and deepseek reviews its own
+work — a missing review is worse than a same-family one. See the
+[cross-review matrix](model-tiers.md#cross-review-matrix). On studio the
+scheduler still load-balances PR reviewers at run time
 (`_reviewer_pressure`).
 A taskfile that names a reviewer family which is not live today is
 remapped by `config.cross_family_reviewer` (code_tasks.py:94), not rejected —
@@ -342,9 +345,9 @@ Not checked by the loader (know where these live):
 
 ## 4. Complete example
 
-One hard task first (`notes-schema`, DeepSeek-V4.1-Flash-thinking-max
+One hard task first (`notes-schema`, DeepSeek-V4.1-Flash
 implements, reviewed by the next live review family — `openai` on the studio
-roster, and nothing on the local profile), then three tasks fanning out in
+roster, and deepseek itself on the local profile), then three tasks fanning out in
 parallel once it
 merges — all medium, all implemented by GLM-5.3 and reviewed by deepseek —
 with disjoint `files_hint` (deepseek reviews the GLM work; a DeepSeek task
@@ -360,7 +363,7 @@ takes the next live review family instead):
         "id": "notes-schema",
         "title": "Note model and JSON persistence",
         "prompt": "This repo is a small note-taking CLI. Create the package dir src/notes/ (with an empty __init__.py) and src/notes/schema.py defining: a Note dataclass with fields id: str, text: str, created: str (ISO-8601); load_notes(path) -> list[Note] that reads a JSON array of note objects (missing file returns []); save_notes(path, notes) that writes the same shape back. Acceptance: python -m py_compile passes and both functions exist with exactly these names. Do not add a CLI, tests, or touch any other file.",
-        "model": "DeepSeek-V4.1-Flash-thinking-max",
+        "model": "DeepSeek-V4.1-Flash",
         "reviewer": "<cross-family>",
         "verify_cmd": "python -m py_compile src/notes/schema.py && grep -q 'def load_notes' src/notes/schema.py && grep -q 'def save_notes' src/notes/schema.py",
         "files_hint": ["src/notes/__init__.py", "src/notes/schema.py"],
@@ -370,8 +373,8 @@ takes the next live review family instead):
         "id": "notes-cli",
         "title": "add and list CLI commands",
         "prompt": "src/notes/schema.py already exists (merged by a previous task) and provides Note, load_notes(path), save_notes(path, notes) — read it first. Create src/notes/cli.py with an argparse CLI runnable as python -m notes.cli: subcommand add \"<text>\" appends a Note (id=str(uuid4()), created=now ISO-8601) using save_notes to notes.json in the current directory; subcommand list prints one '<created>  <text>' line per note via load_notes. Acceptance: py_compile passes and both subcommands are registered. Do not modify schema.py or any other file.",
-        "model": "GLM-5.3",
-        "reviewer": "deepseek",
+        "model": "DeepSeek-V4.1-Flash",
+        "reviewer": "<cross-family>",
         "verify_cmd": "python -m py_compile src/notes/cli.py && grep -q '\"add\"' src/notes/cli.py && grep -q '\"list\"' src/notes/cli.py",
         "files_hint": ["src/notes/cli.py"],
         "deps": ["notes-schema"]
@@ -380,8 +383,8 @@ takes the next live review family instead):
         "id": "notes-export",
         "title": "Markdown and JSON export module",
         "prompt": "src/notes/schema.py already exists (merged by a previous task) and provides Note and load_notes — read it first. Create src/notes/export.py with export_notes(notes: list[Note], fmt: str) -> str: fmt='md' returns one '- <created> <text>' bullet per note; fmt='json' returns a JSON array of {id, text, created}; any other fmt raises ValueError. Acceptance: py_compile passes, the function exists with that signature, unknown fmt raises. Do not modify schema.py, cli.py, or any other file.",
-        "model": "GLM-5.3",
-        "reviewer": "deepseek",
+        "model": "DeepSeek-V4.1-Flash",
+        "reviewer": "<cross-family>",
         "verify_cmd": "python -m py_compile src/notes/export.py && grep -q 'def export_notes' src/notes/export.py",
         "files_hint": ["src/notes/export.py"],
         "deps": ["notes-schema"]
@@ -390,8 +393,8 @@ takes the next live review family instead):
         "id": "usage-docs",
         "title": "README usage section",
         "prompt": "Add a '## Usage' section to README.md (create the file if missing) documenting two commands, each on its own code-formatted line: python -m notes.cli add \"buy milk\" and python -m notes.cli list. The CLI itself is being built in parallel in src/notes/cli.py — do NOT create, modify, or reference-check any source file; only edit README.md. Acceptance: README.md contains both command lines verbatim.",
-        "model": "GLM-5.3",
-        "reviewer": "deepseek",
+        "model": "DeepSeek-V4.1-Flash",
+        "reviewer": "<cross-family>",
         "verify_cmd": "grep -q 'notes.cli add' README.md && grep -q 'notes.cli list' README.md",
         "files_hint": ["README.md"],
         "deps": ["notes-schema"]

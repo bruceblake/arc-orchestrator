@@ -45,6 +45,22 @@ log = logging.getLogger("code-tasks")
 
 
 
+def _successor_in_family(family):
+    """A callable mapping a retired seat onto the live seat of `family`.
+
+    Keyed on the FAMILY, not the harness: on ARC_FLEET=studio-api every seat
+    runs through `opencode`, so a harness lookup cannot tell GPT from Claude —
+    it found no "codex" and mapped GPT-6-Sol onto Claude-Sonnet-5.5 (verified
+    before this fix). Falls back to the strongest live tier only if the family
+    has no seat at all: a retired name must ALWAYS land somewhere.
+    """
+    def resolve():
+        return next((m for m in config.ESCALATION_PATH
+                     if config.MODEL_FAMILY.get(m) == family),
+                    config.ESCALATION_PATH[-1])
+    return resolve
+
+
 # Where a retired model's work goes now. Callables so they read the roster at
 # call time, not at import (the roster is dated).
 RETIRED_MODELS = {
@@ -71,7 +87,61 @@ RETIRED_MODELS = {
     # runnable after the active Studio profile moved to Claude and Codex.
     "Cursor-Grok-4.7":   lambda: config.ESCALATION_PATH[-1],
     "Antigravity-Gemini": lambda: config.ESCALATION_PATH[-1],
+    # The two seats the 2026-09-29 rename REPLACED: Claude-Opus-5.5 ->
+    # Claude-Sonnet-5.5, GPT-6-Sol -> GPT-6.1-Sol. The base branch renamed
+    # them and added the entries above for the same stated purpose ("keep
+    # existing taskfiles runnable") but not these two, so every taskfile
+    # written before the rename stopped loading with "must be an implementer".
+    # Its own check.sh fails 8 ambient ~/tasks/*.json for exactly this reason
+    # on a PRISTINE tree (verified).
+    #
+    # Map by FAMILY, never by harness. On ARC_FLEET=studio-api every seat runs
+    # through `opencode`, so a harness lookup finds no "codex" and falls
+    # through to the default — mapping GPT-6-Sol onto Claude-Sonnet-5.5, i.e.
+    # one vendor's work onto another's plan (verified: live_model('GPT-6-Sol')
+    # returned 'Claude-Sonnet-5.5' on studio-api before this fix). The FAMILY
+    # is what actually identifies the successor and is stable across profiles,
+    # because a harness is an implementation detail of the profile.
+    "Claude-Opus-5.5":   _successor_in_family("anthropic"),
+    "GPT-6-Sol":         _successor_in_family("openai"),
+    # GLM-5.3 is deliberately NOT here on this branch. The base branch listed
+    # it as retired on 2026-09-29 (it deleted the roster row); this branch
+    # KEEPS that row as the implement-only parallel seat, so remapping the
+    # name would silently move every GLM task onto DeepSeek and make the
+    # plan's "GLM-5.3 for an additional deps: [] task" unplannable. A live
+    # model must never appear in a retirement table.
+    # thinking-max is reasoning_effort max. The operator moved the fleet to
+    # the high variant the same day (docs.arc.vt.edu: DeepSeek-V4.1-Flash).
+    "DeepSeek-V4.1-Flash-thinking-max": lambda: next(
+        (m for m in config.ESCALATION_PATH if m.startswith("DeepSeek")),
+        config.ESCALATION_PATH[0]),
 }
+
+
+def live_model(model):
+    """A name a driver can be built for.
+
+    ``load_taskfile`` remaps a retired name in the taskfile. A ``code_tasks``
+    row written before the retirement still carries the old name, and resume
+    reads that row. Review then subscripts ``MODEL_FAMILY`` with it and
+    KeyErrors, and a re-implement dies in ``driver_for`` before the remap
+    can run.
+    """
+    if model in RETIRED_MODELS:
+        return RETIRED_MODELS[model]() or (
+            config.ESCALATION_PATH[0] if config.ESCALATION_PATH else model)
+    return model
+
+
+def implementer_family(model):
+    """The family reviewers must avoid, after a retirement remap."""
+    return config.MODEL_FAMILY.get(live_model(model))
+
+
+def _avoid_implementer(model):
+    """``avoid_families`` for a review run. Empty when the name is unknown."""
+    fam = implementer_family(model)
+    return {fam} if fam else set()
 
 
 def load_taskfile(path, policy=None):
@@ -167,10 +237,14 @@ def load_taskfile(path, policy=None):
             if flipped is not None:
                 reviewer, rev_family = flipped, config.MODEL_FAMILY.get(flipped, flipped)
         if review_on and not allow_self and impl_family == rev_family:
-            raise ValueError(
-                f"task {tid}: reviewer {reviewer!r} must not be the harness that "
-                f"implemented ({model}); use another one"
-            )
+            # Same-family is rejected while another review family exists.
+            # After GLM left (2026-09-29) the local profile has only DeepSeek,
+            # and that family reviews its own work rather than failing the load.
+            if len(config.REVIEW_FAMILIES) > 1:
+                raise ValueError(
+                    f"task {tid}: reviewer {reviewer!r} must not be the harness that "
+                    f"implemented ({model}); use another one"
+                )
         tasks[tid] = {
             "id": tid,
             "title": t.get("title", tid),
@@ -709,7 +783,8 @@ def _plan_window_pairs(blocked):
             grouped.setdefault(harness, set()).add(model)
     known = {
         "codex": getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol"),
-        "claude": "Claude-Opus-5.5",
+        "claude": next((m for m, fam in config.MODEL_FAMILY.items()
+                        if fam == "anthropic"), "Claude-Sonnet-5.5"),
         "cursor": "Cursor-Grok-4.7",
         "agy": "Antigravity-Gemini",
     }
@@ -771,8 +846,11 @@ def _eligible_pr_reviewers(impl_fam, pol):
         # Default: cross-family only. Under ARC_ALLOW_SAME_FAMILY_REVIEW the
         # cross-family reviewer is the thing that is down, so the pool
         # INVERTS to only the implementer's own family.
+        # One review family reviews its own work. Skipping it here left
+        # the local fleet, after GLM left, with an empty PR pool.
+        only_family = len(config.REVIEW_FAMILIES) == 1
         same = config.MODEL_FAMILY.get(m) == impl_fam
-        if same != config.ALLOW_SAME_FAMILY_REVIEW:
+        if not only_family and same != config.ALLOW_SAME_FAMILY_REVIEW:
             continue
         try:
             _driver(m, "pr_reviewer", pol)
@@ -992,12 +1070,15 @@ def _next_tier_m(model):
         # them spends the windows reserved for that work.
         if config.MODEL_FAMILY.get(cand) in ("anthropic", "openai"):
             continue
-        # A seat whose work NOBODY can review is not a destination either:
-        # since GLM-5.3 became implement-only (2026-09-28) the local profile
-        # has ONE review family, so escalating a GLM task onto DeepSeek would
-        # produce a pairing the loader — and Rule 2 — refuse. Skipping it here
-        # lets the escalation gate report a failed task instead of the run
-        # dying on a reviewer that cannot be named.
+        # A seat whose work NOBODY can review is not a destination either.
+        # `cross_family_reviewer` answers None only for a fleet with NO review
+        # family at all — since GLM-5.3 became implement-only (2026-09-28) the
+        # local profile has ONE family, and the one-family fallback covers it
+        # (deepseek reviews its own work), so this skip is inert on local
+        # (measured: `_next_tier_m("GLM-5.3")` returns DeepSeek-V4.1-Flash
+        # there). Where it does fire, it lets the escalation gate report a
+        # failed task instead of the run dying on a reviewer that cannot be
+        # named.
         # `ALLOW_SAME_FAMILY_REVIEW` stands this down, exactly as the twin
         # filter in `drivers._faster_seat_than_glm` does: the hatch exists to
         # permit such a pairing when the fleet is down to one review family,
@@ -1036,8 +1117,9 @@ def _reviewer_for(t, model):
     nxt = config.cross_family_reviewer(model)
     if nxt:
         return nxt
-    # No cross-family reviewer exists for this model on this profile (the local
-    # two-model fleet, since GLM-5.3 became implement-only on 2026-09-28).
+    # No reviewer can be named for this model at all: `cross_family_reviewer`
+    # answers None only for a fleet with NO review family (the one-family
+    # fallback covers the local profile, where deepseek reviews its own work).
     # Returning `current` — the implementer's own family — is a SAME-FAMILY
     # review, which Rule 2 forbids and which `load_taskfile` would have
     # rejected. Escalation (`escalate`) and a yield onto the substitute never
@@ -2011,8 +2093,10 @@ def _frontier_reviewer(impl_model, pol, usage, blocked):
     if pol:
         return None
     impl_fam = config.MODEL_FAMILY.get(impl_model)
-    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")
-    for m in ("Claude-Opus-5.5", gpt):
+    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6.1-Sol")
+    claude = next((m for m, fam in config.MODEL_FAMILY.items()
+                   if fam == "anthropic"), None)
+    for m in (claude, gpt):
         if m not in config.MODEL_ROLES or not config.model_may(m, "reviewer"):
             continue
         if config.MODEL_FAMILY.get(m) == impl_fam:
@@ -2961,15 +3045,20 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         """
         t = tasks[tid]
         r = prior.get(tid)
+        named = (r or {}).get("model") or t["model"]
         if not r or not escalate_on:
-            return t["model"]
-        if r["status"] == "failed" and _is_capability_failure(r.get("error")):
-            nxt = _next_tier(r.get("model") or t["model"])
+            return live_model(t["model"])
+        # A retired row is not evidence the replacement was too weak. Land
+        # on the replacement with a fresh budget instead of skipping past it.
+        if (r["status"] == "failed" and _is_capability_failure(r.get("error"))
+                and named not in RETIRED_MODELS):
+            nxt = _next_tier(named)
             if nxt:
                 return nxt
         # conflict resumes at the same model — a merge conflict is not a
-        # model-capability signal — and so does an interrupted run.
-        return r.get("model") or t["model"]
+        # model-capability signal — and so does an interrupted run. A row
+        # that still names a retired model lands on its replacement.
+        return live_model(named)
 
     if prior:
         skipped = sorted(tid for tid, r in prior.items()
@@ -2983,7 +3072,9 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
         # whether the fleet is about to pile onto a scarce model.
         def _baseline(tid):
             r = prior.get(tid)
-            return (r.get("model") if r else None) or tasks[tid]["model"]
+            # Compare live names. A retired row remaps onto its replacement;
+            # that is the same seat, not an escalation.
+            return live_model((r.get("model") if r else None) or tasks[tid]["model"])
 
         higher = {tid: m for tid in retried
                   if (m := start_model(tid)) != _baseline(tid)}
@@ -3703,12 +3794,13 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
             impact = await graft.blast(wt, task=tid)   # uncommitted: tree vs HEAD
             impl_now = wrote_the_code(ctx, tid, cur_model(ctx), store)
             try:
-                # Rule 2 is not negotiable: a model with no cross-family
-                # reviewer on this profile (the local fleet has ONE review
-                # family since GLM-5.3 became implement-only, 2026-09-28) makes
-                # this review FAILS the task — never a same-family review, and
-                # never an exception out of the node, which would abort every
-                # sibling task in the run.
+                # Rule 2 is not negotiable where another family exists. When
+                # NONE exists, `reviewer_for` raises rather than record a
+                # same-family review nobody may make, and this review FAILS
+                # the task — never an exception out of the node, which would
+                # abort every sibling task in the run. (On the local profile
+                # the one-family fallback means this no longer happens: there
+                # deepseek reviews its own work.)
                 rev_tok = reviewer_for(t, impl_now)
             except ValueError as exc:
                 events.emit("task.reviewed", task=tid, passed=False,
@@ -3744,8 +3836,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await harvesting(tid, wt, "reviewer", driver.model, driver.run(
                     prompt,
                     wt, task_id=f"{tid}-x{attempt}",
-                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
-                        ctx, tid, cur_model(ctx), store)]}))
+                    avoid_families=_avoid_implementer(
+                        wrote_the_code(ctx, tid, cur_model(ctx), store))))
             except asyncio.CancelledError:
                 # A cancelled graph: land what the reviewer wrote, and end the
                 # implementer's lease — nobody will edit these files now.
@@ -4280,8 +4372,8 @@ def build_code_graph(store, taskset, taskfile="", policy=None):
                 res = await harvesting(tid, wt, "pr-reviewer", model, drv.run(
                     prompt,
                     wt, task_id=f"{tid}-pr{it['round']}",
-                    avoid_families={config.MODEL_FAMILY[wrote_the_code(
-                        ctx, tid, cur_model(ctx), store)]}))
+                    avoid_families=_avoid_implementer(
+                        wrote_the_code(ctx, tid, cur_model(ctx), store))))
             except asyncio.CancelledError:
                 board_ingest(tid, wt, "pr-reviewer", model)
                 release_files(tid)
@@ -4837,9 +4929,10 @@ def _routing_tiers_prose():
     tiers = config.IMPLEMENT_TIERS
     lines = ["ROUTING TIERS (enforced — a task file that violates these is rejected):\n"]
     blocked = _blocked_harnesses()
-    claude = "Claude-Opus-5.5"
+    claude = next((m for m, fam in config.MODEL_FAMILY.items()
+                   if fam == "anthropic"), "Claude-Sonnet-5.5")
 
-    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6-Sol")
+    gpt = getattr(config, "STUDIO_OPENAI_MODEL", "GPT-6.1-Sol")
 
     def _assignable(names):
         """Models that implement ordinary code: not Claude, not GPT-6.
@@ -4875,6 +4968,16 @@ def _routing_tiers_prose():
                          "give independent tasks DIFFERENT models so they run in "
                          "parallel and neither sits idle; do NOT send every medium "
                          "task to the same one.\n")
+    else:
+        # GLM-5.3 was the medium tier until 2026-09-29. DeepSeek took that
+        # work and stayed on the hard tier, so the mechanical line names it
+        # even though IMPLEMENT_TIERS no longer has a medium key.
+        ds = next((m for m in config.IMPLEMENTER_MODELS if str(m).startswith("DeepSeek")), None)
+        if ds:
+            lines.append(
+                f"- {ds}: medium tasks (a self-contained feature, a new endpoint, "
+                "moderate refactor of one file) AND the mechanical ones (rename, "
+                "small HTML/CSS, wiring, config). Do not name a retired model.\n")
     hard = _assignable(tiers.get("hard") or [])
     if hard:
         lines.append(f"- {' or '.join(hard)}: hard tasks that need deep "
@@ -4948,9 +5051,15 @@ def _routing_tiers_prose():
         r = config.cross_family_reviewer(m)
         if r:
             pairs.append(f"work by {m} is reviewed by {r}")
-    lines.append(f"- reviewer is one of {' or '.join(fams)}. Cross-review rule: "
-                 + "; ".join(pairs) + ". A reviewer must be a different model "
-                 "from the one that wrote the code.\n\n")
+    if len(fams) == 1:
+        lines.append(
+            f"- reviewer is {fams[0]}. It is the only review family, so the "
+            "review is a fresh agent rather than a second model. "
+            + "; ".join(pairs) + ".\n\n")
+    else:
+        lines.append(f"- reviewer is one of {' or '.join(fams)}. Cross-review rule: "
+                     + "; ".join(pairs) + ". A reviewer must be a different model "
+                     "from the one that wrote the code.\n\n")
     closed = _plan_window_pairs(blocked)
     lines.append("Plan windows closed right now: "
                  + (", ".join(closed) if closed else "none") + "\n")
