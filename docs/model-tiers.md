@@ -54,9 +54,12 @@ to a free cursor / agy / reasonix seat (`drivers._glm_yield_alone`, emitting
 and never reports a full cap). The seat is chosen by
 `drivers._faster_seat_than_glm`, not `cap_substitute`: that helper returns
 None when `ARC_CAP_SWAP_AFTER <= 0`, and its `avoid_families` is the planned
-reviewer's family — `deepseek` on every GLM task — which would hide exactly
-the free seat this rule is for; a candidate that is not cursor/agy/reasonix,
-or has no headroom, is skipped rather than ending the search. It runs
+reviewer's family — `deepseek` on every GLM task — which would hide a seat
+that family reviews for. A candidate that is not cursor/agy/reasonix, has no
+headroom, or whose work nobody on this profile can review is skipped rather
+than ending the search: on the local profile, with its single review family,
+DeepSeek is not a destination (the same filter `code_tasks._next_tier_m`
+applies), and `ARC_ALLOW_SAME_FAMILY_REVIEW=1` stands it down. It runs
 normally when another model is in
 flight, and also when no faster seat is free — a task with nowhere else to go
 still runs — and its four implementation slots are unchanged (the cap is not
@@ -212,10 +215,11 @@ handles a retired family), and `code_tasks._select_reviewer` treats such a
 token as fully contended so the review falls back to a live cross-family seat
 instead of failing.
 
-PR review (`pr_reviewer`) works the same way, and on the local profile there
-is NO second family for a DeepSeek PR, so `config.PR_REVIEWERS` resolves to
-`max(1, min(wanted, families - 1))` = 1 only where a cross-family family
-exists; the studio profile is where PR review has five families to draw on.
+PR review (`pr_reviewer`) works the same way. `config.PR_REVIEWERS` is
+`max(1, min(wanted, families - 1))` — **1 on the local two-model profile and 2
+on studio**, where five review families can field the wanted pair. Measured,
+not assumed: the local profile has one review family and no cross-family
+reviewer for a DeepSeek PR at all.
 When the roster cannot field the wanted number, the miss is not silent —
 `pr_review` emits
 `task.pr_review_thin {task, pr, wanted, got, reviewers, implementer}`. The

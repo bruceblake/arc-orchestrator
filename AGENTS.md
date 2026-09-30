@@ -106,8 +106,12 @@ to the plan, not a flat 32. The plan window is the real limit; local caps
 spending it. On the studio profile, initial planning and review prefer
 Claude-Opus-5.5, then GPT-6-Sol. **GLM-5.3 implements only and never
 reviews** (operator decision 2026-09-28); DeepSeek, Cursor-Grok-4.7 and
-Antigravity-Gemini do the implementation and review (DeepSeek first), with
-Claude and GPT-6-Sol when those are full or their windows are closed.
+Antigravity-Gemini do the implementation, and they review when Claude and
+GPT-6-Sol are full or their windows are closed. That is the order the code
+uses: `_select_reviewer` returns Claude with reason `frontier_review` while
+its window is open (verified on studio), and `_routing_tiers_prose` tells the
+planner "The other seats review when those two are full or their windows are
+closed."
 Claude-Opus-5.5 is also the only
 implementer for 3D asset design (Blender, modelling, animation). The
 captain stays on DeepSeek. Rule 2 stays exact: the implementer's own
@@ -232,7 +236,7 @@ on `reasonix`).
   putting GLM-5.3 back on review). On `ARC_FLEET=studio` a DeepSeek
   implementer's reviewer is openai, then cursor, then google, then anthropic.
   **Nothing may quietly make that pairing same-family.** `_reviewer_for`
-  (code_tasks.py:999) used to end with `or current`, so a GLM task escalated
+  used to end with `or current`, so a GLM task escalated
   onto DeepSeek — or yielded onto it — kept reviewer `"deepseek"` and
   `_select_reviewer` then returned DeepSeek with reason `planned`: a
   same-family pre-merge review. Those paths never re-enter `load_taskfile`, so
@@ -270,9 +274,15 @@ on `reasonix`).
   deliberately not `cap_substitute`, which returns None when
   `ARC_CAP_SWAP_AFTER <= 0` and takes an `avoid_families` that `Driver.run`
   sets to the PLANNED reviewer's family (`deepseek` on every GLM task), which
-  would hide the fastest free seat on the local profile. A candidate that is
-  not cursor/agy/reasonix, or has no headroom, is SKIPPED rather than ending
-  the search. GLM keeps its slot and runs when another model is already
+  would hide a seat that family reviews for. A candidate that is
+  not cursor/agy/reasonix, has no headroom, or **whose work nobody on this
+  profile can review** is SKIPPED rather than ending the search. That last one
+  is the local profile exactly: it has ONE review family (`deepseek`), so
+  DeepSeek is not a destination there — yielding to it made the task
+  implement and then die UNREVIEWED at the review node. The same filter is in
+  `code_tasks._next_tier_m`; `ARC_ALLOW_SAME_FAMILY_REVIEW=1` stands it down,
+  since that hatch is precisely the permission to make such a pairing. GLM
+  keeps its slot and runs when another model is already
   in flight, and when no faster seat is free at all — a task with nowhere else
   to go still runs. The role is guarded (`implementer` only), so review and
   PR-review can never reach it, and the four implementation slots stay

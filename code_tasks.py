@@ -998,7 +998,15 @@ def _next_tier_m(model):
         # produce a pairing the loader — and Rule 2 — refuse. Skipping it here
         # lets the escalation gate report a failed task instead of the run
         # dying on a reviewer that cannot be named.
-        if config.cross_family_reviewer(cand) is None:
+        # `ALLOW_SAME_FAMILY_REVIEW` stands this down, exactly as the twin
+        # filter in `drivers._faster_seat_than_glm` does: the hatch exists to
+        # permit such a pairing when the fleet is down to one review family,
+        # and `_reviewer_for` accepts it under the hatch. Without the guard
+        # the two disagreed — the yield used the seat while escalation could
+        # never reach it (verified: ARC_FLEET=local ALLOW=1 gave the yield
+        # DeepSeek and `_next_tier_m` None).
+        if (not config.ALLOW_SAME_FAMILY_REVIEW
+                and config.cross_family_reviewer(cand) is None):
             continue
         if _harness_of(cand) not in blocked:
             return cand
@@ -1032,9 +1040,9 @@ def _reviewer_for(t, model):
     # two-model fleet, since GLM-5.3 became implement-only on 2026-09-28).
     # Returning `current` — the implementer's own family — is a SAME-FAMILY
     # review, which Rule 2 forbids and which `load_taskfile` would have
-    # rejected. Escalation (code_tasks.py:3763) and a yield onto the substitute
-    # never re-enter the loader, so this is where it has to fail CLOSED rather
-    # than record a pairing nobody is allowed to make.
+    # rejected. Escalation (`escalate`) and a yield onto the substitute never
+    # re-enter the loader, so this is where it has to fail CLOSED rather than
+    # record a pairing nobody is allowed to make.
     raise ValueError(
         f"no cross-family reviewer for {model} on this profile "
         f"({sorted(config.REVIEW_FAMILIES)}): this task cannot be reviewed on "
@@ -4882,8 +4890,26 @@ def _routing_tiers_prose():
     # because the runtime yield (drivers._glm_yield_alone) only rescues plans
     # that already name GLM — new plans must not route work there.
     if "GLM-5.3" in config.IMPLEMENTER_MODELS:
-        medium_first = [m for m in (tiers.get("medium") or []) if m != "GLM-5.3"]
-        hard_first = [m for m in (tiers.get("hard") or []) if m != "GLM-5.3"]
+        # GLM is excluded here (it is the seat these lines steer work AWAY
+        # from), and the rest goes through `_assignable` like the tier lines
+        # above: building these from the raw tier list put GPT-6-Sol and
+        # Claude-Opus-5.5 first for BOTH tiers, contradicting the lines below
+        # that reserve those two for planning/review/3D work — and offering a
+        # seat the prompt itself reports as having a spent plan window.
+        medium_first = [m for m in _assignable(tiers.get("medium") or [])
+                        if m != "GLM-5.3"]
+        hard_first = [m for m in _assignable(tiers.get("hard") or [])
+                      if m != "GLM-5.3"]
+        # Spec order for medium: the subscription implementers first (they are
+        # the fleet's ordinary medium seats), then whatever else is assignable.
+        # Built AFTER the fallback below, because on studio the medium tier
+        # holds only GLM-5.3 — so the list this line prints is the hard seats,
+        # and it still has to lead with Cursor and Antigravity.
+        def _medium_order(names):
+            pref = [m for m in ("Cursor-Grok-4.7", "Antigravity-Gemini")
+                    if m in names]
+            return pref + [m for m in names if m not in pref]
+
         lines.append(
             "- GLM-5.3 IMPLEMENTS AND DOES NOT REVIEW. Never give it the "
             "`reviewer` role, and never plan it as the only task in a graph or "
@@ -4894,7 +4920,8 @@ def _routing_tiers_prose():
             # `medium_first` is empty there and the hard seats are what
             # ordinary medium work goes to instead of waiting on GLM alone.
             lines.append(f"- Medium work goes to "
-                         f"{' and '.join(medium_first or hard_first)} first.\n")
+                         f"{' and '.join(_medium_order(medium_first or hard_first))} "
+                         f"first.\n")
         if hard_first:
             lines.append(f"- Hard work goes to {' and '.join(hard_first)} "
                          "first.\n")

@@ -4640,6 +4640,22 @@ print(text)
         self.assertNotIn("Cursor-Grok-4.7", closed)
         self.assertNotIn("cursor/", closed)
         self.assertIn("medium tasks", body)
+        # THE 'goes to' LINES MUST NAME ORDINARY IMPLEMENTERS ONLY.
+        # REGRESSION: they were built from the raw tier lists, so on studio
+        # they read "Medium work goes to DeepSeek… and GPT-6-Sol and
+        # Cursor-Grok-4.7 and Antigravity-Gemini and Claude-Opus-5.5 first" —
+        # contradicting the 3D-only line below and, with codex+claude blocked,
+        # the "spent plan window. Do not assign it." lines above. Both seats
+        # are reserved for planning and review.
+        for phrase in ("Medium work goes to", "Hard work goes to"):
+            line = next(ln for ln in body.splitlines() if phrase in ln)
+            self.assertNotIn("Claude-Opus-5.5", line)
+            self.assertNotIn(openai, line)
+        medium_line = next(ln for ln in body.splitlines()
+                           if "Medium work goes to" in ln)
+        # Spec order: the subscription implementers first for medium work.
+        self.assertIn("Medium work goes to Cursor-Grok-4.7 and "
+                      "Antigravity-Gemini", medium_line)
 
     def test_local_prose_keeps_deepseek_and_omits_the_subscription_spread(self):
         with mock.patch.object(code_tasks, "_blocked_harnesses", return_value=set()):
@@ -4851,6 +4867,36 @@ class EscalationSkipsSpentPlanWindows(unittest.TestCase):
             self.assertEqual(code_tasks._next_tier_m(config.ESCALATION_PATH[0]),
                              want)
             self.assertIsNone(code_tasks._next_tier_m(config.ESCALATION_PATH[-1]))
+
+    def test_the_capacity_hatch_restores_the_escalation_destination(self):
+        """REGRESSION: the unreviewable-seat filter ignored the hatch.
+
+        `drivers._faster_seat_than_glm` stood its twin filter down under
+        `ALLOW_SAME_FAMILY_REVIEW`, but `_next_tier_m` did not, so the two
+        disagreed: with the hatch ON, verified on the local profile, the yield
+        used DeepSeek while `_next_tier_m` returned None. Before that filter a
+        GLM task could escalate to DeepSeek under the hatch, and
+        `_reviewer_for` accepts the pairing there — so the hatch was half
+        broken for escalation.
+        """
+        head, nxt = config.ESCALATION_PATH[0], config.ESCALATION_PATH[1]
+        if config.cross_family_reviewer(nxt) is not None:
+            self.skipTest("this profile can already review the next tier")
+        with mock.patch.object(code_tasks, "_blocked_harnesses",
+                               return_value=set()), \
+                mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", True):
+            self.assertEqual(code_tasks._next_tier_m(head), nxt,
+                             "the hatch must expose the otherwise-skipped seat")
+            # And the yield agrees with it, so the two filters cannot drift.
+            self.assertEqual(
+                drivers._faster_seat_than_glm(head, frozenset(), {head: 1}), nxt)
+        # Hatch off: both refuse the same seat.
+        with mock.patch.object(code_tasks, "_blocked_harnesses",
+                               return_value=set()), \
+                mock.patch.object(config, "ALLOW_SAME_FAMILY_REVIEW", False):
+            self.assertIsNone(code_tasks._next_tier_m(head))
+            self.assertIsNone(
+                drivers._faster_seat_than_glm(head, frozenset(), {head: 1}))
 
     def test_a_blocked_next_harness_skips_to_the_following_model(self):
         path = ["Tier-A", "Tier-B", "Tier-C"]

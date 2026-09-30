@@ -1,12 +1,14 @@
 """Headless CLI drivers for the coding harnesses (opencode, reasonix; dsh bench-only, kimi retired).
 
-Role map (hard rule): the fleet is TWO models. Operator decision 2026-09-25
-(the 2026-09-12 note had the tiers reversed):
+Role map (hard rule): the fleet is TWO models. Operator decision 2026-09-28:
+GLM-5.3 (opencode) IMPLEMENTS ONLY — it does not review, does not PR-review,
+never plans, and does not run as the sole agent while a faster seat is free.
 DeepSeek-V4.1-Flash-thinking-max (the `reasonix` harness) plans, implements
-the hard tier, and reviews/PR-reviews; GLM-5.3 (opencode) implements and
-reviews the medium tier and does NOT plan.
+the hard tier, and reviews/PR-reviews.
 A task is always reviewed by a *different model
-family* than the one that implemented it (Rule 2). ARC rejects over-limit
+family* than the one that implemented it (Rule 2) — so on the local two-model
+profile, which has ONE review family, a DeepSeek task has no reviewer there.
+ARC rejects over-limit
 requests per model, so per-model semaphores cap concurrent harness instances
 below the account limits (config.driver_limit).
 
@@ -904,8 +906,8 @@ def _faster_seat_than_glm(model, exclude, usage):
     """A FREE cursor / agy / reasonix seat for `model`'s attempt, or None.
 
     Built on `_swap_candidates` — the same roster rules the cap swap uses
-    (role, tier floor, harness, spent windows) — but with two deliberate
-    differences, both of which the review of 2026-09-28 caught:
+    (role, tier floor, harness, spent windows) — but with three deliberate
+    differences, the first two of which the review of 2026-09-28 caught:
 
     * NO `avoid_families`. `Driver.run` sets that to the planned reviewer's
       family, which is `deepseek` on every GLM-5.3 task, so passing it here
@@ -917,6 +919,18 @@ def _faster_seat_than_glm(model, exclude, usage):
     * NO `CAP_SWAP_AFTER` gate. That switch belongs to the cap swap; this path
       runs when nothing was full, so an operator setting it to 0 must not
       re-enable lone-GLM work.
+    * A candidate whose work NOBODY can review is skipped, unless the
+      capacity hatch is on — the same filter `code_tasks._next_tier_m`
+      applies, and for the same reason. On the local profile
+      `cross_family_reviewer("DeepSeek-V4.1-Flash-thinking-max")` is None (GLM
+      was the only other review family and it is implement-only now), so
+      yielding there produced exactly the dead end this check exists to
+      avoid: the task implemented on DeepSeek, the review node raised
+      `_reviewer_for`'s `ValueError`, and the task burned MAX_REVIEW_CRASHES
+      retries and failed UNREVIEWED. Keeping the GLM slot instead is the
+      documented behaviour for that case — "a task with nowhere else to go
+      still runs" — and studio, which fields five review families, still
+      yields to cursor/agy/reasonix.
 
     A candidate that is not fast, or has no room on its own cap or its harness
     pool, is SKIPPED — never treated as the end of the search. Stopping at the
@@ -926,6 +940,9 @@ def _faster_seat_than_glm(model, exclude, usage):
     for cand in _swap_candidates(model, config.MODEL_HARNESS.get(model) or "",
                                  "implementer", exclude, (), other_harness_only=False):
         if config.MODEL_HARNESS.get(cand) not in _FAST_YIELD_HARNESSES:
+            continue
+        if (not config.ALLOW_SAME_FAMILY_REVIEW
+                and config.cross_family_reviewer(cand) is None):
             continue
         try:
             if usage.get(cand, 0) >= config.driver_limit(cand):
