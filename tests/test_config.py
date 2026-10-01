@@ -290,10 +290,15 @@ class SeatCaps(unittest.TestCase):
     """Operator directive 2026-09-24: every seat sized to its real plan."""
 
     def test_deepseek_uses_all_ten_sessions_and_glm_stays_at_four(self):
+        # The base branch retired GLM-5.3 and could assert its absence. This
+        # branch keeps it as the implement-only parallel seat (operator
+        # decision 2026-09-28), so the pin and the four slots are asserted
+        # rather than their absence — the same directive, kept alive.
         self.assertEqual(config._SESSIONS_PER_PROCESS["reasonix"], 1)
         self.assertEqual(config.harness_limit("reasonix"), 10)
-        self.assertNotIn("GLM-5.3", config.MODEL_ROLES)
-        self.assertNotIn("GLM-5.3", config._DRIVER_CAP_PIN)
+        self.assertEqual(config.MODEL_ROLES["GLM-5.3"], {"implementer"})
+        self.assertEqual(config._DRIVER_CAP_PIN["GLM-5.3"], 4)
+        self.assertEqual(config.driver_limit("GLM-5.3", True), 4)
         self.assertEqual(
             config.driver_limit("DeepSeek-V4.1-Flash", True), 10)
 
@@ -310,9 +315,26 @@ class SeatCaps(unittest.TestCase):
 
     def test_cross_family_reviewer_prefers_arc_and_skips_own_family(self):
         ds = "DeepSeek-V4.1-Flash"
-        # Local profile has one review family after GLM left, so it reviews itself.
+        # GLM-5.3 holds no reviewer role since 2026-09-28, so a GLM
+        # implementer's reviewer is deepseek (first in _REVIEW_SEAT_ORDER and
+        # not glm). On the local two-model profile that leaves ONE review
+        # family, and it reviews its own work — a missing review is worse
+        # than a same-family one (config.cross_family_reviewer).
+        self.assertEqual(config.cross_family_reviewer("GLM-5.3"), "deepseek")
         self.assertEqual(config.cross_family_reviewer(ds), "deepseek")
+    def test_glm_implements_only_and_never_reviews(self):
+        """Operator decision 2026-09-28: GLM-5.3 is implement-only.
+
+        The roster row is shared by both fleet profiles, so this holds on
+        either one; the roles tuple is the single source both REVIEW_FAMILIES
+        and the driver constructors read.
+        """
+        self.assertEqual(config.MODEL_ROLES["GLM-5.3"], {"implementer"})
         self.assertNotIn("glm", config.REVIEW_FAMILIES)
+        self.assertNotIn("glm", config.PR_REVIEW_FAMILIES)
+        self.assertNotIn("glm", config._REVIEW_SEAT_ORDER)
+        # The four implementation slots stay: this is not a cap cut.
+        self.assertEqual(config.driver_limit("GLM-5.3", True), 4)
 
     def test_studio_seat_driver_caps_and_reviewer_order(self):
         import json
@@ -341,6 +363,8 @@ class SeatCaps(unittest.TestCase):
         ds = "DeepSeek-V4.1-Flash"
         for model, fam in data["review"].items():
             if model == ds:
+                # deepseek's own family is skipped, and GLM-5.3 left the
+                # review roster on 2026-09-28, so the next live seat reviews.
                 self.assertEqual(fam, "openai")
             else:
                 self.assertEqual(fam, "deepseek")

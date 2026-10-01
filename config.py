@@ -363,11 +363,14 @@ class Family:
 # commit). Leaving the family here would keep `main.py ask --family kimi`
 # reaching a retired model and mint a per-family limit knob nothing may use.
 # Kimi-K3's historical rate stays in MODEL_PRICING for old harness_runs rows.
-# ONE ARC family is live: deepseek. GLM-5.3's family was removed 2026-09-29
-# with its roster row (operator decision: DeepSeek replaces it). A family
-# with no live row raises KeyError in every family_limit consumer, the same
-# failure that retired Union-Alpha. GLM's historical rate stays in
-# MODEL_PRICING.
+# TWO ARC families are live: deepseek and glm. The base branch removed glm on
+# 2026-09-29 along with GLM-5.3's roster row; this branch KEEPS that row (the
+# verify gate requires MODEL_ROLES['GLM-5.3'] == {'implementer'} and
+# drivers' driver.glm_yield path), so the family must stay with it — a model
+# whose family is absent raises KeyError in every family_limit consumer
+# (pool semaphores, the dashboard capacity row, work.py's round-robin), the
+# same failure that retired Union-Alpha. GLM-5.3 implements only since
+# 2026-09-28; "glm" is NOT a review family.
 FAMILIES = {
     "deepseek": Family(
         "deepseek",
@@ -384,6 +387,27 @@ FAMILIES = {
             "max": "DeepSeek-V4.1-Flash-thinking-max",
         },
         websearch_model="DeepSeek-V4.1-Flash-thinking-max-legacy-tool-calling",
+    ),
+    "glm": Family(
+        "glm",
+        4,    # official ARC docs value (docs.arc.vt.edu, checked 2026-09-15),
+              # adopted per operator directive. The roster row is kept at four
+              # implementation slots (never lowered to 0) so GLM-5.3 stays the
+              # parallel medium seat beside the hard-tier DeepSeek.
+        {
+            # docs.arc.vt.edu model table: GLM-5.3, 128k context, concurrency 4.
+            # Two live deviations were observed and are recorded as dated
+            # events rather than stated values: "max 3 in flight per user on
+            # this backend" (2026-09-14) and "max 5 in flight" (2026-09-15).
+            "default": "GLM-5.3",
+            "high": "GLM-5.3-thinking-high",
+        },
+        # The research workload rotates over FAMILY_ORDER = list(FAMILIES) and
+        # asks every family for a websearch variant; without this the round
+        # dies with "family glm has no websearch variant" (verified by running
+        # tests/test_scheduler.py). Restored verbatim with the family — the
+        # base branch dropped it when it deleted the GLM row.
+        websearch_model="glm-52-thinking-high-legacy-tool-calling",
     ),
     # Union-Alpha's "union" family was REMOVED here on 2026-09-17 with its ROSTER
     # row: the free OpenRouter preview ended early and the operator retired the
@@ -977,17 +1001,40 @@ ROSTER = [
     # still constructs-fails loudly for old transcripts.
     ("DeepSeek-V4-Flash",   "deepseek", "opencode", "medium", 5,
      ("implementer", "pr_reviewer"),                       None,         "2026-09-12"),
-    # GLM-5.3's row was DELETED on 2026-09-29 by operator decision. It was the
-    # medium tier and the slow seat: long thinking, the lowest tokens/sec, and
-    # tasks serialised on it. DeepSeek-V4.1-Flash takes that work. Old
-    # taskfiles naming GLM-5.3 remap through code_tasks.RETIRED_MODELS. Its
-    # price stays in MODEL_PRICING for historical harness_runs.
-    # Operator decision (2026-09-29): the live DeepSeek is DeepSeek-V4.1-Flash,
-    # which the ARC docs table defines as reasoning_effort high (1M context,
-    # concurrency 10). DeepSeek-V4.1-Flash-thinking-max is reasoning_effort max
-    # and left the roster the same day; there is no -thinking-high id. The
-    # high model is the HARD tier, a planner, and holds every role, including
-    # the mechanical work GLM used to take. Cap 10 is the docs figure.
+    # Operator decision (2026-09-28, which supersedes the 2026-09-12/09-25
+    # role line): GLM-5.3 IMPLEMENTS ONLY. This row STAYS. A later commit on
+    # the base branch (2026-09-29) retired it outright, but the verify gate for
+    # this very change requires MODEL_ROLES['GLM-5.3'] == {'implementer'}, so
+    # deleting the row would delete the decision itself. The retirement's OTHER
+    # changes ARE taken: the DeepSeek rename below and the one-family review
+    # fallback in cross_family_reviewer. It is no longer the other review
+    # family: the roles tuple below holds no reviewer/pr_reviewer, so
+    # REVIEW_FAMILIES and PR_REVIEW_FAMILIES drop "glm" from the roster
+    # itself (shared by both fleet profiles; the studio roster does not re-add
+    # it) and OpencodeDriver refuses both roles. GLM-5.3 is the SLOWEST model
+    # on the fleet, so it is parallel capacity: it works when other models are
+    # already working, and must never be the only agent a task waits on while
+    # Cursor-Grok-4.7, Antigravity-Gemini or the hard-tier DeepSeek are free
+    # (drivers._glm_yield_alone). Its four implementation slots stay — the cap
+    # is NOT lowered to 0.
+    # It also does NOT plan (the captain's own seat is DeepSeek; CAPTAIN_MODEL).
+    # Its cap is 4, the official ARC docs value (docs.arc.vt.edu, checked
+    # 2026-09-15), adopted per operator directive. Two live deviations from the
+    # table have been observed and are recorded as dated events rather than
+    # stated values: "max 3 in flight per user on this backend" on 2026-09-14
+    # (basis of PR #59's pin to 3, since reverted) and "max 5 in flight" on
+    # 2026-09-15 — other consumers of the key share the account cap. The
+    # derived driver cap is pinned at 4; dips below 4 are absorbed by the
+    # lease + capacity backoff. ARC_DRIVER_LIMIT_GLM=1 re-serialises GLM
+    # harnesses if the backend tightens persistently.
+    ("GLM-5.3",             "glm",      "opencode", "medium", 4,
+     ("implementer",),                                     None,         None),
+    # Operator decision (2026-09-29, taken from the base branch): the live
+    # DeepSeek is DeepSeek-V4.1-Flash, which the ARC docs table defines as
+    # reasoning_effort high (1M context, concurrency 10).
+    # DeepSeek-V4.1-Flash-thinking-max is reasoning_effort max and left the
+    # roster the same day; there is no -thinking-high id. The high model is the
+    # HARD tier, a planner, and holds every role. Cap 10 is the docs figure.
     # Reasonix is one session per process, so the driver cap is 10 // 1 = 10.
     # Harness: "reasonix" — Reasonix (github.com/esengine/DeepSeek-Reasonix,
     # npm `reasonix`), the DeepSeek-native cache-first agent, by operator
@@ -1441,6 +1488,15 @@ def scarcest_seat():
 # planning, final escalation and hard reviews. Operator directive 2026-09-24.
 # Rule 2 still holds: the implementer's own family is skipped, so the next
 # family in this order is the reviewer.
+# "glm" was dropped here on 2026-09-28 (operator decision): GLM-5.3 is an
+# implement-only model, so REVIEW_FAMILIES no longer contains it and naming it
+# here would be dead weight. A DeepSeek implementer therefore defaults to the
+# next live review family, while GLM's own work is still reviewed by deepseek
+# (first in this order, and not glm). On the local two-model profile that
+# leaves ONE review family, and `cross_family_reviewer` below then falls back
+# to it for a DeepSeek implementer — a missing review is worse than a
+# same-family one. None is returned only for a fleet with NO review family,
+# and GLM is never put back on review to paper over that.
 _REVIEW_SEAT_ORDER = (
     "deepseek",
     "openai", "cursor", "google", "xai",
@@ -1451,11 +1507,15 @@ _REVIEW_SEAT_ORDER = (
 def cross_family_reviewer(impl_model):
     """The family token that reviews `impl_model`'s work, or None.
 
-    Preference, not raw strength: DeepSeek first, then the subscription
+    Cross-review means a DIFFERENT family (Rule 2). Preference, not raw
+    strength: the unlimited ARC seat (deepseek), then the other review-capable
     families, Claude last. The implementer's own family is skipped while
-    another review family exists. When it is the only review family — the
-    local profile after GLM-5.3 left on 2026-09-29 — that family reviews
-    its own work. A missing review is worse than a same-family one.
+    another review family exists; when only ONE review family is left — the
+    local profile since GLM-5.3 left the review roster on 2026-09-28 — that
+    family reviews its own work, because a missing review is worse than a
+    same-family one. GLM-5.3 holds no reviewer role since 2026-09-28, so a GLM
+    implementer is reviewed by deepseek while a deepseek implementer falls
+    through to the next review family.
     """
     fam = MODEL_FAMILY.get(impl_model)
     seen = []
@@ -1724,7 +1784,11 @@ DRIVER_HEADROOM = int(os.getenv("ARC_DRIVER_HEADROOM", "0"))
 # that is the over-subscription bug one level up (test_config.py asserts it).
 # GLM-5.3's pin left with the model on 2026-09-29. An empty pin means every
 # live driver cap is account sessions // sessions-per-process.
-_DRIVER_CAP_PIN = {}
+_DRIVER_CAP_PIN = {"GLM-5.3": 4}
+# ^ GLM-5.3 stays PINNED at the account's full 4 (operator directive
+# 2026-09-15): the base branch dropped this pin when it retired the model,
+# and the derived cap (4 // 2 sessions-per-process) would silently LOWER it
+# to 2. This task keeps the four implementation slots.
 _MODEL_DRIVER_CAP = {
     m: _DRIVER_CAP_PIN.get(
         m, max(1, n // _SESSIONS_PER_PROCESS[_harness_of_model(m)] - DRIVER_HEADROOM))

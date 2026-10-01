@@ -2,7 +2,7 @@
 
 The multi-model code fleet is tiered by task difficulty and role. Every
 routing decision below is made at plan time — by
-DeepSeek-V4.1-Flash-thinking-max in `main.py code plan`
+DeepSeek-V4.1-Flash in `main.py code plan`
 (`config.PLANNER_MODEL`), or by whoever writes a task file by hand — and is
 enforced again by `code_tasks.load_taskfile`, which remaps retired model
 names and rejects anything else that violates it. There is no runtime
@@ -16,6 +16,7 @@ corrected 2026-09-25 — the 2026-09-12 note had them reversed):
 | Model | Harness | Tier | Allowed roles | Per-account API cap | Driver semaphore cap |
 |---|---|---|---|---|---|
 | DeepSeek-V4.1-Flash | `reasonix` (`ReasonixDriver`) | hard | Implement, Plan, Review, PR-review | 10 | 10 |
+| GLM-5.3 | `opencode` (`OpencodeDriver`) | medium | Implement only | 4 | 4 |
 
 Subscription seats (studio profile, 2026-09-24) are not unlimited. The plan
 window is the real limit; local caps in `config._SEAT_CAP` keep a burst from
@@ -34,14 +35,42 @@ Context windows and defaults per the official ARC docs
 (https://www.docs.arc.vt.edu/ai/011_llm_api_arc_vt_edu.html, checked
 2026-09-29): **DeepSeek-V4.1-Flash** is `reasoning_effort` high, 1M
 context, concurrency 10. **DeepSeek-V4.1-Flash-thinking-max** is
-`reasoning_effort` max and is not on the roster. **GLM-5.3** left the
-roster the same day.
+`reasoning_effort` max and is not on the roster (it is a
+`code_tasks.RETIRED_MODELS` entry). **GLM-5.3** stays on the roster as the
+implement-only parallel seat, per the operator decision of 2026-09-28 — the
+base branch retired it on 2026-09-29, and that part is deliberately not taken
+here.
 
-**DeepSeek-V4.1-Flash-thinking-max (DS-max) is the fleet's strongest
-model** — operator decision 2026-09-25, and the 2026-09-12 note that said
-otherwise was corrected to match: hard tier, the planner, the last
-escalation stage. **GLM-5.3 is the other family, on the medium tier**: it
-implements, reviews and PR-reviews, and **never plans**.
+**DeepSeek-V4.1-Flash is the fleet's strongest
+model** (the base branch moved it to `reasoning_effort` high on 2026-09-29,
+replacing DS-max; the 2026-09-12 note that had GLM ahead was corrected on
+2026-09-25) — hard tier, the planner, the last
+escalation stage. **GLM-5.3 is the medium tier and implements ONLY**
+(operator decision 2026-09-28): it does not plan, it does not review, and it
+does not PR-review. Its roster row holds `("implementer",)`, so
+`config.REVIEW_FAMILIES` and `config.PR_REVIEW_FAMILIES` drop `glm` from the
+roster itself and `drivers.OpencodeDriver("GLM-5.3", "reviewer")` (or
+`pr_reviewer`, or `driver_for` with either) raises `ValueError` exactly like
+any other off-roster role. GLM-5.3 is the slowest model on the fleet, so it
+is treated as **parallel capacity**: it runs when another model is already
+working, and an attempt that would leave it as the ONLY agent working yields
+to a free cursor / agy / reasonix seat (`drivers._glm_yield_alone`, emitting
+`driver.glm_yield` with `reason: "alone"`; it releases the GLM lease first
+and never reports a full cap). The seat is chosen by
+`drivers._faster_seat_than_glm`, not `cap_substitute`: that helper returns
+None when `ARC_CAP_SWAP_AFTER <= 0`, and its `avoid_families` is the planned
+reviewer's family — `deepseek` on every GLM task — which would hide a seat
+that family reviews for. A candidate that is not cursor/agy/reasonix, has no
+headroom, or whose work nobody on this profile can review is skipped rather
+than ending the search — but that skip only fires for a fleet with NO review
+family, because `cross_family_reviewer` answers `None` only there (the same
+filter `code_tasks._next_tier_m` applies). It is INERT on local: a lone GLM
+attempt DOES yield to DeepSeek there, which the one-family fallback then has
+reviewed by deepseek. `ARC_ALLOW_SAME_FAMILY_REVIEW=1` stands it down. It runs
+normally when another model is in
+flight, and also when no faster seat is free — a task with nowhere else to go
+still runs — and its four implementation slots are unchanged (the cap is not
+lowered).
 
 - **Per-account API cap** — `config.FAMILIES[*].limit` (`glm` 4,
   `deepseek` 10). GLM's 4 is the official ARC docs value (docs.arc.vt.edu,
@@ -70,14 +99,14 @@ implements, reviews and PR-reviews, and **never plans**.
   planner model see one slot fewer while the reserve can afford to give
   (`INTERACTIVE_RESERVE`, reduced by `_apply_reserve` while it would leave
   batch under `MIN_BATCH_SLOTS` = 2). The planner is
-  DeepSeek-V4.1-Flash-thinking-max (cap 10), so batch DeepSeek sees 9 and
+  DeepSeek-V4.1-Flash (cap 10), so batch DeepSeek sees 9 and
   interactive the full 10, while GLM-5.3 keeps its whole 4 for batch — the
   reserve deliberately does NOT touch it (pinning it to the planner is why
   `tests/test_config.py::test_no_other_model_loses_a_slot` holds).
   `ARC_INTERACTIVE_RESERVE=0` hands the planner's slot to batch when nobody
   is chatting. `ARC_DRIVER_LIMIT_GLM=1` re-serialises
   GLM if the backend tightens persistently.
-- GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash-thinking-max runs in
+- GLM-5.3 runs in `opencode`; DeepSeek-V4.1-Flash runs in
   **`reasonix`** (`drivers.ReasonixDriver`, binary via `config.reasonix_bin()`).
   The driver caps apply per model; the **harness** pools are separate —
   5 opencode, 10 reasonix (`config._HARNESS_CAP`, 2026-09-24) — so neither
@@ -103,12 +132,13 @@ rather than rejecting a decomposition that is still good.
 | Tier | Work | Model |
 |---|---|---|
 | medium | moderate AND very basic/mechanical implementation | GLM-5.3 |
-| hard | complex / multi-file / architectural | DeepSeek-V4.1-Flash-thinking-max |
+| hard | complex / multi-file / architectural | DeepSeek-V4.1-Flash |
 
 There is no basic tier: with gpt-oss-120b retired (2026-09-11) the medium
 tier is the floor. Within the fleet,
-DeepSeek-V4.1-Flash-thinking-max takes the hardest tasks — it is the fleet's
-strongest model (operator decision 2026-09-25), and there is no tier above
+DeepSeek-V4.1-Flash takes the hardest tasks — it is the fleet's
+strongest model (the model that holds the top seat since 2026-09-29), and
+there is no tier above
 it to escalate to.
 
 Examples of medium: boilerplate, renames, simple utilities, config edits,
@@ -118,18 +148,22 @@ design, or architectural judgment.
 
 ## Planning and review
 
-- **Both live models may review. On the local profile only
-  DeepSeek-V4.1-Flash-thinking-max may plan.** On the studio profile
-  Claude-Opus-5.5 plans first and GPT-6-Sol plans when Claude's window is
-  closed; those two are also preferred for review. Ordinary implementation
-  is GLM-5.3, DeepSeek, Cursor-Grok-4.7 and Antigravity-Gemini. Claude
-  implements only Blender, modelling and animation. In the task file
-  schema the
-  reviewer field names a review *family* — `glm`, or `deepseek`
+- **GLM-5.3 implements only (operator decision 2026-09-28). It does not
+  review and does not PR-review.** Its `MODEL_ROLES` row is
+  `("implementer",)`, so `config.REVIEW_FAMILIES` has no `glm` token and the
+  PR pool never holds it. **DeepSeek-V4.1-Flash is the
+  planner**; on the studio profile Claude-Sonnet-5.5 plans first and
+  GPT-6.1-Sol plans when Claude's window is closed, and those two are also preferred for
+  review. Ordinary implementation is GLM-5.3, DeepSeek, Cursor-Grok-4.7 and
+  Antigravity-Gemini. Claude implements only Blender, modelling and
+  animation. In the task file schema the
+  reviewer field names a review *family* — `deepseek`, plus `openai`,
+  `cursor`, `google` and `anthropic` on the studio roster
   (`config.REVIEW_FAMILIES`, which maps each token to the live model that
   reviews for it); `code_tasks.load_taskfile` rejects any other value. A
   family token that has left the roster (e.g. `kimi`, retired 2026-09-12) is
-  remapped to the strongest cross-family reviewer at load time, not rejected.
+  remapped to the strongest cross-family reviewer at load time, not rejected —
+  which is what happens to today's `glm` reviewer tokens.
 - **Role eligibility is roster-driven.** `config.MODEL_ROLES` (derived from
   `config.ROSTER`) says which of implementer / planner / reviewer /
   pr_reviewer each model may hold; `config.model_may` answers the question,
@@ -154,25 +188,50 @@ design, or architectural judgment.
 
 Implementer → required reviewer. Cross-review is **family**-based: a task's
 reviewer must come from a model family other than the implementer's own
-(`config.cross_family_reviewer` prefers the unlimited ARC seats —
-deepseek, then glm — and skips the implementer's own family, so the next
-seat in that order reviews. Claude is last. Operator directive 2026-09-24).
-With today's two-model roster that still resolves to:
+(`config.cross_family_reviewer` prefers the unlimited ARC seat — deepseek —
+then the other review-capable families, and skips the implementer's own, so
+the next seat in that order reviews. Claude is last. Operator directive
+2026-09-24). `glm` left that order on 2026-09-28, when GLM-5.3 became
+implement-only. On the local two-model profile that resolves to:
 
 | Implementer | Required reviewer (family → model) |
 |---|---|
-| GLM-5.3 | `deepseek` → DeepSeek-V4.1-Flash-thinking-max |
-| DeepSeek-V4.1-Flash-thinking-max | `glm` → GLM-5.3 |
+| GLM-5.3 | `deepseek` → DeepSeek-V4.1-Flash |
+| DeepSeek-V4.1-Flash | `deepseek` → DeepSeek-V4.1-Flash (the ONE-family fallback) |
+
+A DeepSeek-implemented task on the local profile is therefore reviewed by
+deepseek — its own family — because that is the only one left and "a missing
+review is worse than a same-family one". That is the honest answer, not a
+reason to put GLM-5.3 back on review. `ARC_FLEET=studio` fields five review
+families, so there a DeepSeek
+implementer is reviewed by `openai`, then `cursor`, then `google`, then
+`anthropic`.
+
+Nothing may quietly turn that `None` into a same-family pairing.
+`code_tasks._reviewer_for` raises `ValueError` rather than falling back to the
+task's current reviewer, which is why escalation skips such a seat
+(`_next_tier_m`: the task ends as "exhausted escalation" instead of dying on a
+reviewer that cannot be named) and the dashboard's manual escalation returns
+409 before writing anything. The review node records that `ValueError` as a
+failed review rather than aborting its sibling tasks. Pure bookkeeping writes
+— a `failed` row, an already-merged row — use `_reviewer_or_none` and keep the
+taskfile's reviewer: the task has already ended and its row still has to be
+written.
 
 `code_tasks.load_taskfile` raises `ValueError` if a task's reviewer family is
-the implementer's own family. With two families the pairing is exact and
-there is no choice to make.
+the implementer's own family. A taskfile still naming `glm` as its `reviewer`
+is remapped by the existing not-review-capable branch (the same one that
+handles a retired family), and `code_tasks._select_reviewer` treats such a
+token as fully contended so the review falls back to a live cross-family seat
+instead of failing.
 
-PR review (`pr_reviewer`) works the same way, but the fleet has only ONE
-family other than the implementer's, so exactly one cross-family reviewer
-reads each PR. `config.PR_REVIEWERS_WANTED` is still 2 and
-`config.PR_REVIEWERS` resolves to `max(1, min(wanted, families - 1))` = 1;
-the miss is not silent — `pr_review` emits
+PR review (`pr_reviewer`) works the same way. `config.PR_REVIEWERS` is
+`max(1, min(wanted, families - 1))` — **1 on the local two-model profile and 2
+on studio**, where five review families can field the wanted pair. Measured,
+not assumed: the local profile has one review family and no cross-family
+reviewer for a DeepSeek PR at all.
+When the roster cannot field the wanted number, the miss is not silent —
+`pr_review` emits
 `task.pr_review_thin {task, pr, wanted, got, reviewers, implementer}`. The
 pre-merge review above is the compensating control: the PR review is the
 second read of a change that already passed a cross-family gate.
@@ -246,16 +305,17 @@ table, not an edit in six places on the morning it happens.
 |---|---|---|---|---|
 | DeepSeek-V4-Flash | opencode | medium | implement, PR-review | until 2026-09-12 |
 | Kimi-K3 | kimi | hard | all | retired 2026-09-12 (row deleted) |
-| DeepSeek-V4.1-Flash-thinking-max | reasonix (dsh 2026-09-12..13) | hard | all | from 2026-09-12 |
-| GLM-5.3 | opencode | medium | implement, review, PR-review | — |
+| DeepSeek-V4.1-Flash-thinking-max | reasonix | hard | all | 2026-09-12..2026-09-29 (renamed to DeepSeek-V4.1-Flash) |
+| GLM-5.3 | opencode | medium | implement only | implement-only since 2026-09-28 |
 
 gpt-oss-120b was retired on 2026-09-11 (operator decision). There is no
 "basic" tier: mechanical work routes to the medium tier.
 
 DeepSeek-V4-Flash was retired on 2026-09-12 because the provider removed it
 from the API — a request today returns "Model not found". The replacement
-line is DeepSeek-V4.1-Flash; the code fleet runs its thinking-max variant,
-which the roster row above names (operator decision 2026-09-12). The
+line is DeepSeek-V4.1-Flash, which the roster row above names. Its
+thinking-max variant held the seat from 2026-09-12 until the operator moved
+the fleet to the high variant on 2026-09-29. The
 research workload addresses the family through
 `config.FAMILIES["deepseek"]`: DeepSeek-V4.1-Flash (base),
 DeepSeek-V4.1-Flash-thinking-low, DeepSeek-V4.1-Flash-thinking-max, and the
@@ -268,7 +328,7 @@ for — so it is gone from `config.FAMILIES`, from `MODEL_ROLES`, from
 `harness_runs` rows still price through `MODEL_PRICING`, and `KimiDriver`
 still refuses to construct loudly for old transcripts. A taskfile that still
 names it loads: `code_tasks.RETIRED_MODELS` remaps `Kimi-K3` onto the
-strongest live tier (DeepSeek-V4.1-Flash-thinking-max), and a taskfile naming a retired
+strongest live tier (DeepSeek-V4.1-Flash), and a taskfile naming a retired
 reviewer family
 is remapped by `config.cross_family_reviewer`.
 

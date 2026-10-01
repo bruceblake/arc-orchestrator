@@ -55,7 +55,12 @@ class TestProfileIsolation(unittest.TestCase):
     def test_local_is_the_two_model_fleet(self):
         self.assertEqual(config.FLEET, "local")
         self.assertFalse(config.STUDIO)
-        self.assertEqual(sorted(config.FAMILIES), ["deepseek"])
+        # This branch KEEPS the glm family: the base branch removed it with
+        # GLM-5.3's roster row on 2026-09-29, but that row stays here as the
+        # implement-only parallel seat (operator decision 2026-09-28), and a
+        # row whose family is absent raises KeyError in every family_limit
+        # consumer.
+        self.assertEqual(sorted(config.FAMILIES), ["deepseek", "glm"])
         # Operator decision 2026-09-25: DeepSeek is the stronger model (hard
         # tier, planner); GLM-5.3 is medium and does not plan. The captain's
         # own seat is DeepSeek, which on this profile is also the planner.

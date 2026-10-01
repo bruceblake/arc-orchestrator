@@ -174,8 +174,14 @@ class FleetHome(unittest.TestCase):
         self.assertEqual(env["REASONIX_HOME"], str(config.REASONIX_FLEET_HOME))
         self.assertEqual(env["REASONIX_TELEMETRY"], "off")
         self.assertEqual(env["REASONIX_WORKSPACE_ROOT"], "/x/wt")
+        # GLM-5.3 stays a live IMPLEMENTER on this branch (the base branch
+        # retired it); what it may no longer do is REVIEW, which is the
+        # operator decision of 2026-09-28 this branch carries.
+        drivers.OpencodeDriver("GLM-5.3", "implementer")
         with self.assertRaises(ValueError):
-            drivers.OpencodeDriver("GLM-5.3", "implementer")
+            drivers.OpencodeDriver("GLM-5.3", "reviewer")
+        with self.assertRaises(ValueError):
+            drivers.OpencodeDriver("GLM-5.3", "pr_reviewer")
 
 
 class Transcript(unittest.TestCase):

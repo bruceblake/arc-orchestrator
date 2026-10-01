@@ -184,8 +184,13 @@ class ConcurrencyUpsertSameTask(TempDB):
 
     # Escalation walks the LIVE tier pairs, model and reviewer together: on
     # the 2026-09-12 two-model roster each model's reviewer is the other
-    # family. Written from the roster so it does not encode a past fleet.
-    TIERS = [(m, config.cross_family_reviewer(m)) for m in config.ESCALATION_PATH]
+    # family. Written from the roster so it does not encode a past fleet. A
+    # model with NO cross-family reviewer left (a deepseek implementer on the
+    # local profile, since GLM-5.3 became implement-only on 2026-09-28) cannot
+    # form a pair at all and is left out: the store's `reviewer` column is NOT
+    # NULL, and an escalation to such a model has no reviewer to record.
+    TIERS = [(m, config.cross_family_reviewer(m)) for m in config.ESCALATION_PATH
+             if config.cross_family_reviewer(m)]
 
     def test_one_row_survives_and_the_last_write_wins(self):
         self.store.upsert_code_task("f.json", "t1", "t1", *self.TIERS[0], "running")
@@ -209,7 +214,9 @@ class ConcurrencyUpsertSameTask(TempDB):
         self.assertIn((rows[0]["model"], rows[0]["reviewer"]), self.TIERS)
         # Deterministically pin last-write-wins: a final (escalation) upsert
         # must replace the recorded tier, not be dropped on conflict.
-        top_pair = (STRONGEST, config.cross_family_reviewer(STRONGEST))
+        top_pair = self.TIERS[-1] if self.TIERS else None
+        if top_pair is None:
+            self.skipTest("no live model has a cross-family reviewer")
         self.store.upsert_code_task("f.json", "t1", "t1", *top_pair, "running")
         row = self.store.code_tasks_for("f.json")[0]
         self.assertEqual((row["model"], row["reviewer"]), top_pair)

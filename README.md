@@ -411,12 +411,17 @@ worktree.
 | Model | Harness CLI | Tier, allowed roles |
 |---|---|---|
 | `DeepSeek-V4.1-Flash-thinking-max` | `reasonix` | hard — implement, plan, review, PR-review; the fleet's strongest model (operator decision 2026-09-25), the `code plan` planner, and the last escalation stage. Also the captain autopilot's own turn seat (`config.CAPTAIN_MODEL`) on every fleet profile |
-| `GLM-5.3` | `opencode` | medium — implement, review, PR-review; never plans. The other review family |
+| `GLM-5.3` | `opencode` | medium — **implement only** (operator decision 2026-09-28): it does not review, does not PR-review, and never plans. Parallel capacity beside another model's task — a GLM attempt that would be the only agent working moves to a faster free seat (`drivers._faster_seat_than_glm`) |
 
 Every implementation must pass a deterministic verify gate (a shell command
-run inside the worktree) and then a review by the *other* model family — a
-reviewer never shares a family with the implementer it reviews
-(**GLM-5.3 → deepseek, DeepSeek → glm**). Rejections
+run inside the worktree) and then a review by a *different* model family — a
+reviewer never shares a family with the implementer it reviews. GLM-5.3
+implements only since 2026-09-28, so it reviews nothing: **GLM-5.3 → deepseek**,
+and a DeepSeek task's reviewer is the next live review family (`openai` on the
+studio roster). On the local two-model profile there is no next family left, so
+`config.cross_family_reviewer` falls back to the only one there is — deepseek
+reviews its own work, because a missing review is worse than a same-family one.
+Rejections
 feed back into a fix loop bounded by `ARC_MAX_FIX_ROUNDS` (default 16).
 Cross-family review is unconditional: the temporary same-family-review
 override (2026-09-12..14, while GLM-5.3's backend was unstable) was removed
@@ -525,15 +530,20 @@ the fleet's number from `task.budget` tokens before and after.
  "tasks": [
    {"id": "t01-html", "title": "Create src/index.html hello page",
     "prompt": "Create the file src/index.html: <detailed spec>",
-    "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+    "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
     "verify_cmd": "test -f src/index.html && grep -q Hello src/index.html",
     "files_hint": ["src/index.html"], "deps": []}
  ]}}
 ```
 
-- `model` must be a live implementer (`DeepSeek-V4.1-Flash-thinking-max` or
-  `GLM-5.3` today); `reviewer` names a review
-  family (`glm`, `deepseek`) that differs from the implementer's.
+- `model` must be a live implementer (`DeepSeek-V4.1-Flash` or `GLM-5.3`
+  today); `reviewer` names a review
+  family that differs from the implementer's. GLM-5.3 implements only since
+  2026-09-28 — it is not a reviewer — so on the local two-model profile the
+  only review family is `deepseek`: it reviews GLM-5.3's work, and a
+  DeepSeek-implemented task falls back to it too (a missing review is worse
+  than a same-family one). `ARC_FLEET=studio` adds `openai`, `cursor`,
+  `google` and `anthropic`.)
 - `verify_cmd` runs with the worktree as cwd; empty string skips the gate.
 - `deps` list task ids that must merge first; ids are unique, cycles rejected.
 

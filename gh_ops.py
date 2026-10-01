@@ -164,6 +164,18 @@ def _write_taskfile(repo, rows):
             model = config.IMPLEMENT_TIERS.get(
                 r.get("tier", config.TIER_ORDER[0]),
                 [config.ESCALATION_PATH[0]])[-1]
+        reviewer = _reviewer_for(model, i)
+        if reviewer is None:
+            # One review family left on the profile (local, since GLM-5.3
+            # became implement-only on 2026-09-28) and this task's model is in
+            # it: no cross-family reviewer exists. Write NO reviewer and say
+            # why, rather than a taskfile the loader refuses with a ValueError
+            # about a null reviewer.
+            print(f"WARNING: skipping issue #{r.get('number', i)} "
+                  f"({model}): no cross-family reviewer on this profile "
+                  f"({sorted(config.REVIEW_FAMILIES)}); re-run on the studio "
+                  f"fleet or pick another implementer")
+            continue
         n = r.get("number", i)
         view = f"gh issue view {n}" if cwd else \
             f"gh issue view {n} --repo {repo}"
@@ -174,7 +186,7 @@ def _write_taskfile(repo, rows):
                        f"{r.get('title', '')}\n\n{r.get('summary', '')}\n\n"
                        f"Full detail: `{view}`."),
             "model": model,
-            "reviewer": _reviewer_for(model, i),
+            "reviewer": reviewer,
             "verify_cmd": "",
             "deps": [],
         })

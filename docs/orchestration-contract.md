@@ -26,9 +26,13 @@ GLM-5.3's roles are
 4. **Model routing** — the tier table in
    [model-tiers.md](model-tiers.md). Hard rule, loader-enforced:
    `config.IMPLEMENTER_MODELS` × tier suitability.
-5. **Reviewer** — `glm` or `deepseek` per task, **cross-family**, and with
-   two live families the pairing is forced: a GLM-5.3 task is reviewed by
-   `deepseek`, a DeepSeek-V4.1-Flash-thinking-max task by `glm` (see the
+5. **Reviewer** — a family from `config.REVIEW_FAMILIES` per task
+   (`deepseek` locally; `openai`, `cursor`, `google`, `anthropic` too on
+   studio), **cross-family** wherever another family exists: a GLM-5.3 task is
+   reviewed by `deepseek`, and on studio a DeepSeek task goes to `openai`.
+   GLM-5.3
+   is implement-only (2026-09-28), so it reviews nothing; on the local profile
+   that leaves ONE family, and deepseek reviews its own work there (see the
    cross-review matrix in
    [model-tiers.md](model-tiers.md#cross-review-matrix)).
 6. **Verify gate** — a deterministic `verify_cmd` per task (tests, build,

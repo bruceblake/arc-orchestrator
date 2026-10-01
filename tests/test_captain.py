@@ -105,13 +105,26 @@ class CaptainCapacity(unittest.TestCase):
         for i, m in enumerate(models):
             doc["project"]["tasks"].append({
                 "id": f"t{i}", "prompt": "do something",
-                "model": m, "reviewer": config.cross_family_reviewer(m),
+                "model": m, "reviewer": config.cross_family_reviewer(m) or "x",
                 "verify_cmd": "true"})
         (self._tasks / name).write_text(json.dumps(doc), encoding="utf-8")
         return name
 
+    def _model_with_a_reviewer(self):
+        """An implementer whose work has a cross-family reviewer right now.
+
+        GLM-5.3 became implement-only on 2026-09-28, so on the local profile
+        the ONE review family is deepseek and a DeepSeek-implemented task has
+        no reviewer at all. `plan_pressure` reads a taskfile and does not care
+        which model it names, so the fixture uses one that pairs.
+        """
+        for m in sorted(config.IMPLEMENTER_MODELS):
+            if config.cross_family_reviewer(m):
+                return m
+        raise unittest.SkipTest("no implementer has a cross-family reviewer")
+
     def test_admits_when_slots_are_free(self):
-        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        m = self._model_with_a_reviewer()
         name = self._write_taskfile("ok.json", [m])
         self.cap = {m: {"batch_headroom": 3}}
         r = captain.plan_pressure(name)
@@ -119,7 +132,7 @@ class CaptainCapacity(unittest.TestCase):
         self.assertEqual(r["models"], {m: 1})
 
     def test_queues_when_a_model_has_no_free_slot(self):
-        m = sorted(config.IMPLEMENTER_MODELS)[0]
+        m = self._model_with_a_reviewer()
         name = self._write_taskfile("busy.json", [m, m])
         self.cap = {m: {"batch_headroom": 0}}
         r = captain.plan_pressure(name)

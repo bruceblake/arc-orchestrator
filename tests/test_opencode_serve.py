@@ -83,6 +83,14 @@ class ServeDriverTestBase(unittest.TestCase):
         self.addCleanup(lambda: setattr(drivers, "_lease_store", None))
         import store
         drivers._lease_store = store.Store(self._db.name)
+        # This suite drives GLM-5.3 as the fleet's PARALLEL implementation
+        # capacity: since 2026-09-28 a LONE GLM slot is yielded to a faster
+        # free seat (drivers._glm_yield_alone, task
+        # glm-parallel-implement-only). A peer lease says "somebody else is
+        # already working", which is the case these serve-path tests exercise;
+        # the yield itself is tested in test_usage_limit.
+        drivers._lease_store.acquire_driver_lease(
+            config.ESCALATION_PATH[-1], os.getpid(), "peer", 99, 300)
 
     def _driver(self, role="implementer"):
         d = drivers.OpencodeDriver("GLM-5.3", role)

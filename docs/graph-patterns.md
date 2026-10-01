@@ -57,12 +57,15 @@ live numbers are `config.harness_limit()` /
 | Model | Harness | Tier | Roles | Account cap | Driver slots |
 |---|---|---|---|---|---|
 | DeepSeek-V4.1-Flash-thinking-max | `reasonix` | hard | implement/plan/review/PR-review; the planner | 10 | 10 |
-| GLM-5.3 | `opencode` | medium | implement/review/PR-review (never plans) | 4 | 4 |
+| GLM-5.3 | `opencode` | medium | implement only (never reviews, never plans) | 4 | 4 |
 
 - Reviewer is always cross-family: `reviewer` names a family in
-  `config.REVIEW_FAMILIES` (`glm`, `deepseek`) other than the
-  implementer's. With two families the pairing is forced: GLM-5.3's work goes
-  to deepseek, DeepSeek's to glm.
+  `config.REVIEW_FAMILIES` (`deepseek` locally; five families on studio)
+  other than the
+  implementer's. GLM-5.3 is implement-only since 2026-09-28, so GLM-5.3's work
+  goes to deepseek, and a DeepSeek task goes to `openai` on studio. On the
+  local profile only one review family is left, so deepseek reviews its own
+  work there (the one-family fallback in `config.cross_family_reviewer`).
 - Fan-out wider than a family's driver slots simply **queues** (leases are
   cross-process; over-cap tasks wait, they do not fail), and each harness has
   its own cap (5 for opencode / GLM-5.3, 7 for reasonix / DeepSeek). Width beyond the
@@ -82,7 +85,7 @@ Taskfile task shape (see docs/taskfile-schema.md):
 ```json
 {"id": "kebab-id", "title": "...", "prompt": "<self-contained spec>",
  "model": "DeepSeek-V4.1-Flash",
- "reviewer": "deepseek", "verify_cmd": "./check.sh && ...",
+ "reviewer": "<cross-family>", "verify_cmd": "./check.sh && ...",
  "files_hint": ["..."], "deps": ["other-id"]}
 ```
 
@@ -106,12 +109,12 @@ chaining", generalized: each link is a full implementer + gate + review.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "chain",
  "tasks": [
-  {"id": "intro-api", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "intro-api", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "prompt": "...", "verify_cmd": "./check.sh", "deps": []},
-  {"id": "migrate-callers", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "migrate-callers", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "prompt": "... uses the new API from ...", "verify_cmd": "./check.sh",
    "deps": ["intro-api"]},
-  {"id": "delete-old", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "delete-old", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "prompt": "...", "verify_cmd": "./check.sh", "deps": ["migrate-callers"]}]}}
 ```
 
@@ -141,13 +144,13 @@ same shape with dynamic width.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "fan-out-fan-in",
  "tasks": [
-  {"id": "slice-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "slice-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "files_hint": ["a/"], "deps": [], "...": "..."},
-  {"id": "slice-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "slice-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "files_hint": ["b/"], "deps": []},
-  {"id": "slice-c", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "slice-c", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "files_hint": ["c/"], "deps": []},
-  {"id": "integrate", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "integrate", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "prompt": "Verify the slices work TOGETHER on merged base; fix seams.",
    "verify_cmd": "./check.sh && full test suite",
    "deps": ["slice-a", "slice-b", "slice-c"]}]}}
@@ -188,13 +191,13 @@ coin-flip into a decision.
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "diamond",
  "tasks": [
-  {"id": "contract", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek", "deps": [],
+  {"id": "contract", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>", "deps": [],
    "prompt": "Land the shared interface/types both sides will build on."},
-  {"id": "side-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "side-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "files_hint": ["impl/a*"], "deps": ["contract"]},
-  {"id": "side-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "side-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "files_hint": ["impl/b*"], "deps": ["contract"]},
-  {"id": "verify-integration", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "verify-integration", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "prompt": "Run the full suite against the merged a+b; repair the seam.",
    "verify_cmd": "./check.sh && pytest tests/integration -x",
    "deps": ["side-a", "side-b"]}]}}
@@ -356,11 +359,11 @@ exactly ONE cross-family reviewer in the two-family fleet, recorded as
 ```json
 {"project": {"repo": "...", "title": "...", "pattern": "debate-vote",
  "tasks": [
-  {"id": "cand-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "cand-a", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "files_hint": ["proposals/a.md"], "deps": [], "...": "..."},
-  {"id": "cand-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "cand-b", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "files_hint": ["proposals/b.md"], "deps": []},
-  {"id": "judge", "model": "DeepSeek-V4.1-Flash", "reviewer": "deepseek",
+  {"id": "judge", "model": "DeepSeek-V4.1-Flash", "reviewer": "<cross-family>",
    "prompt": "Compare proposals a/b against the criteria in ...; implement "
              "the winner in src/...",
    "verify_cmd": "./check.sh", "deps": ["cand-a", "cand-b"]}]}}

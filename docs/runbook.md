@@ -518,7 +518,8 @@ Verify‑gate output is written to `logs/gates/<project>/<task>/x<attempt>.log` 
 
 If `code run --dry-run` fails to print `dry-run ok`, the task file is invalid.
 Fix the task file per `docs/taskfile-schema.md` (valid `model`, reviewer
-`glm`/`deepseek`, cross-family reviewer, known deps, no cycles), re-run the
+`deepseek` — plus the studio-only `openai`/`cursor`/`google`/`anthropic`
+— cross-family reviewer, known deps, no cycles), re-run the
 dry-run, then re-run.
 
 ### Chain blocked or timed out (`chain.blocked`)

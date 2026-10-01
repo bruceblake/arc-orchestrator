@@ -134,8 +134,8 @@ class PromptsCarryTheContract(unittest.TestCase):
                     "title": "t",
                     "tasks": [{
                         "id": "t1", "title": "A", "prompt": "p",
-                        "model": "DeepSeek-V4.1-Flash-thinking-max",
-                        "reviewer": "glm", "verify_cmd": "true", "deps": [],
+                        "model": "GLM-5.3",
+                        "reviewer": "deepseek", "verify_cmd": "true", "deps": [],
                     }],
                 }
             }
